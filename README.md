@@ -1,103 +1,157 @@
-# Portable Private VPN Stack
+# Переносимый установщик приватного VPN-контура
 
-Two-hop private VPN bundle for the flow `client -> RU gateway -> foreign exit`.
+Репозиторий разворачивает схему `клиент -> RU gateway -> foreign exit` и теперь умеет полноценно запускаться как с Linux, так и с Windows без WSL. Локальная автоматизация собрана вокруг одного `Python` core, а server-side установка по-прежнему делается через `install.sh` на Ubuntu.
 
-What this repository gives you:
+## Что умеет
 
-- `install.sh` to install either `ru-gateway` or `foreign-exit` on Ubuntu 24.04.
-- `scripts/gen-secrets.sh` to generate one deployment `.env`.
-- `scripts/render-config.sh` to render server-side configs locally before deploy.
-- `scripts/gen-client-profiles.sh` to build cross-platform client configs.
-- `scripts/fetch-assets.sh` to preseed rule assets locally for first boot.
-- `scripts/render-cloud-init.sh` to produce self-contained `cloud-init` files.
-- `scripts/package-bundle.sh` to build uploadable per-role tarballs for manual deploy.
-- `scripts/smoke-test.sh` to run or print post-deploy checks for both servers.
+- Запускаться с Linux через `./bootstrap.sh`.
+- Запускаться с Windows через `.\bootstrap.ps1` без WSL.
+- Если на Windows нет Python, тихо скачать portable CPython в локальную папку `.runtime/python/windows`.
+- Хранить локальный deployment `.env`, состояние SSH-подключений и все собранные артефакты.
+- Проверять оба сервера по SSH перед установкой.
+- Понимать, установлен ли стек раньше, и предлагать обновление, переустановку или пропуск.
+- Работать как с `root`, так и с обычным SSH-пользователем с `sudo`.
+- Автоматически собирать и переносить на серверы нужные артефакты.
 
-## Topology
+## Основные файлы
 
-- Client connects only to the RU server over `VLESS + REALITY` on `443/tcp`.
-- RU server routes Russian traffic out directly.
-- RU server routes non-Russian traffic into a WireGuard tunnel to the foreign server.
-- Foreign server NATs WireGuard traffic to the public internet.
-- Foreign server can additionally block Russian CIDRs on the egress path.
+- [bootstrap.sh](./bootstrap.sh) — Linux launcher.
+- [bootstrap.ps1](./bootstrap.ps1) — Windows launcher без WSL, с auto-bootstrap portable Python.
+- [scripts/orchestrate.py](./scripts/orchestrate.py) — основной локальный orchestration layer.
+- [install.sh](./install.sh) — server-side установщик роли `ru-gateway` или `foreign-exit` на Ubuntu.
+- [deployments/deployment.env.example](./deployments/deployment.env.example) — пример deployment env.
+- [cloud-init/ru.yaml](./cloud-init/ru.yaml) и [cloud-init/foreign.yaml](./cloud-init/foreign.yaml) — шаблонные заглушки, реальные файлы рендерятся в `out/<deployment>/cloud-init/`.
 
-## Quick Start
+## Требования
 
-1. Generate a deployment file:
+### Локальная машина
 
-```bash
-./scripts/gen-secrets.sh ./deployments/my-stack.env
-```
+Linux:
+- `python3`
+- `ssh`
+- `scp`
 
-2. Edit the generated file and fill at least:
+Windows:
+- PowerShell 5.1+ или PowerShell 7+
+- `ssh.exe`
+- `scp.exe`
 
-- `RU_PUBLIC_IP`
-- `FOREIGN_PUBLIC_IP`
-- `RU_REALITY_SERVER_NAME`
-- `RU_REALITY_HANDSHAKE_SERVER`
+Примечание:
+- На Windows Python локально не обязателен, launcher подтянет portable runtime сам.
+- На Linux bootstrap ожидает установленный `python3`.
 
-3. Render local previews:
+### Целевые серверы
 
-```bash
-./scripts/render-config.sh ./deployments/my-stack.env
-```
+- `Ubuntu` на обоих VPS
+- SSH-доступ до обоих серверов
+- Логин либо под `root`, либо под пользователем с `sudo`
 
-4. Optionally prefetch rule assets for offline-ish first boot:
+## Быстрый старт
 
-```bash
-./scripts/fetch-assets.sh ./deployments/my-stack.env
-```
-
-5. Generate client configs:
-
-```bash
-./scripts/gen-client-profiles.sh ./deployments/my-stack.env
-```
-
-6. Generate self-contained cloud-init files:
+### Linux
 
 ```bash
-./scripts/render-cloud-init.sh ./deployments/my-stack.env
+./bootstrap.sh
 ```
 
-7. Boot VPS instances with the generated files from `out/<deployment>/cloud-init/`, or upload the bundle and run:
+### Windows
 
-```bash
-sudo ./install.sh --role foreign-exit --env-file ./out/<deployment>/server/foreign.env --assets-dir ./out/<deployment>/assets
-sudo ./install.sh --role ru-gateway --env-file ./out/<deployment>/server/ru.env --assets-dir ./out/<deployment>/assets
+```powershell
+powershell -ExecutionPolicy Bypass -File .\bootstrap.ps1
 ```
 
-8. If you prefer manual upload packages instead of `cloud-init`:
+## Как работает bootstrap
 
-```bash
-./scripts/package-bundle.sh ./deployments/my-stack.env
-```
+1. Предлагает выбрать существующий deployment или создать новый.
+2. Создаёт или обновляет `deployments/<name>.env`.
+3. Генерирует и сохраняет локально:
+   - UUID клиента
+   - ключи `REALITY`
+   - ключи `WireGuard`
+   - `short_id`
+4. Запрашивает по каждому серверу:
+   - публичный IP
+   - SSH host
+   - SSH port
+   - SSH user
+   - путь к приватному ключу, если нужен явный `-i`
+5. Делает preflight на RU и foreign:
+   - доступность по SSH
+   - кто пользователь входа
+   - есть ли `sudo`
+   - какая ОС и версия
+   - установлен ли стек
+   - какая роль уже стоит
+   - какой WAN interface определился на foreign
+6. Собирает локальные артефакты:
+   - `out/<name>/assets`
+   - `out/<name>/preview`
+   - `out/<name>/client`
+   - `out/<name>/cloud-init`
+   - `out/<name>/bundle`
+7. Загружает role-specific bundle на серверы и запускает установку.
+8. После установки делает post-check сервисов.
 
-9. After deploy, run smoke checks:
+## Где лежит локальное состояние
 
-```bash
-./scripts/smoke-test.sh ./deployments/my-stack.env
-./scripts/smoke-test.sh ./deployments/my-stack.env --ru-ssh root@RU_IP --foreign-ssh root@FOREIGN_IP
-```
-
-## Output Layout
-
-After rendering, artifacts are written to:
+После первого прогона всё нужное остаётся локально:
 
 ```text
-out/<deployment>/
+deployments/<name>.env
+state/<name>.json
+out/<name>/
   assets/
   bundle/
   client/
   cloud-init/
   preview/
   server/
+.runtime/
+  python/
 ```
 
-## Notes
+Это позволяет не генерировать заново ключи, не спрашивать по кругу SSH-параметры и сразу иметь готовые клиентские профили.
 
-- Client configs are sing-box-compatible JSON profiles. Hiddify can import local sing-box configs.
-- The Linux-specific client profile enables `auto_redirect`; the cross-platform profile does not.
-- The v1 bundle is intentionally `IPv4-only fail-closed` for internet egress to avoid accidental IPv6 leaks around the foreign hop.
-- The foreign RU block is CIDR-based and uses IPdeny aggregated zone lists by default.
-- The RU route rules use local `sing-geosite` and `sing-geoip` `.srs` assets.
+## Ручные команды
+
+Все ручные действия можно запускать через `Python` core напрямую:
+
+```bash
+python3 ./scripts/orchestrate.py init-env ./deployments/my-stack.env
+python3 ./scripts/orchestrate.py fetch-assets ./deployments/my-stack.env
+python3 ./scripts/orchestrate.py render-config ./deployments/my-stack.env
+python3 ./scripts/orchestrate.py gen-client-profiles ./deployments/my-stack.env
+python3 ./scripts/orchestrate.py render-cloud-init ./deployments/my-stack.env
+python3 ./scripts/orchestrate.py package-bundle ./deployments/my-stack.env
+python3 ./scripts/orchestrate.py render-all ./deployments/my-stack.env
+```
+
+Под Windows это то же самое, только через:
+
+```powershell
+.\.runtime\python\windows\python.exe .\scripts\orchestrate.py render-all .\deployments\my-stack.env
+```
+
+или через скачанный portable runtime из `.runtime`.
+
+## Что важно про portable Python на Windows
+
+- Runtime ставится только локально в репозиторий, без системной установки.
+- По умолчанию используется embeddable CPython с `python.org`.
+- URL и версия можно переопределить переменными окружения:
+  - `VPN_BOOTSTRAP_PYTHON_VERSION`
+  - `VPN_BOOTSTRAP_PYTHON_URL`
+
+## Ограничения v1
+
+- Основной путь сейчас `IPv4-only fail-closed`, чтобы не словить утечки через IPv6 в обход foreign-hop.
+- Server-side установщик ориентирован на `Ubuntu`, базово тестируется под `Ubuntu 24.04`.
+- SSH-аутентификация со стороны локального bootstrap сейчас рассчитана на ключ или `ssh-agent`. Интерактивный SSH password login не автоматизирован.
+- Если SSH-пользователь не `root`, у него должен быть `sudo`. Без `root` или `sudo` установка не продолжится.
+
+## Что проверить после деплоя
+
+- `ya.ru`, `vk.com`, `gosuslugi.ru` выходят с RU IP.
+- `google.com`, `youtube.com`, `github.com` выходят с foreign IP.
+- При падении foreign-сервера нероссийский трафик падает `fail-closed`.
+- Клиент из РФ светит только соединение к RU IP на `443/tcp`.

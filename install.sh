@@ -643,6 +643,8 @@ fi
 mkdir -p "${VPNSTACK_ROOT}" /etc/sing-box /etc/wireguard "${RULESET_DIR}" /usr/local/lib/vpn-stack /etc/systemd/system
 
 write_file "${VPNSTACK_ROOT}/deployment.env" <"${ENV_FILE}"
+printf '%s\n' "${ROLE}" >"${VPNSTACK_ROOT}/role"
+date -u +"%Y-%m-%dT%H:%M:%SZ" >"${VPNSTACK_ROOT}/installed_at"
 write_file "${RULE_SYNC_SCRIPT}" < <(render_sync_script)
 chmod 0755 "${RULE_SYNC_SCRIPT}"
 write_file "/etc/systemd/system/vpn-stack-sync.service" < <(render_sync_service)
@@ -672,6 +674,9 @@ fi
 
 stage_preseed_assets
 
+chmod 0600 "${VPNSTACK_ROOT}/deployment.env"
+chmod 0644 "${VPNSTACK_ROOT}/role" "${VPNSTACK_ROOT}/installed_at"
+
 sysctl --system >/dev/null
 systemctl daemon-reload
 systemctl enable nftables
@@ -693,6 +698,8 @@ if [[ "$ROLE" == "ru-gateway" ]]; then
   systemctl enable sing-box
   systemctl restart sing-box
 fi
+
+chmod 0600 "${SINGBOX_CONFIG_PATH}" "${WG_CONFIG_PATH}"
 
 systemctl enable unattended-upgrades || true
 

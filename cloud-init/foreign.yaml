@@ -1,2 +1,2 @@
-# Generated files are written to `out/<deployment>/cloud-init/foreign.yaml`.
-# Run `scripts/render-cloud-init.sh <deployment-env-file>` to materialize this file.
+# Сгенерированный файл появляется в `out/<deployment>/cloud-init/foreign.yaml`.
+# Для генерации выполните `python3 scripts/orchestrate.py render-cloud-init <deployment-env-file>`.

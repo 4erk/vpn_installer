@@ -1,4 +1,6 @@
 /out/
+/state/
+/.runtime/
 /deployments/*.env
 !/deployments/deployment.env.example
 
@@ -9,3 +11,5 @@
 # OS/editor noise
 .DS_Store
 Thumbs.db
+__pycache__/
+*.pyc
