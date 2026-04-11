@@ -226,6 +226,20 @@ is_currently_installed() {
   [[ -f "${VPNSTACK_INSTALLED_AT_FILE}" && -f "${VPNSTACK_ROLE_FILE}" ]]
 }
 
+require_managed_install_for_destructive_action() {
+  if ! is_currently_installed; then
+    echo "vpn-stack metadata not found on this host. Refusing ${ACTION}." >&2
+    exit 1
+  fi
+
+  local current_role
+  current_role="$(current_install_role)"
+  if [[ -n "${current_role}" && "${current_role}" != "${ROLE}" ]]; then
+    echo "Installed role mismatch: requested ${ROLE}, found ${current_role}." >&2
+    exit 1
+  fi
+}
+
 service_active_flag() {
   local service="$1"
   if command -v systemctl >/dev/null 2>&1 && systemctl is-active "${service}" >/dev/null 2>&1; then
@@ -519,8 +533,6 @@ render_ru_singbox() {
       "tag": "vless-in",
       "listen": "::",
       "listen_port": ${RU_LISTEN_PORT},
-      "sniff": true,
-      "sniff_override_destination": true,
       "users": [
         {
           "name": "${DEPLOY_NAME}-client",
@@ -563,6 +575,10 @@ render_ru_singbox() {
   ],
   "route": {
     "auto_detect_interface": true,
+    "default_domain_resolver": {
+      "server": "dns-ru-direct",
+      "strategy": "ipv4_only"
+    },
     "rule_set": [
       {
         "type": "local",
@@ -582,6 +598,19 @@ render_ru_singbox() {
         "ip_version": 6,
         "action": "route",
         "outbound": "blocked"
+      },
+      {
+        "inbound": [
+          "vless-in"
+        ],
+        "action": "resolve",
+        "strategy": "ipv4_only"
+      },
+      {
+        "inbound": [
+          "vless-in"
+        ],
+        "action": "sniff"
       },
       {
         "ip_is_private": true,
@@ -844,7 +873,7 @@ have_bootstrap_assets() {
     return 0
   fi
 
-  [[ -s "${RULESET_DIR}/ru-ipv4.zone" ]]
+  [[ -s "${RULESET_DIR}/ru-ipv4.zone" && -s "${RULESET_DIR}/ru-ipv6.zone" ]]
 }
 
 apply_foreign_ru_block_from_local_assets() {
@@ -927,19 +956,15 @@ if [[ "$ACTION" == "status" ]]; then
   exit 0
 fi
 
-CURRENT_ROLE="$(current_install_role)"
-if [[ ( "$ACTION" == "remove" || "$ACTION" == "purge" ) && -n "${CURRENT_ROLE}" && "${CURRENT_ROLE}" != "${ROLE}" ]]; then
-  echo "Installed role mismatch: requested ${ROLE}, found ${CURRENT_ROLE}." >&2
-  exit 1
-fi
-
 if [[ "$ACTION" == "remove" ]]; then
+  require_managed_install_for_destructive_action
   restore_baseline_or_cleanup
   echo "Completed ${ROLE} removal."
   exit 0
 fi
 
 if [[ "$ACTION" == "purge" ]]; then
+  require_managed_install_for_destructive_action
   purge_managed_state
   echo "Completed ${ROLE} purge."
   exit 0

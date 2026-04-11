@@ -13,3 +13,6 @@
 Thumbs.db
 __pycache__/
 *.pyc
+
+# Local/private notes
+/docs/local/

@@ -289,6 +289,13 @@ def ensure_deployment_env(env_path: Path, deployment_name: str) -> dict[str, str
     return env
 
 
+def load_existing_deployment_env(deployment_name: str) -> tuple[Path, dict[str, str]]:
+    env_path = DEPLOYMENTS_DIR / f"{deployment_name}.env"
+    if not env_path.exists():
+        fail(f"Не найден deployment env: {env_path}")
+    return env_path, merge_env_with_defaults(load_env_file(env_path), deployment_name)
+
+
 def state_json_path(deployment_name: str) -> Path:
     return STATE_DIR / f"{deployment_name}.json"
 
@@ -311,8 +318,19 @@ def load_state(deployment_name: str) -> dict[str, Any]:
     }
 
 
-def write_state(deployment_name: str, targets: list[RemoteTarget]) -> None:
+def write_state(deployment_name: str, targets: list[RemoteTarget], existing_state: dict[str, Any] | None = None) -> None:
     payload = {"updated_at": utc_now(), ROLE_RU: {}, ROLE_FOREIGN: {}}
+    if existing_state:
+        for role in (ROLE_RU, ROLE_FOREIGN):
+            role_state = existing_state.get(role, {})
+            if isinstance(role_state, dict):
+                payload[role] = {
+                    "public_ip": str(role_state.get("public_ip", "")),
+                    "ssh_host": str(role_state.get("ssh_host", "")),
+                    "ssh_port": str(role_state.get("ssh_port", "")),
+                    "ssh_user": str(role_state.get("ssh_user", "")),
+                    "identity_path": str(role_state.get("identity_path", "")),
+                }
     for target in targets:
         payload[target.role] = target.to_state()
     write_json(state_json_path(deployment_name), payload)
@@ -396,8 +414,10 @@ def normalize_identity_path(raw_path: str) -> str:
     return str(path)
 
 
-def prompt_server_connection(target: RemoteTarget) -> RemoteTarget:
-    if target.ssh_host and target.public_ip:
+def prompt_server_connection(target: RemoteTarget, *, force_prompt: bool = False, confirm_existing: bool = True) -> RemoteTarget:
+    if not force_prompt and target.ssh_host and target.public_ip:
+        if not confirm_existing:
+            return target
         summary = f"{target.ssh_user}@{target.ssh_host}:{target.ssh_port}"
         if prompt_yes_no(f"{target.label}: использовать сохранённое подключение {summary} (public IP {target.public_ip})?", default=True):
             return target
@@ -455,6 +475,33 @@ def select_deployment(cli_name: str | None) -> str:
             if not deployment_name:
                 fail("Пустое имя deployment.")
             return deployment_name
+
+
+def select_existing_deployment(cli_name: str | None) -> str:
+    if cli_name:
+        deployment_name = sanitize_name(cli_name)
+        if not deployment_name:
+            fail("Пустое имя deployment.")
+        env_path = DEPLOYMENTS_DIR / f"{deployment_name}.env"
+        if not env_path.exists():
+            fail(f"Не найден deployment env: {env_path}")
+        return deployment_name
+
+    existing = find_existing_deployments()
+    if not existing:
+        fail("Не найдено ни одного deployment env.")
+
+    print_header("Выбор deployment")
+    for index, name in enumerate(existing, start=1):
+        print(f"{index}. {name}")
+
+    while True:
+        selection_raw = input("Выберите deployment [1]: ").strip() or "1"
+        if not selection_raw.isdigit():
+            continue
+        selection = int(selection_raw)
+        if 1 <= selection <= len(existing):
+            return existing[selection - 1]
 
 
 def require_env(env: dict[str, str], required: list[str]) -> None:
@@ -539,7 +586,7 @@ def parse_kv_output(payload: str) -> dict[str, str]:
     return result
 
 
-def preflight_script() -> str:
+def preflight_script(wg_interface: str) -> str:
     return textwrap.dedent(
         """\
         set -euo pipefail
@@ -595,14 +642,14 @@ def preflight_script() -> str:
         printf 'installed_at=%s\\n' "${installed_at}"
         printf 'sing_box=%s\\n' "$(service_state sing-box)"
         printf 'nftables=%s\\n' "$(service_state nftables)"
-        printf 'wireguard=%s\\n' "$(service_state wg-quick@wg0)"
+        printf 'wireguard=%s\\n' "$(service_state wg-quick@__WG_INTERFACE__)"
         printf 'sync_timer=%s\\n' "$(service_state vpn-stack-sync.timer)"
         """
-    ).strip()
+    ).replace("__WG_INTERFACE__", wg_interface).strip()
 
 
-def remote_preflight(target: RemoteTarget) -> dict[str, str]:
-    return parse_kv_output(ssh_capture(target, preflight_script()))
+def remote_preflight(target: RemoteTarget, wg_interface: str) -> dict[str, str]:
+    return parse_kv_output(ssh_capture(target, preflight_script(wg_interface)))
 
 
 def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
@@ -677,10 +724,13 @@ def fetch_assets(env: dict[str, str], assets_dir: Path) -> dict[str, Path]:
         "geosite-ru.srs": (env["RU_GEOSITE_URL"], assets_dir / "geosite-ru.srs"),
         "geoip-ru.srs": (env["RU_GEOIP_URL"], assets_dir / "geoip-ru.srs"),
     }
+    required_assets = {"geosite-ru.srs", "geoip-ru.srs"}
     if env.get("FOREIGN_BLOCK_RU", "1") == "1":
         targets["ru-ipv4.zone"] = (env["FOREIGN_RU_IPV4_LIST_URL"], assets_dir / "ru-ipv4.zone")
         targets["ru-ipv6.zone"] = (env["FOREIGN_RU_IPV6_LIST_URL"], assets_dir / "ru-ipv6.zone")
+        required_assets.update({"ru-ipv4.zone", "ru-ipv6.zone"})
     fetched: dict[str, Path] = {}
+    missing_required: list[str] = []
     print_header("Подкачка rule-set и CIDR-ассетов")
     for asset_name, (url, path) in targets.items():
         try:
@@ -688,11 +738,16 @@ def fetch_assets(env: dict[str, str], assets_dir: Path) -> dict[str, Path]:
             fetched[asset_name] = path
             print(f"{asset_name}: OK")
         except (urllib.error.URLError, OSError) as exc:
-            if path.exists():
+            if path.exists() and path.stat().st_size > 0:
                 warn(f"{asset_name}: не удалось обновить, оставляю локальную копию ({exc})")
                 fetched[asset_name] = path
             else:
-                warn(f"{asset_name}: не удалось скачать ({exc})")
+                if asset_name in required_assets:
+                    missing_required.append(f"{asset_name} ({exc})")
+                else:
+                    warn(f"{asset_name}: не удалось скачать ({exc})")
+    if missing_required:
+        fail("Не удалось получить обязательные assets: " + ", ".join(missing_required))
     return fetched
 
 
@@ -733,8 +788,6 @@ def render_ru_singbox(env: dict[str, str]) -> str:
                 "tag": "vless-in",
                 "listen": "::",
                 "listen_port": env_int(env, "RU_LISTEN_PORT"),
-                "sniff": True,
-                "sniff_override_destination": True,
                 "users": [{"name": f"{env['DEPLOY_NAME']}-client", "uuid": env["CLIENT_UUID"], "flow": env["CLIENT_FLOW"]}],
                 "tls": {
                     "enabled": True,
@@ -756,12 +809,15 @@ def render_ru_singbox(env: dict[str, str]) -> str:
         ],
         "route": {
             "auto_detect_interface": True,
+            "default_domain_resolver": {"server": "dns-ru-direct", "strategy": "ipv4_only"},
             "rule_set": [
                 {"type": "local", "tag": "geosite-ru", "format": "binary", "path": f"{env['RULESET_DIR']}/geosite-ru.srs"},
                 {"type": "local", "tag": "geoip-ru", "format": "binary", "path": f"{env['RULESET_DIR']}/geoip-ru.srs"},
             ],
             "rules": [
                 {"ip_version": 6, "action": "route", "outbound": "blocked"},
+                {"inbound": ["vless-in"], "action": "resolve", "strategy": "ipv4_only"},
+                {"inbound": ["vless-in"], "action": "sniff"},
                 {"ip_is_private": True, "action": "route", "outbound": "direct-ru"},
                 {"rule_set": ["geosite-ru"], "action": "route", "outbound": "direct-ru"},
                 {"rule_set": ["geoip-ru"], "action": "route", "outbound": "direct-ru"},
@@ -828,6 +884,7 @@ def render_client_profile(env: dict[str, str], auto_redirect: bool) -> str:
         ],
         "route": {
             "auto_detect_interface": True,
+            "default_domain_resolver": {"server": "dns-remote", "strategy": "ipv4_only"},
             "rules": [{"ip_version": 6, "action": "route", "outbound": "block"}, {"protocol": "dns", "action": "hijack-dns"}, {"ip_is_private": True, "action": "route", "outbound": "direct"}, {"domain_suffix": ["local"], "action": "route", "outbound": "direct"}],
             "final": "ru-gateway",
         },
@@ -979,13 +1036,13 @@ def update_env_with_targets(env: dict[str, str], targets: list[RemoteTarget]) ->
         env[ROLE_META[target.role]["public_ip_key"]] = target.public_ip
 
 
-def postcheck_command() -> str:
+def postcheck_command(wg_interface: str) -> str:
     return textwrap.dedent(
         """\
         set -euo pipefail
         systemctl is-active nftables >/dev/null
         systemctl is-active vpn-stack-sync.timer >/dev/null
-        systemctl is-active wg-quick@wg0 >/dev/null
+        systemctl is-active wg-quick@__WG_INTERFACE__ >/dev/null
         if systemctl list-unit-files sing-box.service >/dev/null 2>&1; then
           systemctl is-active sing-box >/dev/null || true
         fi
@@ -996,7 +1053,7 @@ def postcheck_command() -> str:
         deployment_name="$(grep -E '^DEPLOY_NAME=' /etc/vpn-stack/deployment.env | head -n1 | cut -d= -f2- | sed 's/^"//; s/"$//')"
         printf 'deployment=%s\\n' "${deployment_name}"
         """
-    ).strip()
+    ).replace("__WG_INTERFACE__", wg_interface).strip()
 
 
 def cleanup_remote_workdir(target: RemoteTarget, remote_root: str) -> None:
@@ -1037,9 +1094,9 @@ def install_remote_role(target: RemoteTarget, deployment_name: str, env: dict[st
         cleanup_remote_workdir(target, remote_root)
 
 
-def postcheck_remote_role(target: RemoteTarget) -> None:
+def postcheck_remote_role(target: RemoteTarget, wg_interface: str) -> None:
     print_header(f"Пост-проверка {target.label}")
-    ssh_stream(target, postcheck_command(), as_root=True)
+    ssh_stream(target, postcheck_command(wg_interface), as_root=True)
 
 
 def print_summary(deployment_name: str, env: dict[str, str], targets: list[RemoteTarget]) -> None:
@@ -1069,6 +1126,69 @@ def load_env_for_render(env_path: Path) -> dict[str, str]:
     env = merge_env_with_defaults(load_env_file(env_path), sanitize_name(env_path.stem))
     write_text(env_path, render_env_text(env))
     return env
+
+
+def current_wg_interface(env: dict[str, str]) -> str:
+    return env.get("WG_INTERFACE", "").strip() or "wg0"
+
+
+def prepare_remote_session(
+    deployment_arg: str | None,
+    *,
+    roles: list[str],
+    require_privilege: bool,
+    validate_os: bool = True,
+    allow_create: bool = False,
+    persist_local: bool = True,
+    confirm_existing_connections: bool = True,
+) -> tuple[str, Path, dict[str, str], dict[str, Any], list[RemoteTarget], dict[str, dict[str, str]]]:
+    require_local_commands(["ssh", "scp"])
+    if allow_create or persist_local:
+        ensure_directories()
+
+    if allow_create:
+        deployment_name = select_deployment(deployment_arg)
+        env_path = DEPLOYMENTS_DIR / f"{deployment_name}.env"
+        env = ensure_deployment_env(env_path, deployment_name)
+    else:
+        deployment_name = select_existing_deployment(deployment_arg)
+        env_path, env = load_existing_deployment_env(deployment_name)
+
+    state = load_state(deployment_name)
+
+    print_header("Параметры deployment")
+    targets: list[RemoteTarget] = []
+    for role in roles:
+        target = build_target(role, env, state)
+        force_prompt = not (target.public_ip and target.ssh_host)
+        target = prompt_server_connection(target, force_prompt=force_prompt, confirm_existing=confirm_existing_connections)
+        targets.append(target)
+
+    update_env_with_targets(env, targets)
+    if persist_local:
+        write_text(env_path, render_env_text(env))
+        write_state(deployment_name, targets, existing_state=state)
+
+    wg_interface = current_wg_interface(env)
+    preflights: dict[str, dict[str, str]] = {}
+    for target in targets:
+        preflight = remote_preflight(target, wg_interface)
+        preflights[target.role] = preflight
+        print_preflight(target, preflight)
+
+    if validate_os:
+        for role in roles:
+            preflight = preflights[role]
+            if preflight.get("os_id") != "ubuntu":
+                fail(f"{ROLE_META[role]['label']} должен быть Ubuntu.")
+            if preflight.get("os_version") and preflight["os_version"] != "24.04":
+                warn(f"{ROLE_META[role]['label']} не на Ubuntu 24.04: {preflight['os_version']}")
+
+    if require_privilege:
+        for target in targets:
+            ensure_remote_privilege(target, preflights[target.role])
+
+    return deployment_name, env_path, env, state, targets, preflights
 
 
 def cmd_init_env(args: argparse.Namespace) -> int:
@@ -1126,49 +1246,6 @@ def cmd_render_all(args: argparse.Namespace) -> int:
     return 0
 
 
-def prepare_remote_session(
-    deployment_arg: str | None,
-    *,
-    require_privilege: bool,
-    validate_os: bool = True,
-) -> tuple[str, Path, dict[str, str], list[RemoteTarget], dict[str, dict[str, str]]]:
-    require_local_commands(["ssh", "scp"])
-    ensure_directories()
-    deployment_name = select_deployment(deployment_arg)
-    env_path = DEPLOYMENTS_DIR / f"{deployment_name}.env"
-    env = ensure_deployment_env(env_path, deployment_name)
-    state = load_state(deployment_name)
-
-    print_header("Параметры deployment")
-    ru_target = prompt_server_connection(build_target(ROLE_RU, env, state))
-    foreign_target = prompt_server_connection(build_target(ROLE_FOREIGN, env, state))
-    targets = [ru_target, foreign_target]
-    update_env_with_targets(env, targets)
-    write_text(env_path, render_env_text(env))
-    write_state(deployment_name, targets)
-
-    ru_preflight = remote_preflight(ru_target)
-    foreign_preflight = remote_preflight(foreign_target)
-    preflights = {ROLE_RU: ru_preflight, ROLE_FOREIGN: foreign_preflight}
-
-    print_preflight(ru_target, ru_preflight)
-    print_preflight(foreign_target, foreign_preflight)
-
-    if validate_os:
-        for role, preflight in preflights.items():
-            if preflight.get("os_id") != "ubuntu":
-                fail(f"{ROLE_META[role]['label']} должен быть Ubuntu.")
-            if preflight.get("os_version") and preflight["os_version"] != "24.04":
-                warn(f"{ROLE_META[role]['label']} не на Ubuntu 24.04: {preflight['os_version']}")
-
-    if require_privilege:
-        ensure_remote_privilege(ru_target, ru_preflight)
-        ensure_remote_privilege(foreign_target, foreign_preflight)
-
-    write_state(deployment_name, targets)
-    return deployment_name, env_path, env, targets, preflights
-
-
 def selected_roles(role_arg: str) -> list[str]:
     if role_arg == "all":
         return [ROLE_FOREIGN, ROLE_RU]
@@ -1187,6 +1264,7 @@ def run_selected_remote_action(
 ) -> None:
     target_map = {target.role: target for target in targets}
     roles = selected_roles(role_arg)
+    wg_interface = current_wg_interface(env)
     if action in {"install", "reinstall"}:
         print_header("Локальная сборка артефактов")
         render_all_artifacts(env_path, env)
@@ -1194,16 +1272,24 @@ def run_selected_remote_action(
         target = target_map[role]
         install_remote_role(target, deployment_name, env, action)
         if action in {"install", "reinstall"}:
-            postcheck_remote_role(target)
+            postcheck_remote_role(target, wg_interface)
         else:
-            print_preflight(target, remote_preflight(target))
+            print_preflight(target, remote_preflight(target, wg_interface))
 
 
 def cmd_bootstrap(args: argparse.Namespace) -> int:
-    deployment_name, env_path, env, targets, preflights = prepare_remote_session(args.deployment, require_privilege=True)
+    roles = selected_roles("all")
+    deployment_name, env_path, env, state, targets, preflights = prepare_remote_session(
+        args.deployment,
+        roles=roles,
+        require_privilege=True,
+        allow_create=True,
+        persist_local=True,
+        confirm_existing_connections=True,
+    )
     ensure_foreign_wan_interface(env, preflights[ROLE_FOREIGN])
     write_text(env_path, render_env_text(env))
-    write_state(deployment_name, targets)
+    write_state(deployment_name, targets, existing_state=state)
     print_summary(deployment_name, env, targets)
     actions = {
         ROLE_FOREIGN: ask_install_action(ROLE_FOREIGN, deployment_name, preflights[ROLE_FOREIGN]),
@@ -1228,9 +1314,9 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
             continue
         install_remote_role(target_map[role], deployment_name, env, action)
         if action in {"install", "reinstall"}:
-            postcheck_remote_role(target_map[role])
+            postcheck_remote_role(target_map[role], current_wg_interface(env))
         else:
-            print_preflight(target_map[role], remote_preflight(target_map[role]))
+            print_preflight(target_map[role], remote_preflight(target_map[role], current_wg_interface(env)))
     print_header("Готово")
     print(f"Локальные артефакты: {out_dir}")
     print(f"Deployment env: {env_path}")
@@ -1240,22 +1326,32 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    deployment_name, env_path, env, targets, preflights = prepare_remote_session(args.deployment, require_privilege=False, validate_os=False)
+    roles = selected_roles(args.role)
+    deployment_name, env_path, env, state, targets, preflights = prepare_remote_session(
+        args.deployment,
+        roles=roles,
+        require_privilege=False,
+        validate_os=False,
+        allow_create=False,
+        persist_local=False,
+        confirm_existing_connections=False,
+    )
     print_summary(deployment_name, env, targets)
-    if args.role != "all":
-        selected = {args.role}
-    else:
-        selected = {ROLE_RU, ROLE_FOREIGN}
-    for target in targets:
-        if target.role in selected:
-            print_preflight(target, preflights[target.role])
     print(f"Deployment env: {env_path}")
     return 0
 
 
 def cmd_remote_action(args: argparse.Namespace) -> int:
-    deployment_name, env_path, env, targets, preflights = prepare_remote_session(args.deployment, require_privilege=True)
-    if args.action in {"install", "reinstall"}:
+    roles = selected_roles(args.role)
+    deployment_name, env_path, env, state, targets, preflights = prepare_remote_session(
+        args.deployment,
+        roles=roles,
+        require_privilege=True,
+        allow_create=False,
+        persist_local=True,
+        confirm_existing_connections=True,
+    )
+    if args.action in {"install", "reinstall"} and ROLE_FOREIGN in roles:
         ensure_foreign_wan_interface(env, preflights[ROLE_FOREIGN])
         write_text(env_path, render_env_text(env))
     print_summary(deployment_name, env, targets)

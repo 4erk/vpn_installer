@@ -118,6 +118,10 @@ render_client() {
   ],
   "route": {
     "auto_detect_interface": true,
+    "default_domain_resolver": {
+      "server": "dns-remote",
+      "strategy": "ipv4_only"
+    },
     "rules": [
       {
         "ip_version": 6,

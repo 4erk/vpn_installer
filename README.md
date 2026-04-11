@@ -1,33 +1,49 @@
-# Переносимый установщик приватного VPN-контура
+# Приватный VPN-контур в 3 шага
 
-Схема: `клиент -> RU gateway -> foreign exit`. Клиент из РФ подключается только к RU-серверу на `443/tcp`, а нероссийский трафик уходит дальше через foreign-узел.
+Этот репозиторий поднимает схему:
 
-## 1. Закажи 2 VPS
+`твой компьютер или телефон -> RU сервер -> foreign сервер`
 
-- RU-сервер: `Ubuntu 24.04`, публичный `IPv4`, вход по `SSH key`.
-  - Основной вариант: [Timeweb Cloud](https://timeweb.cloud/services/cloud-servers/)
-  - Если нужна реферальная ссылка: у Timeweb есть партнёрская программа, и для платформы `ТАЙМВЭБ.КЛАУД` на странице программы указано вознаграждение `20%` по сервисам Cloud. Бери свою ссылку из кабинета вебмастера, не используй чужую вслепую: [партнёрская программа](https://timeweb.com/ru/partners/webmasters/), [документация по реферальной ссылке](https://timeweb.com/ru/docs/partnerskie-programmy/programma-webmaster/)
-- Foreign-сервер: `Ubuntu 24.04`, публичный `IPv4`, вход по `SSH key`.
-  - Основной вариант: [THE.Hosting VPS configurator](https://the.hosting/en/vps-configurator)
-  - Если нужна реферальная ссылка: у THE.Hosting есть официальная партнёрская страница, условия смотри там: [THE.Hosting partners](https://the.hosting/en/partners)
-- Если нужен самый быстрый старт без зоопарка провайдеров, можно взять оба сервера у одного провайдера, а потом уже вынести foreign отдельно.
+Что это даёт:
 
-Что выбрать при заказе:
+- провайдер в РФ видит только подключение к российскому серверу
+- русские сайты идут через `RU IP`
+- остальной трафик идёт через `foreign IP`
+- вся настройка и готовые клиентские профили сохраняются у тебя локально
 
-- ОС: `Ubuntu 24.04 LTS`
-- Доступ: `SSH key`
-- Сеть: обязательно публичный `IPv4`
-- Для foreign лучше сразу выбирать ближайшую к тебе нормальную внешнюю локацию `NL/DE/FI/PL/UK`
+Ручная настройка серверов не нужна. Основной сценарий уже автоматизирован.
 
-## 2. Скачай клиент
+## Что нужно подготовить
+
+Нужны два VPS.
+
+`RU сервер`:
+
+- `Ubuntu 24.04`
+- публичный `IPv4`
+- вход по `SSH key`
+- для старта обычно хватает `1 vCPU`, `1 GB RAM`, `10+ GB disk`
+- пример: [Timeweb Cloud](https://timeweb.cloud/services/cloud-servers/)
+
+`Foreign сервер`:
+
+- `Ubuntu 24.04`
+- публичный `IPv4`
+- вход по `SSH key`
+- для старта обычно хватает `1 vCPU`, `1 GB RAM`, `10+ GB disk`
+- примеры: `Koara`, `FirstByte`, `RuWeb`, `THE.Hosting`
+
+Подробное сравнение провайдеров: [docs/PROVIDERS.md](./docs/PROVIDERS.md)
+
+## Шаг 1. Установи клиент
+
+Основной клиент: `Hiddify`.
 
 - Windows: [Hiddify install page](https://hiddify.com/app/How-to-install-Hiddify-app/), [GitHub Releases](https://github.com/hiddify/hiddify-app/releases/latest)
 - Linux: [Hiddify install page](https://hiddify.com/app/How-to-install-Hiddify-app/), [GitHub Releases](https://github.com/hiddify/hiddify-app/releases/latest)
 - Android: [Google Play](https://play.google.com/store/apps/details?id=app.hiddify.com), [GitHub Releases](https://github.com/hiddify/hiddify-app/releases/latest)
 
-Основной клиент здесь один: `Hiddify`. Этого достаточно для Windows, Linux и Android.
-
-## 3. Запусти bootstrap
+## Шаг 2. Запусти bootstrap
 
 Windows:
 
@@ -41,72 +57,97 @@ Linux:
 ./bootstrap.sh
 ```
 
-На Windows локальный Python не обязателен: bootstrap сам подтянет portable runtime в `.runtime/python/windows`.
+Что он сделает сам:
 
-## 4. Ответь на вопросы bootstrap
-
-Он сам:
-
-- создаст или обновит `deployments/<name>.env`
+- создаст или обновит `deployment`
 - сгенерирует ключи и UUID
-- спросит IP и SSH-доступ к RU и foreign
+- спросит IP и SSH-доступ к обоим серверам
 - проверит оба сервера
 - соберёт локальные артефакты
-- установит или переустановит роли на серверах
+- установит стек на оба сервера
 
-Поддерживаются варианты:
+На Windows заранее ставить Python не обязательно. Если его нет, bootstrap сам подтянет portable runtime в `.runtime/python/windows`.
 
-- вход под `root`
-- вход под обычным пользователем с `sudo`
+## Шаг 3. Импортируй готовый профиль
 
-## 5. Забери готовые артефакты
+После bootstrap у тебя появятся локальные файлы:
 
-После прогона всё остаётся локально:
+- `out/<deployment>/client/hiddify-cross-platform.json`
+- `out/<deployment>/client/linux-sing-box.json`
+- `deployments/<deployment>.env`
+- `state/<deployment>.json`
 
-- `deployments/<name>.env`
-- `state/<name>.json`
-- `out/<name>/client/`
-- `out/<name>/cloud-init/`
-- `out/<name>/bundle/`
+Для Windows, Linux и Android обычно нужен именно:
 
-Для клиента обычно нужен профиль из `out/<name>/client/`.
+`out/<deployment>/client/hiddify-cross-platform.json`
 
-## Основные команды обслуживания
+Импортируй этот файл в `Hiddify`.
 
-На Linux используй `python3`, на Windows после первого запуска используй `.\.runtime\python\windows\python.exe`.
+## Обычные команды после установки
 
-Проверка серверов:
+Используй обёртку `manage`, а не внутренние Python-команды.
 
-```bash
-python3 ./scripts/orchestrate.py status --deployment my-stack
+Windows:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\manage.ps1 --help
+powershell -ExecutionPolicy Bypass -File .\manage.ps1 status --deployment my-vpn
+powershell -ExecutionPolicy Bypass -File .\manage.ps1 reinstall --deployment my-vpn
 ```
 
-Переустановка:
+Linux:
 
 ```bash
-python3 ./scripts/orchestrate.py reinstall --deployment my-stack
+./manage.sh --help
+./manage.sh status --deployment my-vpn
+./manage.sh reinstall --deployment my-vpn
 ```
 
-Удаление стека с серверов с восстановлением baseline:
+Полезные действия:
+
+- `status`: проверить оба сервера без изменений
+- `reinstall`: переустановить стек
+- `remove`: удалить стек с серверов и восстановить baseline
+- `purge`: удалить стек и его серверное состояние
+- `cleanup-local`: удалить локальные артефакты
+
+Если нужно работать только с одной ролью:
 
 ```bash
-python3 ./scripts/orchestrate.py remove --deployment my-stack
+./manage.sh status --deployment my-vpn --role ru-gateway
+./manage.sh reinstall --deployment my-vpn --role foreign-exit
 ```
 
-Полная серверная зачистка состояния стека:
+## Если хочешь прогнать локальную самопроверку
+
+Windows:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\audit.ps1 all
+```
+
+Linux:
 
 ```bash
-python3 ./scripts/orchestrate.py purge --deployment my-stack
+./audit.sh all
 ```
 
-Удаление локальных артефактов:
+Это проверяет локальную сборку и Docker-эмуляцию, но не заменяет живой прогон на реальных VPS.
 
-```bash
-python3 ./scripts/orchestrate.py cleanup-local --deployment my-stack
-```
+Важно:
 
-Если нужно действовать только на одну роль, добавь `--role ru-gateway` или `--role foreign-exit`.
+- если на хосте включён selective-VPN, прокси или Docker Desktop networking, локальный audit не считается доказательством реального публичного `IP`
+- реальный `RU/foreign` egress и поведение на настоящих провайдерских сетях всё равно проверяются только на живых VPS
 
-## Что ещё посмотреть
+## Если что-то пошло не так
 
-- Детальный ресерч по провайдерам, клиентам и текущим ограничениям: [docs/RESEARCH.md](./docs/RESEARCH.md)
+- проверь, что оба сервера действительно на `Ubuntu 24.04`
+- проверь, что у обоих серверов есть публичный `IPv4`
+- проверь, что вход по `SSH key` работает вручную
+- для Windows используй `bootstrap.ps1`, `manage.ps1`, `audit.ps1`
+- для Linux используй `bootstrap.sh`, `manage.sh`, `audit.sh`
+
+## Где лежат подробности
+
+- Полная техническая документация: [docs/PROJECT.md](./docs/PROJECT.md)
+- Провайдеры и цены: [docs/PROVIDERS.md](./docs/PROVIDERS.md)
