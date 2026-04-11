@@ -1,19 +1,24 @@
-# Приватный VPN-контур в 3 шага
+# Приватный VPN-контур без ручной настройки серверов
 
 Этот репозиторий поднимает схему:
 
-`твой компьютер или телефон -> RU сервер -> foreign сервер`
+`твой компьютер или телефон -> RU сервер -> Foreign сервер`
 
 Что это даёт:
 
 - провайдер в РФ видит только подключение к российскому серверу
-- русские сайты идут через `RU IP`
-- остальной трафик идёт через `foreign IP`
-- вся настройка и готовые клиентские профили сохраняются у тебя локально
+- русские сайты выходят через `RU IP`
+- остальной трафик выходит через `Foreign IP`
+- готовый клиентский профиль сохраняется у тебя локально
 
-Ручная настройка серверов не нужна. Основной сценарий уже автоматизирован.
+Главный вход для пользователя:
 
-## Что нужно подготовить
+- Windows: `vpn.ps1`
+- Linux: `vpn.sh`
+
+Старые `bootstrap` и `manage` оставлены только для совместимости.
+
+## Что подготовить заранее
 
 Нужны два VPS.
 
@@ -21,21 +26,17 @@
 
 - `Ubuntu 24.04`
 - публичный `IPv4`
-- вход по `SSH key`
-- для старта обычно хватает `1 vCPU`, `1 GB RAM`, `10+ GB disk`
-- пример: [Timeweb Cloud](https://timeweb.cloud/services/cloud-servers/)
+- обычно хватает `1 vCPU`, `1 GB RAM`, `10+ GB disk`
 
 `Foreign сервер`:
 
 - `Ubuntu 24.04`
 - публичный `IPv4`
-- вход по `SSH key`
-- для старта обычно хватает `1 vCPU`, `1 GB RAM`, `10+ GB disk`
-- примеры: `Koara`, `FirstByte`, `RuWeb`, `THE.Hosting`
+- обычно хватает `1 vCPU`, `1 GB RAM`, `10+ GB disk`
 
-Подробное сравнение провайдеров: [docs/PROVIDERS.md](./docs/PROVIDERS.md)
+Примеры провайдеров и цены: [docs/PROVIDERS.md](./docs/PROVIDERS.md)
 
-## Шаг 1. Установи клиент
+## Шаг 1. Установи Hiddify
 
 Основной клиент: `Hiddify`.
 
@@ -43,119 +44,143 @@
 - Linux: [Hiddify install page](https://hiddify.com/app/How-to-install-Hiddify-app/), [GitHub Releases](https://github.com/hiddify/hiddify-app/releases/latest)
 - Android: [Google Play](https://play.google.com/store/apps/details?id=app.hiddify.com), [GitHub Releases](https://github.com/hiddify/hiddify-app/releases/latest)
 
-## Шаг 2. Запусти bootstrap
+## Шаг 2. Запусти мастер установки
 
 Windows:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\bootstrap.ps1
-powershell -ExecutionPolicy Bypass -File .\bootstrap.ps1 --help
+powershell -ExecutionPolicy Bypass -File .\vpn.ps1
 ```
 
 Linux:
 
 ```bash
-./bootstrap.sh
-./bootstrap.sh --help
+chmod +x ./vpn.sh
+./vpn.sh
 ```
 
-Что он сделает сам:
+Если хочешь сразу конкретную команду без меню:
 
-- предложит создать новый `deployment` или выбрать уже существующий
-- сгенерирует ключи и UUID
-- явно спросит `RU` и `Foreign` SSH-подключения
-- проверит оба сервера по SSH
-- проверит ОС, текущую роль и права `root/sudo`
-- соберёт локальные артефакты
-- установит стек на оба сервера
+```powershell
+powershell -ExecutionPolicy Bypass -File .\vpn.ps1 install
+powershell -ExecutionPolicy Bypass -File .\vpn.ps1 status --deployment my-vpn
+```
+
+```bash
+./vpn.sh install
+./vpn.sh status --deployment my-vpn
+```
+
+Что мастер спросит:
+
+1. Имя deployment.
+Пример: `my-vpn`, `home-stack`
+
+2. `RU сервер`.
+Что нужно ввести:
+- `Public IP`
+- `SSH port`
+- `SSH user`
+- способ входа: `SSH key` или `SSH password`
+
+3. `Foreign сервер`.
+Те же поля, в том же порядке.
+
+Если `SSH host` отличается от `Public IP`, мастер сам спросит это отдельным вопросом.
+
+Примеры значений:
+
+- `Public IP`: `203.0.113.10`
+- `SSH port`: `22`
+- `SSH user`: `root` или `ubuntu`
+- путь к ключу: `C:\Users\you\.ssh\id_ed25519` или `~/.ssh/id_ed25519`
+
+Что происходит дальше автоматически:
+
+- проверка подключения к `RU`
+- проверка `Ubuntu`, `root/sudo`, уже установленной роли и deployment
+- проверка подключения к `Foreign`
+- сборка локальных артефактов
+- установка сначала на `Foreign`, потом на `RU`
 
 Важно:
 
-- если у тебя уже есть старые `deployment`, bootstrap по умолчанию предлагает создать новый, а не молча брать первый попавшийся
-- если по роли уже есть сохранённое SSH-подключение, bootstrap теперь явно покажет его и спросит: использовать или изменить
+- `RU` спрашивается и проверяется первым
+- если вход по `SSH password`, пароль не сохраняется на диск
+- если нужен `sudo password`, он тоже спрашивается только на время текущего запуска
+- на Windows заранее ставить Python не нужно: `vpn.ps1` сам поднимет portable runtime в `.runtime/python/windows`, если локального Python нет
 
-На Windows заранее ставить Python не обязательно. Если его нет, bootstrap сам подтянет portable runtime в `.runtime/python/windows`.
+## Шаг 3. Импортируй профиль в Hiddify
 
-## Шаг 3. Импортируй готовый профиль
+После успешной установки мастер:
 
-После bootstrap у тебя появятся локальные файлы:
+- попытается скопировать `Hiddify URI` в буфер обмена
+- сохранит URI в `out/<deployment>/client/hiddify-uri.txt`
+- сохранит запасной JSON в `out/<deployment>/client/hiddify-cross-platform.json`
+- создаст `out/<deployment>/NEXT-STEPS.txt`
 
-- `out/<deployment>/client/hiddify-cross-platform.json`
-- `out/<deployment>/client/linux-sing-box.json`
-- `deployments/<deployment>.env`
-- `state/<deployment>.json`
+Основной путь:
 
-Для Windows, Linux и Android обычно нужен именно:
+1. Открой `Hiddify`
+2. Выбери импорт профиля из буфера обмена
+3. Если буфер не сработал, открой `hiddify-uri.txt` и вставь URI вручную
 
-`out/<deployment>/client/hiddify-cross-platform.json`
+JSON нужен только как запасной вариант.
 
-Импортируй этот файл в `Hiddify`.
-
-## Обычные команды после установки
-
-Используй обёртку `manage`, а не внутренние Python-команды.
+## Основные команды после установки
 
 Windows:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\manage.ps1 --help
-powershell -ExecutionPolicy Bypass -File .\manage.ps1 status --deployment my-vpn
-powershell -ExecutionPolicy Bypass -File .\manage.ps1 reinstall --deployment my-vpn
+powershell -ExecutionPolicy Bypass -File .\vpn.ps1 status --deployment my-vpn
+powershell -ExecutionPolicy Bypass -File .\vpn.ps1 reinstall --deployment my-vpn
+powershell -ExecutionPolicy Bypass -File .\vpn.ps1 remove --deployment my-vpn
+powershell -ExecutionPolicy Bypass -File .\vpn.ps1 purge --deployment my-vpn
+powershell -ExecutionPolicy Bypass -File .\vpn.ps1 cleanup-local --deployment my-vpn
+powershell -ExecutionPolicy Bypass -File .\vpn.ps1 audit
 ```
 
 Linux:
 
 ```bash
-./manage.sh --help
-./manage.sh status --deployment my-vpn
-./manage.sh reinstall --deployment my-vpn
+./vpn.sh status --deployment my-vpn
+./vpn.sh reinstall --deployment my-vpn
+./vpn.sh remove --deployment my-vpn
+./vpn.sh purge --deployment my-vpn
+./vpn.sh cleanup-local --deployment my-vpn
+./vpn.sh audit
 ```
 
-Полезные действия:
-
-- `status`: проверить оба сервера без изменений
-- `reinstall`: переустановить стек
-- `remove`: удалить стек с серверов и восстановить baseline
-- `purge`: удалить стек и его серверное состояние
-- `cleanup-local`: удалить локальные артефакты
-
-Если нужно работать только с одной ролью:
-
-```bash
-./manage.sh status --deployment my-vpn --role ru-gateway
-./manage.sh reinstall --deployment my-vpn --role foreign-exit
-```
-
-## Если хочешь прогнать локальную самопроверку
-
-Windows:
+Если нужно затронуть только одну роль:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\audit.ps1 all
+powershell -ExecutionPolicy Bypass -File .\vpn.ps1 status --deployment my-vpn --role ru-gateway
+powershell -ExecutionPolicy Bypass -File .\vpn.ps1 reinstall --deployment my-vpn --role foreign-exit
 ```
-
-Linux:
-
-```bash
-./audit.sh all
-```
-
-Это проверяет локальную сборку и Docker-эмуляцию, но не заменяет живой прогон на реальных VPS.
-
-Важно:
-
-- если на хосте включён selective-VPN, прокси или Docker Desktop networking, локальный audit не считается доказательством реального публичного `IP`
-- реальный `RU/foreign` egress и поведение на настоящих провайдерских сетях всё равно проверяются только на живых VPS
 
 ## Если что-то пошло не так
 
-- проверь, что оба сервера действительно на `Ubuntu 24.04`
-- проверь, что у обоих серверов есть публичный `IPv4`
-- проверь, что вход по `SSH key` работает вручную
-- для Windows используй `bootstrap.ps1`, `manage.ps1`, `audit.ps1`
-- для Linux используй `bootstrap.sh`, `manage.sh`, `audit.sh`
+- Проверь, что оба сервера действительно на `Ubuntu 24.04`
+- Проверь, что у обоих серверов есть публичный `IPv4`
+- Проверь `SSH` вручную теми же данными, которые вводишь в мастер
+- Если используешь ключ, проверь путь к файлу ключа
+- Если используешь пароль, проверь, что сервер разрешает password login
+- Если окно Windows раньше закрывалось, запускай через `vpn.ps1`: он теперь держит окно открытым до `Enter`
+- Если не понял, что импортировать в `Hiddify`, используй сначала буфер обмена, потом `hiddify-uri.txt`, и только потом JSON
+
+## Локальная самопроверка
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\vpn.ps1 audit
+```
+
+```bash
+./vpn.sh audit
+```
+
+Это проверяет локальную сборку, lifecycle-guard и Docker-эмуляцию. Но это всё ещё не заменяет живой прогон на реальных VPS.
 
 ## Где лежат подробности
 
-- Полная техническая документация: [docs/PROJECT.md](./docs/PROJECT.md)
+- Техническая документация: [docs/PROJECT.md](./docs/PROJECT.md)
 - Провайдеры и цены: [docs/PROVIDERS.md](./docs/PROVIDERS.md)

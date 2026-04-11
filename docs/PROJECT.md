@@ -2,233 +2,241 @@
 
 ## Назначение
 
-Репозиторий разворачивает переносимый приватный VPN-контур со схемой:
+Репозиторий разворачивает переносимый приватный VPN-контур по схеме:
 
-`клиент -> RU gateway -> foreign exit`
+`клиент -> RU gateway -> Foreign exit`
 
 Цель:
 
-- клиент из РФ подключается только к российскому IP
-- русский трафик выходит через RU-сервер
-- остальной трафик выходит через foreign-сервер
-- все ключи, env и клиентские профили сохраняются локально
+- клиент из РФ подключается только к `RU IP`
+- русский трафик выходит через `RU`
+- остальной трафик выходит через `Foreign`
+- ключи, deployment env и клиентские артефакты сохраняются локально
 
-## Компоненты
+## Архитектура
 
 ### RU gateway
 
 - публичный вход `443/tcp`
 - `sing-box` с `VLESS + REALITY`
-- `WireGuard` до foreign-узла
+- `WireGuard` до Foreign
 - маршрутизация:
-  - `RU domains + RU IP -> direct через RU uplink`
-  - всё остальное -> через `wg0` на foreign
-- DNS-логика держится на RU-сервере
+  - `RU domains + RU IP -> direct`
+  - всё остальное -> через `WireGuard` на Foreign
 
 ### Foreign exit
 
-- публичный клиентский вход не поднимается
+- публичный клиентский VPN-вход не поднимается
 - работает как `WireGuard` peer + NAT egress
-- может блокировать выход на RU CIDR, чтобы не было обратной петли
+- может блокировать обратный выход на RU CIDR
 
 ### Клиент
 
 - основной клиент: `Hiddify`
-- профили генерируются локально
-- отдельной клиентской логики split tunneling нет
+- основной пользовательский артефакт: одна `VLESS/Reality URI`
+- JSON-профили сохраняются как резерв
 
-## Что делает локальная автоматизация
+## Пользовательский интерфейс
 
-### bootstrap
+### Основной вход
 
-- запускается с Windows и Linux
-- на Windows умеет тихо поставить portable Python локально
-- создаёт или обновляет `deployments/<name>.env`
-- генерирует ключи `REALITY`, `WireGuard`, `UUID`
-- по умолчанию предлагает создать новый deployment, а не молча брать первый старый
-- явно показывает оба подключения: `RU` и `Foreign`
-- если для роли уже есть сохранённые SSH-данные, спрашивает: использовать их или изменить
-- валидирует `deployment name`, `public IP`, `SSH host`, `SSH port`, `SSH user`, путь к SSH key
-- делает preflight
-- рендерит локальные артефакты
-- выполняет установку, переустановку, удаление или зачистку
+- Windows: `vpn.ps1`
+- Linux: `vpn.sh`
 
-### manage
+Без аргументов:
 
-Это пользовательская обёртка над `scripts/orchestrate.py`, чтобы не вызывать Python вручную.
+- открывает интерактивное меню
 
-- `manage.ps1` для Windows
-- `manage.sh` для Linux
+С аргументами:
 
-Через неё пользователь должен запускать:
-
+- `install`
 - `status`
 - `reinstall`
 - `remove`
 - `purge`
 - `cleanup-local`
+- `audit`
 
-### audit
+### Совместимость
 
-Запускается через:
+Оставлены shim-обёртки:
 
-- `audit.ps1` на Windows
-- `audit.sh` на Linux
-- `scripts/audit.py` как общий Python-core
+- `bootstrap.ps1`, `bootstrap.sh`
+- `manage.ps1`, `manage.sh`
+- `audit.ps1`, `audit.sh`
 
-Режимы:
+Они только перекидывают пользователя на `vpn.ps1/.sh` и не считаются основным UX.
 
-- `quick`
-- `docker`
-- `lab`
-- `all`
+## Что делает install wizard
 
-Что проверяет `quick`:
+Порядок шагов:
 
-- `install.sh` syntax
-- `orchestrate.py` compile/help
-- `bootstrap.ps1`, `bootstrap.sh`, `manage.ps1`, `manage.sh`
-- `render-all`, `render-config`, `gen-client-profiles`, `render-cloud-init`, `package-bundle`
-- валидность JSON-артефактов, состава tarball и `cloud-init schema`
-- bootstrap smoke path на Windows и Linux
+1. Выбор или создание deployment
+2. Ввод и проверка `RU`
+3. Ввод и проверка `Foreign`
+4. Сводка
+5. Локальная сборка артефактов
+6. Установка на `Foreign`
+7. Установка на `RU`
+8. Финализация для Hiddify
 
-Что проверяет `docker`:
+Порядок проверки серверов:
 
-- guard для `remove/purge` на неинициализированном хосте
-- `render-only` для обеих ролей
-- fail-fast по обязательным assets и fallback на локальный cache
-- role-scoped/read-only поведение `status`
-- role-scoped `reinstall/remove/purge` без зависимости от второго узла
+- всегда сначала `RU`
+- потом `Foreign`
 
-Что проверяет `lab`:
+Порядок deploy для `install/reinstall`:
 
-- изолированный Docker-стенд `client -> RU -> foreign`
-- реальные процессы `sing-box`, `wg-quick`, `nftables`
-- детерминированный DNS для RU и global доменов
-- dataplane-маршрутизацию `RU -> direct`, `global -> foreign`
-- `fail-closed` для global при падении foreign
-- сохранение прямого RU-path при остановке foreign
-- RU-block на foreign через lab-specific deny list
+- всегда сначала `Foreign`
+- потом `RU`
 
-### install.sh
+Порядок для `remove/purge`:
 
-Поддерживает действия:
+- `RU`
+- потом `Foreign`
 
-- `install`
-- `reinstall`
-- `status`
-- `remove`
-- `purge`
+## SSH и привилегии
 
-### Состояние и артефакты
+Поддерживаются оба варианта:
 
-Локально:
+- `SSH key`
+- `SSH password`
+
+Дополнительно:
+
+- если вход уже под `root`, используется он
+- если есть `passwordless sudo`, используется он
+- если нужен `sudo password`, он спрашивается интерактивно
+
+Правила хранения:
+
+- в `state/<deployment>.json` сохраняется только `auth_mode`
+- `SSH password` не сохраняется
+- `sudo password` не сохраняется
+
+Транспорт:
+
+- для обычного key-path по умолчанию используется системный `ssh/scp`
+- для password-path и fallback-сценариев используется Python SSH backend на `paramiko`
+- `paramiko` ставится лениво только при необходимости в `.runtime/python-packages`
+
+## Локальные артефакты
+
+Для каждого deployment создаются:
 
 - `deployments/<name>.env`
 - `state/<name>.json`
 - `out/<name>/assets`
 - `out/<name>/bundle`
-- `out/<name>/client`
-- `out/<name>/cloud-init`
 - `out/<name>/preview`
+- `out/<name>/cloud-init`
+- `out/<name>/client`
+- `out/<name>/NEXT-STEPS.txt`
 
-На сервере:
+Основные клиентские файлы:
 
-- `/etc/vpn-stack`
-- `/var/lib/vpn-stack/rules`
-- конфиги `sing-box`, `wireguard`, `nftables`
+- `out/<name>/client/hiddify-uri.txt`
+- `out/<name>/client/hiddify-cross-platform.json`
+- `out/<name>/client/linux-sing-box.json`
 
-## Lifecycle
+## Серверный lifecycle
 
 ### install / reinstall
 
 - ставит пакеты
 - выкладывает конфиги и systemd units
-- поднимает `nftables`, `wg-quick`, `vpn-stack-sync`, а на RU ещё и `sing-box`
-- сохраняет deployment metadata на сервере
+- поднимает `nftables`, `wg-quick`, `vpn-stack-sync`
+- на `RU` поднимает ещё и `sing-box`
+- сохраняет metadata роли и deployment на сервере
 
 ### status
 
-- проверяет, установлен ли стек
-- показывает роль, deployment, время установки
-- показывает состояние сервисов
-- не создаёт новый deployment и не переписывает локальные `env/state`
+- проверяет установлен ли стек
+- показывает роль, deployment и состояние сервисов
+- не создаёт новый deployment
+- не переписывает локальные `env/state`
 
 ### remove
 
 - останавливает сервисы стека
-- удаляет его конфиги
-- пытается восстановить baseline, который был сохранён перед первой установкой новой версией установщика
-- если metadata стека на сервере нет, команда жёстко отказывается вместо destructive cleanup
+- удаляет конфиги стека
+- восстанавливает baseline, если он был сохранён
+- если metadata стека не найдена, команда жёстко отказывается
 
 ### purge
 
-- делает то же, что `remove`
+- делает всё то же, что `remove`
 - дополнительно вычищает серверное состояние в `/etc/vpn-stack`
-- если metadata стека на сервере нет, команда жёстко отказывается вместо destructive cleanup
+- если metadata стека не найдена, команда жёстко отказывается
 
 ## Сборка артефактов
 
-- локальная сборка теперь fail-fast по обязательным rule-set/CIDR assets
-- warning остаётся только если обновление asset не удалось, но валидная локальная копия уже есть
-- role-scoped `status/reinstall/remove/purge` работают только с выбранной ролью и не требуют второй сервер
+- локальная сборка fail-fast по обязательным assets
+- если обязательный asset недоступен и локального cache нет, сборка завершается ошибкой сразу
+- warning остаётся только в сценарии “обновление не удалось, но валидная локальная копия уже есть”
 
-## Что доказано и что ещё нет
+Обязательные assets:
 
-### Доказано локально
+- для `RU`: `geosite-ru.srs`, `geoip-ru.srs`
+- для `Foreign`: `ru-ipv4.zone`, а при `FOREIGN_BLOCK_RU=1` ещё и `ru-ipv6.zone`
 
-- CLI и bootstrap-path работают на Windows и Linux
-- локальная генерация всех артефактов воспроизводима
-- JSON/tar/cloud-init проходят базовую валидацию
-- lifecycle/orchestration-guard покрыты локальными regression tests
+## Что проверяет audit
 
-### Доказано в Docker-lab
+### quick
 
-- dataplane в изолированной сети соответствует схеме проекта
-- `RU`-трафик идёт напрямую через RU-path
-- `global`-трафик уходит через foreign-hop
-- при падении foreign global-path рвётся `fail-closed`, а RU-path остаётся рабочим
+- syntax / help / entrypoints
+- `vpn.ps1`, `vpn.sh`
+- compatibility shims
+- генерацию всех артефактов
+- JSON / tar / cloud-init schema
+- `Hiddify URI` и `NEXT-STEPS.txt`
+- clean-room запуск Windows launcher без заранее установленного Python
+- Linux launcher с Python и без Python
 
-### Всё ещё требует живых VPS
+### docker
+
+- guard для `remove/purge` на неинициализированном хосте
+- `render-only` для обеих ролей
+- fail-fast по assets
+- role-scoped read-only `status`
+- role-scoped `reinstall/remove/purge`
+
+### lab
+
+- изолированный dataplane `client -> RU -> Foreign`
+- реальные `sing-box`, `WireGuard`, `nftables`
+- детерминированный DNS
+- `RU -> direct`
+- `global -> Foreign`
+- `fail-closed` при падении `Foreign`
+
+## Что уже доказано
+
+Подтверждено локально и через Docker:
+
+- единый launcher `vpn.ps1/.sh` работает
+- compatibility shims не отвалились
+- lifecycle guard не ломает неинициализированный сервер
+- role-scoped операции не зависят от второго сервера
+- `status` действительно read-only
+- dataplane в Docker-lab соответствует схеме проекта
+
+Последние успешные summary:
+
+- quick: `out/audit/20260411T234447Z-quick/summary.json`
+- docker: `out/audit/20260411T234525Z-docker/summary.json`
+- lab: `out/audit/20260411T234550Z-lab/summary.json`
+
+## Что ещё требует живых VPS
 
 - first boot у реального VPS-провайдера
-- реальный `root`/`sudo` SSH path к удалённым узлам
-- реальный публичный `RU/foreign` egress
+- реальный `root/sudo` SSH path к удалённым узлам
+- публичный `RU/Foreign egress`
 - DNS leak вне Docker Desktop
-- импорт профилей в Hiddify на Windows/Linux/Android в боевой сети
-- поведение под реальными провайдерскими ограничениями
-
-### Важное ограничение
-
-- Docker-lab не используется как доказательство реального публичного `IP/egress`
-- если на хосте включён selective-VPN, прокси или Docker Desktop networking, audit намеренно не делает из этого выводы о реальной внешней сети
+- боевой импорт в `Hiddify` на Windows/Linux/Android в реальной сети
 
 ## Ограничения
 
-- baseline-восстановление надёжно только для установок, сделанных уже текущей версией установщика
-- системные пакеты при `purge` не удаляются специально
-- автоматический `SSH password login` не реализован
-- автоматическое создание отдельного deploy-user пока не доведено
-- живой end-to-end прогон на боевых VPS ещё нужен
-
-## Основные команды
-
-Linux:
-
-```bash
-./bootstrap.sh
-./manage.sh --help
-./manage.sh status --deployment my-stack
-./manage.sh reinstall --deployment my-stack
-./manage.sh remove --deployment my-stack
-./manage.sh purge --deployment my-stack
-./manage.sh cleanup-local --deployment my-stack
-```
-
-Windows:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\bootstrap.ps1
-powershell -ExecutionPolicy Bypass -File .\manage.ps1 --help
-powershell -ExecutionPolicy Bypass -File .\manage.ps1 status --deployment my-stack
-```
+- baseline-восстановление надёжно только для установок, сделанных новой версией установщика
+- системные пакеты при `purge` специально не удаляются
+- локальный audit не считается доказательством реального публичного `IP`, особенно если на хосте есть selective-VPN, proxy или Docker Desktop networking

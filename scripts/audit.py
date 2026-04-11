@@ -23,13 +23,17 @@ SCRIPTS_DIR = ROOT_DIR / "scripts"
 OUT_DIR = ROOT_DIR / "out"
 AUDIT_ROOT = OUT_DIR / "audit"
 INSTALL_SCRIPT = ROOT_DIR / "install.sh"
+VPN_PS1 = ROOT_DIR / "vpn.ps1"
+VPN_SH = ROOT_DIR / "vpn.sh"
 BOOTSTRAP_PS1 = ROOT_DIR / "bootstrap.ps1"
 BOOTSTRAP_SH = ROOT_DIR / "bootstrap.sh"
 MANAGE_PS1 = ROOT_DIR / "manage.ps1"
 MANAGE_SH = ROOT_DIR / "manage.sh"
+AUDIT_PS1 = ROOT_DIR / "audit.ps1"
+AUDIT_SH = ROOT_DIR / "audit.sh"
 ORCHESTRATE_SCRIPT = SCRIPTS_DIR / "orchestrate.py"
 AUDIT_IMAGE = "vpn-installer-audit-base:1"
-REPO_FILES_FOR_BOOTSTRAP = ["bootstrap.ps1", "bootstrap.sh", "manage.ps1", "manage.sh", "install.sh", "scripts", "deployments"]
+REPO_FILES_FOR_BOOTSTRAP = ["vpn.ps1", "vpn.sh", "bootstrap.ps1", "bootstrap.sh", "manage.ps1", "manage.sh", "audit.ps1", "audit.sh", "install.sh", "scripts", "deployments"]
 
 LAB_FRONT_SUBNET = "198.18.0.0/24"
 LAB_RU_SUBNET = "203.0.113.0/24"
@@ -370,29 +374,47 @@ class AuditRunner:
         self.ensure_audit_image()
         env_path, out_dir = self.ensure_quick_env()
         self.seed_foreign_block_cache(out_dir.name)
+        ps_env = {"VPN_NO_PAUSE": "1"}
 
         self.record("quick-bash-syntax", lambda: self.run_bash("bash-syntax", "bash -n install.sh") or None)
         self.record("quick-py-compile", lambda: self.run_command("py-compile", python_cmd() + ["-m", "py_compile", str(ORCHESTRATE_SCRIPT)]) or None)
         self.record(
-            "quick-bootstrap-ps1-help",
-            lambda: self.run_powershell("bootstrap-ps1-help", ["-File", str(BOOTSTRAP_PS1), "--help"]) or None,
+            "quick-vpn-ps1-help",
+            lambda: self.run_powershell("vpn-ps1-help", ["-File", str(VPN_PS1), "--help"], env=ps_env) or None,
         )
         self.record(
-            "quick-bootstrap-sh-help",
+            "quick-vpn-sh-help",
+            lambda: self.run_bash("vpn-sh-help", "bash ./vpn.sh --help", cwd=ROOT_DIR) or None,
+        )
+        self.record(
+            "quick-bootstrap-ps1-shim",
+            lambda: self.run_powershell("bootstrap-ps1-help", ["-File", str(BOOTSTRAP_PS1), "--help"], env=ps_env) or None,
+        )
+        self.record(
+            "quick-bootstrap-sh-shim",
             lambda: self.run_bash("bootstrap-sh-help", "bash ./bootstrap.sh --help", cwd=ROOT_DIR) or None,
         )
         self.record(
-            "quick-manage-ps1-help",
-            lambda: self.run_powershell("manage-ps1-help", ["-File", str(MANAGE_PS1), "--help"]) or None,
+            "quick-manage-ps1-shim",
+            lambda: self.run_powershell("manage-ps1-help", ["-File", str(MANAGE_PS1), "--help"], env=ps_env) or None,
         )
         self.record(
-            "quick-manage-sh-help",
+            "quick-manage-sh-shim",
             lambda: self.run_bash("manage-sh-help", "bash ./manage.sh --help", cwd=ROOT_DIR) or None,
+        )
+        self.record(
+            "quick-audit-ps1-shim",
+            lambda: self.run_powershell("audit-ps1-help", ["-File", str(AUDIT_PS1), "--help"], env=ps_env) or None,
+        )
+        self.record(
+            "quick-audit-sh-shim",
+            lambda: self.run_bash("audit-sh-help", "bash ./audit.sh --help", cwd=ROOT_DIR) or None,
         )
         self.record(
             "quick-orchestrate-help",
             lambda: self.run_command("orchestrate-help", python_cmd() + [str(ORCHESTRATE_SCRIPT), "--help"]) or None,
         )
+        self.record("quick-vpn-menu-exit", self.test_vpn_menu_exit)
         self.record("quick-bootstrap-ux", self.test_bootstrap_ux_helpers)
         self.record(
             "quick-render-all",
@@ -415,6 +437,7 @@ class AuditRunner:
             lambda: self.run_command("package-bundle", python_cmd() + [str(ORCHESTRATE_SCRIPT), "package-bundle", str(env_path)]) or None,
         )
         self.record("quick-validate-json", lambda: self.test_validate_json(out_dir))
+        self.record("quick-user-artifacts", lambda: self.test_user_artifacts(out_dir))
         self.record("quick-validate-bundle", lambda: self.test_validate_bundle(out_dir))
         self.record("quick-singbox-check", lambda: self.test_singbox_check(out_dir))
         self.record("quick-cloud-init-schema", lambda: self.test_cloud_init_schema(out_dir))
@@ -452,10 +475,26 @@ class AuditRunner:
             json.loads(path.read_text(encoding="utf-8"))
         return {"validated": ", ".join(str(path) for path in json_paths)}
 
+    def test_user_artifacts(self, out_dir: Path) -> dict[str, str]:
+        uri_path = out_dir / "client" / "hiddify-uri.txt"
+        next_steps = out_dir / "NEXT-STEPS.txt"
+        if not uri_path.is_file():
+            raise AuditFailure(f"Не найден Hiddify URI файл: {uri_path}")
+        if not next_steps.is_file():
+            raise AuditFailure(f"Не найден NEXT-STEPS.txt: {next_steps}")
+        uri_payload = uri_path.read_text(encoding="utf-8")
+        if not uri_payload.startswith("vless://"):
+            raise AuditFailure("Hiddify URI не похожа на VLESS URI")
+        next_steps_text = next_steps.read_text(encoding="utf-8")
+        if "Hiddify" not in next_steps_text or "vpn status" not in next_steps_text:
+            raise AuditFailure("NEXT-STEPS.txt не содержит ожидаемых инструкций")
+        return {"uri": str(uri_path), "next_steps": str(next_steps)}
+
     def test_bootstrap_ux_helpers(self) -> dict[str, str]:
         snippet = textwrap.dedent(
             """\
             import builtins
+            import getpass
             import json
             import sys
             from pathlib import Path
@@ -474,7 +513,7 @@ class AuditRunner:
                 builtins.input = orig_input
 
             env_only_target = orchestrate.build_target(orchestrate.ROLE_RU, {"RU_PUBLIC_IP": "1.2.3.4", "SSH_PORT": "22"}, {})
-            answers = iter(["1.2.3.4", "1.2.3.4", "22", "root", ""])
+            answers = iter(["1.2.3.4", "22", "root", "1", "n", ""])
             builtins.input = lambda prompt="": next(answers)
             try:
                 prompted_target = orchestrate.prompt_server_connection(env_only_target, force_prompt=not env_only_target.saved_connection, confirm_existing=True)
@@ -487,29 +526,40 @@ class AuditRunner:
                     "ssh_host": "5.6.7.8",
                     "ssh_port": "2222",
                     "ssh_user": "root",
+                    "auth_mode": "password",
                     "identity_path": "",
                 }
             }
             saved_target = orchestrate.build_target(orchestrate.ROLE_RU, {"RU_PUBLIC_IP": "9.9.9.9", "SSH_PORT": "22"}, saved_state)
             answers = iter(["1"])
+            orig_getpass = getpass.getpass
             builtins.input = lambda prompt="": next(answers)
+            getpass.getpass = lambda prompt="": "secret"
             try:
                 reused_target = orchestrate.prompt_server_connection(saved_target, force_prompt=False, confirm_existing=True)
             finally:
                 builtins.input = orig_input
+                getpass.getpass = orig_getpass
 
             payload = {
                 "selected": selected,
                 "env_only_saved": env_only_target.saved_connection,
                 "prompted_host": prompted_target.ssh_host,
+                "prompted_auth_mode": prompted_target.auth_mode,
                 "reused_saved": reused_target.saved_connection,
                 "reused_port": reused_target.ssh_port,
+                "reused_auth_mode": reused_target.auth_mode,
+                "runtime_password_len": len(reused_target.ssh_password),
             }
             assert selected == "my-new-vpn"
             assert env_only_target.saved_connection is False
             assert prompted_target.ssh_host == "1.2.3.4"
+            assert prompted_target.auth_mode == "key"
             assert reused_target.saved_connection is True
             assert reused_target.ssh_port == 2222
+            assert reused_target.auth_mode == "password"
+            assert reused_target.ssh_password == "secret"
+            assert "ssh_password" not in saved_target.to_state()
             print(json.dumps(payload))
             """
         )
@@ -517,6 +567,21 @@ class AuditRunner:
         payload_line = completed.stdout.strip().splitlines()[-1]
         payload = json.loads(payload_line)
         return {key: str(value) for key, value in payload.items()}
+
+    def test_vpn_menu_exit(self) -> dict[str, str]:
+        ps_env = {"VPN_NO_PAUSE": "1"}
+        completed = self.run_command(
+            "vpn-menu-exit",
+            [powershell_executable(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(VPN_PS1)],
+            input_text="8\n",
+            env=ps_env,
+        )
+        output = completed.stdout + completed.stderr
+        if "VPN Installer" not in output or "Выбери действие" not in output:
+            raise AuditFailure("vpn.ps1 без аргументов не показал главное меню")
+        if "Завершено." not in output:
+            raise AuditFailure("vpn.ps1 меню не завершилось через пункт Выход")
+        return {"launcher": str(VPN_PS1)}
 
     def test_validate_bundle(self, out_dir: Path) -> dict[str, str]:
         bundle_dir = out_dir / "bundle"
@@ -645,28 +710,29 @@ class AuditRunner:
 
     def test_bootstrap_clean_room(self) -> dict[str, str]:
         if os.name != "nt":
-            return {"skipped": "bootstrap.ps1 clean-room проверяется только на Windows"}
+            return {"skipped": "vpn.ps1 clean-room проверяется только на Windows"}
         with self.temp_repo_copy("bootstrap-clean-room") as repo_copy:
             portable_downloads = ROOT_DIR / ".runtime" / "downloads"
             env = os.environ.copy()
+            env["VPN_NO_PAUSE"] = "1"
             if portable_downloads.is_dir():
                 zips = sorted(portable_downloads.glob("python-*-embeddable-*.zip"))
                 if zips:
                     env["VPN_BOOTSTRAP_PYTHON_URL"] = zips[-1].resolve().as_uri()
             self.run_powershell(
                 "bootstrap-clean-room",
-                ["-File", str(repo_copy / "bootstrap.ps1"), "--help"],
+                ["-File", str(repo_copy / "vpn.ps1"), "install", "--help"],
                 cwd=repo_copy,
                 env=env,
             )
             portable = repo_copy / ".runtime" / "python" / "windows" / "python.exe"
             if not portable.is_file():
-                raise AuditFailure("Clean-room bootstrap не поднял portable Python")
+                raise AuditFailure("Clean-room vpn.ps1 не поднял portable Python")
             return {"repo_copy": str(repo_copy), "portable_python": str(portable)}
 
     def test_linux_bootstrap_no_python(self) -> dict[str, str]:
         repo_copy = ensure_dir(self.work_dir / "linux-bootstrap-no-python")
-        for rel in ("bootstrap.sh", "scripts"):
+        for rel in ("vpn.sh", "scripts"):
             source = ROOT_DIR / rel
             destination = repo_copy / rel
             if source.is_dir():
@@ -676,17 +742,17 @@ class AuditRunner:
         container = f"audit-linux-nopy-{self.run_id}"
         with self.docker_container(container, "ubuntu:24.04"):
             self.docker_exec(container, "mkdir -p /work")
-            self.docker_copy(container, repo_copy / "bootstrap.sh", "/work/bootstrap.sh")
+            self.docker_copy(container, repo_copy / "vpn.sh", "/work/vpn.sh")
             self.docker_copy(container, repo_copy / "scripts", "/work/scripts")
             self.docker_exec(
                 container,
-                "cd /work && chmod +x ./bootstrap.sh && ./bootstrap.sh --help >/tmp/out 2>/tmp/err && grep -q 'Что делает bootstrap' /tmp/out",
+                "cd /work && chmod +x ./vpn.sh && ./vpn.sh --help >/tmp/out 2>/tmp/err && grep -q 'Если запустить без аргументов' /tmp/out",
             )
         return {"status": "help-without-python-ok"}
 
     def test_linux_bootstrap_with_python(self) -> dict[str, str]:
         repo_copy = ensure_dir(self.work_dir / "linux-bootstrap-python")
-        for rel in ("bootstrap.sh", "scripts"):
+        for rel in ("vpn.sh", "scripts"):
             source = ROOT_DIR / rel
             destination = repo_copy / rel
             if source.is_dir():
@@ -696,9 +762,9 @@ class AuditRunner:
         container = f"audit-linux-py-{self.run_id}"
         with self.docker_container(container, "python:3.13"):
             self.docker_exec(container, "mkdir -p /work")
-            self.docker_copy(container, repo_copy / "bootstrap.sh", "/work/bootstrap.sh")
+            self.docker_copy(container, repo_copy / "vpn.sh", "/work/vpn.sh")
             self.docker_copy(container, repo_copy / "scripts", "/work/scripts")
-            self.docker_exec(container, "cd /work && chmod +x ./bootstrap.sh && ./bootstrap.sh --help | grep -q 'Что делает bootstrap'")
+            self.docker_exec(container, "cd /work && chmod +x ./vpn.sh && ./vpn.sh install --help | grep -q 'usage: orchestrate.py install'")
         return {"status": "help-ok"}
 
     def test_unmanaged_remove_purge_render_only(self) -> dict[str, str]:
