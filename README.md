@@ -1,157 +1,112 @@
 # Переносимый установщик приватного VPN-контура
 
-Репозиторий разворачивает схему `клиент -> RU gateway -> foreign exit` и теперь умеет полноценно запускаться как с Linux, так и с Windows без WSL. Локальная автоматизация собрана вокруг одного `Python` core, а server-side установка по-прежнему делается через `install.sh` на Ubuntu.
+Схема: `клиент -> RU gateway -> foreign exit`. Клиент из РФ подключается только к RU-серверу на `443/tcp`, а нероссийский трафик уходит дальше через foreign-узел.
 
-## Что умеет
+## 1. Закажи 2 VPS
 
-- Запускаться с Linux через `./bootstrap.sh`.
-- Запускаться с Windows через `.\bootstrap.ps1` без WSL.
-- Если на Windows нет Python, тихо скачать portable CPython в локальную папку `.runtime/python/windows`.
-- Хранить локальный deployment `.env`, состояние SSH-подключений и все собранные артефакты.
-- Проверять оба сервера по SSH перед установкой.
-- Понимать, установлен ли стек раньше, и предлагать обновление, переустановку или пропуск.
-- Работать как с `root`, так и с обычным SSH-пользователем с `sudo`.
-- Автоматически собирать и переносить на серверы нужные артефакты.
+- RU-сервер: `Ubuntu 24.04`, публичный `IPv4`, вход по `SSH key`.
+  - Основной вариант: [Timeweb Cloud](https://timeweb.cloud/services/cloud-servers/)
+  - Если нужна реферальная ссылка: у Timeweb есть партнёрская программа, и для платформы `ТАЙМВЭБ.КЛАУД` на странице программы указано вознаграждение `20%` по сервисам Cloud. Бери свою ссылку из кабинета вебмастера, не используй чужую вслепую: [партнёрская программа](https://timeweb.com/ru/partners/webmasters/), [документация по реферальной ссылке](https://timeweb.com/ru/docs/partnerskie-programmy/programma-webmaster/)
+- Foreign-сервер: `Ubuntu 24.04`, публичный `IPv4`, вход по `SSH key`.
+  - Основной вариант: [THE.Hosting VPS configurator](https://the.hosting/en/vps-configurator)
+  - Если нужна реферальная ссылка: у THE.Hosting есть официальная партнёрская страница, условия смотри там: [THE.Hosting partners](https://the.hosting/en/partners)
+- Если нужен самый быстрый старт без зоопарка провайдеров, можно взять оба сервера у одного провайдера, а потом уже вынести foreign отдельно.
 
-## Основные файлы
+Что выбрать при заказе:
 
-- [bootstrap.sh](./bootstrap.sh) — Linux launcher.
-- [bootstrap.ps1](./bootstrap.ps1) — Windows launcher без WSL, с auto-bootstrap portable Python.
-- [scripts/orchestrate.py](./scripts/orchestrate.py) — основной локальный orchestration layer.
-- [install.sh](./install.sh) — server-side установщик роли `ru-gateway` или `foreign-exit` на Ubuntu.
-- [deployments/deployment.env.example](./deployments/deployment.env.example) — пример deployment env.
-- [cloud-init/ru.yaml](./cloud-init/ru.yaml) и [cloud-init/foreign.yaml](./cloud-init/foreign.yaml) — шаблонные заглушки, реальные файлы рендерятся в `out/<deployment>/cloud-init/`.
+- ОС: `Ubuntu 24.04 LTS`
+- Доступ: `SSH key`
+- Сеть: обязательно публичный `IPv4`
+- Для foreign лучше сразу выбирать ближайшую к тебе нормальную внешнюю локацию `NL/DE/FI/PL/UK`
 
-## Требования
+## 2. Скачай клиент
 
-### Локальная машина
+- Windows: [Hiddify install page](https://hiddify.com/app/How-to-install-Hiddify-app/), [GitHub Releases](https://github.com/hiddify/hiddify-app/releases/latest)
+- Linux: [Hiddify install page](https://hiddify.com/app/How-to-install-Hiddify-app/), [GitHub Releases](https://github.com/hiddify/hiddify-app/releases/latest)
+- Android: [Google Play](https://play.google.com/store/apps/details?id=app.hiddify.com), [GitHub Releases](https://github.com/hiddify/hiddify-app/releases/latest)
 
-Linux:
-- `python3`
-- `ssh`
-- `scp`
+Основной клиент здесь один: `Hiddify`. Этого достаточно для Windows, Linux и Android.
+
+## 3. Запусти bootstrap
 
 Windows:
-- PowerShell 5.1+ или PowerShell 7+
-- `ssh.exe`
-- `scp.exe`
-
-Примечание:
-- На Windows Python локально не обязателен, launcher подтянет portable runtime сам.
-- На Linux bootstrap ожидает установленный `python3`.
-
-### Целевые серверы
-
-- `Ubuntu` на обоих VPS
-- SSH-доступ до обоих серверов
-- Логин либо под `root`, либо под пользователем с `sudo`
-
-## Быстрый старт
-
-### Linux
-
-```bash
-./bootstrap.sh
-```
-
-### Windows
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\bootstrap.ps1
 ```
 
-## Как работает bootstrap
-
-1. Предлагает выбрать существующий deployment или создать новый.
-2. Создаёт или обновляет `deployments/<name>.env`.
-3. Генерирует и сохраняет локально:
-   - UUID клиента
-   - ключи `REALITY`
-   - ключи `WireGuard`
-   - `short_id`
-4. Запрашивает по каждому серверу:
-   - публичный IP
-   - SSH host
-   - SSH port
-   - SSH user
-   - путь к приватному ключу, если нужен явный `-i`
-5. Делает preflight на RU и foreign:
-   - доступность по SSH
-   - кто пользователь входа
-   - есть ли `sudo`
-   - какая ОС и версия
-   - установлен ли стек
-   - какая роль уже стоит
-   - какой WAN interface определился на foreign
-6. Собирает локальные артефакты:
-   - `out/<name>/assets`
-   - `out/<name>/preview`
-   - `out/<name>/client`
-   - `out/<name>/cloud-init`
-   - `out/<name>/bundle`
-7. Загружает role-specific bundle на серверы и запускает установку.
-8. После установки делает post-check сервисов.
-
-## Где лежит локальное состояние
-
-После первого прогона всё нужное остаётся локально:
-
-```text
-deployments/<name>.env
-state/<name>.json
-out/<name>/
-  assets/
-  bundle/
-  client/
-  cloud-init/
-  preview/
-  server/
-.runtime/
-  python/
-```
-
-Это позволяет не генерировать заново ключи, не спрашивать по кругу SSH-параметры и сразу иметь готовые клиентские профили.
-
-## Ручные команды
-
-Все ручные действия можно запускать через `Python` core напрямую:
+Linux:
 
 ```bash
-python3 ./scripts/orchestrate.py init-env ./deployments/my-stack.env
-python3 ./scripts/orchestrate.py fetch-assets ./deployments/my-stack.env
-python3 ./scripts/orchestrate.py render-config ./deployments/my-stack.env
-python3 ./scripts/orchestrate.py gen-client-profiles ./deployments/my-stack.env
-python3 ./scripts/orchestrate.py render-cloud-init ./deployments/my-stack.env
-python3 ./scripts/orchestrate.py package-bundle ./deployments/my-stack.env
-python3 ./scripts/orchestrate.py render-all ./deployments/my-stack.env
+./bootstrap.sh
 ```
 
-Под Windows это то же самое, только через:
+На Windows локальный Python не обязателен: bootstrap сам подтянет portable runtime в `.runtime/python/windows`.
 
-```powershell
-.\.runtime\python\windows\python.exe .\scripts\orchestrate.py render-all .\deployments\my-stack.env
+## 4. Ответь на вопросы bootstrap
+
+Он сам:
+
+- создаст или обновит `deployments/<name>.env`
+- сгенерирует ключи и UUID
+- спросит IP и SSH-доступ к RU и foreign
+- проверит оба сервера
+- соберёт локальные артефакты
+- установит или переустановит роли на серверах
+
+Поддерживаются варианты:
+
+- вход под `root`
+- вход под обычным пользователем с `sudo`
+
+## 5. Забери готовые артефакты
+
+После прогона всё остаётся локально:
+
+- `deployments/<name>.env`
+- `state/<name>.json`
+- `out/<name>/client/`
+- `out/<name>/cloud-init/`
+- `out/<name>/bundle/`
+
+Для клиента обычно нужен профиль из `out/<name>/client/`.
+
+## Основные команды обслуживания
+
+На Linux используй `python3`, на Windows после первого запуска используй `.\.runtime\python\windows\python.exe`.
+
+Проверка серверов:
+
+```bash
+python3 ./scripts/orchestrate.py status --deployment my-stack
 ```
 
-или через скачанный portable runtime из `.runtime`.
+Переустановка:
 
-## Что важно про portable Python на Windows
+```bash
+python3 ./scripts/orchestrate.py reinstall --deployment my-stack
+```
 
-- Runtime ставится только локально в репозиторий, без системной установки.
-- По умолчанию используется embeddable CPython с `python.org`.
-- URL и версия можно переопределить переменными окружения:
-  - `VPN_BOOTSTRAP_PYTHON_VERSION`
-  - `VPN_BOOTSTRAP_PYTHON_URL`
+Удаление стека с серверов с восстановлением baseline:
 
-## Ограничения v1
+```bash
+python3 ./scripts/orchestrate.py remove --deployment my-stack
+```
 
-- Основной путь сейчас `IPv4-only fail-closed`, чтобы не словить утечки через IPv6 в обход foreign-hop.
-- Server-side установщик ориентирован на `Ubuntu`, базово тестируется под `Ubuntu 24.04`.
-- SSH-аутентификация со стороны локального bootstrap сейчас рассчитана на ключ или `ssh-agent`. Интерактивный SSH password login не автоматизирован.
-- Если SSH-пользователь не `root`, у него должен быть `sudo`. Без `root` или `sudo` установка не продолжится.
+Полная серверная зачистка состояния стека:
 
-## Что проверить после деплоя
+```bash
+python3 ./scripts/orchestrate.py purge --deployment my-stack
+```
 
-- `ya.ru`, `vk.com`, `gosuslugi.ru` выходят с RU IP.
-- `google.com`, `youtube.com`, `github.com` выходят с foreign IP.
-- При падении foreign-сервера нероссийский трафик падает `fail-closed`.
-- Клиент из РФ светит только соединение к RU IP на `443/tcp`.
+Удаление локальных артефактов:
+
+```bash
+python3 ./scripts/orchestrate.py cleanup-local --deployment my-stack
+```
+
+Если нужно действовать только на одну роль, добавь `--role ru-gateway` или `--role foreign-exit`.
+
+## Что ещё посмотреть
+
+- Детальный ресерч по провайдерам, клиентам и текущим ограничениям: [docs/RESEARCH.md](./docs/RESEARCH.md)

@@ -6,15 +6,20 @@ ENV_FILE=""
 OUTPUT_DIR=""
 ASSETS_DIR=""
 RENDER_ONLY=0
+ACTION="install"
+VPNSTACK_ROOT="/etc/vpn-stack"
+VPNSTACK_BACKUP_DIR="${VPNSTACK_ROOT}/backups"
 
 usage() {
   cat <<'EOF'
 Usage:
-  install.sh --role <ru-gateway|foreign-exit> --env-file <file> [--assets-dir <dir>] [--render-only --output-dir <dir>]
+  install.sh --role <ru-gateway|foreign-exit> [--env-file <file>] [--assets-dir <dir>] [--action <install|reinstall|remove|purge|status>] [--render-only --output-dir <dir>]
 
 Examples:
   sudo ./install.sh --role ru-gateway --env-file ./out/my-stack/server/ru.env --assets-dir ./out/my-stack/assets
   sudo ./install.sh --role foreign-exit --env-file ./out/my-stack/server/foreign.env --assets-dir ./out/my-stack/assets
+  sudo ./install.sh --role ru-gateway --action remove
+  sudo ./install.sh --role foreign-exit --action purge
   ./install.sh --role ru-gateway --env-file ./deployments/my-stack.env --render-only --output-dir ./out/my-stack/preview/ru
 EOF
 }
@@ -41,6 +46,10 @@ while [[ $# -gt 0 ]]; do
       RENDER_ONLY=1
       shift
       ;;
+    --action)
+      ACTION="${2:-}"
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -53,7 +62,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -z "$ROLE" || -z "$ENV_FILE" ]]; then
+if [[ -z "$ROLE" ]]; then
   usage >&2
   exit 1
 fi
@@ -63,20 +72,38 @@ if [[ "$ROLE" != "ru-gateway" && "$ROLE" != "foreign-exit" ]]; then
   exit 1
 fi
 
-if [[ ! -f "$ENV_FILE" ]]; then
+if [[ "$ACTION" != "install" && "$ACTION" != "reinstall" && "$ACTION" != "remove" && "$ACTION" != "purge" && "$ACTION" != "status" ]]; then
+  echo "Unsupported action: $ACTION" >&2
+  exit 1
+fi
+
+if [[ -z "$ENV_FILE" && ( "$ACTION" == "remove" || "$ACTION" == "purge" || "$ACTION" == "status" ) && -f "${VPNSTACK_ROOT}/deployment.env" ]]; then
+  ENV_FILE="${VPNSTACK_ROOT}/deployment.env"
+fi
+
+if [[ ( "$ACTION" == "install" || "$ACTION" == "reinstall" || "$RENDER_ONLY" == "1" ) && -z "$ENV_FILE" ]]; then
+  echo "Env file is required for action ${ACTION}." >&2
+  exit 1
+fi
+
+if [[ -n "$ENV_FILE" && ! -f "$ENV_FILE" ]]; then
   echo "Env file not found: $ENV_FILE" >&2
   exit 1
 fi
 
-set -a
-# shellcheck disable=SC1090
-source <(sed 's/\r$//' "$ENV_FILE")
-set +a
+if [[ -n "$ENV_FILE" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source <(sed 's/\r$//' "$ENV_FILE")
+  set +a
+fi
 
 if [[ -z "$ASSETS_DIR" ]]; then
-  ENV_PARENT_DIR="$(cd "$(dirname "$ENV_FILE")" && pwd)"
-  if [[ -d "${ENV_PARENT_DIR}/../assets" ]]; then
-    ASSETS_DIR="$(cd "${ENV_PARENT_DIR}/../assets" && pwd)"
+  if [[ -n "$ENV_FILE" ]]; then
+    ENV_PARENT_DIR="$(cd "$(dirname "$ENV_FILE")" && pwd)"
+    if [[ -d "${ENV_PARENT_DIR}/../assets" ]]; then
+      ASSETS_DIR="$(cd "${ENV_PARENT_DIR}/../assets" && pwd)"
+    fi
   fi
 fi
 
@@ -95,6 +122,8 @@ WG_KEEPALIVE="${WG_KEEPALIVE:-25}"
 WG_ROUTE_TABLE="${WG_ROUTE_TABLE:-51820}"
 APP_ROUTE_MARK="${APP_ROUTE_MARK:-48}"
 WG_TUNNEL_FWMARK="${WG_TUNNEL_FWMARK:-51820}"
+WG_RU_ADDRESS="${WG_RU_ADDRESS:-10.74.0.1/32}"
+WG_FOREIGN_ADDRESS="${WG_FOREIGN_ADDRESS:-10.74.0.2/32}"
 
 RU_DIRECT_DNS_SERVER="${RU_DIRECT_DNS_SERVER:-77.88.8.8}"
 RU_DIRECT_DNS_PORT="${RU_DIRECT_DNS_PORT:-53}"
@@ -108,12 +137,19 @@ RU_GEOIP_URL="${RU_GEOIP_URL:-https://raw.githubusercontent.com/SagerNet/sing-ge
 FOREIGN_BLOCK_RU="${FOREIGN_BLOCK_RU:-1}"
 FOREIGN_RU_IPV4_LIST_URL="${FOREIGN_RU_IPV4_LIST_URL:-https://www.ipdeny.com/ipblocks/data/aggregated/ru-aggregated.zone}"
 FOREIGN_RU_IPV6_LIST_URL="${FOREIGN_RU_IPV6_LIST_URL:-https://www.ipdeny.com/ipv6/ipaddresses/aggregated/ru-aggregated.zone}"
-
-VPNSTACK_ROOT="/etc/vpn-stack"
 SINGBOX_CONFIG_PATH="/etc/sing-box/config.json"
 WG_CONFIG_PATH="/etc/wireguard/${WG_INTERFACE}.conf"
 NFTABLES_PATH="/etc/nftables.conf"
 RULE_SYNC_SCRIPT="/usr/local/lib/vpn-stack/sync-state.sh"
+SYNC_SERVICE_PATH="/etc/systemd/system/vpn-stack-sync.service"
+SYNC_TIMER_PATH="/etc/systemd/system/vpn-stack-sync.timer"
+SYSCTL_PATH="/etc/sysctl.d/90-vpn-stack.conf"
+VPNSTACK_ROLE_FILE="${VPNSTACK_ROOT}/role"
+VPNSTACK_DEPLOYMENT_FILE="${VPNSTACK_ROOT}/deployment.env"
+VPNSTACK_INSTALLED_AT_FILE="${VPNSTACK_ROOT}/installed_at"
+VPNSTACK_REMOVED_AT_FILE="${VPNSTACK_ROOT}/removed_at"
+VPNSTACK_BASELINE_DIR="${VPNSTACK_BACKUP_DIR}/baseline"
+VPNSTACK_SNAPSHOT_DIR="${VPNSTACK_BACKUP_DIR}/snapshots"
 
 WG_RU_ADDRESS_HOST="${WG_RU_ADDRESS%%/*}"
 WG_FOREIGN_ADDRESS_HOST="${WG_FOREIGN_ADDRESS%%/*}"
@@ -168,6 +204,265 @@ copy_if_present() {
     return 0
   fi
   return 1
+}
+
+timestamp_utc() {
+  date -u +"%Y%m%dT%H%M%SZ"
+}
+
+current_install_role() {
+  if [[ -f "${VPNSTACK_ROLE_FILE}" ]]; then
+    tr -d '\r\n' <"${VPNSTACK_ROLE_FILE}"
+  fi
+}
+
+current_install_deployment() {
+  if [[ -f "${VPNSTACK_DEPLOYMENT_FILE}" ]]; then
+    grep -E '^DEPLOY_NAME=' "${VPNSTACK_DEPLOYMENT_FILE}" | head -n1 | cut -d= -f2- | sed 's/^"//; s/"$//'
+  fi
+}
+
+is_currently_installed() {
+  [[ -f "${VPNSTACK_INSTALLED_AT_FILE}" && -f "${VPNSTACK_ROLE_FILE}" ]]
+}
+
+service_active_flag() {
+  local service="$1"
+  if command -v systemctl >/dev/null 2>&1 && systemctl is-active "${service}" >/dev/null 2>&1; then
+    printf '1'
+  else
+    printf '0'
+  fi
+}
+
+service_enabled_flag() {
+  local service="$1"
+  if command -v systemctl >/dev/null 2>&1 && systemctl is-enabled "${service}" >/dev/null 2>&1; then
+    printf '1'
+  else
+    printf '0'
+  fi
+}
+
+write_service_state_file() {
+  local path="$1"
+  mkdir -p "$(dirname "$path")"
+  cat >"${path}" <<EOF
+NFTABLES_ENABLED=$(service_enabled_flag nftables)
+NFTABLES_ACTIVE=$(service_active_flag nftables)
+WIREGUARD_ENABLED=$(service_enabled_flag "wg-quick@${WG_INTERFACE}")
+WIREGUARD_ACTIVE=$(service_active_flag "wg-quick@${WG_INTERFACE}")
+SINGBOX_ENABLED=$(service_enabled_flag sing-box)
+SINGBOX_ACTIVE=$(service_active_flag sing-box)
+SYNC_TIMER_ENABLED=$(service_enabled_flag vpn-stack-sync.timer)
+SYNC_TIMER_ACTIVE=$(service_active_flag vpn-stack-sync.timer)
+EOF
+}
+
+managed_paths() {
+  printf '%s\n' \
+    "${SINGBOX_CONFIG_PATH}" \
+    "${WG_CONFIG_PATH}" \
+    "${NFTABLES_PATH}" \
+    "${RULE_SYNC_SCRIPT}" \
+    "${SYNC_SERVICE_PATH}" \
+    "${SYNC_TIMER_PATH}" \
+    "${SYSCTL_PATH}"
+}
+
+backup_target_path() {
+  local backup_root="$1"
+  local original_path="$2"
+  printf '%s/%s' "${backup_root}" "${original_path#/}"
+}
+
+backup_path_if_present() {
+  local backup_root="$1"
+  local original_path="$2"
+  if [[ -e "${original_path}" ]]; then
+    local backup_path
+    backup_path="$(backup_target_path "${backup_root}" "${original_path}")"
+    mkdir -p "$(dirname "${backup_path}")"
+    cp -a "${original_path}" "${backup_path}"
+  fi
+}
+
+backup_rule_directory_if_present() {
+  local backup_root="$1"
+  local backup_path
+  if [[ -d "${RULESET_DIR}" ]]; then
+    backup_path="$(backup_target_path "${backup_root}" "${RULESET_DIR}")"
+    mkdir -p "$(dirname "${backup_path}")"
+    cp -a "${RULESET_DIR}" "${backup_path}"
+  fi
+}
+
+create_baseline_backup() {
+  rm -rf "${VPNSTACK_BASELINE_DIR}"
+  mkdir -p "${VPNSTACK_BASELINE_DIR}"
+  write_service_state_file "${VPNSTACK_BASELINE_DIR}/service-state.env"
+  while IFS= read -r path; do
+    backup_path_if_present "${VPNSTACK_BASELINE_DIR}" "${path}"
+  done < <(managed_paths)
+  backup_rule_directory_if_present "${VPNSTACK_BASELINE_DIR}"
+}
+
+create_revision_snapshot() {
+  local snapshot_dir="${VPNSTACK_SNAPSHOT_DIR}/$(timestamp_utc)"
+  mkdir -p "${snapshot_dir}"
+  write_service_state_file "${snapshot_dir}/service-state.env"
+  while IFS= read -r path; do
+    backup_path_if_present "${snapshot_dir}" "${path}"
+  done < <(managed_paths)
+  backup_rule_directory_if_present "${snapshot_dir}"
+}
+
+restore_path_from_backup() {
+  local backup_root="$1"
+  local original_path="$2"
+  local backup_path
+  backup_path="$(backup_target_path "${backup_root}" "${original_path}")"
+
+  rm -rf "${original_path}"
+  if [[ -e "${backup_path}" ]]; then
+    mkdir -p "$(dirname "${original_path}")"
+    cp -a "${backup_path}" "${original_path}"
+  fi
+}
+
+apply_service_restore_flags() {
+  local service="$1"
+  local enabled_flag="$2"
+  local active_flag="$3"
+
+  if [[ "${enabled_flag}" == "1" ]]; then
+    systemctl enable "${service}" >/dev/null 2>&1 || true
+  else
+    systemctl disable "${service}" >/dev/null 2>&1 || true
+  fi
+
+  if [[ "${active_flag}" == "1" ]]; then
+    systemctl restart "${service}" >/dev/null 2>&1 || systemctl start "${service}" >/dev/null 2>&1 || true
+  else
+    systemctl stop "${service}" >/dev/null 2>&1 || true
+  fi
+}
+
+restore_service_state() {
+  local state_path="$1"
+  if [[ ! -f "${state_path}" ]]; then
+    return 0
+  fi
+
+  # shellcheck disable=SC1090
+  source "${state_path}"
+  apply_service_restore_flags nftables "${NFTABLES_ENABLED:-0}" "${NFTABLES_ACTIVE:-0}"
+  apply_service_restore_flags "wg-quick@${WG_INTERFACE}" "${WIREGUARD_ENABLED:-0}" "${WIREGUARD_ACTIVE:-0}"
+  apply_service_restore_flags vpn-stack-sync.timer "${SYNC_TIMER_ENABLED:-0}" "${SYNC_TIMER_ACTIVE:-0}"
+  apply_service_restore_flags sing-box "${SINGBOX_ENABLED:-0}" "${SINGBOX_ACTIVE:-0}"
+}
+
+stop_managed_services() {
+  systemctl stop sing-box >/dev/null 2>&1 || true
+  systemctl stop "wg-quick@${WG_INTERFACE}" >/dev/null 2>&1 || true
+  systemctl stop vpn-stack-sync.service >/dev/null 2>&1 || true
+  systemctl stop vpn-stack-sync.timer >/dev/null 2>&1 || true
+  systemctl stop nftables >/dev/null 2>&1 || true
+}
+
+disable_managed_services() {
+  systemctl disable sing-box >/dev/null 2>&1 || true
+  systemctl disable "wg-quick@${WG_INTERFACE}" >/dev/null 2>&1 || true
+  systemctl disable vpn-stack-sync.timer >/dev/null 2>&1 || true
+  systemctl disable nftables >/dev/null 2>&1 || true
+}
+
+remove_managed_files() {
+  rm -f \
+    "${SINGBOX_CONFIG_PATH}" \
+    "${WG_CONFIG_PATH}" \
+    "${NFTABLES_PATH}" \
+    "${RULE_SYNC_SCRIPT}" \
+    "${SYNC_SERVICE_PATH}" \
+    "${SYNC_TIMER_PATH}" \
+    "${SYSCTL_PATH}"
+  rm -rf "${RULESET_DIR}"
+}
+
+record_install_metadata() {
+  mkdir -p "${VPNSTACK_ROOT}"
+  if [[ -n "${ENV_FILE:-}" ]]; then
+    write_file "${VPNSTACK_DEPLOYMENT_FILE}" <"${ENV_FILE}"
+    chmod 0600 "${VPNSTACK_DEPLOYMENT_FILE}"
+  fi
+  printf '%s\n' "${ROLE}" >"${VPNSTACK_ROLE_FILE}"
+  date -u +"%Y-%m-%dT%H:%M:%SZ" >"${VPNSTACK_INSTALLED_AT_FILE}"
+  rm -f "${VPNSTACK_REMOVED_AT_FILE}"
+  chmod 0644 "${VPNSTACK_ROLE_FILE}" "${VPNSTACK_INSTALLED_AT_FILE}"
+}
+
+restore_baseline_or_cleanup() {
+  stop_managed_services
+  disable_managed_services
+  remove_managed_files
+  systemctl daemon-reload
+
+  if [[ -d "${VPNSTACK_BASELINE_DIR}" ]]; then
+    while IFS= read -r path; do
+      restore_path_from_backup "${VPNSTACK_BASELINE_DIR}" "${path}"
+    done < <(managed_paths)
+    restore_path_from_backup "${VPNSTACK_BASELINE_DIR}" "${RULESET_DIR}"
+  fi
+
+  sysctl --system >/dev/null 2>&1 || true
+  if [[ -d "${VPNSTACK_BASELINE_DIR}" ]]; then
+    restore_service_state "${VPNSTACK_BASELINE_DIR}/service-state.env"
+  fi
+
+  rm -f "${VPNSTACK_DEPLOYMENT_FILE}" "${VPNSTACK_ROLE_FILE}" "${VPNSTACK_INSTALLED_AT_FILE}"
+  date -u +"%Y-%m-%dT%H:%M:%SZ" >"${VPNSTACK_REMOVED_AT_FILE}"
+}
+
+purge_managed_state() {
+  restore_baseline_or_cleanup
+  rm -rf "${VPNSTACK_ROOT}"
+  rmdir "/usr/local/lib/vpn-stack" >/dev/null 2>&1 || true
+}
+
+print_status() {
+  local installed="0"
+  local installed_at=""
+  local removed_at=""
+  local baseline_present="0"
+  local snapshots_present="0"
+  if is_currently_installed; then
+    installed="1"
+  fi
+  if [[ -f "${VPNSTACK_INSTALLED_AT_FILE}" ]]; then
+    installed_at="$(tr -d '\r\n' <"${VPNSTACK_INSTALLED_AT_FILE}")"
+  fi
+  if [[ -f "${VPNSTACK_REMOVED_AT_FILE}" ]]; then
+    removed_at="$(tr -d '\r\n' <"${VPNSTACK_REMOVED_AT_FILE}")"
+  fi
+  if [[ -d "${VPNSTACK_BASELINE_DIR}" ]]; then
+    baseline_present="1"
+  fi
+  if [[ -d "${VPNSTACK_SNAPSHOT_DIR}" ]]; then
+    snapshots_present="$(find "${VPNSTACK_SNAPSHOT_DIR}" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d '[:space:]')"
+  fi
+
+  echo "role=${ROLE}"
+  echo "installed=${installed}"
+  echo "current_role=$(current_install_role)"
+  echo "deployment=$(current_install_deployment)"
+  echo "installed_at=${installed_at}"
+  echo "removed_at=${removed_at}"
+  echo "baseline_present=${baseline_present}"
+  echo "snapshots_present=${snapshots_present}"
+  echo "nftables_active=$(service_active_flag nftables)"
+  echo "wireguard_active=$(service_active_flag "wg-quick@${WG_INTERFACE}")"
+  echo "sync_timer_active=$(service_active_flag vpn-stack-sync.timer)"
+  echo "sing_box_active=$(service_active_flag sing-box)"
 }
 
 render_ru_singbox() {
@@ -596,10 +891,12 @@ write_preview_files() {
   write_file "${base}/vpn-stack-sync.timer" < <(render_sync_timer)
 }
 
-if [[ "$ROLE" == "ru-gateway" ]]; then
-  require_ru_env
-else
-  require_foreign_env
+if [[ "$ACTION" == "install" || "$ACTION" == "reinstall" || "$RENDER_ONLY" == "1" ]]; then
+  if [[ "$ROLE" == "ru-gateway" ]]; then
+    require_ru_env
+  else
+    require_foreign_env
+  fi
 fi
 
 if [[ "$RENDER_ONLY" == "1" ]]; then
@@ -625,6 +922,43 @@ if [[ "${ID:-}" != "ubuntu" ]]; then
   exit 1
 fi
 
+if [[ "$ACTION" == "status" ]]; then
+  print_status
+  exit 0
+fi
+
+CURRENT_ROLE="$(current_install_role)"
+if [[ ( "$ACTION" == "remove" || "$ACTION" == "purge" ) && -n "${CURRENT_ROLE}" && "${CURRENT_ROLE}" != "${ROLE}" ]]; then
+  echo "Installed role mismatch: requested ${ROLE}, found ${CURRENT_ROLE}." >&2
+  exit 1
+fi
+
+if [[ "$ACTION" == "remove" ]]; then
+  restore_baseline_or_cleanup
+  echo "Completed ${ROLE} removal."
+  exit 0
+fi
+
+if [[ "$ACTION" == "purge" ]]; then
+  purge_managed_state
+  echo "Completed ${ROLE} purge."
+  exit 0
+fi
+
+mkdir -p "${VPNSTACK_ROOT}" "${VPNSTACK_BACKUP_DIR}" "${VPNSTACK_SNAPSHOT_DIR}"
+if ! is_currently_installed; then
+  create_baseline_backup
+elif [[ ! -d "${VPNSTACK_BASELINE_DIR}" ]]; then
+  echo "Baseline backup missing, capturing current host state before ${ACTION}." >&2
+  create_baseline_backup
+else
+  create_revision_snapshot
+fi
+
+if [[ "$ACTION" == "reinstall" ]]; then
+  stop_managed_services
+fi
+
 apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y \
   apt-transport-https \
@@ -642,19 +976,16 @@ fi
 
 mkdir -p "${VPNSTACK_ROOT}" /etc/sing-box /etc/wireguard "${RULESET_DIR}" /usr/local/lib/vpn-stack /etc/systemd/system
 
-write_file "${VPNSTACK_ROOT}/deployment.env" <"${ENV_FILE}"
-printf '%s\n' "${ROLE}" >"${VPNSTACK_ROOT}/role"
-date -u +"%Y-%m-%dT%H:%M:%SZ" >"${VPNSTACK_ROOT}/installed_at"
 write_file "${RULE_SYNC_SCRIPT}" < <(render_sync_script)
 chmod 0755 "${RULE_SYNC_SCRIPT}"
-write_file "/etc/systemd/system/vpn-stack-sync.service" < <(render_sync_service)
-write_file "/etc/systemd/system/vpn-stack-sync.timer" < <(render_sync_timer)
+write_file "${SYNC_SERVICE_PATH}" < <(render_sync_service)
+write_file "${SYNC_TIMER_PATH}" < <(render_sync_timer)
 
 if [[ "$ROLE" == "ru-gateway" ]]; then
   write_file "${SINGBOX_CONFIG_PATH}" < <(render_ru_singbox)
   write_file "${WG_CONFIG_PATH}" < <(render_ru_wg)
   write_file "${NFTABLES_PATH}" < <(render_ru_firewall_nftables)
-  cat >/etc/sysctl.d/90-vpn-stack.conf <<EOF
+  cat >"${SYSCTL_PATH}" <<EOF
 net.ipv4.conf.all.src_valid_mark=1
 EOF
 else
@@ -666,16 +997,14 @@ else
   write_file "${SINGBOX_CONFIG_PATH}" < <(render_foreign_singbox)
   write_file "${WG_CONFIG_PATH}" < <(render_foreign_wg)
   write_file "${NFTABLES_PATH}" < <(render_foreign_nftables "$WAN_INTERFACE")
-  cat >/etc/sysctl.d/90-vpn-stack.conf <<EOF
+  cat >"${SYSCTL_PATH}" <<EOF
 net.ipv4.ip_forward=1
 net.ipv6.conf.all.forwarding=1
 EOF
 fi
 
 stage_preseed_assets
-
-chmod 0600 "${VPNSTACK_ROOT}/deployment.env"
-chmod 0644 "${VPNSTACK_ROOT}/role" "${VPNSTACK_ROOT}/installed_at"
+record_install_metadata
 
 sysctl --system >/dev/null
 systemctl daemon-reload

@@ -365,6 +365,28 @@ def prompt_yes_no(label: str, default: bool = True) -> bool:
             return False
 
 
+def prompt_choice(label: str, options: list[tuple[str, str]], default: str) -> str:
+    if default not in {value for value, _ in options}:
+        raise AppError(f"Некорректный default для prompt_choice: {default}")
+    print(label)
+    default_index = 1
+    option_map: dict[str, str] = {}
+    for index, (value, description) in enumerate(options, start=1):
+        if value == default:
+            default_index = index
+        option_map[str(index)] = value
+        print(f"{index}. {description} [{value}]")
+    while True:
+        raw = input(f"Выберите вариант [{default_index}]: ").strip().lower()
+        if not raw:
+            return default
+        if raw in option_map:
+            return option_map[raw]
+        for value, _ in options:
+            if raw == value:
+                return value
+
+
 def normalize_identity_path(raw_path: str) -> str:
     raw_path = raw_path.strip()
     if not raw_path:
@@ -375,6 +397,10 @@ def normalize_identity_path(raw_path: str) -> str:
 
 
 def prompt_server_connection(target: RemoteTarget) -> RemoteTarget:
+    if target.ssh_host and target.public_ip:
+        summary = f"{target.ssh_user}@{target.ssh_host}:{target.ssh_port}"
+        if prompt_yes_no(f"{target.label}: использовать сохранённое подключение {summary} (public IP {target.public_ip})?", default=True):
+            return target
     target.public_ip = prompt_value(f"{target.label}: публичный IP", target.public_ip or None)
     target.ssh_host = prompt_value(f"{target.label}: SSH host/IP", target.ssh_host or target.public_ip or None)
     ssh_port_raw = prompt_value(f"{target.label}: SSH port", str(target.ssh_port))
@@ -614,10 +640,26 @@ def ask_install_action(role: str, deployment_name: str, preflight: dict[str, str
     existing_deployment = preflight.get("deployment_name", "")
     if existing_role and existing_role != role:
         print(f"На {ROLE_META[role]['label']} уже стоит роль {existing_role} (deployment: {existing_deployment or '-'})")
-        return "reinstall" if prompt_yes_no("Переустановить эту роль?", default=False) else "skip"
+        return prompt_choice(
+            f"Что делать с {ROLE_META[role]['label']}?",
+            [
+                ("reinstall", "Переустановить поверх текущей роли"),
+                ("skip", "Ничего не делать"),
+            ],
+            default="skip",
+        )
     if existing_deployment and existing_deployment != deployment_name:
         print(f"На сервере уже найден другой deployment: {existing_deployment}")
-    return "update" if prompt_yes_no(f"Обновить {ROLE_META[role]['label']}?", default=True) else "skip"
+    return prompt_choice(
+        f"Что делать с {ROLE_META[role]['label']}?",
+        [
+            ("reinstall", "Переустановить / обновить роль"),
+            ("remove", "Удалить роль и восстановить baseline"),
+            ("purge", "Удалить роль и вычистить её состояние"),
+            ("skip", "Ничего не делать"),
+        ],
+        default="reinstall",
+    )
 
 
 def download_file(url: str, destination: Path) -> None:
@@ -957,18 +999,42 @@ def postcheck_command() -> str:
     ).strip()
 
 
-def install_remote_role(target: RemoteTarget, deployment_name: str, env: dict[str, str]) -> None:
-    bundle_path = deployment_out_dir(env) / "bundle" / f"{target.role}.tar.gz"
-    if not bundle_path.is_file():
-        fail(f"Не найден bundle для {target.label}: {bundle_path}")
-    remote_root = f"~/vpn-installer/{deployment_name}/{target.role}"
+def cleanup_remote_workdir(target: RemoteTarget, remote_root: str) -> None:
+    try:
+        ssh_stream(target, f"rm -rf {shlex.quote(remote_root)}")
+    except AppError as exc:
+        warn(f"Не удалось очистить временную папку на {target.label}: {exc}")
+
+
+def install_remote_role(target: RemoteTarget, deployment_name: str, env: dict[str, str], action: str) -> None:
+    remote_root = f"vpn-installer/{deployment_name}/{target.role}"
     archive_name = f"{target.role}.tar.gz"
-    print_header(f"Загрузка bundle на {target.label}")
+    print_header(f"Подготовка {target.label}")
     ssh_stream(target, f"rm -rf {shlex.quote(remote_root)} && mkdir -p {shlex.quote(remote_root)}")
-    scp_upload(target, bundle_path, f"{remote_root}/{archive_name}")
-    print_header(f"Установка {target.label}")
-    install_command = f"cd {shlex.quote(remote_root)} && tar -xzf {shlex.quote(f'{remote_root}/{archive_name}')} && chmod +x ./install.sh && ./install.sh --role {shlex.quote(target.role)} --env-file ./deployment.env --assets-dir ./assets"
-    ssh_stream(target, install_command, as_root=True)
+    try:
+        if action in {"install", "reinstall"}:
+            bundle_path = deployment_out_dir(env) / "bundle" / f"{target.role}.tar.gz"
+            if not bundle_path.is_file():
+                fail(f"Не найден bundle для {target.label}: {bundle_path}")
+            print_header(f"Загрузка bundle на {target.label}")
+            scp_upload(target, bundle_path, f"{remote_root}/{archive_name}")
+            remote_command = (
+                f"cd {shlex.quote(remote_root)} && "
+                f"tar -xzf {shlex.quote(archive_name)} && "
+                "chmod +x ./install.sh && "
+                f"./install.sh --role {shlex.quote(target.role)} --action {shlex.quote(action)} --env-file ./deployment.env --assets-dir ./assets"
+            )
+        else:
+            scp_upload(target, INSTALL_SCRIPT_PATH, f"{remote_root}/install.sh")
+            remote_command = (
+                f"cd {shlex.quote(remote_root)} && "
+                "chmod +x ./install.sh && "
+                f"./install.sh --role {shlex.quote(target.role)} --action {shlex.quote(action)}"
+            )
+        print_header(f"Действие {action} для {target.label}")
+        ssh_stream(target, remote_command, as_root=True)
+    finally:
+        cleanup_remote_workdir(target, remote_root)
 
 
 def postcheck_remote_role(target: RemoteTarget) -> None:
@@ -1060,13 +1126,19 @@ def cmd_render_all(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_bootstrap(args: argparse.Namespace) -> int:
+def prepare_remote_session(
+    deployment_arg: str | None,
+    *,
+    require_privilege: bool,
+    validate_os: bool = True,
+) -> tuple[str, Path, dict[str, str], list[RemoteTarget], dict[str, dict[str, str]]]:
     require_local_commands(["ssh", "scp"])
     ensure_directories()
-    deployment_name = select_deployment(args.deployment)
+    deployment_name = select_deployment(deployment_arg)
     env_path = DEPLOYMENTS_DIR / f"{deployment_name}.env"
     env = ensure_deployment_env(env_path, deployment_name)
     state = load_state(deployment_name)
+
     print_header("Параметры deployment")
     ru_target = prompt_server_connection(build_target(ROLE_RU, env, state))
     foreign_target = prompt_server_connection(build_target(ROLE_FOREIGN, env, state))
@@ -1074,46 +1146,155 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
     update_env_with_targets(env, targets)
     write_text(env_path, render_env_text(env))
     write_state(deployment_name, targets)
+
     ru_preflight = remote_preflight(ru_target)
     foreign_preflight = remote_preflight(foreign_target)
+    preflights = {ROLE_RU: ru_preflight, ROLE_FOREIGN: foreign_preflight}
+
     print_preflight(ru_target, ru_preflight)
     print_preflight(foreign_target, foreign_preflight)
-    if ru_preflight.get("os_id") != "ubuntu":
-        fail("RU gateway должен быть Ubuntu.")
-    if foreign_preflight.get("os_id") != "ubuntu":
-        fail("Foreign exit должен быть Ubuntu.")
-    if ru_preflight.get("os_version") and ru_preflight["os_version"] != "24.04":
-        warn(f"RU gateway не на Ubuntu 24.04: {ru_preflight['os_version']}")
-    if foreign_preflight.get("os_version") and foreign_preflight["os_version"] != "24.04":
-        warn(f"Foreign exit не на Ubuntu 24.04: {foreign_preflight['os_version']}")
-    ensure_remote_privilege(ru_target, ru_preflight)
-    ensure_remote_privilege(foreign_target, foreign_preflight)
-    ensure_foreign_wan_interface(env, foreign_preflight)
+
+    if validate_os:
+        for role, preflight in preflights.items():
+            if preflight.get("os_id") != "ubuntu":
+                fail(f"{ROLE_META[role]['label']} должен быть Ubuntu.")
+            if preflight.get("os_version") and preflight["os_version"] != "24.04":
+                warn(f"{ROLE_META[role]['label']} не на Ubuntu 24.04: {preflight['os_version']}")
+
+    if require_privilege:
+        ensure_remote_privilege(ru_target, ru_preflight)
+        ensure_remote_privilege(foreign_target, foreign_preflight)
+
+    write_state(deployment_name, targets)
+    return deployment_name, env_path, env, targets, preflights
+
+
+def selected_roles(role_arg: str) -> list[str]:
+    if role_arg == "all":
+        return [ROLE_FOREIGN, ROLE_RU]
+    return [role_arg]
+
+
+def run_selected_remote_action(
+    action: str,
+    deployment_name: str,
+    env_path: Path,
+    env: dict[str, str],
+    targets: list[RemoteTarget],
+    preflights: dict[str, dict[str, str]],
+    *,
+    role_arg: str = "all",
+) -> None:
+    target_map = {target.role: target for target in targets}
+    roles = selected_roles(role_arg)
+    if action in {"install", "reinstall"}:
+        print_header("Локальная сборка артефактов")
+        render_all_artifacts(env_path, env)
+    for role in roles:
+        target = target_map[role]
+        install_remote_role(target, deployment_name, env, action)
+        if action in {"install", "reinstall"}:
+            postcheck_remote_role(target)
+        else:
+            print_preflight(target, remote_preflight(target))
+
+
+def cmd_bootstrap(args: argparse.Namespace) -> int:
+    deployment_name, env_path, env, targets, preflights = prepare_remote_session(args.deployment, require_privilege=True)
+    ensure_foreign_wan_interface(env, preflights[ROLE_FOREIGN])
     write_text(env_path, render_env_text(env))
     write_state(deployment_name, targets)
     print_summary(deployment_name, env, targets)
-    if not prompt_yes_no("Продолжить сборку и установку?", default=True):
+    actions = {
+        ROLE_FOREIGN: ask_install_action(ROLE_FOREIGN, deployment_name, preflights[ROLE_FOREIGN]),
+        ROLE_RU: ask_install_action(ROLE_RU, deployment_name, preflights[ROLE_RU]),
+    }
+    if all(action == "skip" for action in actions.values()):
+        print("Все роли пропущены.")
+        return 0
+    if not prompt_yes_no("Продолжить выполнение выбранных действий?", default=True):
         print("Остановлено пользователем.")
         return 0
-    print_header("Локальная сборка артефактов")
-    out_dir = render_all_artifacts(env_path, env)
-    foreign_action = ask_install_action(ROLE_FOREIGN, deployment_name, foreign_preflight)
-    ru_action = ask_install_action(ROLE_RU, deployment_name, ru_preflight)
-    if foreign_action != "skip":
-        install_remote_role(foreign_target, deployment_name, env)
-        postcheck_remote_role(foreign_target)
-    else:
-        print("Foreign exit: пропуск установки.")
-    if ru_action != "skip":
-        install_remote_role(ru_target, deployment_name, env)
-        postcheck_remote_role(ru_target)
-    else:
-        print("RU gateway: пропуск установки.")
+    needs_render = any(action in {"install", "reinstall"} for action in actions.values())
+    out_dir = OUT_DIR / deployment_name
+    if needs_render:
+        print_header("Локальная сборка артефактов")
+        out_dir = render_all_artifacts(env_path, env)
+    target_map = {target.role: target for target in targets}
+    for role in [ROLE_FOREIGN, ROLE_RU]:
+        action = actions[role]
+        if action == "skip":
+            print(f"{ROLE_META[role]['label']}: пропуск.")
+            continue
+        install_remote_role(target_map[role], deployment_name, env, action)
+        if action in {"install", "reinstall"}:
+            postcheck_remote_role(target_map[role])
+        else:
+            print_preflight(target_map[role], remote_preflight(target_map[role]))
     print_header("Готово")
     print(f"Локальные артефакты: {out_dir}")
     print(f"Deployment env: {env_path}")
     print(f"Локальное состояние: {state_json_path(deployment_name)}")
     print(f"Клиентские профили: {out_dir / 'client'}")
+    return 0
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    deployment_name, env_path, env, targets, preflights = prepare_remote_session(args.deployment, require_privilege=False, validate_os=False)
+    print_summary(deployment_name, env, targets)
+    if args.role != "all":
+        selected = {args.role}
+    else:
+        selected = {ROLE_RU, ROLE_FOREIGN}
+    for target in targets:
+        if target.role in selected:
+            print_preflight(target, preflights[target.role])
+    print(f"Deployment env: {env_path}")
+    return 0
+
+
+def cmd_remote_action(args: argparse.Namespace) -> int:
+    deployment_name, env_path, env, targets, preflights = prepare_remote_session(args.deployment, require_privilege=True)
+    if args.action in {"install", "reinstall"}:
+        ensure_foreign_wan_interface(env, preflights[ROLE_FOREIGN])
+        write_text(env_path, render_env_text(env))
+    print_summary(deployment_name, env, targets)
+    if not prompt_yes_no(f"Продолжить действие {args.action}?", default=False):
+        print("Остановлено пользователем.")
+        return 0
+    run_selected_remote_action(args.action, deployment_name, env_path, env, targets, preflights, role_arg=args.role)
+    print_header("Готово")
+    print(f"Deployment env: {env_path}")
+    print(f"Локальное состояние: {state_json_path(deployment_name)}")
+    return 0
+
+
+def cmd_cleanup_local(args: argparse.Namespace) -> int:
+    ensure_directories()
+    deployment_name = select_deployment(args.deployment)
+    removed: list[str] = []
+    out_dir = OUT_DIR / deployment_name
+    env_path = DEPLOYMENTS_DIR / f"{deployment_name}.env"
+    for path in (out_dir,):
+        if path.is_dir():
+            shutil.rmtree(path)
+            removed.append(str(path))
+    for path in (state_json_path(deployment_name), state_legacy_path(deployment_name)):
+        if path.is_file():
+            path.unlink()
+            removed.append(str(path))
+    if args.drop_env and env_path.is_file():
+        env_path.unlink()
+        removed.append(str(env_path))
+    if args.drop_runtime and RUNTIME_DIR.is_dir():
+        shutil.rmtree(RUNTIME_DIR)
+        removed.append(str(RUNTIME_DIR))
+    if removed:
+        print("Удалено:")
+        for item in removed:
+            print(item)
+    else:
+        print("Локальные артефакты для этого deployment не найдены.")
     return 0
 
 
@@ -1123,6 +1304,27 @@ def build_parser() -> argparse.ArgumentParser:
     bootstrap = subparsers.add_parser("bootstrap", help="Интерактивный полный сценарий.")
     bootstrap.add_argument("--deployment", help="Имя deployment.")
     bootstrap.set_defaults(func=cmd_bootstrap)
+    status = subparsers.add_parser("status", help="Проверить состояние серверов без изменений.")
+    status.add_argument("--deployment", help="Имя deployment.")
+    status.add_argument("--role", choices=["all", ROLE_RU, ROLE_FOREIGN], default="all", help="Какую роль проверять.")
+    status.set_defaults(func=cmd_status)
+    reinstall = subparsers.add_parser("reinstall", help="Переустановить одну роль или обе.")
+    reinstall.add_argument("--deployment", help="Имя deployment.")
+    reinstall.add_argument("--role", choices=["all", ROLE_RU, ROLE_FOREIGN], default="all", help="Какую роль затронуть.")
+    reinstall.set_defaults(func=cmd_remote_action, action="reinstall")
+    remove = subparsers.add_parser("remove", help="Удалить стек с сервера и восстановить baseline.")
+    remove.add_argument("--deployment", help="Имя deployment.")
+    remove.add_argument("--role", choices=["all", ROLE_RU, ROLE_FOREIGN], default="all", help="Какую роль затронуть.")
+    remove.set_defaults(func=cmd_remote_action, action="remove")
+    purge = subparsers.add_parser("purge", help="Удалить стек и вычистить его серверное состояние.")
+    purge.add_argument("--deployment", help="Имя deployment.")
+    purge.add_argument("--role", choices=["all", ROLE_RU, ROLE_FOREIGN], default="all", help="Какую роль затронуть.")
+    purge.set_defaults(func=cmd_remote_action, action="purge")
+    cleanup_local = subparsers.add_parser("cleanup-local", help="Удалить локальные артефакты deployment.")
+    cleanup_local.add_argument("--deployment", help="Имя deployment.")
+    cleanup_local.add_argument("--drop-env", action="store_true", help="Удалить и deployment env.")
+    cleanup_local.add_argument("--drop-runtime", action="store_true", help="Удалить общий portable Python runtime.")
+    cleanup_local.set_defaults(func=cmd_cleanup_local)
     init_env = subparsers.add_parser("init-env", help="Создать или обновить deployment env.")
     init_env.add_argument("output_env", help="Путь к env-файлу.")
     init_env.set_defaults(func=cmd_init_env)
