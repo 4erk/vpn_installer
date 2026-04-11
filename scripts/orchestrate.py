@@ -5,6 +5,7 @@ import argparse
 import ast
 import base64
 import getpass
+import ipaddress
 import json
 import os
 import re
@@ -85,6 +86,7 @@ class RemoteTarget:
     identity_path: str = ""
     sudo_mode: str = "unknown"
     sudo_password: str = ""
+    saved_connection: bool = False
 
     @property
     def label(self) -> str:
@@ -118,6 +120,13 @@ def utc_now() -> str:
 
 def sanitize_name(raw_name: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "-", raw_name).strip("-")
+
+
+def validate_deployment_name(raw_name: str) -> str:
+    cleaned = sanitize_name(raw_name)
+    if not cleaned:
+        fail("Имя deployment пустое или состоит только из недопустимых символов.")
+    return cleaned
 
 
 def ensure_directories() -> None:
@@ -338,20 +347,22 @@ def write_state(deployment_name: str, targets: list[RemoteTarget], existing_stat
 
 def build_target(role: str, env: dict[str, str], state: dict[str, Any]) -> RemoteTarget:
     role_state = state.get(role, {})
+    saved_connection = has_saved_connection(role_state)
     public_ip_key = ROLE_META[role]["public_ip_key"]
-    ssh_port_raw = str(role_state.get("ssh_port") or env.get("SSH_PORT", "22") or "22")
+    ssh_port_raw = str((role_state.get("ssh_port") if saved_connection else None) or env.get("SSH_PORT", "22") or "22")
     try:
         ssh_port = int(ssh_port_raw)
     except ValueError as exc:
         raise AppError(f"Некорректный SSH port для {ROLE_META[role]['label']}: {ssh_port_raw}") from exc
-    public_ip = str(role_state.get("public_ip") or env.get(public_ip_key, ""))
+    public_ip = str((role_state.get("public_ip") if saved_connection else None) or env.get(public_ip_key, ""))
     return RemoteTarget(
         role=role,
         public_ip=public_ip,
-        ssh_host=str(role_state.get("ssh_host") or public_ip),
+        ssh_host=str((role_state.get("ssh_host") if saved_connection else None) or public_ip),
         ssh_port=ssh_port,
-        ssh_user=str(role_state.get("ssh_user") or "root"),
-        identity_path=str(role_state.get("identity_path") or ""),
+        ssh_user=str((role_state.get("ssh_user") if saved_connection else None) or "root"),
+        identity_path=str((role_state.get("identity_path") if saved_connection else None) or ""),
+        saved_connection=saved_connection,
     )
 
 
@@ -365,6 +376,25 @@ def prompt_value(label: str, default: str | None = None, allow_empty: bool = Fal
             return default
         if allow_empty:
             return ""
+
+
+def prompt_validated_value(
+    label: str,
+    *,
+    default: str | None = None,
+    allow_empty: bool = False,
+    validator: Any | None = None,
+) -> str:
+    while True:
+        value = prompt_value(label, default=default, allow_empty=allow_empty)
+        if not value and allow_empty:
+            return value
+        if validator is None:
+            return value
+        try:
+            return validator(value)
+        except AppError as exc:
+            warn(str(exc))
 
 
 def prompt_secret(label: str) -> str:
@@ -414,25 +444,130 @@ def normalize_identity_path(raw_path: str) -> str:
     return str(path)
 
 
-def prompt_server_connection(target: RemoteTarget, *, force_prompt: bool = False, confirm_existing: bool = True) -> RemoteTarget:
-    if not force_prompt and target.ssh_host and target.public_ip:
-        if not confirm_existing:
-            return target
-        summary = f"{target.ssh_user}@{target.ssh_host}:{target.ssh_port}"
-        if prompt_yes_no(f"{target.label}: использовать сохранённое подключение {summary} (public IP {target.public_ip})?", default=True):
-            return target
-    target.public_ip = prompt_value(f"{target.label}: публичный IP", target.public_ip or None)
-    target.ssh_host = prompt_value(f"{target.label}: SSH host/IP", target.ssh_host or target.public_ip or None)
-    ssh_port_raw = prompt_value(f"{target.label}: SSH port", str(target.ssh_port))
-    target.ssh_user = prompt_value(f"{target.label}: SSH user", target.ssh_user or "root")
-    identity_raw = prompt_value(f"{target.label}: путь к SSH key (пусто = ssh-agent / стандартный ключ)", target.identity_path or None, allow_empty=True)
-    target.identity_path = normalize_identity_path(identity_raw)
-    if target.identity_path and not Path(target.identity_path).is_file():
-        fail(f"Не найден SSH key: {target.identity_path}")
+def validate_ip_literal(raw_value: str) -> str:
+    value = raw_value.strip()
+    if not value:
+        fail("IP не может быть пустым.")
     try:
-        target.ssh_port = int(ssh_port_raw)
+        ipaddress.ip_address(value)
     except ValueError as exc:
-        raise AppError(f"Некорректный SSH port: {ssh_port_raw}") from exc
+        raise AppError(f"Некорректный IP-адрес: {raw_value}") from exc
+    return value
+
+
+def validate_ssh_host(raw_value: str) -> str:
+    value = raw_value.strip()
+    if not value:
+        fail("SSH host не может быть пустым.")
+    if any(char.isspace() for char in value):
+        fail(f"SSH host не должен содержать пробелы: {raw_value}")
+    try:
+        ipaddress.ip_address(value)
+        return value
+    except ValueError:
+        pass
+    if len(value) > 253:
+        fail("SSH host слишком длинный.")
+    labels = value.split(".")
+    host_pattern = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
+    if not all(label and host_pattern.fullmatch(label) for label in labels):
+        fail(f"Некорректное имя хоста: {raw_value}")
+    return value
+
+
+def validate_ssh_port(raw_value: str) -> str:
+    value = raw_value.strip()
+    try:
+        port = int(value)
+    except ValueError as exc:
+        raise AppError(f"SSH port должен быть числом: {raw_value}") from exc
+    if not 1 <= port <= 65535:
+        fail(f"SSH port вне диапазона 1..65535: {raw_value}")
+    return str(port)
+
+
+def validate_ssh_user(raw_value: str) -> str:
+    value = raw_value.strip()
+    if not value:
+        fail("SSH user не может быть пустым.")
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", value):
+        fail(f"Некорректный SSH user: {raw_value}")
+    return value
+
+
+def validate_identity_path(raw_path: str) -> str:
+    normalized = normalize_identity_path(raw_path)
+    if normalized and not Path(normalized).is_file():
+        fail(f"Не найден SSH key: {normalized}")
+    return normalized
+
+
+def has_saved_connection(role_state: dict[str, Any]) -> bool:
+    return bool(
+        str(role_state.get("public_ip", "")).strip()
+        and str(role_state.get("ssh_host", "")).strip()
+        and str(role_state.get("ssh_user", "")).strip()
+        and str(role_state.get("ssh_port", "")).strip()
+    )
+
+
+def validate_target_settings(target: RemoteTarget) -> None:
+    target.public_ip = validate_ip_literal(target.public_ip)
+    target.ssh_host = validate_ssh_host(target.ssh_host)
+    target.ssh_port = int(validate_ssh_port(str(target.ssh_port)))
+    target.ssh_user = validate_ssh_user(target.ssh_user)
+    target.identity_path = validate_identity_path(target.identity_path)
+
+
+def prompt_server_connection(target: RemoteTarget, *, force_prompt: bool = False, confirm_existing: bool = True) -> RemoteTarget:
+    print_header(f"Подключение: {target.label}")
+    if target.saved_connection:
+        try:
+            validate_target_settings(target)
+        except AppError as exc:
+            warn(f"{target.label}: сохранённые SSH-данные повреждены или неполны, нужно ввести заново ({exc})")
+            force_prompt = True
+        else:
+            print("Найдены сохранённые SSH-данные:")
+            print(f"public IP: {target.public_ip}")
+            print(f"SSH: {target.ssh_user}@{target.ssh_host}:{target.ssh_port}")
+            print(f"key: {target.identity_path or 'ssh-agent / стандартный ключ'}")
+            if not force_prompt and not confirm_existing:
+                print("Использую сохранённое подключение.")
+                return target
+            if not force_prompt:
+                action = prompt_choice(
+                    f"Что делать с подключением для {target.label}?",
+                    [
+                        ("reuse", "Использовать сохранённые SSH-данные"),
+                        ("edit", "Изменить SSH-данные"),
+                    ],
+                    default="reuse",
+                )
+                if action == "reuse":
+                    print(f"{target.label}: использую сохранённое подключение, дальше будет реальная SSH-проверка.")
+                    return target
+    elif target.public_ip:
+        print(f"Подставлен public IP из deployment env: {target.public_ip}")
+
+    target.public_ip = prompt_validated_value(f"{target.label}: публичный IP", default=target.public_ip or None, validator=validate_ip_literal)
+    target.ssh_host = prompt_validated_value(f"{target.label}: SSH host/IP", default=target.ssh_host or target.public_ip or None, validator=validate_ssh_host)
+    ssh_port_raw = prompt_validated_value(f"{target.label}: SSH port", default=str(target.ssh_port), validator=validate_ssh_port)
+    target.ssh_user = prompt_validated_value(f"{target.label}: SSH user", default=target.ssh_user or "root", validator=validate_ssh_user)
+    identity_raw = prompt_validated_value(
+        f"{target.label}: путь к SSH key (пусто = ssh-agent / стандартный ключ)",
+        default=target.identity_path or None,
+        allow_empty=True,
+        validator=validate_identity_path,
+    )
+    target.identity_path = identity_raw
+    target.ssh_port = int(ssh_port_raw)
+    target.saved_connection = False
+    validate_target_settings(target)
+    print("Будет использовано подключение:")
+    print(f"public IP: {target.public_ip}")
+    print(f"SSH: {target.ssh_user}@{target.ssh_host}:{target.ssh_port}")
+    print(f"key: {target.identity_path or 'ssh-agent / стандартный ключ'}")
     return target
 
 
@@ -446,42 +581,33 @@ def find_existing_deployments() -> list[str]:
 
 def select_deployment(cli_name: str | None) -> str:
     if cli_name:
-        deployment_name = sanitize_name(cli_name)
-        if not deployment_name:
-            fail("Пустое имя deployment.")
-        return deployment_name
+        return validate_deployment_name(cli_name)
 
     existing = find_existing_deployments()
     if not existing:
-        deployment_name = sanitize_name(prompt_value("Имя нового deployment"))
-        if not deployment_name:
-            fail("Пустое имя deployment.")
-        return deployment_name
+        return validate_deployment_name(prompt_value("Имя нового deployment"))
 
     print_header("Выбор deployment")
     for index, name in enumerate(existing, start=1):
         print(f"{index}. {name}")
-    print(f"{len(existing) + 1}. Создать новый deployment")
+    create_index = len(existing) + 1
+    print(f"{create_index}. Создать новый deployment")
 
     while True:
-        selection_raw = input("Выберите deployment [1]: ").strip() or "1"
+        selection_raw = input(f"Выберите deployment [{create_index}]: ").strip() or str(create_index)
         if not selection_raw.isdigit():
             continue
         selection = int(selection_raw)
         if 1 <= selection <= len(existing):
+            print(f"Выбран существующий deployment: {existing[selection - 1]}")
             return existing[selection - 1]
-        if selection == len(existing) + 1:
-            deployment_name = sanitize_name(prompt_value("Имя нового deployment"))
-            if not deployment_name:
-                fail("Пустое имя deployment.")
-            return deployment_name
+        if selection == create_index:
+            return validate_deployment_name(prompt_value("Имя нового deployment"))
 
 
 def select_existing_deployment(cli_name: str | None) -> str:
     if cli_name:
-        deployment_name = sanitize_name(cli_name)
-        if not deployment_name:
-            fail("Пустое имя deployment.")
+        deployment_name = validate_deployment_name(cli_name)
         env_path = DEPLOYMENTS_DIR / f"{deployment_name}.env"
         if not env_path.exists():
             fail(f"Не найден deployment env: {env_path}")
@@ -670,9 +796,11 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
 def ensure_remote_privilege(target: RemoteTarget, preflight: dict[str, str]) -> None:
     if preflight.get("is_root") == "1":
         target.sudo_mode = "root"
+        print(f"{target.label}: удалённый вход уже под root.")
         return
     if preflight.get("has_sudo") == "1":
         target.sudo_mode = "nopasswd"
+        print(f"{target.label}: найден passwordless sudo.")
         return
     if not prompt_yes_no(f"Пользователь {preflight.get('login_user', 'unknown')} на {preflight.get('hostname', 'unknown')} не root и без passwordless sudo. Попробовать sudo по паролю?", default=True):
         fail(f"Для {target.label} нужен root или sudo.")
@@ -682,7 +810,15 @@ def ensure_remote_privilege(target: RemoteTarget, preflight: dict[str, str]) -> 
 
 def ask_install_action(role: str, deployment_name: str, preflight: dict[str, str]) -> str:
     if preflight.get("installed") != "1":
-        return "install"
+        print(f"На {ROLE_META[role]['label']} стек не найден.")
+        return prompt_choice(
+            f"Что делать с {ROLE_META[role]['label']}?",
+            [
+                ("install", "Установить роль"),
+                ("skip", "Ничего не делать"),
+            ],
+            default="install",
+        )
     existing_role = preflight.get("role", "")
     existing_deployment = preflight.get("deployment_name", "")
     if existing_role and existing_role != role:
@@ -1157,10 +1293,11 @@ def prepare_remote_session(
     state = load_state(deployment_name)
 
     print_header("Параметры deployment")
+    print(f"deployment: {deployment_name}")
     targets: list[RemoteTarget] = []
     for role in roles:
         target = build_target(role, env, state)
-        force_prompt = not (target.public_ip and target.ssh_host)
+        force_prompt = not target.saved_connection
         target = prompt_server_connection(target, force_prompt=force_prompt, confirm_existing=confirm_existing_connections)
         targets.append(target)
 
@@ -1171,8 +1308,13 @@ def prepare_remote_session(
 
     wg_interface = current_wg_interface(env)
     preflights: dict[str, dict[str, str]] = {}
+    print_header("Проверка доступа и состояния серверов")
     for target in targets:
-        preflight = remote_preflight(target, wg_interface)
+        print(f"Подключаюсь к {target.label}: {target.ssh_user}@{target.ssh_host}:{target.ssh_port}")
+        try:
+            preflight = remote_preflight(target, wg_interface)
+        except AppError as exc:
+            fail(f"Не удалось проверить {target.label} по SSH ({target.ssh_user}@{target.ssh_host}:{target.ssh_port}): {exc}")
         preflights[target.role] = preflight
         print_preflight(target, preflight)
 
@@ -1278,6 +1420,12 @@ def run_selected_remote_action(
 
 
 def cmd_bootstrap(args: argparse.Namespace) -> int:
+    print_header("Bootstrap")
+    print("Сценарий:")
+    print("1. Выберет или создаст deployment")
+    print("2. Запросит RU и Foreign SSH-подключения")
+    print("3. Проверит SSH, ОС, права sudo/root и текущее состояние серверов")
+    print("4. Соберёт артефакты и выполнит install/reinstall/remove/purge по выбранным ролям")
     roles = selected_roles("all")
     deployment_name, env_path, env, state, targets, preflights = prepare_remote_session(
         args.deployment,

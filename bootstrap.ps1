@@ -11,6 +11,29 @@ $PythonRoot = Join-Path $RuntimeRoot 'python\windows'
 $PortablePython = Join-Path $PythonRoot 'python.exe'
 $PortableVersion = if ($env:VPN_BOOTSTRAP_PYTHON_VERSION) { $env:VPN_BOOTSTRAP_PYTHON_VERSION } else { '3.13.13' }
 
+function Show-BootstrapHelp {
+  @'
+Использование:
+  powershell -ExecutionPolicy Bypass -File .\bootstrap.ps1
+  powershell -ExecutionPolicy Bypass -File .\bootstrap.ps1 --deployment my-vpn
+
+Что делает bootstrap:
+  1. Выбирает существующий deployment или создаёт новый
+  2. Запрашивает RU и Foreign SSH-подключения
+  3. Проверяет SSH, ОС, права sudo/root и текущее состояние обоих серверов
+  4. Собирает локальные артефакты
+  5. Выполняет install/reinstall/remove/purge по выбранным ролям
+
+Что нужно заранее:
+  - 2 VPS на Ubuntu 24.04
+  - публичный IPv4 у каждого
+  - рабочий SSH-доступ по ключу
+
+Если Python на Windows не установлен:
+  bootstrap сам подтянет portable runtime в .runtime\python\windows
+'@ | Write-Host
+}
+
 function Test-PythonExe {
   param(
     [Parameter(Mandatory = $true)]
@@ -117,5 +140,11 @@ function Resolve-Python {
 
 $PythonCommand = Resolve-Python
 $ScriptPath = Join-Path $RepoRoot 'scripts\orchestrate.py'
+
+if ($ScriptArgs.Count -gt 0 -and $ScriptArgs[0] -in @('--help', '-h', 'help')) {
+  Show-BootstrapHelp
+  exit 0
+}
+
 & $PythonCommand $ScriptPath bootstrap @ScriptArgs
 exit $LASTEXITCODE

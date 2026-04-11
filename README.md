@@ -49,22 +49,30 @@ Windows:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\bootstrap.ps1
+powershell -ExecutionPolicy Bypass -File .\bootstrap.ps1 --help
 ```
 
 Linux:
 
 ```bash
 ./bootstrap.sh
+./bootstrap.sh --help
 ```
 
 Что он сделает сам:
 
-- создаст или обновит `deployment`
+- предложит создать новый `deployment` или выбрать уже существующий
 - сгенерирует ключи и UUID
-- спросит IP и SSH-доступ к обоим серверам
-- проверит оба сервера
+- явно спросит `RU` и `Foreign` SSH-подключения
+- проверит оба сервера по SSH
+- проверит ОС, текущую роль и права `root/sudo`
 - соберёт локальные артефакты
 - установит стек на оба сервера
+
+Важно:
+
+- если у тебя уже есть старые `deployment`, bootstrap по умолчанию предлагает создать новый, а не молча брать первый попавшийся
+- если по роли уже есть сохранённое SSH-подключение, bootstrap теперь явно покажет его и спросит: использовать или изменить
 
 На Windows заранее ставить Python не обязательно. Если его нет, bootstrap сам подтянет portable runtime в `.runtime/python/windows`.
 

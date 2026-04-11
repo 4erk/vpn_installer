@@ -393,6 +393,7 @@ class AuditRunner:
             "quick-orchestrate-help",
             lambda: self.run_command("orchestrate-help", python_cmd() + [str(ORCHESTRATE_SCRIPT), "--help"]) or None,
         )
+        self.record("quick-bootstrap-ux", self.test_bootstrap_ux_helpers)
         self.record(
             "quick-render-all",
             lambda: self.run_command("render-all", python_cmd() + [str(ORCHESTRATE_SCRIPT), "render-all", str(env_path)]) or {"out_dir": str(out_dir)},
@@ -450,6 +451,72 @@ class AuditRunner:
                 raise AuditFailure(f"Не найден JSON-артефакт: {path}")
             json.loads(path.read_text(encoding="utf-8"))
         return {"validated": ", ".join(str(path) for path in json_paths)}
+
+    def test_bootstrap_ux_helpers(self) -> dict[str, str]:
+        snippet = textwrap.dedent(
+            """\
+            import builtins
+            import json
+            import sys
+            from pathlib import Path
+
+            sys.path.insert(0, str(Path.cwd() / "scripts"))
+            import orchestrate
+
+            existing = ["alpha", "beta"]
+            orchestrate.find_existing_deployments = lambda: existing
+            answers = iter(["", "my new vpn"])
+            orig_input = builtins.input
+            builtins.input = lambda prompt="": next(answers)
+            try:
+                selected = orchestrate.select_deployment(None)
+            finally:
+                builtins.input = orig_input
+
+            env_only_target = orchestrate.build_target(orchestrate.ROLE_RU, {"RU_PUBLIC_IP": "1.2.3.4", "SSH_PORT": "22"}, {})
+            answers = iter(["1.2.3.4", "1.2.3.4", "22", "root", ""])
+            builtins.input = lambda prompt="": next(answers)
+            try:
+                prompted_target = orchestrate.prompt_server_connection(env_only_target, force_prompt=not env_only_target.saved_connection, confirm_existing=True)
+            finally:
+                builtins.input = orig_input
+
+            saved_state = {
+                orchestrate.ROLE_RU: {
+                    "public_ip": "5.6.7.8",
+                    "ssh_host": "5.6.7.8",
+                    "ssh_port": "2222",
+                    "ssh_user": "root",
+                    "identity_path": "",
+                }
+            }
+            saved_target = orchestrate.build_target(orchestrate.ROLE_RU, {"RU_PUBLIC_IP": "9.9.9.9", "SSH_PORT": "22"}, saved_state)
+            answers = iter(["1"])
+            builtins.input = lambda prompt="": next(answers)
+            try:
+                reused_target = orchestrate.prompt_server_connection(saved_target, force_prompt=False, confirm_existing=True)
+            finally:
+                builtins.input = orig_input
+
+            payload = {
+                "selected": selected,
+                "env_only_saved": env_only_target.saved_connection,
+                "prompted_host": prompted_target.ssh_host,
+                "reused_saved": reused_target.saved_connection,
+                "reused_port": reused_target.ssh_port,
+            }
+            assert selected == "my-new-vpn"
+            assert env_only_target.saved_connection is False
+            assert prompted_target.ssh_host == "1.2.3.4"
+            assert reused_target.saved_connection is True
+            assert reused_target.ssh_port == 2222
+            print(json.dumps(payload))
+            """
+        )
+        completed = self.run_command("bootstrap-ux", python_cmd() + ["-c", snippet])
+        payload_line = completed.stdout.strip().splitlines()[-1]
+        payload = json.loads(payload_line)
+        return {key: str(value) for key, value in payload.items()}
 
     def test_validate_bundle(self, out_dir: Path) -> dict[str, str]:
         bundle_dir = out_dir / "bundle"
@@ -613,9 +680,9 @@ class AuditRunner:
             self.docker_copy(container, repo_copy / "scripts", "/work/scripts")
             self.docker_exec(
                 container,
-                "cd /work && chmod +x ./bootstrap.sh && set +e && ./bootstrap.sh --help >/tmp/out 2>/tmp/err; rc=$?; set -e; test \"$rc\" -eq 1; grep -q 'Python 3 не найден' /tmp/err",
+                "cd /work && chmod +x ./bootstrap.sh && ./bootstrap.sh --help >/tmp/out 2>/tmp/err && grep -q 'Что делает bootstrap' /tmp/out",
             )
-        return {"status": "graceful-fail"}
+        return {"status": "help-without-python-ok"}
 
     def test_linux_bootstrap_with_python(self) -> dict[str, str]:
         repo_copy = ensure_dir(self.work_dir / "linux-bootstrap-python")
@@ -631,7 +698,7 @@ class AuditRunner:
             self.docker_exec(container, "mkdir -p /work")
             self.docker_copy(container, repo_copy / "bootstrap.sh", "/work/bootstrap.sh")
             self.docker_copy(container, repo_copy / "scripts", "/work/scripts")
-            self.docker_exec(container, "cd /work && chmod +x ./bootstrap.sh && ./bootstrap.sh --help | sed -n '1,4p' | grep -q 'usage: orchestrate.py bootstrap'")
+            self.docker_exec(container, "cd /work && chmod +x ./bootstrap.sh && ./bootstrap.sh --help | grep -q 'Что делает bootstrap'")
         return {"status": "help-ok"}
 
     def test_unmanaged_remove_purge_render_only(self) -> dict[str, str]:
@@ -878,12 +945,18 @@ class AuditRunner:
             sys.path.insert(0, "/work/scripts")
             import orchestrate as orch
 
-            answers = iter([True, False])
+            answers = iter([True])
 
             def fake_prompt_yes_no(label: str, default: bool = True) -> bool:
                 return next(answers)
 
+            def fake_prompt_choice(label: str, options, default: str):
+                if "подключением" in label:
+                    return "reuse"
+                return default
+
             orch.prompt_yes_no = fake_prompt_yes_no
+            orch.prompt_choice = fake_prompt_choice
             ns = argparse.Namespace(deployment="{env_path.stem}", role="ru-gateway", action="{action}")
             rc = orch.cmd_remote_action(ns)
             print(f"rc={{rc}}")
@@ -894,6 +967,7 @@ class AuditRunner:
         container = f"audit-{action}-{self.run_id}"
         with self.docker_container(container, "python:3.13"):
             self.docker_exec(container, "mkdir -p /work/scripts /work/deployments /work/state /work/fakebin")
+            self.docker_copy(container, INSTALL_SCRIPT, "/work/install.sh")
             self.docker_copy(container, ORCHESTRATE_SCRIPT, "/work/scripts/orchestrate.py")
             self.docker_copy(container, deploy_dir / env_path.name, f"/work/deployments/{env_path.name}")
             self.docker_copy(container, state_dir / state_path.name, f"/work/state/{state_path.name}")
@@ -908,7 +982,6 @@ class AuditRunner:
                     chmod +x /work/fakebin/ssh /work/fakebin/scp
                     : > /work/calls.log
                     PATH=/work/fakebin:$PATH python3 /work/driver.py >/work/driver.out
-                    grep -q "Остановлено пользователем" /work/driver.out
                     grep -q "rc=0" /work/driver.out
                     grep -q "ru.example" /work/calls.log
                     if grep -q "foreign.example" /work/calls.log; then
