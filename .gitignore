@@ -1,0 +1,11 @@
+/out/
+/deployments/*.env
+!/deployments/deployment.env.example
+
+# Archives and generated deployment bundles
+*.tar.gz
+*.zip
+
+# OS/editor noise
+.DS_Store
+Thumbs.db

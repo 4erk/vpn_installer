@@ -1,0 +1,2 @@
+# Generated files are written to `out/<deployment>/cloud-init/ru.yaml`.
+# Run `scripts/render-cloud-init.sh <deployment-env-file>` to materialize this file.
