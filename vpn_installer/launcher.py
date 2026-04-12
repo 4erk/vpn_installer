@@ -8,12 +8,15 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from vpn_installer.cli import main  # noqa: E402
-from vpn_installer.models import AppError  # noqa: E402
+from vpn_installer.models import AppError, UserCancelled  # noqa: E402
 
 
 def run(argv: list[str] | None = None) -> int:
     try:
         return main(argv)
+    except UserCancelled as exc:
+        print(str(exc) or "Операция отменена пользователем.", file=sys.stderr)
+        return 130
     except KeyboardInterrupt:
         print("\nОстановлено пользователем.", file=sys.stderr)
         return 130
@@ -27,4 +30,3 @@ def run(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(run(sys.argv[1:]))
-

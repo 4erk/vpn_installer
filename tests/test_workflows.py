@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from vpn_installer.config import generate_default_env
+from vpn_installer.models import AppError, ROLE_RU, RemoteTarget, UserCancelled
 from vpn_installer import workflows
 
 
@@ -56,6 +57,20 @@ class WorkflowTests(unittest.TestCase):
             with patch("vpn_installer.workflows.client_artifact_paths", return_value={"uri": Path(tmp) / "hiddify-uri.txt", "hiddify_json": Path(tmp) / "h.json", "linux_json": Path(tmp) / "l.json", "next_steps": Path(tmp) / "NEXT-STEPS.txt"}):
                 with patch("vpn_installer.workflows.copy_to_clipboard", return_value=(False, "no clipboard")):
                     workflows.finalize_install_output(env, "demo")
+
+    def test_verify_target_interactively_cancel_raises_user_cancelled(self) -> None:
+        target = RemoteTarget(role=ROLE_RU, public_ip="203.0.113.10", ssh_host="203.0.113.10", ssh_port=22, ssh_user="root")
+        with patch("vpn_installer.workflows.prompt_server_connection", return_value=target):
+            with patch("vpn_installer.workflows.remote_preflight", side_effect=AppError("boom")):
+                with patch("vpn_installer.workflows.prompt_choice", return_value="cancel"):
+                    with self.assertRaises(UserCancelled):
+                        workflows.verify_target_interactively(
+                            target,
+                            wg_interface="wg0",
+                            require_privilege=False,
+                            validate_os=False,
+                            confirm_existing_connection=False,
+                        )
 
 
 if __name__ == "__main__":

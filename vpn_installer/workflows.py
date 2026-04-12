@@ -17,7 +17,7 @@ from .config import (
     require_env,
     ensure_deployment_env,
 )
-from .models import ROLE_FOREIGN, ROLE_META, ROLE_RU, RemoteTarget
+from .models import ROLE_FOREIGN, ROLE_META, ROLE_RU, RemoteTarget, UserCancelled
 from .prompts import (
     ask_install_action,
     auth_mode_label,
@@ -135,7 +135,7 @@ def verify_target_interactively(
                 default="edit",
             )
             if action == "cancel":
-                raise
+                raise UserCancelled(f"{target.label}: операция отменена пользователем.")
             if action == "retry":
                 target.saved_connection = True
                 if target.auth_mode == "password":

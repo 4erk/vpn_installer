@@ -7,6 +7,10 @@ class AppError(RuntimeError):
     pass
 
 
+class UserCancelled(AppError):
+    pass
+
+
 ROLE_RU = "ru-gateway"
 ROLE_FOREIGN = "foreign-exit"
 ROLE_META = {

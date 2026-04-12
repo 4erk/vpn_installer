@@ -169,6 +169,9 @@ try {
   if ($ExitCode -eq 0) {
     Write-Host ""
     Write-Host "Команда завершена."
+  } elseif ($ExitCode -eq 130) {
+    Write-Host ""
+    Write-Host "Операция отменена пользователем." -ForegroundColor Yellow
   } else {
     Write-Host ""
     Write-Host "Команда завершилась с ошибкой (код $ExitCode)." -ForegroundColor Red

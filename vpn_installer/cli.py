@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from .models import AppError, ROLE_FOREIGN, ROLE_RU
+from .models import AppError, ROLE_FOREIGN, ROLE_RU, UserCancelled
 from .workflows import cleanup_local_workflow, install_workflow, menu_workflow, remote_action_workflow, status_workflow
 
 
@@ -71,6 +71,9 @@ def main(argv: list[str] | None = None) -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
+    except UserCancelled as exc:
+        print(str(exc) or "Операция отменена пользователем.", file=sys.stderr)
+        raise SystemExit(130)
     except KeyboardInterrupt:
         print("\nОстановлено пользователем.", file=sys.stderr)
         raise SystemExit(130)
