@@ -43,16 +43,11 @@ else
   exit 1
 fi
 
+export VPN_REPO_ROOT="${ROOT_DIR}"
+LAUNCHER_PATH="${ROOT_DIR}/vpn_installer/launcher.py"
+
 if [[ "$#" -eq 0 ]]; then
-  exec "$PYTHON_BIN" "${ROOT_DIR}/scripts/orchestrate.py" menu
+  exec "$PYTHON_BIN" "$LAUNCHER_PATH"
 fi
 
-if [[ "$1" == "audit" ]]; then
-  shift
-  if [[ "$#" -eq 0 ]]; then
-    exec "$PYTHON_BIN" "${ROOT_DIR}/scripts/audit.py" quick
-  fi
-  exec "$PYTHON_BIN" "${ROOT_DIR}/scripts/audit.py" "$@"
-fi
-
-exec "$PYTHON_BIN" "${ROOT_DIR}/scripts/orchestrate.py" "$@"
+exec "$PYTHON_BIN" "$LAUNCHER_PATH" "$@"

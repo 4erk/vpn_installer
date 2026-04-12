@@ -1,50 +1,36 @@
-# Приватный VPN-контур без ручной настройки серверов
+# VPN Installer
 
 Этот репозиторий поднимает схему:
 
 `твой компьютер или телефон -> RU сервер -> Foreign сервер`
 
-Что это даёт:
-
-- провайдер в РФ видит только подключение к российскому серверу
-- русские сайты выходят через `RU IP`
-- остальной трафик выходит через `Foreign IP`
-- готовый клиентский профиль сохраняется у тебя локально
-
-Главный вход для пользователя:
+Пользовательский вход только один:
 
 - Windows: `vpn.ps1`
 - Linux: `vpn.sh`
 
-Старые `bootstrap` и `manage` оставлены только для совместимости.
+## Что подготовить
 
-## Что подготовить заранее
+Нужны:
 
-Нужны два VPS.
+- `RU` сервер с `Ubuntu 24.04`, публичным `IPv4` и доступом по `SSH`
+- `Foreign` сервер с `Ubuntu 24.04`, публичным `IPv4` и доступом по `SSH`
+- клиент `Hiddify`
 
-`RU сервер`:
+Подходят оба варианта входа на сервер:
 
-- `Ubuntu 24.04`
-- публичный `IPv4`
-- обычно хватает `1 vCPU`, `1 GB RAM`, `10+ GB disk`
+- `SSH key`
+- `SSH password`
 
-`Foreign сервер`:
+Если вход не под `root`, нужен `sudo`.
 
-- `Ubuntu 24.04`
-- публичный `IPv4`
-- обычно хватает `1 vCPU`, `1 GB RAM`, `10+ GB disk`
+## Установи Hiddify
 
-Примеры провайдеров и цены: [docs/PROVIDERS.md](./docs/PROVIDERS.md)
+- Windows / Linux / Android: [Hiddify install page](https://hiddify.com/app/How-to-install-Hiddify-app/)
+- GitHub Releases: [hiddify-app releases](https://github.com/hiddify/hiddify-app/releases/latest)
+- Android в Google Play: [Hiddify on Google Play](https://play.google.com/store/apps/details?id=app.hiddify.com)
 
-## Шаг 1. Установи Hiddify
-
-Основной клиент: `Hiddify`.
-
-- Windows: [Hiddify install page](https://hiddify.com/app/How-to-install-Hiddify-app/), [GitHub Releases](https://github.com/hiddify/hiddify-app/releases/latest)
-- Linux: [Hiddify install page](https://hiddify.com/app/How-to-install-Hiddify-app/), [GitHub Releases](https://github.com/hiddify/hiddify-app/releases/latest)
-- Android: [Google Play](https://play.google.com/store/apps/details?id=app.hiddify.com), [GitHub Releases](https://github.com/hiddify/hiddify-app/releases/latest)
-
-## Шаг 2. Запусти мастер установки
+## Запуск
 
 Windows:
 
@@ -59,7 +45,7 @@ chmod +x ./vpn.sh
 ./vpn.sh
 ```
 
-Если хочешь сразу конкретную команду без меню:
+Если хочешь обойти меню:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\vpn.ps1 install
@@ -71,63 +57,68 @@ powershell -ExecutionPolicy Bypass -File .\vpn.ps1 status --deployment my-vpn
 ./vpn.sh status --deployment my-vpn
 ```
 
-Что мастер спросит:
+## Что спросит мастер
 
-1. Имя deployment.
-Пример: `my-vpn`, `home-stack`
+Сначала всегда `RU`, потом `Foreign`.
 
-2. `RU сервер`.
-Что нужно ввести:
+Для каждого сервера мастер спрашивает:
+
 - `Public IP`
 - `SSH port`
 - `SSH user`
-- способ входа: `SSH key` или `SSH password`
+- способ входа: `key` или `password`
 
-3. `Foreign сервер`.
-Те же поля, в том же порядке.
-
-Если `SSH host` отличается от `Public IP`, мастер сам спросит это отдельным вопросом.
-
-Примеры значений:
+Примеры:
 
 - `Public IP`: `203.0.113.10`
 - `SSH port`: `22`
 - `SSH user`: `root` или `ubuntu`
 - путь к ключу: `C:\Users\you\.ssh\id_ed25519` или `~/.ssh/id_ed25519`
 
-Что происходит дальше автоматически:
-
-- проверка подключения к `RU`
-- проверка `Ubuntu`, `root/sudo`, уже установленной роли и deployment
-- проверка подключения к `Foreign`
-- сборка локальных артефактов
-- установка сначала на `Foreign`, потом на `RU`
+Если `SSH host` отличается от публичного IP, мастер спросит его отдельно.
 
 Важно:
 
-- `RU` спрашивается и проверяется первым
-- если вход по `SSH password`, пароль не сохраняется на диск
-- если нужен `sudo password`, он тоже спрашивается только на время текущего запуска
-- на Windows заранее ставить Python не нужно: `vpn.ps1` сам поднимет portable runtime в `.runtime/python/windows`, если локального Python нет
+- `Enter` оставляет показанное значение
+- пароль не сохраняется на диск
+- на Windows `vpn.ps1` сам поднимет portable Python, если его нет
+- на Linux нужен `python3`
 
-## Шаг 3. Импортируй профиль в Hiddify
+## Что делает мастер
 
-После успешной установки мастер:
+Автоматически:
 
-- попытается скопировать `Hiddify URI` в буфер обмена
-- сохранит URI в `out/<deployment>/client/hiddify-uri.txt`
-- сохранит запасной JSON в `out/<deployment>/client/hiddify-cross-platform.json`
-- создаст `out/<deployment>/NEXT-STEPS.txt`
+1. Проверяет `RU` сервер
+2. Проверяет `Foreign` сервер
+3. Собирает локальные артефакты
+4. Устанавливает сначала `Foreign`, потом `RU`
+5. Готовит строку для `Hiddify`
+
+## Что получится в конце
+
+После успешной установки будут созданы:
+
+- `out/<deployment>/client/hiddify-uri.txt`
+- `out/<deployment>/client/hiddify-cross-platform.json`
+- `out/<deployment>/client/linux-sing-box.json`
+- `out/<deployment>/NEXT-STEPS.txt`
+
+Основной результат:
+
+- строка `Hiddify URI` копируется в буфер обмена
+- та же строка сохраняется в `hiddify-uri.txt`
+
+## Как импортировать в Hiddify
 
 Основной путь:
 
 1. Открой `Hiddify`
-2. Выбери импорт профиля из буфера обмена
-3. Если буфер не сработал, открой `hiddify-uri.txt` и вставь URI вручную
+2. Выбери добавление профиля из буфера обмена
+3. Если буфер не сработал, открой `hiddify-uri.txt` и вставь строку вручную
 
-JSON нужен только как запасной вариант.
+JSON-файлы нужны только как запасной вариант.
 
-## Основные команды после установки
+## Полезные команды
 
 Windows:
 
@@ -137,7 +128,7 @@ powershell -ExecutionPolicy Bypass -File .\vpn.ps1 reinstall --deployment my-vpn
 powershell -ExecutionPolicy Bypass -File .\vpn.ps1 remove --deployment my-vpn
 powershell -ExecutionPolicy Bypass -File .\vpn.ps1 purge --deployment my-vpn
 powershell -ExecutionPolicy Bypass -File .\vpn.ps1 cleanup-local --deployment my-vpn
-powershell -ExecutionPolicy Bypass -File .\vpn.ps1 audit
+powershell -ExecutionPolicy Bypass -File .\vpn.ps1 audit all
 ```
 
 Linux:
@@ -148,39 +139,22 @@ Linux:
 ./vpn.sh remove --deployment my-vpn
 ./vpn.sh purge --deployment my-vpn
 ./vpn.sh cleanup-local --deployment my-vpn
-./vpn.sh audit
+./vpn.sh audit all
 ```
 
-Если нужно затронуть только одну роль:
+## Если что-то не сработало
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\vpn.ps1 status --deployment my-vpn --role ru-gateway
-powershell -ExecutionPolicy Bypass -File .\vpn.ps1 reinstall --deployment my-vpn --role foreign-exit
-```
+Проверь:
 
-## Если что-то пошло не так
+- оба сервера действительно на `Ubuntu 24.04`
+- у обоих серверов есть публичный `IPv4`
+- `SSH` работает вручную теми же данными
+- у пользователя есть `root` или `sudo`
+- путь к ключу указан правильно
 
-- Проверь, что оба сервера действительно на `Ubuntu 24.04`
-- Проверь, что у обоих серверов есть публичный `IPv4`
-- Проверь `SSH` вручную теми же данными, которые вводишь в мастер
-- Если используешь ключ, проверь путь к файлу ключа
-- Если используешь пароль, проверь, что сервер разрешает password login
-- Если окно Windows раньше закрывалось, запускай через `vpn.ps1`: он теперь держит окно открытым до `Enter`
-- Если не понял, что импортировать в `Hiddify`, используй сначала буфер обмена, потом `hiddify-uri.txt`, и только потом JSON
+Если установка дошла до конца, смотри:
 
-## Локальная самопроверка
+- `out/<deployment>/NEXT-STEPS.txt`
+- `out/<deployment>/client/hiddify-uri.txt`
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\vpn.ps1 audit
-```
-
-```bash
-./vpn.sh audit
-```
-
-Это проверяет локальную сборку, lifecycle-guard и Docker-эмуляцию. Но это всё ещё не заменяет живой прогон на реальных VPS.
-
-## Где лежат подробности
-
-- Техническая документация: [docs/PROJECT.md](./docs/PROJECT.md)
-- Провайдеры и цены: [docs/PROVIDERS.md](./docs/PROVIDERS.md)
+Технические детали проекта: [docs/PROJECT.md](./docs/PROJECT.md)

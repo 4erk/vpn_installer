@@ -1,0 +1,475 @@
+from __future__ import annotations
+
+import argparse
+import base64
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import textwrap
+import time
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Callable
+
+from ..common import INSTALL_SCRIPT_PATH, OUT_DIR, ROOT_DIR, ensure_file_parent
+from ..config import generate_default_env, load_env_file, render_env_text
+
+AUDIT_ROOT = OUT_DIR / "audit"
+AUDIT_IMAGE = "vpn-installer-audit-base:1"
+VPN_PS1 = ROOT_DIR / "vpn.ps1"
+VPN_SH = ROOT_DIR / "vpn.sh"
+REPO_FILES_FOR_BOOTSTRAP = [
+    "vpn.ps1",
+    "vpn.sh",
+    "install.sh",
+    "vpn_installer",
+    "deployments",
+]
+
+
+class AuditFailure(RuntimeError):
+    pass
+
+
+@dataclass
+class TestResult:
+    name: str
+    status: str
+    duration_sec: float
+    details: str = ""
+    artifacts: dict[str, str] = field(default_factory=dict)
+
+
+def utc_stamp() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def run_stamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def ensure_dir(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def write_text(path: Path, content: str) -> None:
+    ensure_file_parent(path)
+    path.write_text(content, encoding="utf-8", newline="\n")
+
+
+def write_bytes(path: Path, content: bytes) -> None:
+    ensure_file_parent(path)
+    path.write_bytes(content)
+
+
+def powershell_executable() -> str:
+    for name in ("powershell", "pwsh"):
+        if shutil.which(name):
+            return name
+    raise AuditFailure("Не найден PowerShell.")
+
+
+def require_command(name: str) -> None:
+    if shutil.which(name) is None:
+        raise AuditFailure(f"Не найдена команда: {name}")
+
+
+def python_cmd() -> list[str]:
+    return [sys.executable]
+
+
+class AuditRunner:
+    def __init__(self, mode: str, keep_docker: bool = False, json_output: bool = False) -> None:
+        self.mode = mode
+        self.keep_docker = keep_docker
+        self.json_output = json_output
+        self.started_at = utc_stamp()
+        self.run_id = f"{run_stamp()}-{mode}"
+        self.run_dir = ensure_dir(AUDIT_ROOT / self.run_id)
+        self.logs_dir = ensure_dir(self.run_dir / "logs")
+        self.work_dir = ensure_dir(self.run_dir / "work")
+        self.results: list[TestResult] = []
+        self.failures = 0
+        self.base_image_ready = False
+
+    def note(self, message: str) -> None:
+        print(message)
+
+    def summary_path(self) -> Path:
+        return self.run_dir / "summary.json"
+
+    def write_summary(self) -> None:
+        payload = {
+            "mode": self.mode,
+            "run_id": self.run_id,
+            "started_at": self.started_at,
+            "completed_at": utc_stamp(),
+            "success": self.failures == 0,
+            "results": [asdict(result) for result in self.results],
+        }
+        write_text(self.summary_path(), json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+        if self.json_output:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+            return
+        print(f"\nИтог: {'OK' if self.failures == 0 else 'FAIL'}")
+        print(f"Summary: {self.summary_path()}")
+        for result in self.results:
+            print(f"- {result.name}: {result.status}")
+
+    def run(self) -> int:
+        from . import docker as docker_checks
+        from . import lab as lab_checks
+        from . import quick as quick_checks
+
+        try:
+            if self.mode == "quick":
+                quick_checks.run(self)
+            elif self.mode == "docker":
+                docker_checks.run(self)
+            elif self.mode == "lab":
+                lab_checks.run(self)
+            elif self.mode == "all":
+                quick_checks.run(self)
+                docker_checks.run(self)
+                lab_checks.run(self)
+            else:
+                raise AuditFailure(f"Неизвестный режим: {self.mode}")
+        finally:
+            self.write_summary()
+        return 0 if self.failures == 0 else 1
+
+    def record(self, name: str, fn: Callable[[], dict[str, str] | str | None]) -> None:
+        self.note(f"\n== {name} ==")
+        started = time.monotonic()
+        status = "passed"
+        details = ""
+        artifacts: dict[str, str] = {}
+        try:
+            returned = fn()
+            if isinstance(returned, dict):
+                artifacts = {key: str(value) for key, value in returned.items()}
+            elif isinstance(returned, str):
+                details = returned
+        except Exception as exc:  # noqa: BLE001
+            status = "failed"
+            details = str(exc)
+            self.failures += 1
+            self.note(f"FAIL: {exc}")
+        else:
+            self.note("OK")
+        self.results.append(
+            TestResult(
+                name=name,
+                status=status,
+                duration_sec=round(time.monotonic() - started, 3),
+                details=details,
+                artifacts=artifacts,
+            )
+        )
+
+    def run_command(
+        self,
+        name: str,
+        args: list[str],
+        *,
+        cwd: Path | None = None,
+        env: dict[str, str] | None = None,
+        input_text: str | None = None,
+        expect_code: int = 0,
+        expected_codes: set[int] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        test_dir = ensure_dir(self.logs_dir / re.sub(r"[^A-Za-z0-9._-]+", "-", name))
+        stdout_path = test_dir / "stdout.log"
+        stderr_path = test_dir / "stderr.log"
+        merged_env = os.environ.copy()
+        if env:
+            merged_env.update(env)
+        repo_pythonpath = str(ROOT_DIR)
+        if merged_env.get("PYTHONPATH"):
+            merged_env["PYTHONPATH"] = f"{repo_pythonpath}{os.pathsep}{merged_env['PYTHONPATH']}"
+        else:
+            merged_env["PYTHONPATH"] = repo_pythonpath
+        completed = subprocess.run(
+            args,
+            cwd=str(cwd or ROOT_DIR),
+            env=merged_env,
+            input=input_text,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        write_text(stdout_path, completed.stdout)
+        write_text(stderr_path, completed.stderr)
+        allowed_codes = expected_codes or {expect_code}
+        if completed.returncode not in allowed_codes:
+            raise AuditFailure(
+                f"{name}: код {completed.returncode}, ожидался один из {sorted(allowed_codes)}.\n"
+                f"stdout: {stdout_path}\nstderr: {stderr_path}"
+            )
+        return completed
+
+    def run_bash(
+        self,
+        name: str,
+        script: str,
+        *,
+        cwd: Path | None = None,
+        expect_code: int = 0,
+        env: dict[str, str] | None = None,
+        expected_codes: set[int] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        require_command("bash")
+        return self.run_command(
+            name,
+            ["bash", "-lc", script],
+            cwd=cwd,
+            env=env,
+            expect_code=expect_code,
+            expected_codes=expected_codes,
+        )
+
+    def run_powershell(
+        self,
+        name: str,
+        script_or_path: list[str],
+        *,
+        cwd: Path | None = None,
+        env: dict[str, str] | None = None,
+        expect_code: int = 0,
+        expected_codes: set[int] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        exe = powershell_executable()
+        return self.run_command(
+            name,
+            [exe, "-NoProfile", "-ExecutionPolicy", "Bypass", *script_or_path],
+            cwd=cwd,
+            env=env,
+            expect_code=expect_code,
+            expected_codes=expected_codes,
+        )
+
+    def docker(
+        self,
+        name: str,
+        args: list[str],
+        *,
+        expect_code: int = 0,
+        expected_codes: set[int] | None = None,
+        cwd: Path | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        require_command("docker")
+        return self.run_command(
+            f"docker-{name}",
+            ["docker", *args],
+            cwd=cwd,
+            expect_code=expect_code,
+            expected_codes=expected_codes,
+        )
+
+    def ensure_audit_image(self) -> None:
+        if self.base_image_ready:
+            return
+        inspect = subprocess.run(["docker", "image", "inspect", AUDIT_IMAGE], capture_output=True, text=True, check=False)
+        if inspect.returncode == 0:
+            self.base_image_ready = True
+            return
+        build_dir = ensure_dir(self.work_dir / "audit-image")
+        dockerfile = textwrap.dedent(
+            """\
+            FROM ubuntu:24.04
+            ENV DEBIAN_FRONTEND=noninteractive
+            RUN apt-get update && apt-get install -y \
+                ca-certificates \
+                cloud-init \
+                curl \
+                dnsmasq \
+                gnupg \
+                iproute2 \
+                iputils-ping \
+                jq \
+                netcat-openbsd \
+                nftables \
+                procps \
+                python3 \
+                tar \
+                wireguard-tools \
+                && rm -rf /var/lib/apt/lists/*
+            RUN bash -lc 'curl -fsSL https://sing-box.sagernet.org/installation/tools/install.sh | bash && sing-box version >/tmp/singbox-version.txt'
+            CMD ["sleep", "infinity"]
+            """
+        )
+        write_text(build_dir / "Dockerfile", dockerfile)
+        self.docker("build-audit-image", ["build", "-t", AUDIT_IMAGE, str(build_dir)])
+        self.base_image_ready = True
+
+    def create_env(self, name: str, overrides: dict[str, str] | None = None) -> tuple[Path, dict[str, str]]:
+        deploy_name = re.sub(r"[^A-Za-z0-9._-]+", "-", f"{self.run_id}-{name}").strip("-")
+        env = generate_default_env(deploy_name)
+        env["RU_PUBLIC_IP"] = "203.0.113.10"
+        env["FOREIGN_PUBLIC_IP"] = "198.51.100.20"
+        env["WAN_INTERFACE"] = "eth1"
+        if overrides:
+            env.update(overrides)
+        env_path = self.work_dir / "env" / f"{deploy_name}.env"
+        write_text(env_path, render_env_text(env))
+        return env_path, env
+
+    def parse_cloud_init_payload(self, yaml_path: Path) -> tuple[dict[str, bytes], str]:
+        files: dict[str, bytes] = {}
+        current_path: str | None = None
+        runcmd = ""
+        for line in yaml_path.read_text(encoding="utf-8").splitlines():
+            if line.startswith("  - path: "):
+                current_path = line.split(": ", 1)[1].strip()
+            elif current_path and line.strip().startswith("content: "):
+                payload = line.split("content: ", 1)[1].strip()
+                files[current_path] = base64.b64decode(payload.encode("ascii"))
+                current_path = None
+            elif line.strip().startswith("- [bash, -lc, "):
+                match = re.search(r'- \[bash, -lc, "(.*)"\]', line.strip())
+                if match:
+                    runcmd = match.group(1)
+        if "/root/vpn-stack/install.sh" not in files or "/root/vpn-stack/deployment.env" not in files:
+            raise AuditFailure(f"Cloud-init payload {yaml_path} не содержит install.sh/deployment.env")
+        if not runcmd:
+            raise AuditFailure(f"Cloud-init payload {yaml_path} не содержит runcmd")
+        return files, runcmd
+
+    @contextmanager
+    def temp_repo_copy(self, name: str):
+        target = ensure_dir(self.work_dir / name)
+        for rel in REPO_FILES_FOR_BOOTSTRAP:
+            source = ROOT_DIR / rel
+            destination = target / rel
+            if source.is_dir():
+                if destination.exists():
+                    shutil.rmtree(destination)
+                shutil.copytree(source, destination)
+            else:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, destination)
+        yield target
+
+    def ensure_quick_env(self) -> tuple[Path, Path]:
+        env_path, _ = self.create_env("quick")
+        env = load_env_file(env_path)
+        env["RU_PUBLIC_IP"] = "203.0.113.10"
+        env["FOREIGN_PUBLIC_IP"] = "198.51.100.20"
+        env["WAN_INTERFACE"] = "eth1"
+        write_text(env_path, render_env_text(env))
+        return env_path, OUT_DIR / env["DEPLOY_NAME"]
+
+    def seed_foreign_block_cache(self, deploy_name: str) -> Path:
+        assets_dir = ensure_dir(OUT_DIR / deploy_name / "assets")
+        if not (assets_dir / "ru-ipv4.zone").exists():
+            write_text(assets_dir / "ru-ipv4.zone", "203.0.113.0/24\n")
+        if not (assets_dir / "ru-ipv6.zone").exists():
+            write_text(assets_dir / "ru-ipv6.zone", "2001:db8::/32\n")
+        return assets_dir
+
+    def cleanup_stale_lab_resources(self) -> None:
+        container_prefixes = ("ru-", "foreign-", "client-", "dns-", "ruweb-", "globalweb-")
+        network_prefixes = ("audit-front-", "audit-ru-", "audit-global-")
+        containers = subprocess.run(["docker", "ps", "-a", "--format", "{{.Names}}"], capture_output=True, text=True, check=False)
+        for name in containers.stdout.splitlines():
+            if name.endswith("-lab") and name.startswith(container_prefixes):
+                subprocess.run(["docker", "rm", "-f", name], capture_output=True, text=True, check=False)
+        networks = subprocess.run(["docker", "network", "ls", "--format", "{{.Name}}"], capture_output=True, text=True, check=False)
+        for name in networks.stdout.splitlines():
+            if name.endswith("-lab") and name.startswith(network_prefixes):
+                subprocess.run(["docker", "network", "rm", name], capture_output=True, text=True, check=False)
+
+    def docker_copy(self, container: str, source: Path, destination: str) -> None:
+        self.docker("cp", ["cp", str(source), f"{container}:{destination}"])
+
+    def docker_cp_from(self, container: str, source: str, destination: Path) -> None:
+        self.docker("cp-from", ["cp", f"{container}:{source}", str(destination)])
+
+    @contextmanager
+    def docker_container(
+        self,
+        name: str,
+        image: str,
+        *,
+        privileged: bool = False,
+        network: str | None = None,
+        ip: str | None = None,
+        extra_args: list[str] | None = None,
+    ):
+        args = ["create", "--name", name, "--label", "vpn-installer.audit=1"]
+        if privileged:
+            args.append("--privileged")
+        if network:
+            args.extend(["--network", network])
+        if ip:
+            args.extend(["--ip", ip])
+        if extra_args:
+            args.extend(extra_args)
+        args.extend([image, "sleep", "infinity"])
+        self.docker(f"create-{name}", args)
+        try:
+            self.docker(f"start-{name}", ["start", name])
+            yield name
+        finally:
+            if not self.keep_docker:
+                self.docker(f"rm-{name}", ["rm", "-f", name], expect_code=0)
+
+    def docker_exec(
+        self,
+        container: str,
+        script: str,
+        *,
+        expect_code: int = 0,
+        expected_codes: set[int] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        return self.docker(
+            f"exec-{container}",
+            ["exec", container, "bash", "-lc", script],
+            expect_code=expect_code,
+            expected_codes=expected_codes,
+        )
+
+    @contextmanager
+    def docker_network(self, name: str, subnet: str, gateway: str):
+        self.docker(
+            f"network-create-{name}",
+            ["network", "create", "--label", "vpn-installer.audit=1", "--driver", "bridge", "--subnet", subnet, "--gateway", gateway, name],
+        )
+        try:
+            yield name
+        finally:
+            if not self.keep_docker:
+                self.docker(f"network-rm-{name}", ["network", "rm", name], expect_code=0)
+
+    def docker_network_connect(self, network: str, container: str, ip: str) -> None:
+        self.docker(f"network-connect-{network}-{container}", ["network", "connect", "--ip", ip, network, container])
+
+    def lab_curl(self, container: str, url: str, *, expect_codes: set[int] | None = None) -> subprocess.CompletedProcess[str]:
+        host = url.split("://", 1)[-1].split("/", 1)[0].replace(":", "_")
+        return self.docker(
+            f"curl-{container}-{host}",
+            ["exec", container, "bash", "-lc", f"curl --silent --show-error --fail --max-time 10 --socks5-hostname 127.0.0.1:1080 {url}"],
+            expect_code=0,
+            expected_codes=expect_codes or {0},
+        )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Локальный аудит и Docker regression/lab для vpn-installer.")
+    parser.add_argument("mode", choices=["quick", "docker", "lab", "all"], help="Какой контур проверок запускать.")
+    parser.add_argument("--json", action="store_true", help="Печатать итоговую summary в JSON.")
+    parser.add_argument("--keep-docker", action="store_true", help="Не удалять Docker-контейнеры и сети после тестов.")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    runner = AuditRunner(args.mode, keep_docker=args.keep_docker, json_output=args.json)
+    return runner.run()

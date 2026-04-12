@@ -156,18 +156,10 @@ try {
     exit 0
   }
 
-  $EffectiveArgs = if ($ScriptArgs.Count -eq 0) { @('menu') } else { @($ScriptArgs) }
+  $EffectiveArgs = @($ScriptArgs)
   $PythonCommand = Resolve-Python
-  $ScriptPath = if ($EffectiveArgs[0] -eq 'audit') {
-    $EffectiveArgs = if ($EffectiveArgs.Count -gt 1) { @($EffectiveArgs[1..($EffectiveArgs.Count - 1)]) } else { @('quick') }
-    if ($EffectiveArgs.Count -eq 1 -and $EffectiveArgs[0] -in @('--help', '-h', 'help', '-')) {
-      $EffectiveArgs = @('--help')
-    }
-    Join-Path $RepoRoot 'scripts\audit.py'
-  } else {
-    Join-Path $RepoRoot 'scripts\orchestrate.py'
-  }
-  $CommandLine = @($PythonCommand) + @($ScriptPath) + @($EffectiveArgs)
+  $LauncherPath = Join-Path $RepoRoot 'vpn_installer\launcher.py'
+  $CommandLine = @($PythonCommand) + @($LauncherPath) + @($EffectiveArgs)
   if ($CommandLine.Count -le 1) {
     throw "Внутренняя ошибка launcher: пустая команда запуска Python."
   }

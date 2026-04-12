@@ -1,2 +1,0 @@
-# Сгенерированный файл появляется в `out/<deployment>/cloud-init/ru.yaml`.
-# Для генерации выполните `python3 scripts/orchestrate.py render-cloud-init <deployment-env-file>`.
