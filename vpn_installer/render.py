@@ -10,35 +10,41 @@ from pathlib import Path
 from typing import Any
 
 from .common import INSTALL_SCRIPT_PATH, OUT_DIR, ensure_file_parent, print_header, warn, write_text
-from .config import download_file, render_env_text, require_env
+from .config import download_asset, render_env_text, require_env, split_asset_sources
 from .models import DEFAULT_ASSET_TIMEOUT, REQUIRED_ENV_VARS, ROLE_FOREIGN, ROLE_RU
 
 
 def fetch_assets(env: dict[str, str], assets_dir: Path) -> dict[str, Path]:
     assets_dir.mkdir(parents=True, exist_ok=True)
     targets = {
-        "geosite-ru.srs": (env["RU_GEOSITE_URL"], assets_dir / "geosite-ru.srs"),
-        "geoip-ru.srs": (env["RU_GEOIP_URL"], assets_dir / "geoip-ru.srs"),
+        "geosite-ru.srs": (split_asset_sources(env["RU_GEOSITE_URL"]), assets_dir / "geosite-ru.srs"),
+        "geoip-ru.srs": (split_asset_sources(env["RU_GEOIP_URL"]), assets_dir / "geoip-ru.srs"),
     }
     required_assets = {"geosite-ru.srs", "geoip-ru.srs"}
     if env.get("FOREIGN_BLOCK_RU", "1") == "1":
-        targets["ru-ipv4.zone"] = (env["FOREIGN_RU_IPV4_LIST_URL"], assets_dir / "ru-ipv4.zone")
-        targets["ru-ipv6.zone"] = (env["FOREIGN_RU_IPV6_LIST_URL"], assets_dir / "ru-ipv6.zone")
+        targets["ru-ipv4.zone"] = (split_asset_sources(env["FOREIGN_RU_IPV4_LIST_URL"]), assets_dir / "ru-ipv4.zone")
+        targets["ru-ipv6.zone"] = (split_asset_sources(env["FOREIGN_RU_IPV6_LIST_URL"]), assets_dir / "ru-ipv6.zone")
         required_assets.update({"ru-ipv4.zone", "ru-ipv6.zone"})
     print_header("Подкачка rule-set и CIDR-ассетов")
     results: dict[str, Path] = {}
     missing_required: list[str] = []
-    for name, (url, path) in targets.items():
-        try:
-            download_file(url, path)
-            print(f"{name}: OK")
-            results[name] = path
-        except (urllib.error.URLError, OSError) as exc:
+    for name, (sources, path) in targets.items():
+        errors: list[str] = []
+        for source in sources:
+            try:
+                download_asset(source, path, name)
+                print(f"{name}: OK")
+                results[name] = path
+                break
+            except (urllib.error.URLError, OSError, RuntimeError) as exc:
+                errors.append(f"{source}: {exc}")
+        else:
+            joined_errors = "; ".join(errors) if errors else "источники не заданы"
             if path.exists() and path.stat().st_size > 0:
-                warn(f"{name}: не удалось обновить, оставляю локальную копию ({exc})")
+                warn(f"{name}: не удалось обновить ни из одного источника, оставляю локальную копию ({joined_errors})")
                 results[name] = path
             else:
-                warn(f"{name}: загрузка не удалась ({exc})")
+                warn(f"{name}: загрузка не удалась ни из одного источника ({joined_errors})")
                 if name in required_assets:
                     missing_required.append(name)
     if missing_required:
@@ -255,24 +261,76 @@ def render_sync_script(env: dict[str, str]) -> str:
             "",
             'mkdir -p "$RULESET_DIR"',
             "",
-            "download() {",
-            '  local url="$1"',
+            "download_from_source() {",
+            '  local source="$1"',
             '  local output="$2"',
-            '  curl -fsSL "$url" -o "$output.tmp"',
-            '  mv "$output.tmp" "$output"',
+            '  local asset_kind="$3"',
+            '  local response_tmp="$output.response.tmp"',
+            '  local render_tmp="$output.render.tmp"',
+            '  rm -f "$response_tmp" "$render_tmp"',
+            '  curl -fsSL "$source" -o "$response_tmp"',
+            '  if [[ "$source" == *"stat.ripe.net/data/country-resource-list/"* ]]; then',
+            '    python3 - "$asset_kind" "$response_tmp" "$render_tmp" <<\'PY\'',
+            "import json",
+            "import sys",
+            "from pathlib import Path",
+            "",
+            "asset_kind = sys.argv[1]",
+            "response_path = Path(sys.argv[2])",
+            "output_path = Path(sys.argv[3])",
+            "payload = json.loads(response_path.read_text(encoding='utf-8'))",
+            "resources = payload.get('data', {}).get('resources', {})",
+            "family = 'ipv6' if asset_kind == 'ipv6' else 'ipv4'",
+            "prefixes = resources.get(family, [])",
+            "if not isinstance(prefixes, list) or not prefixes:",
+            "    raise SystemExit(1)",
+            "output_path.write_text(''.join(f'{entry}\\n' for entry in prefixes if str(entry).strip()), encoding='utf-8')",
+            "PY",
+            '    mv "$render_tmp" "$output"',
+            "  else",
+            '    mv "$response_tmp" "$output"',
+            "  fi",
+            '  rm -f "$response_tmp" "$render_tmp"',
+            "}",
+            "",
+            "download_any() {",
+            '  local sources="$1"',
+            '  local output="$2"',
+            '  local asset_kind="$3"',
+            "  local source",
+            "  local errors=()",
+            '  for source in $sources; do',
+            '    if download_from_source "$source" "$output.tmp" "$asset_kind"; then',
+            '      if [[ -s "$output.tmp" ]]; then',
+            '        mv "$output.tmp" "$output"',
+            "        return 0",
+            "      fi",
+            '      rm -f "$output.tmp"',
+            '      errors+=("$source: empty payload")',
+            "      continue",
+            "    fi",
+            '    rm -f "$output.tmp"',
+            '    errors+=("$source")',
+            "  done",
+            '  if [[ -s "$output" ]]; then',
+            '    echo "vpn-stack-sync: оставляю старую копию $(basename "$output"), все источники недоступны: ${errors[*]}" >&2',
+            "    return 0",
+            "  fi",
+            '  echo "vpn-stack-sync: не удалось получить $(basename "$output") ни из одного источника: ${errors[*]}" >&2',
+            "  return 1",
             "}",
             "",
             'if [[ "$ROLE" == "ru-gateway" ]]; then',
-            '  download "$RU_GEOSITE_URL" "$RULESET_DIR/geosite-ru.srs"',
-            '  download "$RU_GEOIP_URL" "$RULESET_DIR/geoip-ru.srs"',
+            '  download_any "$RU_GEOSITE_URL" "$RULESET_DIR/geosite-ru.srs" binary',
+            '  download_any "$RU_GEOIP_URL" "$RULESET_DIR/geoip-ru.srs" binary',
             "  exit 0",
             "fi",
             "",
             'if [[ "$ROLE" == "foreign-exit" && "$FOREIGN_BLOCK_RU" == "1" ]]; then',
             '  local_v4="$RULESET_DIR/ru-ipv4.zone"',
             '  local_v6="$RULESET_DIR/ru-ipv6.zone"',
-            '  download "$FOREIGN_RU_IPV4_LIST_URL" "$local_v4"',
-            '  download "$FOREIGN_RU_IPV6_LIST_URL" "$local_v6"',
+            '  download_any "$FOREIGN_RU_IPV4_LIST_URL" "$local_v4" ipv4',
+            '  download_any "$FOREIGN_RU_IPV6_LIST_URL" "$local_v6" ipv6',
             "  {",
             '    echo "flush set inet vpnstack ru_ipv4"',
             '    if [[ -s "$local_v4" ]]; then',

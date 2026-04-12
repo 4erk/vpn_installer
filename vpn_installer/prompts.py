@@ -112,6 +112,10 @@ def auth_mode_label(auth_mode: str) -> str:
     return "SSH key" if auth_mode == "key" else "SSH password"
 
 
+def human_target_label(target: RemoteTarget) -> str:
+    return target.label[:1].lower() + target.label[1:]
+
+
 def display_target_connection(target: RemoteTarget) -> None:
     print(f"Public IP: {target.public_ip}")
     print(f"SSH: {target.ssh_user}@{target.ssh_host}:{target.ssh_port}")
@@ -135,7 +139,7 @@ def hydrate_runtime_auth(target: RemoteTarget) -> RemoteTarget:
 
 
 def prompt_server_connection(target: RemoteTarget, *, force_prompt: bool = False, confirm_existing: bool = True) -> RemoteTarget:
-    print_header(f"Подключение: {target.label}")
+    print_header(f"Подключение: {human_target_label(target)}")
     if target.saved_connection:
         try:
             validate_target_settings(target)
@@ -150,7 +154,7 @@ def prompt_server_connection(target: RemoteTarget, *, force_prompt: bool = False
                 return hydrate_runtime_auth(target)
             if not force_prompt:
                 action = prompt_choice(
-                    f"Что делать с подключением для {target.label}?",
+                    "Что делать с этим подключением?",
                     [("reuse", "Использовать сохранённые SSH-данные"), ("edit", "Изменить SSH-данные")],
                     default="reuse",
                 )
@@ -279,7 +283,7 @@ def select_role_for_menu(command_name: str) -> str:
     if command_name not in {"status", "reinstall", "remove", "purge"}:
         return "all"
     return prompt_choice(
-        "Какую часть контура нужно затронуть?",
-        [("all", "Обе роли: RU и Foreign"), (ROLE_RU, "Только RU сервер"), (ROLE_FOREIGN, "Только Foreign сервер")],
+        "Какой сервер нужно затронуть?",
+        [("all", "Оба сервера"), (ROLE_RU, "Только российский сервер"), (ROLE_FOREIGN, "Только зарубежный сервер")],
         default="all",
     )

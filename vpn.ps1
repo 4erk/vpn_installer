@@ -18,7 +18,6 @@ function Show-VpnHelp {
   powershell -ExecutionPolicy Bypass -File .\vpn.ps1
   powershell -ExecutionPolicy Bypass -File .\vpn.ps1 install
   powershell -ExecutionPolicy Bypass -File .\vpn.ps1 status --deployment my-vpn
-  powershell -ExecutionPolicy Bypass -File .\vpn.ps1 reinstall --deployment my-vpn --role ru-gateway
 
 Если запустить без аргументов:
   откроется пошаговое меню с действиями:
@@ -31,7 +30,7 @@ function Show-VpnHelp {
   - Самопроверка
 
 Что нужно заранее:
-  - 2 VPS на Ubuntu 24.04
+  - российский и зарубежный сервер на Ubuntu 24.04
   - публичный IPv4 у каждого
   - SSH-доступ по ключу или паролю
   - установленный Hiddify на устройстве клиента
@@ -40,6 +39,8 @@ function Show-VpnHelp {
   - URI для Hiddify сохранится локально
   - будет попытка скопировать URI в буфер обмена
   - появится файл NEXT-STEPS.txt с дальнейшими шагами
+  - Как выбрать серверы: docs/PROVIDERS.md
+  - Что внутри проекта: docs/PROJECT.md
 
 Подсказка:
   Enter в вопросах с дефолтом оставляет текущее значение.

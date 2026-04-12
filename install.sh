@@ -132,11 +132,11 @@ GLOBAL_DOH_SERVER_NAME="${GLOBAL_DOH_SERVER_NAME:-cloudflare-dns.com}"
 GLOBAL_DOH_PATH="${GLOBAL_DOH_PATH:-/dns-query}"
 
 RULESET_DIR="${RULESET_DIR:-/var/lib/vpn-stack/rules}"
-RU_GEOSITE_URL="${RU_GEOSITE_URL:-https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ru.srs}"
-RU_GEOIP_URL="${RU_GEOIP_URL:-https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-ru.srs}"
+RU_GEOSITE_URL="${RU_GEOSITE_URL:-https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ru.srs https://cdn.jsdelivr.net/gh/SagerNet/sing-geosite@rule-set/geosite-category-ru.srs https://github.com/SagerNet/sing-geosite/raw/rule-set/geosite-category-ru.srs}"
+RU_GEOIP_URL="${RU_GEOIP_URL:-https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-ru.srs https://cdn.jsdelivr.net/gh/SagerNet/sing-geoip@rule-set/geoip-ru.srs https://github.com/SagerNet/sing-geoip/raw/rule-set/geoip-ru.srs}"
 FOREIGN_BLOCK_RU="${FOREIGN_BLOCK_RU:-1}"
-FOREIGN_RU_IPV4_LIST_URL="${FOREIGN_RU_IPV4_LIST_URL:-https://www.ipdeny.com/ipblocks/data/aggregated/ru-aggregated.zone}"
-FOREIGN_RU_IPV6_LIST_URL="${FOREIGN_RU_IPV6_LIST_URL:-https://www.ipdeny.com/ipv6/ipaddresses/aggregated/ru-aggregated.zone}"
+FOREIGN_RU_IPV4_LIST_URL="${FOREIGN_RU_IPV4_LIST_URL:-https://www.ipdeny.com/ipblocks/data/aggregated/ru-aggregated.zone https://stat.ripe.net/data/country-resource-list/data.json?resource=ru&v4_format=prefix}"
+FOREIGN_RU_IPV6_LIST_URL="${FOREIGN_RU_IPV6_LIST_URL:-https://www.ipdeny.com/ipv6/ipaddresses/aggregated/ru-aggregated.zone https://stat.ripe.net/data/country-resource-list/data.json?resource=ru}"
 SINGBOX_CONFIG_PATH="/etc/sing-box/config.json"
 WG_CONFIG_PATH="/etc/wireguard/${WG_INTERFACE}.conf"
 NFTABLES_PATH="/etc/nftables.conf"
@@ -779,15 +779,67 @@ FOREIGN_RU_IPV6_LIST_URL="\${7:-${FOREIGN_RU_IPV6_LIST_URL}}"
 mkdir -p "\$RULESET_DIR"
 
 download() {
-  local url="\$1"
+  local source="\$1"
   local output="\$2"
-  curl -fsSL "\$url" -o "\$output.tmp"
-  mv "\$output.tmp" "\$output"
+  local asset_kind="\$3"
+  local response_tmp="\${output}.response.tmp"
+  local render_tmp="\${output}.render.tmp"
+  rm -f "\${response_tmp}" "\${render_tmp}"
+  curl -fsSL "\$source" -o "\${response_tmp}"
+  if [[ "\$source" == *"stat.ripe.net/data/country-resource-list/"* ]]; then
+    python3 - "\$asset_kind" "\${response_tmp}" "\${render_tmp}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+asset_kind = sys.argv[1]
+response_path = Path(sys.argv[2])
+output_path = Path(sys.argv[3])
+payload = json.loads(response_path.read_text(encoding="utf-8"))
+resources = payload.get("data", {}).get("resources", {})
+family = "ipv6" if asset_kind == "ipv6" else "ipv4"
+prefixes = resources.get(family, [])
+if not isinstance(prefixes, list) or not prefixes:
+    raise SystemExit(1)
+output_path.write_text("".join(f"{entry}\n" for entry in prefixes if str(entry).strip()), encoding="utf-8")
+PY
+    mv "\${render_tmp}" "\$output"
+  else
+    mv "\${response_tmp}" "\$output"
+  fi
+  rm -f "\${response_tmp}" "\${render_tmp}"
+}
+
+download_any() {
+  local sources="\$1"
+  local output="\$2"
+  local asset_kind="\$3"
+  local source
+  local errors=()
+  for source in \$sources; do
+    if download "\$source" "\${output}.tmp" "\$asset_kind"; then
+      if [[ -s "\${output}.tmp" ]]; then
+        mv "\${output}.tmp" "\$output"
+        return 0
+      fi
+      rm -f "\${output}.tmp"
+      errors+=("\$source: empty payload")
+      continue
+    fi
+    rm -f "\${output}.tmp"
+    errors+=("\$source")
+  done
+  if [[ -s "\$output" ]]; then
+    echo "vpn-stack-sync: оставляю старую копию \$(basename "\$output"), все источники недоступны: \${errors[*]}" >&2
+    return 0
+  fi
+  echo "vpn-stack-sync: не удалось получить \$(basename "\$output") ни из одного источника: \${errors[*]}" >&2
+  return 1
 }
 
 if [[ "\$ROLE" == "ru-gateway" ]]; then
-  download "\$RU_GEOSITE_URL" "\$RULESET_DIR/geosite-ru.srs"
-  download "\$RU_GEOIP_URL" "\$RULESET_DIR/geoip-ru.srs"
+  download_any "\$RU_GEOSITE_URL" "\$RULESET_DIR/geosite-ru.srs" binary
+  download_any "\$RU_GEOIP_URL" "\$RULESET_DIR/geoip-ru.srs" binary
   exit 0
 fi
 
@@ -795,8 +847,8 @@ if [[ "\$ROLE" == "foreign-exit" && "\$FOREIGN_BLOCK_RU" == "1" ]]; then
   local_v4="\$RULESET_DIR/ru-ipv4.zone"
   local_v6="\$RULESET_DIR/ru-ipv6.zone"
 
-  download "\$FOREIGN_RU_IPV4_LIST_URL" "\$local_v4"
-  download "\$FOREIGN_RU_IPV6_LIST_URL" "\$local_v6"
+  download_any "\$FOREIGN_RU_IPV4_LIST_URL" "\$local_v4" ipv4
+  download_any "\$FOREIGN_RU_IPV6_LIST_URL" "\$local_v6" ipv6
 
   {
     echo "flush set inet vpnstack ru_ipv4"
@@ -991,6 +1043,7 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y \
   curl \
   gnupg \
   nftables \
+  python3 \
   unattended-upgrades \
   wireguard \
   wireguard-tools

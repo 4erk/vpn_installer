@@ -93,8 +93,8 @@ def ensure_foreign_wan_interface(env: dict[str, str], foreign_preflight: dict[st
 def print_summary(deployment_name: str, env: dict[str, str], targets: list[RemoteTarget]) -> None:
     print_header("Сводка deployment")
     print(f"deployment: {deployment_name}")
-    print(f"RU public IP: {env.get('RU_PUBLIC_IP', '-')}")
-    print(f"Foreign public IP: {env.get('FOREIGN_PUBLIC_IP', '-')}")
+    print(f"IP российского сервера: {env.get('RU_PUBLIC_IP', '-')}")
+    print(f"IP зарубежного сервера: {env.get('FOREIGN_PUBLIC_IP', '-')}")
     for target in targets:
         print(f"{target.label}: {target.ssh_user}@{target.ssh_host}:{target.ssh_port} ({auth_mode_label(target.auth_mode)})")
     print(f"WAN_INTERFACE: {env.get('WAN_INTERFACE') or '-'}")
@@ -302,10 +302,10 @@ def install_workflow(deployment: str | None) -> int:
     print_header("Установка / обновление VPN")
     print("Сценарий:")
     print("1. Выбор или создание deployment")
-    print("2. Проверка RU сервера")
-    print("3. Проверка Foreign сервера")
+    print("2. Проверка российского сервера")
+    print("3. Проверка зарубежного сервера")
     print("4. Локальная сборка артефактов")
-    print("5. Установка сначала на Foreign, затем на RU")
+    print("5. Установка сначала на зарубежный сервер, затем на российский")
     roles = requested_roles("all")
     deployment_name, env_path, env, state, targets, preflights = prepare_remote_session(
         deployment,

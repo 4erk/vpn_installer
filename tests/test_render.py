@@ -52,6 +52,29 @@ class RenderTests(unittest.TestCase):
             with self.assertRaises(Exception):
                 render.fetch_assets(env, Path(tmp))
 
+    def test_fetch_assets_tries_next_source_after_failure(self) -> None:
+        env = self.make_env()
+        env["RU_GEOSITE_URL"] = "https://bad.example/geosite-ru.srs https://good.example/geosite-ru.srs"
+        env["RU_GEOIP_URL"] = "https://good.example/geoip-ru.srs"
+        env["FOREIGN_RU_IPV4_LIST_URL"] = "https://good.example/ru-ipv4.zone"
+        env["FOREIGN_RU_IPV6_LIST_URL"] = "https://good.example/ru-ipv6.zone"
+
+        calls: list[str] = []
+
+        def fake_download(source: str, destination: Path, asset_name: str) -> None:
+            calls.append(source)
+            if source.startswith("https://bad.example/"):
+                raise OSError("boom")
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(f"{asset_name}\n", encoding="utf-8")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(render, "download_asset", side_effect=fake_download):
+                result = render.fetch_assets(env, Path(tmp))
+                self.assertTrue(result["geosite-ru.srs"].is_file())
+        self.assertIn("https://bad.example/geosite-ru.srs", calls)
+        self.assertIn("https://good.example/geosite-ru.srs", calls)
+
     def test_client_artifact_paths_contract(self) -> None:
         env = self.make_env()
         paths = render.client_artifact_paths(env)

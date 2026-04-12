@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ipaddress
+import json
 import os
 import re
 import urllib.error
@@ -140,11 +141,11 @@ def generate_default_env(deploy_name: str) -> dict[str, str]:
         "GLOBAL_DOH_SERVER_NAME": "cloudflare-dns.com",
         "GLOBAL_DOH_PATH": "/dns-query",
         "RULESET_DIR": "/var/lib/vpn-stack/rules",
-        "RU_GEOSITE_URL": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ru.srs",
-        "RU_GEOIP_URL": "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-ru.srs",
+        "RU_GEOSITE_URL": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ru.srs https://cdn.jsdelivr.net/gh/SagerNet/sing-geosite@rule-set/geosite-category-ru.srs https://github.com/SagerNet/sing-geosite/raw/rule-set/geosite-category-ru.srs",
+        "RU_GEOIP_URL": "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-ru.srs https://cdn.jsdelivr.net/gh/SagerNet/sing-geoip@rule-set/geoip-ru.srs https://github.com/SagerNet/sing-geoip/raw/rule-set/geoip-ru.srs",
         "FOREIGN_BLOCK_RU": "1",
-        "FOREIGN_RU_IPV4_LIST_URL": "https://www.ipdeny.com/ipblocks/data/aggregated/ru-aggregated.zone",
-        "FOREIGN_RU_IPV6_LIST_URL": "https://www.ipdeny.com/ipv6/ipaddresses/aggregated/ru-aggregated.zone",
+        "FOREIGN_RU_IPV4_LIST_URL": "https://www.ipdeny.com/ipblocks/data/aggregated/ru-aggregated.zone https://stat.ripe.net/data/country-resource-list/data.json?resource=ru&v4_format=prefix",
+        "FOREIGN_RU_IPV6_LIST_URL": "https://www.ipdeny.com/ipv6/ipaddresses/aggregated/ru-aggregated.zone https://stat.ripe.net/data/country-resource-list/data.json?resource=ru",
         "CLIENT_TUN_NAME": "tun0",
         "CLIENT_TUN_ADDRESS_V4": "172.19.0.1/30",
         "CLIENT_TUN_ADDRESS_V6": "fdfe:dcba:9876::1/126",
@@ -279,6 +280,42 @@ def find_existing_deployments() -> list[str]:
         if env_path.name != "deployment.env.example":
             names.append(env_path.stem)
     return names
+
+
+def split_asset_sources(raw_value: str) -> list[str]:
+    return [entry for entry in re.split(r"[\s|]+", raw_value.strip()) if entry]
+
+
+def _country_resource_key(asset_name: str) -> str:
+    return "ipv6" if asset_name.endswith(".ipv6") or "ipv6" in asset_name else "ipv4"
+
+
+def _write_prefix_lines(destination: Path, prefixes: list[str]) -> None:
+    if not prefixes:
+        fail("Источник не вернул ни одного префикса.")
+    tmp_path = destination.with_suffix(destination.suffix + ".tmp")
+    tmp_path.write_text("\n".join(prefixes) + "\n", encoding="utf-8")
+    tmp_path.replace(destination)
+
+
+def _download_ripe_country_resource(url: str, destination: Path, asset_name: str) -> None:
+    request = urllib.request.Request(url, headers={"User-Agent": "vpn-installer/1.0"})
+    with urllib.request.urlopen(request, timeout=DEFAULT_ASSET_TIMEOUT) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    resources = payload.get("data", {}).get("resources", {})
+    family_key = _country_resource_key(asset_name)
+    prefixes = resources.get(family_key, [])
+    if not isinstance(prefixes, list):
+        fail(f"RIPE country-resource-list вернул неожиданный формат для {asset_name}.")
+    normalized = [str(prefix).strip() for prefix in prefixes if str(prefix).strip()]
+    _write_prefix_lines(destination, normalized)
+
+
+def download_asset(url: str, destination: Path, asset_name: str) -> None:
+    if "stat.ripe.net/data/country-resource-list/" in url:
+        _download_ripe_country_resource(url, destination, asset_name)
+        return
+    download_file(url, destination)
 
 
 def download_file(url: str, destination: Path) -> None:

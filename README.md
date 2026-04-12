@@ -1,23 +1,19 @@
 # VPN Installer
 
-Этот репозиторий поднимает схему:
+Self-hosted VPN для личного использования и своего круга людей. Этот проект поднимает приватный контур из двух узлов: российский сервер даёт российский IP для российских сайтов, а зарубежный сервер выпускает остальной трафик через зарубежный IP. Это закрывает типовые проблемы публичных VPN: нестабильность, блокировки, зависимость от чужого сервиса и отсутствие контроля над своей инфраструктурой.
 
-`твой компьютер или телефон -> RU сервер -> Foreign сервер`
+Важно: решение рассчитано на приватное использование. Чем шире и бесконтрольнее его распространять, тем выше риск блокировок, компрометации доступа и лишнего внимания к контуру.
 
-Пользовательский вход только один:
+- [Как выбрать серверы](./docs/PROVIDERS.md)
+- [Что внутри проекта](./docs/PROJECT.md)
 
-- Windows: `vpn.ps1`
-- Linux: `vpn.sh`
+## Что нужно заранее
 
-## Что подготовить
+- один `российский сервер` с `Ubuntu 24.04`, публичным `IPv4` и доступом по `SSH`
+- один `зарубежный сервер` с `Ubuntu 24.04`, публичным `IPv4` и доступом по `SSH`
+- установленный клиент `Hiddify`
 
-Нужны:
-
-- `RU` сервер с `Ubuntu 24.04`, публичным `IPv4` и доступом по `SSH`
-- `Foreign` сервер с `Ubuntu 24.04`, публичным `IPv4` и доступом по `SSH`
-- клиент `Hiddify`
-
-Подходят оба варианта входа на сервер:
+Подходят оба варианта доступа:
 
 - `SSH key`
 - `SSH password`
@@ -45,21 +41,19 @@ chmod +x ./vpn.sh
 ./vpn.sh
 ```
 
-Если хочешь обойти меню:
+Если нужно сразу открыть установку без меню:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\vpn.ps1 install
-powershell -ExecutionPolicy Bypass -File .\vpn.ps1 status --deployment my-vpn
 ```
 
 ```bash
 ./vpn.sh install
-./vpn.sh status --deployment my-vpn
 ```
 
 ## Что спросит мастер
 
-Сначала всегда `RU`, потом `Foreign`.
+Сначала всегда проверяется `российский сервер`, потом `зарубежный сервер`.
 
 Для каждого сервера мастер спрашивает:
 
@@ -77,70 +71,34 @@ powershell -ExecutionPolicy Bypass -File .\vpn.ps1 status --deployment my-vpn
 
 Если `SSH host` отличается от публичного IP, мастер спросит его отдельно.
 
-Важно:
+Подсказки:
 
 - `Enter` оставляет показанное значение
 - пароль не сохраняется на диск
 - на Windows `vpn.ps1` сам поднимет portable Python, если его нет
-- на Linux нужен `python3`
-
-## Что делает мастер
-
-Автоматически:
-
-1. Проверяет `RU` сервер
-2. Проверяет `Foreign` сервер
-3. Собирает локальные артефакты
-4. Устанавливает сначала `Foreign`, потом `RU`
-5. Готовит строку для `Hiddify`
+- на Linux нужен локально установленный `python3`
 
 ## Что получится в конце
 
-После успешной установки будут созданы:
+После успешной установки появятся:
 
 - `out/<deployment>/client/hiddify-uri.txt`
 - `out/<deployment>/client/hiddify-cross-platform.json`
 - `out/<deployment>/client/linux-sing-box.json`
 - `out/<deployment>/NEXT-STEPS.txt`
 
-Основной результат:
+Главный результат:
 
-- строка `Hiddify URI` копируется в буфер обмена
+- строка для `Hiddify` копируется в буфер обмена
 - та же строка сохраняется в `hiddify-uri.txt`
 
-## Как импортировать в Hiddify
-
-Основной путь:
+## Как подключить в Hiddify
 
 1. Открой `Hiddify`
 2. Выбери добавление профиля из буфера обмена
 3. Если буфер не сработал, открой `hiddify-uri.txt` и вставь строку вручную
 
 JSON-файлы нужны только как запасной вариант.
-
-## Полезные команды
-
-Windows:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\vpn.ps1 status --deployment my-vpn
-powershell -ExecutionPolicy Bypass -File .\vpn.ps1 reinstall --deployment my-vpn
-powershell -ExecutionPolicy Bypass -File .\vpn.ps1 remove --deployment my-vpn
-powershell -ExecutionPolicy Bypass -File .\vpn.ps1 purge --deployment my-vpn
-powershell -ExecutionPolicy Bypass -File .\vpn.ps1 cleanup-local --deployment my-vpn
-powershell -ExecutionPolicy Bypass -File .\vpn.ps1 audit all
-```
-
-Linux:
-
-```bash
-./vpn.sh status --deployment my-vpn
-./vpn.sh reinstall --deployment my-vpn
-./vpn.sh remove --deployment my-vpn
-./vpn.sh purge --deployment my-vpn
-./vpn.sh cleanup-local --deployment my-vpn
-./vpn.sh audit all
-```
 
 ## Если что-то не сработало
 
@@ -157,4 +115,12 @@ Linux:
 - `out/<deployment>/NEXT-STEPS.txt`
 - `out/<deployment>/client/hiddify-uri.txt`
 
-Технические детали проекта: [docs/PROJECT.md](./docs/PROJECT.md)
+Для быстрой проверки после установки:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\vpn.ps1 status --deployment my-vpn
+```
+
+```bash
+./vpn.sh status --deployment my-vpn
+```

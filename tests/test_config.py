@@ -1,10 +1,26 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from vpn_installer import config
+
+
+class _FakeResponse:
+    def __init__(self, payload: bytes) -> None:
+        self.payload = payload
+
+    def __enter__(self) -> "_FakeResponse":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return self.payload
 
 
 class ConfigTests(unittest.TestCase):
@@ -49,6 +65,31 @@ class ConfigTests(unittest.TestCase):
         merged = config.merge_env_with_defaults({"WAN_INTERFACE": ""}, "sample")
         self.assertIn("WAN_INTERFACE", merged)
         self.assertEqual(merged["WAN_INTERFACE"], "")
+
+    def test_split_asset_sources_supports_spaces_and_pipe(self) -> None:
+        self.assertEqual(
+            config.split_asset_sources("https://a.example/file https://b.example/file|https://c.example/file"),
+            ["https://a.example/file", "https://b.example/file", "https://c.example/file"],
+        )
+
+    def test_download_asset_converts_ripe_json_to_prefix_file(self) -> None:
+        payload = {
+            "data": {
+                "resources": {
+                    "ipv4": ["5.8.0.0/21", "31.13.24.0/21"],
+                    "ipv6": ["2a00:1450::/32"],
+                }
+            }
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "ru-ipv4.zone"
+            with patch("urllib.request.urlopen", return_value=_FakeResponse(json.dumps(payload).encode("utf-8"))):
+                config.download_asset(
+                    "https://stat.ripe.net/data/country-resource-list/data.json?resource=ru&v4_format=prefix",
+                    output,
+                    "ru-ipv4.zone",
+                )
+            self.assertEqual(output.read_text(encoding="utf-8"), "5.8.0.0/21\n31.13.24.0/21\n")
 
 
 if __name__ == "__main__":

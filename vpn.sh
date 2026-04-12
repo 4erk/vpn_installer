@@ -9,7 +9,6 @@ show_vpn_help() {
   ./vpn.sh
   ./vpn.sh install
   ./vpn.sh status --deployment my-vpn
-  ./vpn.sh reinstall --deployment my-vpn --role ru-gateway
 
 Если запустить без аргументов:
   откроется пошаговое меню с действиями:
@@ -22,10 +21,12 @@ show_vpn_help() {
   - Самопроверка
 
 Что нужно заранее:
-  - 2 VPS на Ubuntu 24.04
+  - российский и зарубежный сервер на Ubuntu 24.04
   - публичный IPv4 у каждого
   - SSH-доступ по ключу или паролю
   - установленный Hiddify на клиентском устройстве
+  - Как выбрать серверы: docs/PROVIDERS.md
+  - Что внутри проекта: docs/PROJECT.md
 EOF
 }
 
