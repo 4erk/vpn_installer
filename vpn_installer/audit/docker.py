@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import shutil
 import textwrap
@@ -70,13 +72,14 @@ def test_asset_fail_fast(runner: AuditRunner) -> dict[str, str]:
             "FOREIGN_RU_IPV6_LIST_URL": "http://127.0.0.1:9/ru-ipv6.zone",
         },
     )
-    try:
-        render_all_artifacts(env_path, env)
-    except Exception as exc:  # noqa: BLE001
-        if "Не удалось получить обязательные assets" not in str(exc):
-            raise
-    else:
-        raise AuditFailure("Не сработал fail-fast по обязательным assets")
+    with contextlib.redirect_stderr(io.StringIO()):
+        try:
+            render_all_artifacts(env_path, env)
+        except Exception as exc:  # noqa: BLE001
+            if "Не удалось получить обязательные assets" not in str(exc):
+                raise
+        else:
+            raise AuditFailure("Не сработал fail-fast по обязательным assets")
 
     assets_dir = ROOT_DIR / "out" / env["DEPLOY_NAME"] / "assets"
     assets_dir.mkdir(parents=True, exist_ok=True)
@@ -84,7 +87,8 @@ def test_asset_fail_fast(runner: AuditRunner) -> dict[str, str]:
     write_text(assets_dir / "geoip-ru.srs", "dummy")
     write_text(assets_dir / "ru-ipv4.zone", "203.0.113.0/24")
     write_text(assets_dir / "ru-ipv6.zone", "2001:db8::/32")
-    render_all_artifacts(env_path, env)
+    with contextlib.redirect_stderr(io.StringIO()):
+        render_all_artifacts(env_path, env)
     return {"env_path": str(env_path)}
 
 

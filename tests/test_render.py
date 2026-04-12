@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -49,8 +51,9 @@ class RenderTests(unittest.TestCase):
         env["FOREIGN_RU_IPV4_LIST_URL"] = "http://127.0.0.1:9/ru-ipv4.zone"
         env["FOREIGN_RU_IPV6_LIST_URL"] = "http://127.0.0.1:9/ru-ipv6.zone"
         with tempfile.TemporaryDirectory() as tmp:
-            with self.assertRaises(Exception):
-                render.fetch_assets(env, Path(tmp))
+            with contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(Exception):
+                    render.fetch_assets(env, Path(tmp))
 
     def test_fetch_assets_tries_next_source_after_failure(self) -> None:
         env = self.make_env()
