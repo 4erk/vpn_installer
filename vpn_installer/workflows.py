@@ -4,6 +4,7 @@ import argparse
 import shlex
 import shutil
 import textwrap
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +18,7 @@ from .config import (
     require_env,
     ensure_deployment_env,
 )
-from .models import ROLE_FOREIGN, ROLE_META, ROLE_RU, RemoteTarget, UserCancelled
+from .models import AppError, ROLE_FOREIGN, ROLE_META, ROLE_RU, RemoteTarget, UserCancelled
 from .prompts import (
     ask_install_action,
     auth_mode_label,
@@ -423,39 +424,79 @@ def cleanup_local_workflow(deployment: str | None, *, drop_env: bool, drop_runti
     return 0
 
 
-def menu_workflow() -> int:
-    print_header("VPN Installer")
-    choice = prompt_choice(
-        "Выбери действие",
-        [
-            ("install", "Установить или обновить VPN"),
-            ("status", "Проверить текущее состояние"),
-            ("reinstall", "Переустановить"),
-            ("remove", "Удалить с серверов"),
-            ("purge", "Полностью очистить состояние"),
-            ("cleanup-local", "Удалить локальные файлы"),
-            ("audit", "Запустить самопроверку"),
-            ("exit", "Выход"),
-        ],
-        default="install",
-    )
-    if choice == "exit":
-        print("Завершено.")
-        return 0
-    if choice == "audit":
+def run_menu_action(action: Any, *, return_to: str) -> None:
+    try:
+        result = action()
+        if isinstance(result, int) and result != 0:
+            warn(f"Действие завершилось с кодом {result}.")
+    except UserCancelled as exc:
+        warn(str(exc) or "Операция отменена пользователем.")
+    except KeyboardInterrupt:
+        warn("Остановлено пользователем.")
+    except EOFError:
+        warn(f"Ввод прерван. Возврат в {return_to}.")
+    except AppError as exc:
+        warn(f"Ошибка: {exc}")
+        print(f"Возврат в {return_to}.")
+    except Exception:  # noqa: BLE001
+        traceback.print_exc()
+        warn(f"Сценарий завершился с ошибкой. Возврат в {return_to}.")
+    else:
+        print(f"Возврат в {return_to}.")
+
+
+def audit_menu_workflow() -> int:
+    while True:
+        print_header("Самопроверка")
         audit_mode = prompt_choice(
-            "Какой режим самопроверки нужен?",
-            [("quick", "Быстрая локальная проверка"), ("docker", "Docker regression"), ("lab", "Глубокий Docker lab"), ("all", "Полный прогон")],
+            "Выбери режим самопроверки",
+            [
+                ("quick", "Быстрая локальная проверка"),
+                ("docker", "Docker regression"),
+                ("lab", "Глубокий Docker lab"),
+                ("all", "Полный прогон"),
+                ("back", "Назад в главное меню"),
+            ],
             default="quick",
         )
+        if audit_mode == "back":
+            return 0
         from .audit.runner import main as audit_main
 
-        return audit_main([audit_mode])
-    if choice == "cleanup-local":
-        return cleanup_local_workflow(None, drop_env=False, drop_runtime=False)
-    role = select_role_for_menu(choice)
-    if choice == "install":
-        return install_workflow(None)
-    if choice == "status":
-        return status_workflow(None, role)
-    return remote_action_workflow(None, role, choice)
+        run_menu_action(lambda mode=audit_mode: audit_main([mode]), return_to="меню самопроверки")
+
+
+def menu_workflow() -> int:
+    while True:
+        print_header("VPN Installer")
+        choice = prompt_choice(
+            "Выбери действие",
+            [
+                ("install", "Установить или обновить VPN"),
+                ("status", "Проверить текущее состояние"),
+                ("reinstall", "Переустановить"),
+                ("remove", "Удалить с серверов"),
+                ("purge", "Полностью очистить состояние"),
+                ("cleanup-local", "Удалить локальные файлы"),
+                ("audit", "Запустить самопроверку"),
+                ("exit", "Выход"),
+            ],
+            default="install",
+        )
+        if choice == "exit":
+            print("Завершено.")
+            return 0
+        if choice == "audit":
+            audit_menu_workflow()
+            continue
+        if choice == "cleanup-local":
+            run_menu_action(lambda: cleanup_local_workflow(None, drop_env=False, drop_runtime=False), return_to="главное меню")
+            continue
+        role = select_role_for_menu(choice)
+        if choice == "install":
+            run_menu_action(lambda: install_workflow(None), return_to="главное меню")
+            continue
+        if choice == "status":
+            run_menu_action(lambda selected_role=role: status_workflow(None, selected_role), return_to="главное меню")
+            continue
+        run_menu_action(lambda selected_role=role, action_name=choice: remote_action_workflow(None, selected_role, action_name), return_to="главное меню")

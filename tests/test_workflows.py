@@ -250,21 +250,32 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(workflows.status_workflow("demo", ROLE_RU), 0)
         mocked.assert_called_once()
 
-    def test_menu_workflow_dispatches_audit_and_exit(self) -> None:
-        with patch("vpn_installer.workflows.prompt_choice", side_effect=["audit", "quick"]), patch("vpn_installer.audit.runner.main", return_value=0) as audit_main:
+    def test_menu_workflow_dispatches_actions_and_returns_to_menu(self) -> None:
+        with patch("vpn_installer.workflows.prompt_choice", side_effect=["audit", "quick", "back", "exit"]), patch("vpn_installer.audit.runner.main", return_value=0) as audit_main:
             self.assertEqual(workflows.menu_workflow(), 0)
         audit_main.assert_called_once_with(["quick"])
 
-        with patch("vpn_installer.workflows.prompt_choice", return_value="exit"):
-            self.assertEqual(workflows.menu_workflow(), 0)
-
-        with patch("vpn_installer.workflows.prompt_choice", return_value="cleanup-local"), patch("vpn_installer.workflows.cleanup_local_workflow", return_value=0) as cleanup:
+        with patch("vpn_installer.workflows.prompt_choice", side_effect=["cleanup-local", "exit"]), patch("vpn_installer.workflows.cleanup_local_workflow", return_value=0) as cleanup:
             self.assertEqual(workflows.menu_workflow(), 0)
         cleanup.assert_called_once_with(None, drop_env=False, drop_runtime=False)
 
-        with patch("vpn_installer.workflows.prompt_choice", return_value="status"), patch("vpn_installer.workflows.select_role_for_menu", return_value=ROLE_RU), patch("vpn_installer.workflows.status_workflow", return_value=0) as status:
+        with patch("vpn_installer.workflows.prompt_choice", side_effect=["status", "exit"]), patch("vpn_installer.workflows.select_role_for_menu", return_value=ROLE_RU), patch("vpn_installer.workflows.status_workflow", return_value=0) as status:
             self.assertEqual(workflows.menu_workflow(), 0)
         status.assert_called_once_with(None, ROLE_RU)
+
+    def test_run_menu_action_handles_cancel_and_error_without_propagation(self) -> None:
+        with patch("sys.stderr", new_callable=__import__("io").StringIO) as stream:
+            workflows.run_menu_action(lambda: (_ for _ in ()).throw(UserCancelled("cancelled")), return_to="главное меню")
+        self.assertIn("cancelled", stream.getvalue())
+
+        with patch("sys.stdout", new_callable=__import__("io").StringIO) as stream:
+            workflows.run_menu_action(lambda: (_ for _ in ()).throw(AppError("broken")), return_to="главное меню")
+        self.assertIn("Возврат в главное меню", stream.getvalue())
+
+    def test_audit_menu_workflow_loops_until_back(self) -> None:
+        with patch("vpn_installer.workflows.prompt_choice", side_effect=["quick", "back"]), patch("vpn_installer.audit.runner.main", return_value=0) as audit_main:
+            self.assertEqual(workflows.audit_menu_workflow(), 0)
+        audit_main.assert_called_once_with(["quick"])
 
     def test_cleanup_local_reports_when_nothing_found(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
