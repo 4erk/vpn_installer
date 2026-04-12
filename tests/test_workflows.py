@@ -268,12 +268,23 @@ class WorkflowTests(unittest.TestCase):
             workflows.run_menu_action(lambda: (_ for _ in ()).throw(UserCancelled("cancelled")), return_to="главное меню")
         self.assertIn("cancelled", stream.getvalue())
 
-        with patch("sys.stdout", new_callable=__import__("io").StringIO) as stream:
+        with patch("sys.stdout", new_callable=__import__("io").StringIO) as stdout_stream, patch("sys.stderr", new_callable=__import__("io").StringIO) as stderr_stream:
             workflows.run_menu_action(lambda: (_ for _ in ()).throw(AppError("broken")), return_to="главное меню")
-        self.assertIn("Возврат в главное меню", stream.getvalue())
+        self.assertIn("Возврат в главное меню", stdout_stream.getvalue())
+        self.assertIn("Ошибка: broken", stderr_stream.getvalue())
+
+        with patch("sys.stdout", new_callable=__import__("io").StringIO) as stdout_stream, patch("sys.stderr", new_callable=__import__("io").StringIO) as stderr_stream:
+            workflows.run_menu_action(lambda: (_ for _ in ()).throw(RuntimeError("boom")), return_to="меню самопроверки")
+        self.assertIn("Возврат в меню самопроверки", stdout_stream.getvalue())
+        self.assertIn("Непредвиденная ошибка: boom", stderr_stream.getvalue())
 
     def test_audit_menu_workflow_loops_until_back(self) -> None:
         with patch("vpn_installer.workflows.prompt_choice", side_effect=["quick", "back"]), patch("vpn_installer.audit.runner.main", return_value=0) as audit_main:
+            self.assertEqual(workflows.audit_menu_workflow(), 0)
+        audit_main.assert_called_once_with(["quick"])
+
+    def test_audit_menu_workflow_recovers_after_failure(self) -> None:
+        with patch("vpn_installer.workflows.prompt_choice", side_effect=["quick", "back"]), patch("vpn_installer.audit.runner.main", side_effect=RuntimeError("boom")) as audit_main:
             self.assertEqual(workflows.audit_menu_workflow(), 0)
         audit_main.assert_called_once_with(["quick"])
 

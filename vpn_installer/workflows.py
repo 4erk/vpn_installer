@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shlex
 import shutil
 import textwrap
@@ -438,9 +439,11 @@ def run_menu_action(action: Any, *, return_to: str) -> None:
     except AppError as exc:
         warn(f"Ошибка: {exc}")
         print(f"Возврат в {return_to}.")
-    except Exception:  # noqa: BLE001
-        traceback.print_exc()
-        warn(f"Сценарий завершился с ошибкой. Возврат в {return_to}.")
+    except Exception as exc:  # noqa: BLE001
+        if os.environ.get("VPN_DEBUG"):
+            traceback.print_exc()
+        warn(f"Непредвиденная ошибка: {exc}")
+        print(f"Возврат в {return_to}.")
     else:
         print(f"Возврат в {return_to}.")
 
