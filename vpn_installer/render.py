@@ -9,7 +9,7 @@ import urllib.error
 from pathlib import Path
 from typing import Any
 
-from .common import INSTALL_SCRIPT_PATH, OUT_DIR, ensure_file_parent, print_header, warn, write_text
+from .common import INSTALL_SCRIPT_PATH, OUT_DIR, ROOT_DIR, ensure_file_parent, parse_env_value, print_header, warn, write_text
 from .config import download_asset, render_env_text, require_env, split_asset_sources
 from .models import DEFAULT_ASSET_TIMEOUT, REQUIRED_ENV_VARS, ROLE_FOREIGN, ROLE_RU
 
@@ -60,11 +60,64 @@ def env_int(env: dict[str, str], key: str) -> int:
     return int(env[key])
 
 
+def env_list(env: dict[str, str], key: str) -> list[str]:
+    raw_value = env.get(key, "")
+    if not raw_value:
+        return []
+    result: list[str] = []
+    for raw_item in textwrap.dedent(raw_value).replace("\n", ",").split(","):
+        item = raw_item.strip()
+        if item:
+            result.append(item)
+    return result
+
+
+def load_env_file_from_text(env_text: str) -> dict[str, str]:
+    env: dict[str, str] = {}
+    for raw_line in env_text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, raw_value = line.split("=", 1)
+        env[key.strip()] = parse_env_value(raw_value)
+    return env
+
+
 def wg_host_address(cidr: str) -> str:
     return cidr.split("/", 1)[0]
 
 
 def render_ru_singbox(env: dict[str, str]) -> str:
+    direct_domains = env_list(env, "RU_FORCE_DIRECT_DOMAIN")
+    direct_domain_suffixes = env_list(env, "RU_FORCE_DIRECT_DOMAIN_SUFFIX")
+    direct_ip_cidrs = env_list(env, "RU_FORCE_DIRECT_IP_CIDR")
+
+    dns_rules: list[dict[str, Any]] = [{"query_type": ["AAAA"], "action": "reject"}]
+    if direct_domains:
+        dns_rules.append({"domain": direct_domains, "action": "route", "server": "dns-ru-direct", "strategy": "ipv4_only"})
+    if direct_domain_suffixes:
+        dns_rules.append({"domain_suffix": direct_domain_suffixes, "action": "route", "server": "dns-ru-direct", "strategy": "ipv4_only"})
+    dns_rules.append({"rule_set": ["ru-geosite"], "action": "route", "server": "dns-ru-direct", "strategy": "ipv4_only"})
+
+    route_rules: list[dict[str, Any]] = [
+        {"ip_version": 6, "action": "route", "outbound": "blocked"},
+        {"inbound": ["vless-in"], "action": "resolve", "strategy": "ipv4_only"},
+        {"inbound": ["vless-in"], "action": "sniff"},
+    ]
+    if direct_domains:
+        route_rules.append({"domain": direct_domains, "action": "route", "outbound": "direct-ru"})
+    if direct_domain_suffixes:
+        route_rules.append({"domain_suffix": direct_domain_suffixes, "action": "route", "outbound": "direct-ru"})
+    if direct_ip_cidrs:
+        route_rules.append({"ip_cidr": direct_ip_cidrs, "action": "route", "outbound": "direct-ru"})
+    route_rules.extend(
+        [
+            {"ip_is_private": True, "action": "route", "outbound": "direct-ru"},
+            {"rule_set": ["ru-geosite"], "action": "route", "outbound": "direct-ru"},
+            {"rule_set": ["ru-geoip"], "action": "route", "outbound": "direct-ru"},
+        ]
+    )
+
     payload = {
         "log": {"level": "warn", "timestamp": True},
         "dns": {
@@ -73,17 +126,14 @@ def render_ru_singbox(env: dict[str, str]) -> str:
                 {"type": "udp", "tag": "dns-ru-direct", "server": env["RU_DIRECT_DNS_SERVER"], "server_port": env_int(env, "RU_DIRECT_DNS_PORT"), "detour": "direct-ru"},
                 {"type": "https", "tag": "dns-global", "server": env["GLOBAL_DOH_SERVER"], "server_port": 443, "path": env["GLOBAL_DOH_PATH"], "detour": "to-foreign", "tls": {"enabled": True, "server_name": env["GLOBAL_DOH_SERVER_NAME"]}},
             ],
-            "rules": [
-                {"query_type": ["AAAA"], "action": "reject"},
-                {"rule_set": ["ru-geosite"], "action": "route", "server": "dns-ru-direct"},
-            ],
+            "rules": dns_rules,
             "final": "dns-global",
             "independent_cache": True,
         },
         "inbounds": [
             {
                 "type": "vless",
-                "tag": "client-in",
+                "tag": "vless-in",
                 "listen": "::",
                 "listen_port": env_int(env, "RU_LISTEN_PORT"),
                 "users": [{"name": f"{env['DEPLOY_NAME']}-client", "uuid": env["CLIENT_UUID"], "flow": env["CLIENT_FLOW"]}],
@@ -102,20 +152,16 @@ def render_ru_singbox(env: dict[str, str]) -> str:
         "outbounds": [
             {"type": "direct", "tag": "direct-ru"},
             {"type": "direct", "tag": "to-foreign", "bind_interface": env["WG_INTERFACE"], "routing_mark": env_int(env, "APP_ROUTE_MARK")},
-            {"type": "block", "tag": "block"},
+            {"type": "block", "tag": "blocked"},
         ],
         "route": {
-            "default_domain_resolver": {"server": "dns-global", "strategy": "ipv4_only"},
+            "auto_detect_interface": True,
+            "default_domain_resolver": {"server": "dns-ru-direct", "strategy": "ipv4_only"},
             "rule_set": [
                 {"tag": "ru-geosite", "type": "local", "format": "binary", "path": f"{env['RULESET_DIR']}/geosite-ru.srs"},
                 {"tag": "ru-geoip", "type": "local", "format": "binary", "path": f"{env['RULESET_DIR']}/geoip-ru.srs"},
             ],
-            "rules": [
-                {"ip_version": 6, "action": "route", "outbound": "block"},
-                {"protocol": "dns", "action": "hijack-dns"},
-                {"rule_set": ["ru-geosite"], "action": "route", "outbound": "direct-ru"},
-                {"rule_set": ["ru-geoip"], "action": "route", "outbound": "direct-ru"},
-            ],
+            "rules": route_rules,
             "final": "to-foreign",
         },
     }
@@ -428,6 +474,45 @@ def deployment_out_dir(env: dict[str, str]) -> Path:
     return OUT_DIR / env["DEPLOY_NAME"]
 
 
+def preview_dir_for_role(preview_root: Path, role: str) -> Path:
+    return preview_root / ("ru" if role == ROLE_RU else "foreign")
+
+
+def rendered_files_for_role(env: dict[str, str], role: str) -> dict[str, str]:
+    if role == ROLE_RU:
+        return {
+            "sing-box.json": render_ru_singbox(env),
+            f"{env['WG_INTERFACE']}.conf": render_ru_wg(env),
+            "nftables.conf": render_ru_firewall_nftables(env),
+            "sync-state.sh": render_sync_script(env),
+            "vpn-stack-sync.service": render_sync_service(ROLE_RU),
+            "vpn-stack-sync.timer": render_sync_timer(),
+        }
+    wan_iface = env.get("WAN_INTERFACE", "").strip() or "eth0"
+    return {
+        "sing-box.json": render_foreign_singbox(),
+        f"{env['WG_INTERFACE']}.conf": render_foreign_wg(env),
+        "nftables.conf": render_foreign_nftables(env, wan_iface),
+        "sync-state.sh": render_sync_script(env),
+        "vpn-stack-sync.service": render_sync_service(ROLE_FOREIGN),
+        "vpn-stack-sync.timer": render_sync_timer(),
+    }
+
+
+def write_role_rendered_files(env: dict[str, str], role: str, output_dir: Path) -> Path:
+    for name, content in rendered_files_for_role(env, role).items():
+        write_text(output_dir / name, content)
+    return output_dir
+
+
+def copy_python_package(target_root: Path) -> Path:
+    destination = target_root / "vpn_installer"
+    if destination.exists():
+        shutil.rmtree(destination)
+    shutil.copytree(ROOT_DIR / "vpn_installer", destination, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    return destination
+
+
 def client_artifact_paths(env: dict[str, str]) -> dict[str, Path]:
     client_dir = deployment_out_dir(env) / "client"
     return {
@@ -462,21 +547,8 @@ def render_next_steps(env: dict[str, str]) -> str:
 
 
 def render_preview_files(env: dict[str, str], preview_dir: Path) -> None:
-    ru_dir = preview_dir / "ru"
-    foreign_dir = preview_dir / "foreign"
-    wan_iface = env.get("WAN_INTERFACE", "").strip() or "eth0"
-    write_text(ru_dir / "sing-box.json", render_ru_singbox(env))
-    write_text(ru_dir / f"{env['WG_INTERFACE']}.conf", render_ru_wg(env))
-    write_text(ru_dir / "nftables.conf", render_ru_firewall_nftables(env))
-    write_text(ru_dir / "sync-state.sh", render_sync_script(env))
-    write_text(ru_dir / "vpn-stack-sync.service", render_sync_service(ROLE_RU))
-    write_text(ru_dir / "vpn-stack-sync.timer", render_sync_timer())
-    write_text(foreign_dir / "sing-box.json", render_foreign_singbox())
-    write_text(foreign_dir / f"{env['WG_INTERFACE']}.conf", render_foreign_wg(env))
-    write_text(foreign_dir / "nftables.conf", render_foreign_nftables(env, wan_iface))
-    write_text(foreign_dir / "sync-state.sh", render_sync_script(env))
-    write_text(foreign_dir / "vpn-stack-sync.service", render_sync_service(ROLE_FOREIGN))
-    write_text(foreign_dir / "vpn-stack-sync.timer", render_sync_timer())
+    write_role_rendered_files(env, ROLE_RU, preview_dir_for_role(preview_dir, ROLE_RU))
+    write_role_rendered_files(env, ROLE_FOREIGN, preview_dir_for_role(preview_dir, ROLE_FOREIGN))
 
 
 def render_config_artifacts(env_path: Path, env: dict[str, str], *, fetch_assets_first: bool = True) -> Path:
@@ -515,27 +587,44 @@ def emit_cloud_init_assets(assets_dir: Path) -> str:
     return "\n".join(lines)
 
 
-def render_cloud_init_role(role: str, env_text: str, assets_dir: Path) -> str:
-    install_b64 = base64.b64encode(INSTALL_SCRIPT_PATH.read_bytes()).decode("ascii")
-    env_b64 = base64.b64encode(env_text.encode("utf-8")).decode("ascii")
-    lines = [
-        "#cloud-config",
-        "package_update: true",
-        "write_files:",
-        "  - path: /root/vpn-stack/install.sh",
-        "    permissions: '0755'",
-        "    encoding: b64",
-        f"    content: {install_b64}",
-        "  - path: /root/vpn-stack/deployment.env",
-        "    permissions: '0600'",
-        "    encoding: b64",
-        f"    content: {env_b64}",
-    ]
-    asset_block = emit_cloud_init_assets(assets_dir)
-    if asset_block:
-        lines.append(asset_block)
-    lines.extend(["runcmd:", f'  - [bash, -lc, "cd /root/vpn-stack && ./install.sh --role {role} --env-file /root/vpn-stack/deployment.env --assets-dir /root/vpn-stack/assets"]', ""])
+def emit_cloud_init_tree(source_dir: Path, destination_prefix: str) -> str:
+    lines: list[str] = []
+    executable_names = {"install.sh", "sync-state.sh"}
+    for path in sorted(source_dir.rglob("*")):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(source_dir).as_posix()
+        destination = f"{destination_prefix.rstrip('/')}/{relative}"
+        permissions = "0755" if path.name in executable_names else "0644"
+        encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+        lines.extend([f"  - path: {destination}", f"    permissions: '{permissions}'", "    encoding: b64", f"    content: {encoded}"])
     return "\n".join(lines)
+
+
+def render_cloud_init_role(role: str, env_text: str, assets_dir: Path) -> str:
+    cloud_root = OUT_DIR / ".cloud-init-stage" / role
+    if cloud_root.exists():
+        shutil.rmtree(cloud_root)
+    try:
+        cloud_root.mkdir(parents=True, exist_ok=True)
+        write_text(cloud_root / "install.sh", INSTALL_SCRIPT_PATH.read_text(encoding="utf-8"))
+        write_text(cloud_root / "deployment.env", env_text)
+        copy_python_package(cloud_root)
+        write_role_rendered_files(env=load_env_file_from_text(env_text), role=role, output_dir=cloud_root / "rendered")
+        lines = [
+            "#cloud-config",
+            "package_update: true",
+            "write_files:",
+        ]
+        lines.append(emit_cloud_init_tree(cloud_root, "/root/vpn-stack"))
+        asset_block = emit_cloud_init_assets(assets_dir)
+        if asset_block:
+            lines.append(asset_block)
+        lines.extend(["runcmd:", f'  - [bash, -lc, "cd /root/vpn-stack && ./install.sh --role {role} --env-file /root/vpn-stack/deployment.env --assets-dir /root/vpn-stack/assets"]', ""])
+        return "\n".join(lines)
+    finally:
+        if cloud_root.exists():
+            shutil.rmtree(cloud_root, ignore_errors=True)
 
 
 def render_cloud_init_artifacts(env: dict[str, str]) -> Path:
@@ -579,6 +668,10 @@ def package_bundle(env: dict[str, str]) -> Path:
     shutil.copy2(INSTALL_SCRIPT_PATH, foreign_bundle / "install.sh")
     shutil.copy2(server_dir / "ru.env", ru_bundle / "deployment.env")
     shutil.copy2(server_dir / "foreign.env", foreign_bundle / "deployment.env")
+    copy_python_package(ru_bundle)
+    copy_python_package(foreign_bundle)
+    shutil.copytree(preview_dir_for_role(out_dir / "preview", ROLE_RU), ru_bundle / "rendered", dirs_exist_ok=True)
+    shutil.copytree(preview_dir_for_role(out_dir / "preview", ROLE_FOREIGN), foreign_bundle / "rendered", dirs_exist_ok=True)
     for asset_name in ("geosite-ru.srs", "geoip-ru.srs"):
         copy_asset_if_present(assets_dir / asset_name, ru_bundle / "assets" / asset_name)
     for asset_name in ("ru-ipv4.zone", "ru-ipv6.zone"):

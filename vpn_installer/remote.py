@@ -1,66 +1,18 @@
 from __future__ import annotations
 
-import importlib
 import shlex
 import sys
 import time
-import urllib.error
-import urllib.request
 from pathlib import Path
 from typing import Any
 
-from .common import RUNTIME_DIR, RUNTIME_SITE_PACKAGES, command_exists, fail, run_command
+from .common import command_exists, fail, run_command
 from .models import AppError, RemoteTarget
-
-if str(RUNTIME_SITE_PACKAGES) not in sys.path:
-    sys.path.insert(0, str(RUNTIME_SITE_PACKAGES))
-
-
-def ensure_pip_available() -> None:
-    if run_command([sys.executable, "-m", "pip", "--version"], capture_output=True, check=False).returncode == 0:
-        return
-    if run_command([sys.executable, "-m", "ensurepip", "--upgrade"], capture_output=True, check=False).returncode == 0:
-        if run_command([sys.executable, "-m", "pip", "--version"], capture_output=True, check=False).returncode == 0:
-            return
-    downloads_dir = RUNTIME_DIR / "downloads"
-    downloads_dir.mkdir(parents=True, exist_ok=True)
-    get_pip_path = downloads_dir / "get-pip.py"
-    get_pip_url = "https://bootstrap.pypa.io/get-pip.py"
-    try:
-        urllib.request.urlretrieve(get_pip_url, get_pip_path)
-    except (urllib.error.URLError, OSError) as exc:
-        raise AppError(f"Не удалось скачать get-pip.py: {exc}") from exc
-    completed = run_command([sys.executable, str(get_pip_path)], capture_output=True, check=False)
-    if completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout or "").strip()
-        raise AppError(f"Не удалось подготовить pip для Python runtime.\n{detail}")
+from .runtime_deps import ensure_python_package
 
 
 def ensure_paramiko_installed():
-    try:
-        return importlib.import_module("paramiko")
-    except ImportError:
-        ensure_pip_available()
-        completed = run_command(
-            [
-                sys.executable,
-                "-m",
-                "pip",
-                "install",
-                "--disable-pip-version-check",
-                "--no-input",
-                "--target",
-                str(RUNTIME_SITE_PACKAGES),
-                "paramiko>=3.5,<4",
-            ],
-            capture_output=True,
-            check=False,
-        )
-        if completed.returncode != 0:
-            detail = (completed.stderr or completed.stdout or "").strip()
-            raise AppError(f"Не удалось подготовить Python SSH backend (paramiko).\n{detail}")
-        importlib.invalidate_caches()
-        return importlib.import_module("paramiko")
+    return ensure_python_package("paramiko", "paramiko>=3.5,<4")
 
 
 def use_python_ssh_backend(target: RemoteTarget) -> bool:

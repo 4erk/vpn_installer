@@ -22,11 +22,21 @@ class CliTests(unittest.TestCase):
             self.assertEqual(cli.main(["audit", "quick"]), 0)
         mocked.assert_called_once()
 
+    def test_audit_dispatch_forwards_flags(self) -> None:
+        with patch("vpn_installer.audit.runner.main", return_value=7) as mocked:
+            self.assertEqual(cli.main(["audit", "--json", "--keep-docker", "docker"]), 7)
+        mocked.assert_called_once_with(["--json", "--keep-docker", "docker"])
+
     def test_cleanup_local_parser_flags(self) -> None:
         parser = cli.build_parser()
         args = parser.parse_args(["cleanup-local", "--deployment", "demo", "--drop-env", "--drop-runtime"])
         self.assertTrue(args.drop_env)
         self.assertTrue(args.drop_runtime)
+
+    def test_reinstall_parser_has_role(self) -> None:
+        parser = cli.build_parser()
+        args = parser.parse_args(["reinstall", "--deployment", "demo", "--role", "ru-gateway"])
+        self.assertEqual(args.role, "ru-gateway")
 
 
 if __name__ == "__main__":

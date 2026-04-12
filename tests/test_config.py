@@ -38,17 +38,38 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaises(Exception):
             config.validate_ssh_user("bad user")
 
+    def test_validate_ssh_host_accepts_domain_and_rejects_bad(self) -> None:
+        self.assertEqual(config.validate_ssh_host("ssh.example.com"), "ssh.example.com")
+        with self.assertRaises(Exception):
+            config.validate_ssh_host("bad host")
+
     def test_validate_auth_mode_accepts_password(self) -> None:
         self.assertEqual(config.validate_auth_mode("password"), "password")
 
     def test_validate_identity_path_allows_empty(self) -> None:
         self.assertEqual(config.validate_identity_path(""), "")
 
+    def test_normalize_identity_path_resolves_relative(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            key_path = Path(tmp) / "id_ed25519"
+            key_path.write_text("key", encoding="utf-8")
+            with patch("pathlib.Path.cwd", return_value=Path(tmp)):
+                normalized = config.normalize_identity_path("id_ed25519")
+        self.assertEqual(Path(normalized), key_path.resolve())
+
     def test_default_reality_keys_are_urlsafe_without_padding(self) -> None:
         env = config.generate_default_env("sample")
         self.assertNotIn("=", env["RU_REALITY_PRIVATE_KEY"])
         self.assertNotIn("+", env["RU_REALITY_PRIVATE_KEY"])
         self.assertNotIn("/", env["RU_REALITY_PRIVATE_KEY"])
+
+    def test_default_ru_forced_direct_domains_include_ip_check_services(self) -> None:
+        env = config.generate_default_env("sample")
+        self.assertIn("api.ok.ru", env["RU_FORCE_DIRECT_DOMAIN"])
+        self.assertIn("checkip.amazonaws.com", env["RU_FORCE_DIRECT_DOMAIN"])
+        self.assertIn("ident.me", env["RU_FORCE_DIRECT_DOMAIN"])
+        self.assertIn(".ipify.org", env["RU_FORCE_DIRECT_DOMAIN_SUFFIX"])
+        self.assertIn(".ipinfo.io", env["RU_FORCE_DIRECT_DOMAIN_SUFFIX"])
 
     def test_render_env_roundtrip(self) -> None:
         env = config.generate_default_env("sample")
@@ -65,6 +86,11 @@ class ConfigTests(unittest.TestCase):
         merged = config.merge_env_with_defaults({"WAN_INTERFACE": ""}, "sample")
         self.assertIn("WAN_INTERFACE", merged)
         self.assertEqual(merged["WAN_INTERFACE"], "")
+
+    def test_generate_example_env_contains_public_ip_placeholders(self) -> None:
+        env = config.generate_example_env()
+        self.assertEqual(env["DEPLOY_NAME"], "my-stack")
+        self.assertEqual(env["RU_PUBLIC_IP"], "203.0.113.10")
 
     def test_split_asset_sources_supports_spaces_and_pipe(self) -> None:
         self.assertEqual(
@@ -90,6 +116,59 @@ class ConfigTests(unittest.TestCase):
                     "ru-ipv4.zone",
                 )
             self.assertEqual(output.read_text(encoding="utf-8"), "5.8.0.0/21\n31.13.24.0/21\n")
+
+    def test_require_env_and_existing_deployment_helpers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            deploy_dir = Path(tmp) / "deployments"
+            deploy_dir.mkdir()
+            env_path = deploy_dir / "demo.env"
+            env_path.write_text('DEPLOY_NAME="demo"\nRU_PUBLIC_IP="203.0.113.10"\nFOREIGN_PUBLIC_IP="198.51.100.20"\n', encoding="utf-8")
+            with patch("vpn_installer.config.DEPLOYMENTS_DIR", deploy_dir):
+                loaded_path, loaded_env = config.load_existing_deployment_env("demo")
+                names = config.find_existing_deployments()
+        self.assertEqual(loaded_path, env_path)
+        self.assertEqual(names, ["demo"])
+        config.require_env(
+            {
+                "DEPLOY_NAME": "demo",
+                "RU_PUBLIC_IP": "203.0.113.10",
+                "FOREIGN_PUBLIC_IP": "198.51.100.20",
+                "CLIENT_UUID": "x",
+                "RU_REALITY_SERVER_NAME": "a",
+                "RU_REALITY_HANDSHAKE_SERVER": "a",
+                "RU_REALITY_PRIVATE_KEY": "a",
+                "RU_REALITY_PUBLIC_KEY": "a",
+                "RU_REALITY_SHORT_ID": "a",
+                "WG_RU_ADDRESS": "a",
+                "WG_FOREIGN_ADDRESS": "a",
+                "WG_RU_PRIVATE_KEY": "a",
+                "WG_RU_PUBLIC_KEY": "a",
+                "WG_FOREIGN_PRIVATE_KEY": "a",
+                "WG_FOREIGN_PUBLIC_KEY": "a",
+                "WG_PRESHARED_KEY": "a",
+            }
+        )
+        self.assertEqual(loaded_env["DEPLOY_NAME"], "demo")
+
+    def test_ensure_deployment_env_creates_and_merges(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env_path = Path(tmp) / "demo.env"
+            env = config.ensure_deployment_env(env_path, "demo")
+            env_path.write_text(config.render_env_text({**env, "WAN_INTERFACE": "eth9"}), encoding="utf-8")
+            updated = config.ensure_deployment_env(env_path, "demo")
+        self.assertEqual(updated["WAN_INTERFACE"], "eth9")
+
+    def test_write_prefix_lines_and_download_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ru.zone"
+            config._write_prefix_lines(path, ["203.0.113.0/24"])  # type: ignore[attr-defined]
+            self.assertEqual(path.read_text(encoding="utf-8"), "203.0.113.0/24\n")
+            with self.assertRaises(Exception):
+                config._write_prefix_lines(path, [])  # type: ignore[attr-defined]
+            fake_response = _FakeResponse(b"payload")
+            with patch("urllib.request.urlopen", return_value=fake_response):
+                config.download_file("https://example.com/file", path)
+            self.assertEqual(path.read_bytes(), b"payload")
 
 
 if __name__ == "__main__":

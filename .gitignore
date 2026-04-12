@@ -13,6 +13,13 @@
 Thumbs.db
 __pycache__/
 *.pyc
+.coverage
+/htmlcov/
+coverage-driver.py
+coverage-details*.json
+hiddify-test-config.json
+docs/hs_err_pid*.log
+docs/replay_pid*.log
 
 # Local/private notes
 /docs/local/

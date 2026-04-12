@@ -140,6 +140,9 @@ def generate_default_env(deploy_name: str) -> dict[str, str]:
         "GLOBAL_DOH_SERVER": "1.1.1.1",
         "GLOBAL_DOH_SERVER_NAME": "cloudflare-dns.com",
         "GLOBAL_DOH_PATH": "/dns-query",
+        "RU_FORCE_DIRECT_DOMAIN": "api.oneme.ru,mtalk.google.com,calls.okcdn.ru,gosuslugi.ru,api.ok.ru,ifconfig.me,ifconfig.co,checkip.amazonaws.com,ipapi.co,ipinfo.io,ident.me,tnedi.me,icanhazip.com",
+        "RU_FORCE_DIRECT_DOMAIN_SUFFIX": ".gstatic.com,.gosuslugi.ru,.ipify.org,.ipinfo.io,.ident.me,.tnedi.me,.icanhazip.com",
+        "RU_FORCE_DIRECT_IP_CIDR": "",
         "RULESET_DIR": "/var/lib/vpn-stack/rules",
         "RU_GEOSITE_URL": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ru.srs https://cdn.jsdelivr.net/gh/SagerNet/sing-geosite@rule-set/geosite-category-ru.srs https://github.com/SagerNet/sing-geosite/raw/rule-set/geosite-category-ru.srs",
         "RU_GEOIP_URL": "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-ru.srs https://cdn.jsdelivr.net/gh/SagerNet/sing-geoip@rule-set/geoip-ru.srs https://github.com/SagerNet/sing-geoip/raw/rule-set/geoip-ru.srs",
@@ -175,6 +178,29 @@ def merge_env_with_defaults(existing: dict[str, str], deploy_name: str) -> dict[
             merged[key] = value
     merged["DEPLOY_NAME"] = deploy_name
     return merged
+
+
+def generate_example_env() -> dict[str, str]:
+    env = generate_default_env("my-stack")
+    env.update(
+        {
+            "RU_PUBLIC_IP": "203.0.113.10",
+            "FOREIGN_PUBLIC_IP": "198.51.100.20",
+            "CLIENT_UUID": "00000000-0000-0000-0000-000000000000",
+            "RU_REALITY_PRIVATE_KEY": "",
+            "RU_REALITY_PUBLIC_KEY": "",
+            "WG_RU_PRIVATE_KEY": "",
+            "WG_RU_PUBLIC_KEY": "",
+            "WG_FOREIGN_PRIVATE_KEY": "",
+            "WG_FOREIGN_PUBLIC_KEY": "",
+            "WG_PRESHARED_KEY": "",
+        }
+    )
+    return env
+
+
+def render_example_env_text() -> str:
+    return render_env_text(generate_example_env())
 
 
 def ensure_deployment_env(env_path: Path, deployment_name: str) -> dict[str, str]:

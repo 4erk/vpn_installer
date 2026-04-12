@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from ..common import INSTALL_SCRIPT_PATH, OUT_DIR, ROOT_DIR, ensure_file_parent
+from ..common import INSTALL_SCRIPT_PATH, OUT_DIR, ROOT_DIR, RUNTIME_SITE_PACKAGES, ensure_file_parent
 from ..config import generate_default_env, load_env_file, render_env_text
 
 AUDIT_ROOT = OUT_DIR / "audit"
@@ -191,10 +191,12 @@ class AuditRunner:
         if env:
             merged_env.update(env)
         repo_pythonpath = str(ROOT_DIR)
+        pythonpath_parts = [repo_pythonpath]
+        if RUNTIME_SITE_PACKAGES.exists():
+            pythonpath_parts.append(str(RUNTIME_SITE_PACKAGES))
         if merged_env.get("PYTHONPATH"):
-            merged_env["PYTHONPATH"] = f"{repo_pythonpath}{os.pathsep}{merged_env['PYTHONPATH']}"
-        else:
-            merged_env["PYTHONPATH"] = repo_pythonpath
+            pythonpath_parts.append(merged_env["PYTHONPATH"])
+        merged_env["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)
         completed = subprocess.run(
             args,
             cwd=str(cwd or ROOT_DIR),
@@ -374,15 +376,23 @@ class AuditRunner:
         return assets_dir
 
     def cleanup_stale_lab_resources(self) -> None:
-        container_prefixes = ("ru-", "foreign-", "client-", "dns-", "ruweb-", "globalweb-")
-        network_prefixes = ("audit-front-", "audit-ru-", "audit-global-")
-        containers = subprocess.run(["docker", "ps", "-a", "--format", "{{.Names}}"], capture_output=True, text=True, check=False)
+        containers = subprocess.run(
+            ["docker", "ps", "-a", "--filter", "label=vpn-installer.audit=1", "--format", "{{.Names}}"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
         for name in containers.stdout.splitlines():
-            if name.endswith("-lab") and name.startswith(container_prefixes):
+            if name:
                 subprocess.run(["docker", "rm", "-f", name], capture_output=True, text=True, check=False)
-        networks = subprocess.run(["docker", "network", "ls", "--format", "{{.Name}}"], capture_output=True, text=True, check=False)
+        networks = subprocess.run(
+            ["docker", "network", "ls", "--filter", "label=vpn-installer.audit=1", "--format", "{{.Name}}"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
         for name in networks.stdout.splitlines():
-            if name.endswith("-lab") and name.startswith(network_prefixes):
+            if name:
                 subprocess.run(["docker", "network", "rm", name], capture_output=True, text=True, check=False)
 
     def docker_copy(self, container: str, source: Path, destination: str) -> None:
@@ -418,7 +428,7 @@ class AuditRunner:
             yield name
         finally:
             if not self.keep_docker:
-                self.docker(f"rm-{name}", ["rm", "-f", name], expect_code=0)
+                self._docker_cleanup(f"rm-{name}", ["rm", "-f", name])
 
     def docker_exec(
         self,
@@ -445,7 +455,7 @@ class AuditRunner:
             yield name
         finally:
             if not self.keep_docker:
-                self.docker(f"network-rm-{name}", ["network", "rm", name], expect_code=0)
+                self._docker_cleanup(f"network-rm-{name}", ["network", "rm", name])
 
     def docker_network_connect(self, network: str, container: str, ip: str) -> None:
         self.docker(f"network-connect-{network}-{container}", ["network", "connect", "--ip", ip, network, container])
@@ -458,6 +468,12 @@ class AuditRunner:
             expect_code=0,
             expected_codes=expect_codes or {0},
         )
+
+    def _docker_cleanup(self, name: str, args: list[str]) -> None:
+        completed = self.docker(name, args, expect_code=0, expected_codes={0, 1})
+        output = f"{completed.stdout}\n{completed.stderr}".lower()
+        if completed.returncode == 1 and "not found" not in output:
+            raise AuditFailure(f"{name}: cleanup failed unexpectedly.\nstdout/stderr saved in logs.")
 
 
 def build_parser() -> argparse.ArgumentParser:

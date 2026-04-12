@@ -9,11 +9,50 @@ import textwrap
 from pathlib import Path
 from unittest.mock import patch
 
-from ..common import OUT_DIR, ROOT_DIR
+from ..common import OUT_DIR, ROOT_DIR, RUNTIME_SITE_PACKAGES
 from ..config import load_env_file
 from ..render import render_all_artifacts
+from ..runtime_deps import ensure_python_package
 from ..workflows import build_target
 from .runner import AUDIT_IMAGE, VPN_PS1, AuditFailure, AuditRunner, powershell_executable, python_cmd, require_command, write_bytes
+
+COVERAGE_THRESHOLD = 90
+COVERAGE_OMIT = "vpn_installer/audit/*"
+
+
+def coverage_command(*args: str) -> list[str]:
+    runner = (
+        "import runpy, sys; "
+        f"sys.path.insert(0, {str(RUNTIME_SITE_PACKAGES)!r}); "
+        "sys.argv=['coverage', *sys.argv[1:]]; "
+        "runpy.run_module('coverage', run_name='__main__')"
+    )
+    return python_cmd() + ["-c", runner, *args]
+
+
+def unit_test_modules() -> list[str]:
+    return sorted(f"tests.{path.stem}" for path in (ROOT_DIR / "tests").glob("test_*.py"))
+
+
+def unittest_driver_text() -> str:
+    return textwrap.dedent(
+        f"""
+        import pathlib
+        import sys
+        import unittest
+
+        repo = pathlib.Path({str(ROOT_DIR)!r}).resolve()
+        sys.path.insert(0, str(repo))
+        module_name = sys.argv[1]
+        suite = unittest.defaultTestLoader.loadTestsFromName(module_name)
+        result = unittest.TextTestRunner(verbosity=2).run(suite)
+        raise SystemExit(0 if result.wasSuccessful() else 1)
+        """
+    ).strip() + "\n"
+
+
+def coverage_driver_text() -> str:
+    return unittest_driver_text()
 
 
 def run(runner: AuditRunner) -> None:
@@ -24,7 +63,8 @@ def run(runner: AuditRunner) -> None:
     runner.seed_foreign_block_cache(out_dir.name)
     ps_env = {"VPN_NO_PAUSE": "1"}
 
-    runner.record("quick-unittest", lambda: runner.run_command("unittest", python_cmd() + ["-m", "unittest", "discover", "-s", "tests", "-t", ".", "-v"]) or None)
+    runner.record("quick-unittest", lambda: test_unittest_modules(runner))
+    runner.record("quick-coverage", lambda: test_coverage(runner))
     runner.record("quick-bash-syntax", lambda: runner.run_bash("bash-syntax", "bash -n install.sh") or None)
     runner.record(
         "quick-py-compile",
@@ -37,6 +77,8 @@ def run(runner: AuditRunner) -> None:
                 str(ROOT_DIR / "vpn_installer" / "__main__.py"),
                 str(ROOT_DIR / "vpn_installer" / "launcher.py"),
                 str(ROOT_DIR / "vpn_installer" / "cli.py"),
+                str(ROOT_DIR / "vpn_installer" / "install_support.py"),
+                str(ROOT_DIR / "vpn_installer" / "runtime_deps.py"),
                 str(ROOT_DIR / "vpn_installer" / "workflows.py"),
                 str(ROOT_DIR / "vpn_installer" / "render.py"),
                 str(ROOT_DIR / "vpn_installer" / "audit" / "runner.py"),
@@ -64,6 +106,46 @@ def run(runner: AuditRunner) -> None:
     runner.record("quick-windows-clean-room", lambda: test_windows_clean_room(runner))
     runner.record("quick-linux-launcher-no-python", lambda: test_linux_launcher_no_python(runner))
     runner.record("quick-linux-launcher-python", lambda: test_linux_launcher_with_python(runner))
+
+
+def test_unittest_modules(runner: AuditRunner) -> dict[str, str]:
+    driver = runner.run_dir / "unittest_driver.py"
+    driver.write_text(unittest_driver_text(), encoding="utf-8")
+    modules = unit_test_modules()
+    for module_name in modules:
+        short_name = module_name.split(".")[-1]
+        runner.run_command(f"unittest-{short_name}", python_cmd() + [str(driver), module_name])
+    return {"modules": str(len(modules))}
+
+
+def test_coverage(runner: AuditRunner) -> dict[str, str]:
+    ensure_python_package("coverage", "coverage>=7,<8")
+    coverage_data = runner.run_dir / "coverage.json"
+    coverage_driver = runner.run_dir / "coverage_driver.py"
+    coverage_driver.write_text(coverage_driver_text(), encoding="utf-8")
+    modules = unit_test_modules()
+    runner.run_command("coverage-erase", coverage_command("erase"))
+    for index, module_name in enumerate(modules):
+        short_name = module_name.split(".")[-1]
+        args = ["run", "--source", "vpn_installer"]
+        if index > 0:
+            args.append("--append")
+        args.extend([str(coverage_driver), module_name])
+        runner.run_command(f"coverage-run-{short_name}", coverage_command(*args))
+    runner.run_command(
+        "coverage-report",
+        coverage_command("report", f"--fail-under={COVERAGE_THRESHOLD}", f"--omit={COVERAGE_OMIT}"),
+    )
+    runner.run_command(
+        "coverage-json",
+        coverage_command("json", f"--omit={COVERAGE_OMIT}", "-o", str(coverage_data)),
+    )
+    return {
+        "coverage_json": str(coverage_data),
+        "threshold": str(COVERAGE_THRESHOLD),
+        "omit": COVERAGE_OMIT,
+        "modules": str(len(modules)),
+    }
 
 
 def test_install_ux_helpers() -> dict[str, str]:
@@ -167,8 +249,8 @@ def test_validate_bundle(out_dir: Path) -> dict[str, str]:
     bundle_dir = out_dir / "bundle"
     tarballs = [bundle_dir / "ru-gateway.tar.gz", bundle_dir / "foreign-exit.tar.gz"]
     expected = {
-        "ru-gateway.tar.gz": {"install.sh", "deployment.env", "assets/geosite-ru.srs", "assets/geoip-ru.srs"},
-        "foreign-exit.tar.gz": {"install.sh", "deployment.env", "assets/ru-ipv4.zone", "assets/ru-ipv6.zone"},
+        "ru-gateway.tar.gz": {"install.sh", "deployment.env", "assets/geosite-ru.srs", "assets/geoip-ru.srs", "rendered/sing-box.json", "rendered/sync-state.sh", "vpn_installer/install_support.py"},
+        "foreign-exit.tar.gz": {"install.sh", "deployment.env", "assets/ru-ipv4.zone", "assets/ru-ipv6.zone", "rendered/sing-box.json", "rendered/sync-state.sh", "vpn_installer/install_support.py"},
     }
     for tarball in tarballs:
         if not tarball.is_file():

@@ -9,6 +9,7 @@ RENDER_ONLY=0
 ACTION="install"
 VPNSTACK_ROOT="/etc/vpn-stack"
 VPNSTACK_BACKUP_DIR="${VPNSTACK_ROOT}/backups"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
   cat <<'EOF'
@@ -130,6 +131,9 @@ RU_DIRECT_DNS_PORT="${RU_DIRECT_DNS_PORT:-53}"
 GLOBAL_DOH_SERVER="${GLOBAL_DOH_SERVER:-1.1.1.1}"
 GLOBAL_DOH_SERVER_NAME="${GLOBAL_DOH_SERVER_NAME:-cloudflare-dns.com}"
 GLOBAL_DOH_PATH="${GLOBAL_DOH_PATH:-/dns-query}"
+RU_FORCE_DIRECT_DOMAIN="${RU_FORCE_DIRECT_DOMAIN:-api.oneme.ru,mtalk.google.com,calls.okcdn.ru,gosuslugi.ru,api.ok.ru,ifconfig.me,ifconfig.co,checkip.amazonaws.com,ipapi.co,ipinfo.io,ident.me,tnedi.me,icanhazip.com}"
+RU_FORCE_DIRECT_DOMAIN_SUFFIX="${RU_FORCE_DIRECT_DOMAIN_SUFFIX:-.gstatic.com,.gosuslugi.ru,.ipify.org,.ipinfo.io,.ident.me,.tnedi.me,.icanhazip.com}"
+RU_FORCE_DIRECT_IP_CIDR="${RU_FORCE_DIRECT_IP_CIDR:-}"
 
 RULESET_DIR="${RULESET_DIR:-/var/lib/vpn-stack/rules}"
 RU_GEOSITE_URL="${RU_GEOSITE_URL:-https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ru.srs https://cdn.jsdelivr.net/gh/SagerNet/sing-geosite@rule-set/geosite-category-ru.srs https://github.com/SagerNet/sing-geosite/raw/rule-set/geosite-category-ru.srs}"
@@ -479,424 +483,113 @@ print_status() {
   echo "sing_box_active=$(service_active_flag sing-box)"
 }
 
-render_ru_singbox() {
-  cat <<EOF
-{
-  "log": {
-    "level": "info",
-    "timestamp": true
-  },
-  "dns": {
-    "strategy": "ipv4_only",
-    "servers": [
-      {
-        "type": "udp",
-        "tag": "dns-ru-direct",
-        "server": "${RU_DIRECT_DNS_SERVER}",
-        "server_port": ${RU_DIRECT_DNS_PORT}
-      },
-      {
-        "type": "https",
-        "tag": "dns-global",
-        "server": "${GLOBAL_DOH_SERVER}",
-        "server_port": 443,
-        "path": "${GLOBAL_DOH_PATH}",
-        "routing_mark": ${APP_ROUTE_MARK},
-        "tls": {
-          "enabled": true,
-          "server_name": "${GLOBAL_DOH_SERVER_NAME}"
-        }
-      }
-    ],
-    "rules": [
-      {
-        "query_type": [
-          "AAAA"
-        ],
-        "action": "reject"
-      },
-      {
-        "rule_set": [
-          "geosite-ru"
-        ],
-        "action": "route",
-        "server": "dns-ru-direct",
-        "strategy": "ipv4_only"
-      }
-    ],
-    "final": "dns-global",
-    "independent_cache": true
-  },
-  "inbounds": [
-    {
-      "type": "vless",
-      "tag": "vless-in",
-      "listen": "::",
-      "listen_port": ${RU_LISTEN_PORT},
-      "users": [
-        {
-          "name": "${DEPLOY_NAME}-client",
-          "uuid": "${CLIENT_UUID}",
-          "flow": "${CLIENT_FLOW}"
-        }
-      ],
-      "tls": {
-        "enabled": true,
-        "server_name": "${RU_REALITY_SERVER_NAME}",
-        "reality": {
-          "enabled": true,
-          "handshake": {
-            "server": "${RU_REALITY_HANDSHAKE_SERVER}",
-            "server_port": ${RU_REALITY_HANDSHAKE_PORT}
-          },
-          "private_key": "${RU_REALITY_PRIVATE_KEY}",
-          "short_id": [
-            "${RU_REALITY_SHORT_ID}"
-          ],
-          "max_time_difference": "1m"
-        }
-      }
-    }
-  ],
-  "outbounds": [
-    {
-      "type": "direct",
-      "tag": "direct-ru"
-    },
-    {
-      "type": "direct",
-      "tag": "to-foreign",
-      "routing_mark": ${APP_ROUTE_MARK}
-    },
-    {
-      "type": "block",
-      "tag": "blocked"
-    }
-  ],
-  "route": {
-    "auto_detect_interface": true,
-    "default_domain_resolver": {
-      "server": "dns-ru-direct",
-      "strategy": "ipv4_only"
-    },
-    "rule_set": [
-      {
-        "type": "local",
-        "tag": "geosite-ru",
-        "format": "binary",
-        "path": "${RULESET_DIR}/geosite-ru.srs"
-      },
-      {
-        "type": "local",
-        "tag": "geoip-ru",
-        "format": "binary",
-        "path": "${RULESET_DIR}/geoip-ru.srs"
-      }
-    ],
-    "rules": [
-      {
-        "ip_version": 6,
-        "action": "route",
-        "outbound": "blocked"
-      },
-      {
-        "inbound": [
-          "vless-in"
-        ],
-        "action": "resolve",
-        "strategy": "ipv4_only"
-      },
-      {
-        "inbound": [
-          "vless-in"
-        ],
-        "action": "sniff"
-      },
-      {
-        "ip_is_private": true,
-        "action": "route",
-        "outbound": "direct-ru"
-      },
-      {
-        "rule_set": [
-          "geosite-ru"
-        ],
-        "action": "route",
-        "outbound": "direct-ru"
-      },
-      {
-        "rule_set": [
-          "geoip-ru"
-        ],
-        "action": "route",
-        "outbound": "direct-ru"
-      }
-    ],
-    "final": "to-foreign"
-  }
-}
-EOF
+python_candidate_works() {
+  local candidate="$1"
+  [[ -n "${candidate}" ]] || return 1
+  "${candidate}" -c "import sys; raise SystemExit(0)" >/dev/null 2>&1
 }
 
-render_foreign_singbox() {
-  cat <<'EOF'
-{
-  "log": {
-    "level": "warn",
-    "timestamp": true
-  },
-  "outbounds": [
-    {
-      "type": "direct",
-      "tag": "direct"
-    }
-  ]
-}
-EOF
-}
+python_executable() {
+  local candidate=""
 
-render_ru_wg() {
-  cat <<EOF
-[Interface]
-Address = ${WG_RU_ADDRESS}
-PrivateKey = ${WG_RU_PRIVATE_KEY}
-MTU = ${WG_MTU}
-FwMark = ${WG_TUNNEL_FWMARK}
-Table = off
-PostUp = ip -4 route add default dev ${WG_INTERFACE} table ${WG_ROUTE_TABLE}
-PostUp = ip -4 rule add fwmark ${APP_ROUTE_MARK} table ${WG_ROUTE_TABLE} priority 10000
-PreDown = ip -4 rule del fwmark ${APP_ROUTE_MARK} table ${WG_ROUTE_TABLE} priority 10000
-PreDown = ip -4 route del default dev ${WG_INTERFACE} table ${WG_ROUTE_TABLE}
-
-[Peer]
-PublicKey = ${WG_FOREIGN_PUBLIC_KEY}
-PresharedKey = ${WG_PRESHARED_KEY}
-AllowedIPs = 0.0.0.0/0
-Endpoint = ${FOREIGN_PUBLIC_IP}:${WG_PORT}
-PersistentKeepalive = ${WG_KEEPALIVE}
-EOF
-}
-
-render_foreign_wg() {
-  cat <<EOF
-[Interface]
-Address = ${WG_FOREIGN_ADDRESS}
-ListenPort = ${WG_PORT}
-PrivateKey = ${WG_FOREIGN_PRIVATE_KEY}
-MTU = ${WG_MTU}
-
-[Peer]
-PublicKey = ${WG_RU_PUBLIC_KEY}
-PresharedKey = ${WG_PRESHARED_KEY}
-AllowedIPs = ${WG_RU_ADDRESS_HOST}/32
-EOF
-}
-
-render_foreign_nftables() {
-  local wan_iface="$1"
-  cat <<EOF
-flush ruleset
-
-table inet vpnstack {
-  set ru_ipv4 {
-    type ipv4_addr
-    flags interval
-    auto-merge
-  }
-
-  set ru_ipv6 {
-    type ipv6_addr
-    flags interval
-    auto-merge
-  }
-
-  chain input {
-    type filter hook input priority 0;
-    policy drop;
-
-    iifname "lo" accept
-    ip6 nexthdr icmpv6 accept
-    ip protocol icmp accept
-    ct state established,related accept
-    tcp dport ${SSH_PORT} accept
-    udp dport ${WG_PORT} accept
-  }
-
-  chain forward {
-    type filter hook forward priority 0;
-    policy drop;
-
-    ct state established,related accept
-    iifname "${WG_INTERFACE}" oifname "${wan_iface}" ip daddr @ru_ipv4 drop
-    iifname "${WG_INTERFACE}" oifname "${wan_iface}" ip6 daddr @ru_ipv6 drop
-    iifname "${WG_INTERFACE}" oifname "${wan_iface}" accept
-    iifname "${wan_iface}" oifname "${WG_INTERFACE}" ct state established,related accept
-  }
-}
-
-table ip nat {
-  chain postrouting {
-    type nat hook postrouting priority srcnat;
-    ip saddr ${WG_RU_ADDRESS_HOST} oifname "${wan_iface}" masquerade
-  }
-}
-EOF
-}
-
-render_ru_firewall_nftables() {
-  cat <<EOF
-flush ruleset
-
-table inet vpnstack {
-  chain input {
-    type filter hook input priority 0;
-    policy drop;
-
-    iifname "lo" accept
-    ip6 nexthdr icmpv6 accept
-    ip protocol icmp accept
-    ct state established,related accept
-    tcp dport ${SSH_PORT} accept
-    tcp dport ${RU_LISTEN_PORT} accept
-  }
-}
-EOF
-}
-
-render_sync_script() {
-  cat <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-
-ROLE="\${1:-}"
-RULESET_DIR="\${2:-${RULESET_DIR}}"
-RU_GEOSITE_URL="\${3:-${RU_GEOSITE_URL}}"
-RU_GEOIP_URL="\${4:-${RU_GEOIP_URL}}"
-FOREIGN_BLOCK_RU="\${5:-${FOREIGN_BLOCK_RU}}"
-FOREIGN_RU_IPV4_LIST_URL="\${6:-${FOREIGN_RU_IPV4_LIST_URL}}"
-FOREIGN_RU_IPV6_LIST_URL="\${7:-${FOREIGN_RU_IPV6_LIST_URL}}"
-
-mkdir -p "\$RULESET_DIR"
-
-download() {
-  local source="\$1"
-  local output="\$2"
-  local asset_kind="\$3"
-  local response_tmp="\${output}.response.tmp"
-  local render_tmp="\${output}.render.tmp"
-  rm -f "\${response_tmp}" "\${render_tmp}"
-  curl -fsSL "\$source" -o "\${response_tmp}"
-  if [[ "\$source" == *"stat.ripe.net/data/country-resource-list/"* ]]; then
-    python3 - "\$asset_kind" "\${response_tmp}" "\${render_tmp}" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-asset_kind = sys.argv[1]
-response_path = Path(sys.argv[2])
-output_path = Path(sys.argv[3])
-payload = json.loads(response_path.read_text(encoding="utf-8"))
-resources = payload.get("data", {}).get("resources", {})
-family = "ipv6" if asset_kind == "ipv6" else "ipv4"
-prefixes = resources.get(family, [])
-if not isinstance(prefixes, list) or not prefixes:
-    raise SystemExit(1)
-output_path.write_text("".join(f"{entry}\n" for entry in prefixes if str(entry).strip()), encoding="utf-8")
-PY
-    mv "\${render_tmp}" "\$output"
-  else
-    mv "\${response_tmp}" "\$output"
-  fi
-  rm -f "\${response_tmp}" "\${render_tmp}"
-}
-
-download_any() {
-  local sources="\$1"
-  local output="\$2"
-  local asset_kind="\$3"
-  local source
-  local errors=()
-  for source in \$sources; do
-    if download "\$source" "\${output}.tmp" "\$asset_kind"; then
-      if [[ -s "\${output}.tmp" ]]; then
-        mv "\${output}.tmp" "\$output"
-        return 0
-      fi
-      rm -f "\${output}.tmp"
-      errors+=("\$source: empty payload")
-      continue
-    fi
-    rm -f "\${output}.tmp"
-    errors+=("\$source")
-  done
-  if [[ -s "\$output" ]]; then
-    echo "vpn-stack-sync: оставляю старую копию \$(basename "\$output"), все источники недоступны: \${errors[*]}" >&2
+  if [[ -n "${PYTHON_BIN:-}" ]] && python_candidate_works "${PYTHON_BIN}"; then
+    printf '%s\n' "${PYTHON_BIN}"
     return 0
   fi
-  echo "vpn-stack-sync: не удалось получить \$(basename "\$output") ни из одного источника: \${errors[*]}" >&2
+
+  if command -v python3 >/dev/null 2>&1; then
+    candidate="$(command -v python3)"
+    if python_candidate_works "${candidate}"; then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+  fi
+
+  if [[ -x "${SCRIPT_DIR}/.runtime/python/windows/python.exe" ]] && python_candidate_works "${SCRIPT_DIR}/.runtime/python/windows/python.exe"; then
+    printf '%s\n' "${SCRIPT_DIR}/.runtime/python/windows/python.exe"
+    return 0
+  fi
+
+  if command -v python >/dev/null 2>&1; then
+    candidate="$(command -v python)"
+    if python_candidate_works "${candidate}"; then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+  fi
+
   return 1
 }
 
-if [[ "\$ROLE" == "ru-gateway" ]]; then
-  download_any "\$RU_GEOSITE_URL" "\$RULESET_DIR/geosite-ru.srs" binary
-  download_any "\$RU_GEOIP_URL" "\$RULESET_DIR/geoip-ru.srs" binary
-  exit 0
-fi
-
-if [[ "\$ROLE" == "foreign-exit" && "\$FOREIGN_BLOCK_RU" == "1" ]]; then
-  local_v4="\$RULESET_DIR/ru-ipv4.zone"
-  local_v6="\$RULESET_DIR/ru-ipv6.zone"
-
-  download_any "\$FOREIGN_RU_IPV4_LIST_URL" "\$local_v4" ipv4
-  download_any "\$FOREIGN_RU_IPV6_LIST_URL" "\$local_v6" ipv6
-
-  {
-    echo "flush set inet vpnstack ru_ipv4"
-    if [[ -s "\$local_v4" ]]; then
-      printf 'add element inet vpnstack ru_ipv4 { '
-      paste -sd, "\$local_v4"
-      echo ' }'
-    fi
-    echo "flush set inet vpnstack ru_ipv6"
-    if [[ -s "\$local_v6" ]]; then
-      printf 'add element inet vpnstack ru_ipv6 { '
-      paste -sd, "\$local_v6"
-      echo ' }'
-    fi
-  } > "\$RULESET_DIR/nft-ru-block.nft"
-
-  nft -f "\$RULESET_DIR/nft-ru-block.nft"
-fi
-EOF
+render_role_with_python() {
+  local output_dir="$1"
+  local python_bin=""
+  local args=()
+  if [[ ! -f "${SCRIPT_DIR}/vpn_installer/install_support.py" ]]; then
+    echo "Python renderer package not found next to install.sh: ${SCRIPT_DIR}/vpn_installer" >&2
+    return 1
+  fi
+  python_bin="$(python_executable)" || {
+    echo "Python is required to render role artifacts." >&2
+    return 1
+  }
+  mkdir -p "${output_dir}"
+  if [[ "$ROLE" == "foreign-exit" && -n "${WAN_INTERFACE:-}" ]]; then
+    args+=(--set "WAN_INTERFACE=${WAN_INTERFACE}")
+  fi
+  "${python_bin}" -c 'import sys; sys.path.insert(0, sys.argv[1]); from vpn_installer.install_support import main; raise SystemExit(main(sys.argv[2:]))' \
+    "${SCRIPT_DIR}" \
+    render-role \
+    --role "${ROLE}" \
+    --env-file "${ENV_FILE}" \
+    --output-dir "${output_dir}" \
+    "${args[@]}"
 }
 
-render_sync_service() {
-  cat <<EOF
-[Unit]
-Description=Sync vpn-stack state for ${ROLE}
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=${RULE_SYNC_SCRIPT} ${ROLE}
-EOF
+find_rendered_role_dir() {
+  local env_dir=""
+  local candidate=""
+  if [[ -n "${ENV_FILE:-}" ]]; then
+    env_dir="$(cd "$(dirname "${ENV_FILE}")" && pwd)"
+  fi
+  for candidate in "${SCRIPT_DIR}/rendered" "${env_dir}/rendered"; do
+    if [[ -n "${candidate}" && -d "${candidate}" && -f "${candidate}/sing-box.json" ]]; then
+      printf '%s' "${candidate}"
+      return 0
+    fi
+  done
+  return 1
 }
 
-render_sync_timer() {
-  cat <<'EOF'
-[Unit]
-Description=Run vpn-stack state sync daily
+prepare_role_artifacts() {
+  local rendered_dir=""
+  local temp_dir=""
+  if rendered_dir="$(find_rendered_role_dir)"; then
+    printf '%s' "${rendered_dir}"
+    return 0
+  fi
+  temp_dir="$(mktemp -d)"
+  if ! render_role_with_python "${temp_dir}"; then
+    rm -rf "${temp_dir}"
+    return 1
+  fi
+  printf '%s' "${temp_dir}"
+}
 
-[Timer]
-OnBootSec=2m
-OnUnitActiveSec=1d
-RandomizedDelaySec=20m
-Persistent=true
+copy_role_artifacts() {
+  local source_dir="$1"
+  copy_if_present "${source_dir}/sing-box.json" "${SINGBOX_CONFIG_PATH}" || { echo "Missing sing-box.json in ${source_dir}" >&2; exit 1; }
+  copy_if_present "${source_dir}/${WG_INTERFACE}.conf" "${WG_CONFIG_PATH}" || { echo "Missing ${WG_INTERFACE}.conf in ${source_dir}" >&2; exit 1; }
+  copy_if_present "${source_dir}/nftables.conf" "${NFTABLES_PATH}" || { echo "Missing nftables.conf in ${source_dir}" >&2; exit 1; }
+  copy_if_present "${source_dir}/sync-state.sh" "${RULE_SYNC_SCRIPT}" || { echo "Missing sync-state.sh in ${source_dir}" >&2; exit 1; }
+  copy_if_present "${source_dir}/vpn-stack-sync.service" "${SYNC_SERVICE_PATH}" || { echo "Missing vpn-stack-sync.service in ${source_dir}" >&2; exit 1; }
+  copy_if_present "${source_dir}/vpn-stack-sync.timer" "${SYNC_TIMER_PATH}" || { echo "Missing vpn-stack-sync.timer in ${source_dir}" >&2; exit 1; }
+  chmod 0755 "${RULE_SYNC_SCRIPT}"
+}
 
-[Install]
-WantedBy=timers.target
-EOF
+write_preview_files() {
+  local base="$1"
+  render_role_with_python "${base}"
 }
 
 stage_preseed_assets() {
@@ -952,24 +645,6 @@ apply_foreign_ru_block_from_local_assets() {
   } > "${RULESET_DIR}/nft-ru-block.nft"
 
   nft -f "${RULESET_DIR}/nft-ru-block.nft"
-}
-
-write_preview_files() {
-  local base="$1"
-  mkdir -p "$base"
-  if [[ "$ROLE" == "ru-gateway" ]]; then
-    write_file "${base}/sing-box.json" < <(render_ru_singbox)
-    write_file "${base}/${WG_INTERFACE}.conf" < <(render_ru_wg)
-    write_file "${base}/nftables.conf" < <(render_ru_firewall_nftables)
-  else
-    local wan_iface="${WAN_INTERFACE:-eth0}"
-    write_file "${base}/sing-box.json" < <(render_foreign_singbox)
-    write_file "${base}/${WG_INTERFACE}.conf" < <(render_foreign_wg)
-    write_file "${base}/nftables.conf" < <(render_foreign_nftables "$wan_iface")
-  fi
-  write_file "${base}/sync-state.sh" < <(render_sync_script)
-  write_file "${base}/vpn-stack-sync.service" < <(render_sync_service)
-  write_file "${base}/vpn-stack-sync.timer" < <(render_sync_timer)
 }
 
 if [[ "$ACTION" == "install" || "$ACTION" == "reinstall" || "$RENDER_ONLY" == "1" ]]; then
@@ -1054,27 +729,23 @@ fi
 
 mkdir -p "${VPNSTACK_ROOT}" /etc/sing-box /etc/wireguard "${RULESET_DIR}" /usr/local/lib/vpn-stack /etc/systemd/system
 
-write_file "${RULE_SYNC_SCRIPT}" < <(render_sync_script)
-chmod 0755 "${RULE_SYNC_SCRIPT}"
-write_file "${SYNC_SERVICE_PATH}" < <(render_sync_service)
-write_file "${SYNC_TIMER_PATH}" < <(render_sync_timer)
-
-if [[ "$ROLE" == "ru-gateway" ]]; then
-  write_file "${SINGBOX_CONFIG_PATH}" < <(render_ru_singbox)
-  write_file "${WG_CONFIG_PATH}" < <(render_ru_wg)
-  write_file "${NFTABLES_PATH}" < <(render_ru_firewall_nftables)
-  cat >"${SYSCTL_PATH}" <<EOF
-net.ipv4.conf.all.src_valid_mark=1
-EOF
-else
+if [[ "$ROLE" == "foreign-exit" ]]; then
   WAN_INTERFACE="${WAN_INTERFACE:-$(ip route show default | awk '/default/ {print $5; exit}')}"
   if [[ -z "${WAN_INTERFACE:-}" ]]; then
     echo "Unable to detect WAN interface. Set WAN_INTERFACE in the env file." >&2
     exit 1
   fi
-  write_file "${SINGBOX_CONFIG_PATH}" < <(render_foreign_singbox)
-  write_file "${WG_CONFIG_PATH}" < <(render_foreign_wg)
-  write_file "${NFTABLES_PATH}" < <(render_foreign_nftables "$WAN_INTERFACE")
+fi
+
+ROLE_ARTIFACTS_DIR="$(prepare_role_artifacts)"
+trap 'if [[ -n "${ROLE_ARTIFACTS_DIR:-}" && "${ROLE_ARTIFACTS_DIR}" == /tmp/* ]]; then rm -rf "${ROLE_ARTIFACTS_DIR}"; fi' EXIT
+copy_role_artifacts "${ROLE_ARTIFACTS_DIR}"
+
+if [[ "$ROLE" == "ru-gateway" ]]; then
+  cat >"${SYSCTL_PATH}" <<EOF
+net.ipv4.conf.all.src_valid_mark=1
+EOF
+else
   cat >"${SYSCTL_PATH}" <<EOF
 net.ipv4.ip_forward=1
 net.ipv6.conf.all.forwarding=1

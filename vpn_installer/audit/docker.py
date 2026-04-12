@@ -10,7 +10,7 @@ from pathlib import Path
 from ..common import INSTALL_SCRIPT_PATH, ROOT_DIR
 from ..models import ROLE_FOREIGN, ROLE_RU
 from ..render import render_all_artifacts
-from .runner import AuditFailure, AuditRunner, write_text
+from .runner import AUDIT_IMAGE, AuditFailure, AuditRunner, write_text
 
 
 def run(runner: AuditRunner) -> None:
@@ -26,10 +26,11 @@ def run(runner: AuditRunner) -> None:
 def test_unmanaged_remove_purge_render_only(runner: AuditRunner) -> dict[str, str]:
     env_path, _env = runner.create_env("unmanaged")
     container = f"audit-unmanaged-{runner.run_id}"
-    with runner.docker_container(container, "ubuntu:24.04"):
+    with runner.docker_container(container, AUDIT_IMAGE):
         runner.docker_exec(container, "mkdir -p /work/assets")
         runner.docker_copy(container, INSTALL_SCRIPT_PATH, "/work/install.sh")
         runner.docker_copy(container, env_path, "/work/deployment.env")
+        runner.docker_copy(container, ROOT_DIR / "vpn_installer", "/work")
         runner.docker_exec(
             container,
             textwrap.dedent(
