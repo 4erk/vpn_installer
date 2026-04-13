@@ -28,59 +28,59 @@
 
 | Провайдер | Российские локации | Старт для российского сервера | Почему подходит | Риски и заметки | Ссылка |
 | --- | --- | --- | --- | --- | --- |
-| FirstByte | Москва | `75 ₽/мес` | Самый дешёвый вход в рублях, можно быстро поднять входной узел | Российский минимальный тариф очень слабый и на странице может быть распродан | [firstbyte.ru/vps-vds/cheap](https://firstbyte.ru/vps-vds/cheap/) |
-| RuVDS | Москва, Королев, Казань, Санкт-Петербург, Екатеринбург, Новосибирск, Владивосток, Краснодар, Омск, Мурманск, Уфа и другие | `от 139 ₽/мес` | Очень много российских ЦОД, есть бесплатный тест на 3 дня | Посадка по цене и конфигам менее прозрачная, чем у простых country pages | [ruvds.com/ru-rub](https://ruvds.com/ru-rub) |
-| AdminVPS | Россия | `429 ₽/мес` | Есть отдельная российская страница и простой выбор локации | Часть портов на европейских VPS закрыта по умолчанию и открывается через поддержку | [adminvps.ru/vps/vps_russia.php](https://adminvps.ru/vps/vps_russia.php) |
-| Aéza | Москва | `€4.94/мес` | Один современный провайдер, если нужен единый стек с anti-DDoS | Интерфейс довольно JS-heavy, цены в евро | [aeza.net/virtual-servers](https://aeza.net/virtual-servers) |
-| Timeweb Cloud | Санкт-Петербург, Москва, Новосибирск | `477 ₽/мес` | Лучшая документация, `cloud-init`, сильный вариант для быстрого redeploy | Не самый дешёвый вариант; стоимость публичного IPv4 лучше отдельно проверить в калькуляторе | [timeweb.cloud/services/cloud-servers](https://timeweb.cloud/services/cloud-servers/) |
+| [FirstByte](https://firstbyte.pro/?from=242253) | Москва | `75 ₽/мес` | Самый дешёвый вход в рублях, можно быстро поднять входной узел | Российский минимальный тариф очень слабый и на странице может быть распродан | [firstbyte.ru/vps-vds/cheap](https://firstbyte.ru/vps-vds/cheap/?from=242253) |
+| [RuVDS](https://ruvds.com/ru-rub) | Москва, Королев, Казань, Санкт-Петербург, Екатеринбург, Новосибирск, Владивосток, Краснодар, Омск, Мурманск, Уфа и другие | `от 139 ₽/мес` | Очень много российских ЦОД, есть бесплатный тест на 3 дня | Посадка по цене и конфигам менее прозрачная, чем у простых country pages | [ruvds.com/ru-rub](https://ruvds.com/ru-rub) |
+| [AdminVPS](https://my.adminvps.ru/aff.php?aff=30584) | Россия | `429 ₽/мес` | Есть отдельная российская страница и простой выбор локации | Часть портов на европейских VPS закрыта по умолчанию и открывается через поддержку | [adminvps.ru/vps/vps_russia.php](https://adminvps.ru/vps/vps_russia.php?aff=30584) |
+| [Aéza](https://aeza.net/?ref=825645) | Москва | `€4.94/мес` | Один современный провайдер, если нужен единый стек с anti-DDoS | Интерфейс довольно JS-heavy, цены в евро | [aeza.net/virtual-servers](https://aeza.net/virtual-servers?ref=825645) |
+| [Timeweb Cloud](https://timeweb.cloud/?i=141135) | Санкт-Петербург, Москва, Новосибирск | `477 ₽/мес` | Лучшая документация, `cloud-init`, сильный вариант для быстрого redeploy | Не самый дешёвый вариант; стоимость публичного IPv4 лучше отдельно проверить в калькуляторе | [timeweb.cloud/services/cloud-servers](https://timeweb.cloud/services/cloud-servers/?i=141135) |
 
 ## Топ-5 для зарубежного сервера
 
 | Провайдер | Зарубежные локации | Старт для зарубежного сервера | Почему подходит | Риски и заметки | Ссылка |
 | --- | --- | --- | --- | --- | --- |
-| THE.Hosting | Десятки стран, включая Германию, Нидерланды, США, Великобританию, Финляндию, Польшу и другие | `€1/мес` на Ferrum-[NL] | Самый дешёвый подтверждённый зарубежный VPS, очень широкая география | Ferrum требует KYC | [the.hosting/en/1-dollar-vps-server](https://the.hosting/en/1-dollar-vps-server) |
-| ProfitServer | Нидерланды, Германия, Великобритания, Польша, Италия, Испания, США, Канада, Азия и другие | `$1.9/мес` | Дешёвый foreign-only вариант с широкой географией, есть страница `VPS for VPN` | Российскую локацию не нашли, поэтому смотрим только как зарубежный узел | [profitserver.net](https://profitserver.net/) |
-| FirstByte | Финляндия, Франция, Болгария, Испания, Германия, Нидерланды, США, Сингапур | `259 ₽/мес` | Хороший дешёвый зарубежный узел в рублях и при желании одна биллинговая зона для двух узлов | Минимальные тарифы скромные по ресурсам | [firstbyte.ru/vps-vds/cheap](https://firstbyte.ru/vps-vds/cheap/) |
-| Koara | Германия подтверждена | `259 ₽/мес` | Недорогой зарубежный узел в Германии с простыми тарифами | Российская локация пока только `Coming soon`, поэтому берем только как foreign-вариант | [koara.cloud/products/vds](https://koara.cloud/products/vds) |
-| Aéza | Германия, Австрия, Нидерланды, Швеция | `€4.94/мес` | Один провайдер на обе роли, сильные иностранные ЦОД и anti-DDoS | Для строгого бюджета есть более дешёвые foreign-only варианты | [aeza.net/virtual-servers](https://aeza.net/virtual-servers) |
+| [THE.Hosting](https://the.hosting/?from=1028494) | Десятки стран, включая Германию, Нидерланды, США, Великобританию, Финляндию, Польшу и другие | `€1/мес` на Ferrum-[NL] | Самый дешёвый подтверждённый зарубежный VPS, очень широкая география | Ferrum требует KYC | [the.hosting/en/1-dollar-vps-server](https://the.hosting/en/1-dollar-vps-server?from=1028494) |
+| [ProfitServer](https://profitserver.net/) | Нидерланды, Германия, Великобритания, Польша, Италия, Испания, США, Канада, Азия и другие | `$1.9/мес` | Дешёвый foreign-only вариант с широкой географией, есть страница `VPS for VPN` | Российскую локацию не нашли, поэтому смотрим только как зарубежный узел | [profitserver.net](https://profitserver.net/) |
+| [FirstByte](https://firstbyte.pro/?from=242253) | Финляндия, Франция, Болгария, Испания, Германия, Нидерланды, США, Сингапур | `259 ₽/мес` | Хороший дешёвый зарубежный узел в рублях и при желании одна биллинговая зона для двух узлов | Минимальные тарифы скромные по ресурсам | [firstbyte.ru/vps-vds/cheap](https://firstbyte.ru/vps-vds/cheap/?from=242253) |
+| [Koara](https://koara.cloud/?from=6989) | Германия подтверждена | `259 ₽/мес` | Недорогой зарубежный узел в Германии с простыми тарифами | Российская локация пока только `Coming soon`, поэтому берем только как foreign-вариант | [koara.cloud/products/vds](https://koara.cloud/products/vds?from=6989) |
+| [Aéza](https://aeza.net/?ref=825645) | Германия, Австрия, Нидерланды, Швеция | `€4.94/мес` | Один провайдер на обе роли, сильные иностранные ЦОД и anti-DDoS | Для строгого бюджета есть более дешёвые foreign-only варианты | [aeza.net/virtual-servers](https://aeza.net/virtual-servers?ref=825645) |
 
 ## Рекомендуемые пары
 
 | Сценарий | Российский сервер | Зарубежный сервер | Итого | Почему так |
 | --- | --- | --- | --- | --- |
-| Минимум цены в рублях | FirstByte | FirstByte | `75 ₽ + 259 ₽ = 334 ₽/мес` | Самый дешёвый старт, если хватает минимальных ресурсов |
-| Баланс удобства и цены | Timeweb Cloud | ProfitServer | `477 ₽ + $1.9/мес` | Удобный российский узел с нормальной документацией и очень дешёвый foreign |
-| Нужна частая замена страны | Timeweb Cloud | THE.Hosting | `477 ₽ + €1/мес` | Российский узел стабилен, зарубежный легко ротировать по странам |
-| Один провайдер на обе роли | AdminVPS | AdminVPS | `429 ₽ + 499 ₽ = 928 ₽/мес` | Понятные country pages и обе роли у одного биллинга |
-| Один провайдер с упором на anti-DDoS | Aéza | Aéza | `€4.94 + €4.94 = €9.88/мес` | Москва + набор европейских ЦОД у одного провайдера |
+| Минимум цены в рублях | [FirstByte](https://firstbyte.pro/?from=242253) | [FirstByte](https://firstbyte.pro/?from=242253) | `75 ₽ + 259 ₽ = 334 ₽/мес` | Самый дешёвый старт, если хватает минимальных ресурсов |
+| Баланс удобства и цены | [Timeweb Cloud](https://timeweb.cloud/?i=141135) | [ProfitServer](https://profitserver.net/) | `477 ₽ + $1.9/мес` | Удобный российский узел с нормальной документацией и очень дешёвый foreign |
+| Нужна частая замена страны | [Timeweb Cloud](https://timeweb.cloud/?i=141135) | [THE.Hosting](https://the.hosting/?from=1028494) | `477 ₽ + €1/мес` | Российский узел стабилен, зарубежный легко ротировать по странам |
+| Один провайдер на обе роли | [AdminVPS](https://my.adminvps.ru/aff.php?aff=30584) | [AdminVPS](https://my.adminvps.ru/aff.php?aff=30584) | `429 ₽ + 499 ₽ = 928 ₽/мес` | Понятные country pages и обе роли у одного биллинга |
+| Один провайдер с упором на anti-DDoS | [Aéza](https://aeza.net/?ref=825645) | [Aéza](https://aeza.net/?ref=825645) | `€4.94 + €4.94 = €9.88/мес` | Москва + набор европейских ЦОД у одного провайдера |
 
 ## Спорные или нежелательные варианты
 
 | Провайдер | Почему с оговорками |
 | --- | --- |
-| RuWeb | У RuWeb есть отдельная страница для private VPN на VPS и есть Россия + Нидерланды, но на странице `VPS для VPN` официально запрещены анонимные прокси, открытые релеи, shell-hosting, Tor и прочие анонимные сервисы. Для частного контура подходит, для публичного/open proxy сценария — плохой выбор |
-| Webhost1 | В этой проверке не удалось нормально переподтвердить текущие официальные страницы VPS и локации. Без ручной перепроверки не брать в основу |
-| Koara для российского сервера | Российская локация на странице дата-центров помечена как `Coming soon...`, значит сейчас это не опора для входного узла |
-| THE.Hosting для российского сервера | Российскую локацию не нашли, поэтому провайдер логичен только для зарубежного узла |
-| ProfitServer для российского сервера | Российскую локацию не нашли, поэтому провайдер логичен только для зарубежного узла |
+| [RuWeb](https://ruweb.net/?ref=169921) | У RuWeb есть отдельная страница для private VPN на VPS и есть Россия + Нидерланды, но на странице `VPS для VPN` официально запрещены анонимные прокси, открытые релеи, shell-hosting, Tor и прочие анонимные сервисы. Для частного контура подходит, для публичного/open proxy сценария — плохой выбор |
+| [Webhost1](https://webhost1.ru/?r=164726) | В этой проверке не удалось нормально переподтвердить текущие официальные страницы VPS и локации. Без ручной перепроверки не брать в основу |
+| [Koara](https://koara.cloud/?from=6989) для российского сервера | Российская локация на странице дата-центров помечена как `Coming soon...`, значит сейчас это не опора для входного узла |
+| [THE.Hosting](https://the.hosting/?from=1028494) для российского сервера | Российскую локацию не нашли, поэтому провайдер логичен только для зарубежного узла |
+| [ProfitServer](https://profitserver.net/) для российского сервера | Российскую локацию не нашли, поэтому провайдер логичен только для зарубежного узла |
 
 ## Источники
 
-- [Timeweb Cloud: облачные серверы](https://timeweb.cloud/services/cloud-servers/)
-- [Timeweb Cloud: серверы в Европе](https://timeweb.cloud/services/servers-europe)
-- [THE.Hosting: cheap VPS from €1](https://the.hosting/en/1-dollar-vps-server)
-- [THE.Hosting: конфигуратор](https://the.hosting/en/vps-configurator)
+- [Timeweb Cloud: облачные серверы](https://timeweb.cloud/services/cloud-servers/?i=141135)
+- [Timeweb Cloud: серверы в Европе](https://timeweb.cloud/services/servers-europe/?i=141135)
+- [THE.Hosting: cheap VPS from €1](https://the.hosting/en/1-dollar-vps-server?from=1028494)
+- [THE.Hosting: конфигуратор](https://the.hosting/en/vps-configurator?from=1028494)
 - [ProfitServer: VPS](https://profitserver.net/)
-- [FirstByte: дешёвые VPS](https://firstbyte.ru/vps-vds/cheap/)
-- [RuWeb: VPS/VDS](https://ruweb.net/vds)
-- [RuWeb: VPS в Европе](https://ruweb.net/vps-europe)
-- [RuWeb: VPS для VPN](https://ruweb.net/vps-vpn)
-- [Koara: VPS/VDS](https://koara.cloud/products/vds)
-- [Koara: дата-центры](https://koara.cloud/en/datacenters)
-- [AdminVPS: VPS в России](https://adminvps.ru/vps/vps_russia.php)
-- [AdminVPS: VPS в Германии](https://adminvps.ru/vps/vps_germany.php)
-- [AdminVPS: VPS в Нидерландах](https://adminvps.ru/vps/vps_holland.php)
+- [FirstByte: дешёвые VPS](https://firstbyte.ru/vps-vds/cheap/?from=242253)
+- [RuWeb: VPS/VDS](https://ruweb.net/vds?ref=169921)
+- [RuWeb: VPS в Европе](https://ruweb.net/vps-europe?ref=169921)
+- [RuWeb: VPS для VPN](https://ruweb.net/vps-vpn?ref=169921)
+- [Koara: VPS/VDS](https://koara.cloud/products/vds?from=6989)
+- [Koara: дата-центры](https://koara.cloud/en/datacenters?from=6989)
+- [AdminVPS: VPS в России](https://adminvps.ru/vps/vps_russia.php?aff=30584)
+- [AdminVPS: VPS в Германии](https://adminvps.ru/vps/vps_germany.php?aff=30584)
+- [AdminVPS: VPS в Нидерландах](https://adminvps.ru/vps/vps_holland.php?aff=30584)
 - [RuVDS: главная страница VPS](https://ruvds.com/ru-rub)
-- [Aéza: виртуальные серверы](https://aeza.net/virtual-servers)
-- [Aéza: дата-центры](https://aeza.net/ru/data-center)
+- [Aéza: виртуальные серверы](https://aeza.net/virtual-servers?ref=825645)
+- [Aéza: дата-центры](https://aeza.net/ru/data-center?ref=825645)
 - [HostingHub: VPS/VDS для VPN](https://hostinghub.ru/top/vds/vps-for-vpn)
