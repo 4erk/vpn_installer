@@ -11,6 +11,7 @@ $PythonRoot = Join-Path $RuntimeRoot 'python\windows'
 $PortablePython = Join-Path $PythonRoot 'python.exe'
 $PortableVersion = if ($env:VPN_BOOTSTRAP_PYTHON_VERSION) { $env:VPN_BOOTSTRAP_PYTHON_VERSION } else { '3.13.13' }
 $ExitCode = 0
+$RuntimeLogDir = Join-Path $RepoRoot 'out\logs\runtime'
 
 function Show-VpnHelp {
   @'
@@ -44,7 +45,43 @@ function Show-VpnHelp {
 
 Подсказка:
   Enter в вопросах с дефолтом оставляет текущее значение.
+  При ошибке подробный лог сохраняется в out\logs\runtime\latest-error.log
 '@ | Write-Host
+}
+
+function Write-VpnErrorLog {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Context,
+    [Parameter(Mandatory = $true)]
+    [object]$ErrorObject
+  )
+
+  try {
+    New-Item -ItemType Directory -Path $RuntimeLogDir -Force | Out-Null
+    $Stamp = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssffffZ')
+    $LogPath = Join-Path $RuntimeLogDir "error-$Stamp-powershell.log"
+    $LatestPath = Join-Path $RuntimeLogDir 'latest-error.log'
+    $Message = if ($ErrorObject.Exception) { $ErrorObject.Exception.Message } else { [string]$ErrorObject }
+    $Detail = @(
+      "timestamp_utc: $([DateTime]::UtcNow.ToString('o'))"
+      "context: $Context"
+      "cwd: $RepoRoot"
+      "powershell_version: $($PSVersionTable.PSVersion)"
+      "script: $PSCommandPath"
+      "message: $Message"
+      ""
+      "details:"
+      ($ErrorObject | Out-String).TrimEnd()
+      ""
+    ) -join [Environment]::NewLine
+    $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($LogPath, $Detail, $Utf8NoBom)
+    [System.IO.File]::WriteAllText($LatestPath, $Detail, $Utf8NoBom)
+    return $LogPath
+  } catch {
+    return $null
+  }
 }
 
 function Test-PythonExe {
@@ -181,8 +218,12 @@ try {
   }
 } catch {
   $ExitCode = 1
+  $LogPath = Write-VpnErrorLog -Context 'powershell-launcher' -ErrorObject $_
   Write-Host ""
   Write-Host "Запуск завершился с ошибкой: $($_.Exception.Message)" -ForegroundColor Red
+  if ($LogPath) {
+    Write-Host "Подробности сохранены в: $LogPath" -ForegroundColor Yellow
+  }
   Write-Host "Проверь сообщение выше и затем попробуй снова через .\vpn.ps1." -ForegroundColor Yellow
 } finally {
   if (-not $env:VPN_NO_PAUSE) {

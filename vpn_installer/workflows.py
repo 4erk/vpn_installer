@@ -19,6 +19,7 @@ from .config import (
     require_env,
     ensure_deployment_env,
 )
+from .error_logging import log_exception
 from .models import AppError, ROLE_FOREIGN, ROLE_META, ROLE_RU, RemoteTarget, UserCancelled
 from .prompts import (
     ask_install_action,
@@ -437,12 +438,18 @@ def run_menu_action(action: Any, *, return_to: str) -> None:
     except EOFError:
         warn(f"Ввод прерван. Возврат в {return_to}.")
     except AppError as exc:
+        log_path = log_exception("menu.app_error", exc, extra={"return_to": return_to})
         warn(f"Ошибка: {exc}")
+        if log_path:
+            print(f"Лог ошибки: {log_path}")
         print(f"Возврат в {return_to}.")
     except Exception as exc:  # noqa: BLE001
+        log_path = log_exception("menu.unhandled", exc, extra={"return_to": return_to})
         if os.environ.get("VPN_DEBUG"):
             traceback.print_exc()
         warn(f"Непредвиденная ошибка: {exc}")
+        if log_path:
+            print(f"Лог ошибки: {log_path}")
         print(f"Возврат в {return_to}.")
     else:
         print(f"Возврат в {return_to}.")

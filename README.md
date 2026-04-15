@@ -115,6 +115,10 @@ JSON-файлы нужны только как запасной вариант.
 - `out/<deployment>/NEXT-STEPS.txt`
 - `out/<deployment>/client/hiddify-uri.txt`
 
+Если сценарий упал или окно закрылось слишком быстро, смотри лог ошибки:
+
+- `out/logs/runtime/latest-error.log`
+
 Для быстрой проверки после установки:
 
 ```powershell

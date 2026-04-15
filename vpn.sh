@@ -27,6 +27,7 @@ show_vpn_help() {
   - установленный Hiddify на клиентском устройстве
   - Как выбрать серверы: docs/PROVIDERS.md
   - Что внутри проекта: docs/PROJECT.md
+  - При ошибке подробный лог: out/logs/runtime/latest-error.log
 EOF
 }
 

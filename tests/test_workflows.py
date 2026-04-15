@@ -269,13 +269,19 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("cancelled", stream.getvalue())
 
         with patch("sys.stdout", new_callable=__import__("io").StringIO) as stdout_stream, patch("sys.stderr", new_callable=__import__("io").StringIO) as stderr_stream:
-            workflows.run_menu_action(lambda: (_ for _ in ()).throw(AppError("broken")), return_to="главное меню")
+            with patch("vpn_installer.workflows.log_exception", return_value=Path("out/logs/runtime/error.log")) as log_mock:
+                workflows.run_menu_action(lambda: (_ for _ in ()).throw(AppError("broken")), return_to="главное меню")
+        log_mock.assert_called_once()
         self.assertIn("Возврат в главное меню", stdout_stream.getvalue())
+        self.assertIn(f"Лог ошибки: {Path('out/logs/runtime/error.log')}", stdout_stream.getvalue())
         self.assertIn("Ошибка: broken", stderr_stream.getvalue())
 
         with patch("sys.stdout", new_callable=__import__("io").StringIO) as stdout_stream, patch("sys.stderr", new_callable=__import__("io").StringIO) as stderr_stream:
-            workflows.run_menu_action(lambda: (_ for _ in ()).throw(RuntimeError("boom")), return_to="меню самопроверки")
+            with patch("vpn_installer.workflows.log_exception", return_value=Path("out/logs/runtime/error.log")) as log_mock:
+                workflows.run_menu_action(lambda: (_ for _ in ()).throw(RuntimeError("boom")), return_to="меню самопроверки")
+        log_mock.assert_called_once()
         self.assertIn("Возврат в меню самопроверки", stdout_stream.getvalue())
+        self.assertIn(f"Лог ошибки: {Path('out/logs/runtime/error.log')}", stdout_stream.getvalue())
         self.assertIn("Непредвиденная ошибка: boom", stderr_stream.getvalue())
 
     def test_audit_menu_workflow_loops_until_back(self) -> None:
