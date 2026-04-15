@@ -33,10 +33,11 @@ class PackageTests(unittest.TestCase):
         self.assertIn('systemctl restart vpn-stack-sync.timer', install_script)
         self.assertIn('systemctl enable vpn-stack-subscription.service', install_script)
         self.assertIn('systemctl restart vpn-stack-subscription.service', install_script)
+        self.assertIn('net.core.default_qdisc=fq_codel', install_script)
 
     def test_package_exposes_version_via_getattr(self) -> None:
         package = importlib.import_module("vpn_installer")
-        self.assertEqual(package.__version__, "0.2.12")
+        self.assertEqual(package.__version__, "0.2.13")
         with self.assertRaises(AttributeError):
             package.__getattr__("nope")
 

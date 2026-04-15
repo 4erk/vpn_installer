@@ -773,6 +773,7 @@ net.ipv4.conf.all.src_valid_mark=1
 EOF
 else
   cat >"${SYSCTL_PATH}" <<EOF
+net.core.default_qdisc=fq_codel
 net.ipv4.ip_forward=1
 net.ipv6.conf.all.forwarding=1
 EOF
