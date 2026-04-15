@@ -12,10 +12,14 @@ $PortablePython = Join-Path $PythonRoot 'python.exe'
 $PortableVersion = if ($env:VPN_BOOTSTRAP_PYTHON_VERSION) { $env:VPN_BOOTSTRAP_PYTHON_VERSION } else { '3.13.13' }
 $ExitCode = 0
 $RuntimeLogDir = Join-Path $RepoRoot 'out\logs\runtime'
+$TranscriptStarted = $false
+$TranscriptPath = Join-Path $RuntimeLogDir 'latest-transcript.log'
 
 function Show-VpnHelp {
   @'
 Использование:
+  .\vpn.cmd
+  .\vpn.cmd install
   powershell -ExecutionPolicy Bypass -File .\vpn.ps1
   powershell -ExecutionPolicy Bypass -File .\vpn.ps1 install
   powershell -ExecutionPolicy Bypass -File .\vpn.ps1 status --deployment my-vpn
@@ -46,7 +50,30 @@ function Show-VpnHelp {
 Подсказка:
   Enter в вопросах с дефолтом оставляет текущее значение.
   При ошибке подробный лог сохраняется в out\logs\runtime\latest-error.log
+  Для Windows по умолчанию лучше запускать vpn.cmd: он держит окно открытым и пишет отдельный console log.
 '@ | Write-Host
+}
+
+function Start-VpnTranscript {
+  try {
+    New-Item -ItemType Directory -Path $RuntimeLogDir -Force | Out-Null
+    Start-Transcript -LiteralPath $TranscriptPath -Force | Out-Null
+    $script:TranscriptStarted = $true
+  } catch {
+    $script:TranscriptStarted = $false
+  }
+}
+
+function Stop-VpnTranscript {
+  if (-not $script:TranscriptStarted) {
+    return
+  }
+  try {
+    Stop-Transcript | Out-Null
+  } catch {
+  } finally {
+    $script:TranscriptStarted = $false
+  }
 }
 
 function Write-VpnErrorLog {
@@ -188,33 +215,34 @@ function Resolve-Python {
   return @($PortablePython)
 }
 
+Start-VpnTranscript
+
 try {
   if ($ScriptArgs.Count -gt 0 -and $ScriptArgs[0] -in @('--help', '-h', 'help')) {
     Show-VpnHelp
-    exit 0
-  }
-
-  $EffectiveArgs = @($ScriptArgs)
-  $PythonCommand = Resolve-Python
-  $LauncherPath = Join-Path $RepoRoot 'vpn_installer\launcher.py'
-  $CommandLine = @($PythonCommand) + @($LauncherPath) + @($EffectiveArgs)
-  if ($CommandLine.Count -le 1) {
-    throw "Внутренняя ошибка launcher: пустая команда запуска Python."
-  }
-  & $CommandLine[0] @($CommandLine[1..($CommandLine.Count - 1)])
-  $ExitCode = $LASTEXITCODE
-
-  if ($ExitCode -eq 0) {
-    Write-Host ""
-    Write-Host "Команда завершена."
-  } elseif ($ExitCode -eq 130) {
-    Write-Host ""
-    Write-Host "Операция отменена пользователем." -ForegroundColor Yellow
   } else {
-    Write-Host ""
-    Write-Host "Команда завершилась с ошибкой (код $ExitCode)." -ForegroundColor Red
-    Write-Host "Проверь сообщение выше. Обычно дальше помогает:" -ForegroundColor Yellow
-    Write-Host "  powershell -ExecutionPolicy Bypass -File .\vpn.ps1 status --deployment <имя>"
+    $EffectiveArgs = @($ScriptArgs)
+    $PythonCommand = Resolve-Python
+    $LauncherPath = Join-Path $RepoRoot 'vpn_installer\launcher.py'
+    $CommandLine = @($PythonCommand) + @($LauncherPath) + @($EffectiveArgs)
+    if ($CommandLine.Count -le 1) {
+      throw "Внутренняя ошибка launcher: пустая команда запуска Python."
+    }
+    & $CommandLine[0] @($CommandLine[1..($CommandLine.Count - 1)])
+    $ExitCode = $LASTEXITCODE
+
+    if ($ExitCode -eq 0) {
+      Write-Host ""
+      Write-Host "Команда завершена."
+    } elseif ($ExitCode -eq 130) {
+      Write-Host ""
+      Write-Host "Операция отменена пользователем." -ForegroundColor Yellow
+    } else {
+      Write-Host ""
+      Write-Host "Команда завершилась с ошибкой (код $ExitCode)." -ForegroundColor Red
+      Write-Host "Проверь сообщение выше. Обычно дальше помогает:" -ForegroundColor Yellow
+      Write-Host "  powershell -ExecutionPolicy Bypass -File .\vpn.ps1 status --deployment <имя>"
+    }
   }
 } catch {
   $ExitCode = 1
@@ -226,6 +254,7 @@ try {
   }
   Write-Host "Проверь сообщение выше и затем попробуй снова через .\vpn.ps1." -ForegroundColor Yellow
 } finally {
+  Stop-VpnTranscript
   if (-not $env:VPN_NO_PAUSE) {
     Write-Host ""
     Read-Host "Нажми Enter, чтобы закрыть окно" | Out-Null

@@ -6,6 +6,7 @@ Self-hosted VPN для личного использования и своего
 
 - [Как выбрать серверы](./docs/PROVIDERS.md)
 - [Что внутри проекта](./docs/PROJECT.md)
+- [История версий](./CHANGELOG.md)
 
 ## Что нужно заранее
 
@@ -31,8 +32,10 @@ Self-hosted VPN для личного использования и своего
 Windows:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\vpn.ps1
+.\vpn.cmd
 ```
+
+Запуск через ярлык или двойной клик на Windows тоже лучше делать именно через `vpn.cmd`.
 
 Linux:
 
@@ -44,7 +47,7 @@ chmod +x ./vpn.sh
 Если нужно сразу открыть установку без меню:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\vpn.ps1 install
+.\vpn.cmd install
 ```
 
 ```bash
@@ -75,7 +78,8 @@ powershell -ExecutionPolicy Bypass -File .\vpn.ps1 install
 
 - `Enter` оставляет показанное значение
 - пароль не сохраняется на диск
-- на Windows `vpn.ps1` сам поднимет portable Python, если его нет
+- на Windows лучше запускать `vpn.cmd`: он держит окно открытым и пишет отдельный console log
+- `vpn.ps1` тоже можно запускать вручную из PowerShell; он сам поднимет portable Python, если его нет
 - на Linux нужен локально установленный `python3`
 
 ## Что получится в конце
@@ -118,11 +122,13 @@ JSON-файлы нужны только как запасной вариант.
 Если сценарий упал или окно закрылось слишком быстро, смотри лог ошибки:
 
 - `out/logs/runtime/latest-error.log`
+- `out/logs/runtime/latest-console.log`
+- `out/logs/runtime/latest-transcript.log`
 
 Для быстрой проверки после установки:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\vpn.ps1 status --deployment my-vpn
+.\vpn.cmd status --deployment my-vpn
 ```
 
 ```bash

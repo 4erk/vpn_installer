@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 __all__ = ["main"]
+VERSION = "0.2.0"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -15,5 +16,5 @@ def main(argv: list[str] | None = None) -> int:
 
 def __getattr__(name: str) -> Any:
     if name == "__version__":
-        return "1"
+        return VERSION
     raise AttributeError(name)
