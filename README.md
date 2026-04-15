@@ -122,8 +122,14 @@ JSON-файлы нужны только как запасной вариант.
 Если сценарий упал или окно закрылось слишком быстро, смотри лог ошибки:
 
 - `out/logs/runtime/latest-error.log`
-- `out/logs/runtime/latest-console.log`
 - `out/logs/runtime/latest-transcript.log`
+- `out/logs/runtime/latest-console.log`
+
+Где что смотреть:
+
+- `latest-transcript.log` — основной подробный лог запуска на Windows
+- `latest-error.log` — traceback и детали необработанной ошибки
+- `latest-console.log` — краткий wrapper-log от `vpn.cmd`
 
 Для быстрой проверки после установки:
 

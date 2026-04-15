@@ -1,0 +1,47 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - '*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build release notes from CHANGELOG
+        shell: bash
+        run: |
+          python <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          tag = os.environ["GITHUB_REF_NAME"]
+          changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
+          pattern = re.compile(r"^## \[" + re.escape(tag) + r"\] - .*$", re.MULTILINE)
+          match = pattern.search(changelog)
+          if not match:
+              body = f"Release {tag}"
+          else:
+              start = match.start()
+              next_match = re.search(r"^## \[", changelog[match.end():], re.MULTILINE)
+              end = match.end() + next_match.start() if next_match else len(changelog)
+              body = changelog[start:end].strip()
+          Path("release-body.md").write_text(body + "\n", encoding="utf-8")
+          PY
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: release-body.md
+          draft: false
+          prerelease: false
