@@ -140,8 +140,15 @@ class WorkflowTests(unittest.TestCase):
         write_state_mock.assert_called_once()
 
     def test_postcheck_command_uses_selected_interface(self) -> None:
-        command = workflows.postcheck_command("wg-test")
+        command = workflows.postcheck_command(ROLE_RU, "wg-test")
         self.assertIn("wg-quick@wg-test", command)
+        self.assertIn("check_service_active", command)
+        self.assertIn("postcheck_failed_service", command)
+        self.assertIn("journalctl -u \"$service\" -n 20 --no-pager", command)
+        self.assertIn("check_service_active sing-box sing-box", command)
+
+        foreign_command = workflows.postcheck_command(ROLE_FOREIGN, "wg-test")
+        self.assertNotIn("check_service_active sing-box sing-box", foreign_command)
 
     def test_cleanup_remote_workdir_warns_on_error(self) -> None:
         with patch("vpn_installer.workflows.ssh_stream", side_effect=AppError("fail")), patch("vpn_installer.workflows.warn") as warn_mock:
@@ -174,6 +181,22 @@ class WorkflowTests(unittest.TestCase):
         with patch("vpn_installer.workflows.ssh_stream") as mocked:
             workflows.postcheck_remote_role(RemoteTarget(role=ROLE_RU), "wg0")
         mocked.assert_called_once()
+        self.assertIn("check_service_active sing-box sing-box", mocked.call_args.args[1])
+
+    def test_filter_targets_for_remove_skips_unmanaged_hosts(self) -> None:
+        ru = RemoteTarget(role=ROLE_RU)
+        foreign = RemoteTarget(role=ROLE_FOREIGN)
+        with patch("sys.stdout", new_callable=__import__("io").StringIO) as stream:
+            result = workflows.filter_targets_for_action(
+                "remove",
+                [ru, foreign],
+                {
+                    ROLE_RU: {"installed": "0"},
+                    ROLE_FOREIGN: {"installed": "1"},
+                },
+            )
+        self.assertEqual(result, [foreign])
+        self.assertIn("Российский сервер: стек не найден на сервере, действие remove пропущено.", stream.getvalue())
 
     def test_load_env_for_render_rewrites_existing_env(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -228,6 +251,18 @@ class WorkflowTests(unittest.TestCase):
         ru = RemoteTarget(role=ROLE_RU)
         with patch("vpn_installer.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), env, {}, [ru], {ROLE_RU: {}})), patch("vpn_installer.workflows.print_summary"), patch("vpn_installer.workflows.prompt_yes_no", return_value=False):
             self.assertEqual(workflows.remote_action_workflow("demo", ROLE_RU, "remove"), 0)
+
+    def test_remote_action_workflow_skips_remove_when_stack_absent(self) -> None:
+        env = generate_default_env("demo")
+        env["RU_PUBLIC_IP"] = "203.0.113.10"
+        env["FOREIGN_PUBLIC_IP"] = "198.51.100.20"
+        ru = RemoteTarget(role=ROLE_RU)
+        with patch("vpn_installer.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), env, {}, [ru], {ROLE_RU: {"installed": "0"}})), patch("vpn_installer.workflows.print_summary") as print_summary, patch("vpn_installer.workflows.prompt_yes_no") as prompt_yes_no, patch("vpn_installer.workflows.run_selected_remote_action") as run_selected, patch("sys.stdout", new_callable=__import__('io').StringIO) as stream:
+            self.assertEqual(workflows.remote_action_workflow("demo", ROLE_RU, "remove"), 0)
+        print_summary.assert_called_once()
+        prompt_yes_no.assert_not_called()
+        run_selected.assert_not_called()
+        self.assertIn("Подходящих серверов для действия не найдено.", stream.getvalue())
 
     def test_remote_action_workflow_reinstall_updates_env_and_finalizes(self) -> None:
         env = generate_default_env("demo")

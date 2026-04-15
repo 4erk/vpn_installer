@@ -765,6 +765,7 @@ fi
 systemctl enable "wg-quick@${WG_INTERFACE}"
 systemctl restart "wg-quick@${WG_INTERFACE}"
 systemctl enable vpn-stack-sync.timer
+systemctl restart vpn-stack-sync.timer
 if ! systemctl start vpn-stack-sync.service; then
   if ! have_bootstrap_assets; then
     echo "vpn-stack-sync.service failed and no bootstrap assets are present." >&2

@@ -26,9 +26,15 @@ class PackageTests(unittest.TestCase):
         checked_in = example_path.read_text(encoding="utf-8")
         self.assertEqual(checked_in, render_example_env_text())
 
+    def test_install_script_starts_sync_timer_after_enabling(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        install_script = (repo_root / "install.sh").read_text(encoding="utf-8")
+        self.assertIn('systemctl enable vpn-stack-sync.timer', install_script)
+        self.assertIn('systemctl restart vpn-stack-sync.timer', install_script)
+
     def test_package_exposes_version_via_getattr(self) -> None:
         package = importlib.import_module("vpn_installer")
-        self.assertEqual(package.__version__, "0.2.3")
+        self.assertEqual(package.__version__, "0.2.4")
         with self.assertRaises(AttributeError):
             package.__getattr__("nope")
 

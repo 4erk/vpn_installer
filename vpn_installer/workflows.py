@@ -196,16 +196,38 @@ def prepare_remote_session(
     return deployment_name, env_path, env, state, targets, preflights
 
 
-def postcheck_command(wg_interface: str) -> str:
+def postcheck_command(role: str, wg_interface: str) -> str:
+    sing_box_check = (
+        'check_service_active sing-box sing-box'
+        if role == ROLE_RU
+        else textwrap.dedent(
+            """\
+            if systemctl list-unit-files sing-box.service >/dev/null 2>&1; then
+              systemctl is-active sing-box >/dev/null || true
+            fi
+            """
+        ).strip()
+    )
     return textwrap.dedent(
         f"""\
         set -euo pipefail
-        systemctl is-active nftables >/dev/null
-        systemctl is-active vpn-stack-sync.timer >/dev/null
-        systemctl is-active wg-quick@{wg_interface} >/dev/null
-        if systemctl list-unit-files sing-box.service >/dev/null 2>&1; then
-          systemctl is-active sing-box >/dev/null || true
-        fi
+        check_service_active() {{
+          local service="$1"
+          local label="$2"
+          if systemctl is-active --quiet "$service"; then
+            return 0
+          fi
+          printf 'postcheck_failed_service=%s\\n' "${{label}}"
+          printf 'postcheck_service_state=%s\\n' "$(systemctl is-active "$service" 2>/dev/null || true)"
+          printf 'postcheck_service_enabled=%s\\n' "$(systemctl is-enabled "$service" 2>/dev/null || true)"
+          systemctl status "$service" --no-pager --full || true
+          journalctl -u "$service" -n 20 --no-pager || true
+          exit 1
+        }}
+        check_service_active nftables nftables
+        check_service_active vpn-stack-sync.timer vpn-stack-sync.timer
+        check_service_active wg-quick@{wg_interface} wg-quick@{wg_interface}
+        {sing_box_check}
         printf 'role='
         cat /etc/vpn-stack/role
         printf 'installed_at='
@@ -221,6 +243,24 @@ def cleanup_remote_workdir(target: RemoteTarget, remote_root: str) -> None:
         ssh_stream(target, f"rm -rf {shlex.quote(remote_root)}")
     except Exception as exc:  # noqa: BLE001
         warn(f"Не удалось очистить временную папку на {target.label}: {exc}")
+
+
+def filter_targets_for_action(
+    action: str,
+    targets: list[RemoteTarget],
+    preflights: dict[str, dict[str, str]],
+) -> list[RemoteTarget]:
+    if action not in {"remove", "purge"}:
+        return targets
+    actionable: list[RemoteTarget] = []
+    for target in targets:
+        preflight = preflights.get(target.role, {})
+        installed = preflight.get("installed", "0")
+        if installed != "1":
+            print(f"{target.label}: стек не найден на сервере, действие {action} пропущено.")
+            continue
+        actionable.append(target)
+    return actionable
 
 
 def install_remote_role(target: RemoteTarget, deployment_name: str, env: dict[str, str], action: str) -> None:
@@ -252,7 +292,7 @@ def install_remote_role(target: RemoteTarget, deployment_name: str, env: dict[st
 
 def postcheck_remote_role(target: RemoteTarget, wg_interface: str) -> None:
     print_header(f"Пост-проверка {target.label}")
-    ssh_stream(target, postcheck_command(wg_interface), as_root=True)
+    ssh_stream(target, postcheck_command(target.role, wg_interface), as_root=True)
 
 
 def finalize_install_output(env: dict[str, str], deployment_name: str) -> None:
@@ -388,7 +428,12 @@ def remote_action_workflow(deployment: str | None, role: str, action: str) -> in
         ensure_foreign_wan_interface(env, preflights[ROLE_FOREIGN])
         write_text(env_path, render_env_text(env))
         write_state(deployment_name, targets, existing_state=state)
+    targets = filter_targets_for_action(action, targets, preflights)
     print_summary(deployment_name, env, targets)
+    if not targets:
+        print_header("Готово")
+        print("Подходящих серверов для действия не найдено.")
+        return 0
     if not prompt_yes_no(f"Продолжить действие {action}?", default=False):
         print("Остановлено пользователем.")
         return 0
