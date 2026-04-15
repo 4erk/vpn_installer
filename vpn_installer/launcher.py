@@ -13,6 +13,10 @@ from vpn_installer.error_logging import log_exception  # noqa: E402
 from vpn_installer.models import AppError, UserCancelled  # noqa: E402
 
 
+def _is_audit_failure(exc: BaseException) -> bool:
+    return exc.__class__.__name__ == "AuditFailure" and exc.__class__.__module__.startswith("vpn_installer.audit")
+
+
 def run(argv: list[str] | None = None) -> int:
     try:
         return main(argv)
@@ -28,13 +32,17 @@ def run(argv: list[str] | None = None) -> int:
         if log_path:
             print(f"Подробности сохранены в: {log_path}", file=sys.stderr)
         return 1
-    except AppError as exc:
-        log_path = log_exception("launcher.app_error", exc, argv=argv)
-        print(f"Ошибка: {exc}", file=sys.stderr)
-        if log_path:
-            print(f"Подробности сохранены в: {log_path}", file=sys.stderr)
-        return 1
     except Exception as exc:  # noqa: BLE001
+        if _is_audit_failure(exc):
+            print(f"Самопроверка завершилась с ошибкой: {exc}", file=sys.stderr)
+            print("Смотри summary и логи в out/audit/<run_id>/.", file=sys.stderr)
+            return 1
+        if isinstance(exc, AppError):
+            log_path = log_exception("launcher.app_error", exc, argv=argv)
+            print(f"Ошибка: {exc}", file=sys.stderr)
+            if log_path:
+                print(f"Подробности сохранены в: {log_path}", file=sys.stderr)
+            return 1
         log_path = log_exception("launcher.unhandled", exc, argv=argv)
         print(f"Непредвиденная ошибка: {exc}", file=sys.stderr)
         if log_path:

@@ -38,6 +38,10 @@ from .render import client_artifact_paths, deployment_out_dir, render_all_artifa
 from .state import load_state, state_json_path, state_legacy_path, write_state
 
 
+def is_audit_failure(exc: BaseException) -> bool:
+    return exc.__class__.__name__ == "AuditFailure" and exc.__class__.__module__.startswith("vpn_installer.audit")
+
+
 def build_target(role: str, env: dict[str, str], state: dict[str, Any]) -> RemoteTarget:
     role_state = state.get(role, {})
     saved_connection = has_saved_connection(role_state)
@@ -444,6 +448,11 @@ def run_menu_action(action: Any, *, return_to: str) -> None:
             print(f"Лог ошибки: {log_path}")
         print(f"Возврат в {return_to}.")
     except Exception as exc:  # noqa: BLE001
+        if is_audit_failure(exc):
+            warn(f"Самопроверка завершилась с ошибкой: {exc}")
+            print("Смотри summary и логи в out/audit/<run_id>/.")
+            print(f"Возврат в {return_to}.")
+            return
         log_path = log_exception("menu.unhandled", exc, extra={"return_to": return_to})
         if os.environ.get("VPN_DEBUG"):
             traceback.print_exc()

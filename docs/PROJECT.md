@@ -176,10 +176,12 @@
 
 `vpn audit quick`
 
-- `unittest`
-- launcher smoke
+- пользовательская быстрая самопроверка
+- launcher smoke для текущей платформы
 - рендер артефактов
 - JSON / tar / cloud-init validation
+- dev-only проверки (`unittest`, `coverage`, Docker/container, cross-platform regression) в обычном `quick` переходят в `skipped`
+- для полного developer/regression контура используется `vpn audit all`
 
 `vpn audit docker`
 

@@ -284,6 +284,16 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn(f"Лог ошибки: {Path('out/logs/runtime/error.log')}", stdout_stream.getvalue())
         self.assertIn("Непредвиденная ошибка: boom", stderr_stream.getvalue())
 
+        AuditFailure = type("AuditFailure", (RuntimeError,), {})
+        AuditFailure.__module__ = "vpn_installer.audit.runner"
+        with patch("sys.stdout", new_callable=__import__("io").StringIO) as stdout_stream, patch("sys.stderr", new_callable=__import__("io").StringIO) as stderr_stream:
+            with patch("vpn_installer.workflows.log_exception") as log_mock:
+                workflows.run_menu_action(lambda: (_ for _ in ()).throw(AuditFailure("Не найдена команда: docker")), return_to="меню самопроверки")
+        log_mock.assert_not_called()
+        self.assertIn("Смотри summary и логи в out/audit/<run_id>/.", stdout_stream.getvalue())
+        self.assertIn("Возврат в меню самопроверки", stdout_stream.getvalue())
+        self.assertIn("Самопроверка завершилась с ошибкой", stderr_stream.getvalue())
+
     def test_audit_menu_workflow_loops_until_back(self) -> None:
         with patch("vpn_installer.workflows.prompt_choice", side_effect=["quick", "back"]), patch("vpn_installer.audit.runner.main", return_value=0) as audit_main:
             self.assertEqual(workflows.audit_menu_workflow(), 0)

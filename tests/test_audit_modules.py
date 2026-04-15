@@ -15,13 +15,18 @@ from vpn_installer.audit.runner import AuditFailure
 class FakeRunner:
     def __init__(self) -> None:
         self.records: list[str] = []
+        self.skips: list[str] = []
         self.run_id = "rid"
+        self.mode = "quick"
 
     def ensure_audit_image(self) -> None:
         self.records.append("ensure")
 
     def record(self, name, fn):
         self.records.append(name)
+
+    def skip(self, name, _reason):
+        self.skips.append(name)
 
 
 class AuditModuleTests(unittest.TestCase):
@@ -40,7 +45,6 @@ class AuditModuleTests(unittest.TestCase):
         runner = QuickRunner()
         no_op = patch.multiple(
             audit_quick,
-            require_command=lambda *_args, **_kwargs: None,
             test_coverage=lambda *_args, **_kwargs: {},
             test_install_ux_helpers=lambda *_args, **_kwargs: {},
             test_render_all=lambda *_args, **_kwargs: {},
@@ -57,10 +61,12 @@ class AuditModuleTests(unittest.TestCase):
             test_vpn_menu_exit=lambda *_args, **_kwargs: {},
             load_env_file=lambda *_args, **_kwargs: {"DEPLOY_NAME": "demo"},
         )
-        with no_op:
+        with no_op, patch("vpn_installer.audit.quick.shutil.which", return_value="found"):
             audit_quick.run(runner)  # type: ignore[arg-type]
-        self.assertIn("quick-unittest", runner.records)
-        self.assertIn("quick-linux-launcher-python", runner.records)
+        self.assertNotIn("quick-unittest", runner.records)
+        self.assertIn("quick-install-ux", runner.records)
+        self.assertIn("quick-unittest", runner.skips)
+        self.assertIn("quick-linux-launcher-python", runner.skips)
 
     def test_quick_helper_validations(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -100,7 +106,8 @@ class AuditModuleTests(unittest.TestCase):
 
                 return subprocess.CompletedProcess(["pwsh"], 0, stdout="VPN Installer\nВыбери действие\nЗавершено.\n", stderr="")
 
-        result = audit_quick.test_vpn_menu_exit(Runner())
+        with patch("vpn_installer.audit.quick.powershell_executable", return_value="powershell"):
+            result = audit_quick.test_vpn_menu_exit(Runner())
         self.assertIn("launcher", result)
 
     def test_docker_run_registers_checks(self) -> None:

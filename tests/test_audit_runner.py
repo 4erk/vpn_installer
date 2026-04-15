@@ -54,9 +54,23 @@ class AuditRunnerTests(unittest.TestCase):
 
     def test_runner_run_invalid_mode_fails(self) -> None:
         runner = self.make_runner("nope")
-        with self.assertRaises(audit_runner.AuditFailure):
-            runner.run()
+        rc = runner.run()
+        self.assertEqual(rc, 1)
+        self.assertEqual(runner.results[-1].status, "failed")
         self.assertTrue(runner.summary_path().is_file())
+
+    def test_runner_run_captures_top_level_failure_in_summary(self) -> None:
+        runner = self.make_runner("quick")
+        fake_quick = types.SimpleNamespace(run=MagicMock(side_effect=audit_runner.AuditFailure("boom")))
+        fake_docker = types.SimpleNamespace(run=MagicMock())
+        fake_lab = types.SimpleNamespace(run=MagicMock())
+        import sys
+
+        with patch.dict(sys.modules, {"vpn_installer.audit.quick": fake_quick, "vpn_installer.audit.docker": fake_docker, "vpn_installer.audit.lab": fake_lab}):
+            rc = runner.run()
+        self.assertEqual(rc, 1)
+        self.assertEqual(runner.results[-1].name, "quick-runner")
+        self.assertEqual(runner.results[-1].status, "failed")
 
     def test_run_command_writes_logs_and_respects_codes(self) -> None:
         runner = self.make_runner()
@@ -160,7 +174,7 @@ class AuditRunnerTests(unittest.TestCase):
 
     def test_docker_helpers_delegate(self) -> None:
         runner = self.make_runner()
-        with patch.object(runner, "run_command", return_value=completed(0)) as run_command:
+        with patch.object(audit_runner, "require_command"), patch.object(runner, "run_command", return_value=completed(0)) as run_command:
             runner.docker("ps", ["ps"])
             runner.docker_copy("demo", Path("install.sh"), "/tmp/install.sh")
             runner.docker_cp_from("demo", "/tmp/install.sh", Path("install.sh"))

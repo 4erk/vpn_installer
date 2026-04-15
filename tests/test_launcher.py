@@ -39,6 +39,14 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("Непредвиденная ошибка: boom", stream.getvalue())
         self.assertIn(str(Path("out/logs/runtime/error.log")), stream.getvalue())
 
+    def test_launcher_does_not_log_audit_failure_to_runtime_log(self) -> None:
+        AuditFailure = type("AuditFailure", (RuntimeError,), {})
+        AuditFailure.__module__ = "vpn_installer.audit.runner"
+        with patch("vpn_installer.launcher.main", side_effect=AuditFailure("Не найдена команда: docker")), patch("vpn_installer.launcher.log_exception") as log_mock, patch("sys.stderr", new_callable=StringIO) as stream:
+            self.assertEqual(launcher.run(["audit", "quick"]), 1)
+        log_mock.assert_not_called()
+        self.assertIn("Самопроверка завершилась с ошибкой", stream.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

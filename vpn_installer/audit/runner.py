@@ -140,6 +140,18 @@ class AuditRunner:
                 lab_checks.run(self)
             else:
                 raise AuditFailure(f"Неизвестный режим: {self.mode}")
+        except Exception as exc:  # noqa: BLE001
+            self.failures += 1
+            self.note(f"FAIL: {exc}")
+            self.results.append(
+                TestResult(
+                    name=f"{self.mode}-runner",
+                    status="failed",
+                    duration_sec=0.0,
+                    details=str(exc),
+                    artifacts={},
+                )
+            )
         finally:
             self.write_summary()
         return 0 if self.failures == 0 else 1
@@ -170,6 +182,19 @@ class AuditRunner:
                 duration_sec=round(time.monotonic() - started, 3),
                 details=details,
                 artifacts=artifacts,
+            )
+        )
+
+    def skip(self, name: str, reason: str) -> None:
+        self.note(f"\n== {name} ==")
+        self.note(f"SKIP: {reason}")
+        self.results.append(
+            TestResult(
+                name=name,
+                status="skipped",
+                duration_sec=0.0,
+                details=reason,
+                artifacts={},
             )
         )
 

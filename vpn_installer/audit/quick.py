@@ -14,7 +14,7 @@ from ..config import load_env_file
 from ..render import render_all_artifacts
 from ..runtime_deps import ensure_python_package
 from ..workflows import build_target
-from .runner import AUDIT_IMAGE, VPN_PS1, AuditFailure, AuditRunner, powershell_executable, python_cmd, require_command, write_bytes
+from .runner import AUDIT_IMAGE, VPN_PS1, AuditFailure, AuditRunner, powershell_executable, python_cmd, write_bytes
 
 COVERAGE_THRESHOLD = 90
 COVERAGE_OMIT = "vpn_installer/audit/*"
@@ -56,16 +56,32 @@ def coverage_driver_text() -> str:
 
 
 def run(runner: AuditRunner) -> None:
-    require_command("docker")
-    runner.ensure_audit_image()
+    dev_mode = runner.mode == "all" or os.environ.get("VPN_AUDIT_DEV") == "1"
+    windows_host = os.name == "nt"
+    docker_available = shutil.which("docker") is not None
+    bash_available = shutil.which("bash") is not None
+    powershell_available = shutil.which("powershell") is not None or shutil.which("pwsh") is not None
+
+    if dev_mode and docker_available:
+        runner.ensure_audit_image()
     env_path, out_dir = runner.ensure_quick_env()
     env = load_env_file(env_path)
     runner.seed_foreign_block_cache(out_dir.name)
     ps_env = {"VPN_NO_PAUSE": "1"}
 
-    runner.record("quick-unittest", lambda: test_unittest_modules(runner))
-    runner.record("quick-coverage", lambda: test_coverage(runner))
-    runner.record("quick-bash-syntax", lambda: runner.run_bash("bash-syntax", "bash -n install.sh") or None)
+    if dev_mode:
+        runner.record("quick-unittest", lambda: test_unittest_modules(runner))
+        runner.record("quick-coverage", lambda: test_coverage(runner))
+    else:
+        runner.skip("quick-unittest", "dev-only: unit-тесты запускаются только в полном аудите")
+        runner.skip("quick-coverage", "dev-only: coverage запускается только в полном аудите")
+
+    if dev_mode and bash_available:
+        runner.record("quick-bash-syntax", lambda: runner.run_bash("bash-syntax", "bash -n install.sh") or None)
+    elif dev_mode:
+        runner.skip("quick-bash-syntax", "bash не найден, shell-проверки пропущены")
+    else:
+        runner.skip("quick-bash-syntax", "dev-only: shell-проверка выполняется только в полном аудите")
     runner.record(
         "quick-py-compile",
         lambda: runner.run_command(
@@ -89,23 +105,60 @@ def run(runner: AuditRunner) -> None:
         )
         or None,
     )
-    runner.record("quick-vpn-ps1-help", lambda: runner.run_powershell("vpn-ps1-help", ["-File", str(VPN_PS1), "--help"], env=ps_env) or None)
-    runner.record("quick-vpn-sh-help", lambda: runner.run_bash("vpn-sh-help", "bash ./vpn.sh --help", cwd=ROOT_DIR) or None)
-    runner.record("quick-vpn-ps1-install-help", lambda: runner.run_powershell("vpn-ps1-install-help", ["-File", str(VPN_PS1), "install", "--help"], env=ps_env) or None)
-    runner.record("quick-vpn-sh-audit-help", lambda: runner.run_bash("vpn-sh-audit-help", "bash ./vpn.sh audit --help", cwd=ROOT_DIR) or None)
-    runner.record("quick-vpn-menu-exit", lambda: test_vpn_menu_exit(runner))
+    if windows_host and powershell_available:
+        runner.record("quick-vpn-ps1-help", lambda: runner.run_powershell("vpn-ps1-help", ["-File", str(VPN_PS1), "--help"], env=ps_env) or None)
+        runner.record("quick-vpn-ps1-install-help", lambda: runner.run_powershell("vpn-ps1-install-help", ["-File", str(VPN_PS1), "install", "--help"], env=ps_env) or None)
+        runner.record("quick-vpn-menu-exit", lambda: test_vpn_menu_exit(runner))
+        if dev_mode:
+            runner.record("quick-windows-clean-room", lambda: test_windows_clean_room(runner))
+        else:
+            runner.skip("quick-windows-clean-room", "dev-only: clean-room Windows bootstrap выполняется только в полном аудите")
+    elif windows_host:
+        runner.skip("quick-vpn-ps1-help", "PowerShell не найден, Windows launcher help пропущен")
+        runner.skip("quick-vpn-ps1-install-help", "PowerShell не найден, Windows install help пропущен")
+        runner.skip("quick-vpn-menu-exit", "PowerShell не найден, menu smoke пропущен")
+        runner.skip("quick-windows-clean-room", "PowerShell не найден, Windows clean-room пропущен")
+    else:
+        runner.skip("quick-vpn-ps1-help", "не Windows-хост: PowerShell smoke пропущен")
+        runner.skip("quick-vpn-ps1-install-help", "не Windows-хост: PowerShell smoke пропущен")
+        runner.skip("quick-vpn-menu-exit", "не Windows-хост: menu smoke для PowerShell пропущен")
+        runner.skip("quick-windows-clean-room", "не Windows-хост: Windows clean-room пропущен")
+
+    if not windows_host and bash_available:
+        runner.record("quick-vpn-sh-help", lambda: runner.run_bash("vpn-sh-help", "bash ./vpn.sh --help", cwd=ROOT_DIR) or None)
+        runner.record("quick-vpn-sh-audit-help", lambda: runner.run_bash("vpn-sh-audit-help", "bash ./vpn.sh audit --help", cwd=ROOT_DIR) or None)
+    elif not windows_host:
+        runner.skip("quick-vpn-sh-help", "bash не найден, Linux launcher help пропущен")
+        runner.skip("quick-vpn-sh-audit-help", "bash не найден, Linux audit help пропущен")
+    else:
+        runner.skip("quick-vpn-sh-help", "не Linux-хост: Linux launcher help пропущен")
+        runner.skip("quick-vpn-sh-audit-help", "не Linux-хост: Linux audit help пропущен")
     runner.record("quick-install-ux", test_install_ux_helpers)
     runner.record("quick-render-all", lambda: test_render_all(env_path, env, out_dir))
     runner.record("quick-validate-json", lambda: test_validate_json(out_dir))
     runner.record("quick-user-artifacts", lambda: test_user_artifacts(out_dir))
     runner.record("quick-validate-bundle", lambda: test_validate_bundle(out_dir))
-    runner.record("quick-singbox-check", lambda: test_singbox_check(runner, out_dir))
-    runner.record("quick-cloud-init-schema", lambda: test_cloud_init_schema(runner, out_dir))
-    runner.record("quick-cloud-init-render-only", lambda: test_cloud_init_render_only(runner, out_dir))
-    runner.record("quick-bundle-render-only", lambda: test_bundle_render_only(runner, out_dir))
-    runner.record("quick-windows-clean-room", lambda: test_windows_clean_room(runner))
-    runner.record("quick-linux-launcher-no-python", lambda: test_linux_launcher_no_python(runner))
-    runner.record("quick-linux-launcher-python", lambda: test_linux_launcher_with_python(runner))
+    if dev_mode and docker_available:
+        runner.record("quick-singbox-check", lambda: test_singbox_check(runner, out_dir))
+        runner.record("quick-cloud-init-schema", lambda: test_cloud_init_schema(runner, out_dir))
+        runner.record("quick-cloud-init-render-only", lambda: test_cloud_init_render_only(runner, out_dir))
+        runner.record("quick-bundle-render-only", lambda: test_bundle_render_only(runner, out_dir))
+        runner.record("quick-linux-launcher-no-python", lambda: test_linux_launcher_no_python(runner))
+        runner.record("quick-linux-launcher-python", lambda: test_linux_launcher_with_python(runner))
+    elif dev_mode:
+        runner.skip("quick-singbox-check", "docker не найден, sing-box container check пропущен")
+        runner.skip("quick-cloud-init-schema", "docker не найден, cloud-init schema check пропущен")
+        runner.skip("quick-cloud-init-render-only", "docker не найден, cloud-init render-only check пропущен")
+        runner.skip("quick-bundle-render-only", "docker не найден, bundle render-only check пропущен")
+        runner.skip("quick-linux-launcher-no-python", "docker не найден, Linux launcher test пропущен")
+        runner.skip("quick-linux-launcher-python", "docker не найден, Linux launcher test пропущен")
+    else:
+        runner.skip("quick-singbox-check", "dev-only: Docker/container проверки выполняются только в полном аудите")
+        runner.skip("quick-cloud-init-schema", "dev-only: cloud-init schema выполняется только в полном аудите")
+        runner.skip("quick-cloud-init-render-only", "dev-only: cloud-init render-only выполняется только в полном аудите")
+        runner.skip("quick-bundle-render-only", "dev-only: bundle render-only выполняется только в полном аудите")
+        runner.skip("quick-linux-launcher-no-python", "dev-only: Linux launcher regression выполняется только в полном аудите")
+        runner.skip("quick-linux-launcher-python", "dev-only: Linux launcher regression выполняется только в полном аудите")
 
 
 def test_unittest_modules(runner: AuditRunner) -> dict[str, str]:
