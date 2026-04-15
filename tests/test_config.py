@@ -96,6 +96,32 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("WAN_INTERFACE", merged)
         self.assertEqual(merged["WAN_INTERFACE"], "")
 
+    def test_merge_env_with_defaults_appends_new_direct_domain_defaults(self) -> None:
+        merged = config.merge_env_with_defaults(
+            {
+                "RU_FORCE_DIRECT_DOMAIN": "api.oneme.ru,legacy.example",
+                "RU_FORCE_DIRECT_DOMAIN_SUFFIX": ".legacy.example,.ipify.org",
+            },
+            "sample",
+        )
+        domains = merged["RU_FORCE_DIRECT_DOMAIN"].split(",")
+        suffixes = merged["RU_FORCE_DIRECT_DOMAIN_SUFFIX"].split(",")
+        self.assertIn("legacy.example", domains)
+        self.assertIn("api.oneme.ru", domains)
+        self.assertIn("2ip.ru", domains)
+        self.assertIn("ip.mail.ru", domains)
+        self.assertEqual(domains.count("api.oneme.ru"), 1)
+        self.assertIn(".legacy.example", suffixes)
+        self.assertIn(".ipify.org", suffixes)
+        self.assertEqual(suffixes.count(".ipify.org"), 1)
+
+    def test_merge_env_with_defaults_appends_new_asset_sources(self) -> None:
+        merged = config.merge_env_with_defaults({"RU_GEOSITE_URL": "https://legacy.example/geosite.srs"}, "sample")
+        geosite_sources = config.split_asset_sources(merged["RU_GEOSITE_URL"])
+        self.assertEqual(geosite_sources[0], "https://legacy.example/geosite.srs")
+        self.assertTrue(any("raw.githubusercontent.com/SagerNet/sing-geosite" in source for source in geosite_sources))
+        self.assertTrue(any("cdn.jsdelivr.net/gh/SagerNet/sing-geosite" in source for source in geosite_sources))
+
     def test_generate_example_env_contains_public_ip_placeholders(self) -> None:
         env = config.generate_example_env()
         self.assertEqual(env["DEPLOY_NAME"], "my-stack")

@@ -21,6 +21,19 @@ from .models import (
     AppError,
 )
 
+MERGED_CSV_DEFAULT_KEYS = {
+    "RU_FORCE_DIRECT_DOMAIN",
+    "RU_FORCE_DIRECT_DOMAIN_SUFFIX",
+    "RU_FORCE_DIRECT_IP_CIDR",
+}
+
+MERGED_SOURCE_DEFAULT_KEYS = {
+    "RU_GEOSITE_URL",
+    "RU_GEOIP_URL",
+    "FOREIGN_RU_IPV4_LIST_URL",
+    "FOREIGN_RU_IPV6_LIST_URL",
+}
+
 
 def validate_deployment_name(raw_name: str) -> str:
     cleaned = sanitize_name(raw_name)
@@ -174,11 +187,44 @@ def base64_url_nopad(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
 
 
+def _split_csv_values(raw_value: str) -> list[str]:
+    return [item.strip() for item in raw_value.replace("\n", ",").split(",") if item.strip()]
+
+
+def _merge_csv_defaults(existing_value: str, default_value: str) -> str:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for item in _split_csv_values(existing_value) + _split_csv_values(default_value):
+        if item in seen:
+            continue
+        seen.add(item)
+        merged.append(item)
+    return ",".join(merged)
+
+
+def _merge_source_defaults(existing_value: str, default_value: str) -> str:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for item in split_asset_sources(existing_value) + split_asset_sources(default_value):
+        if item in seen:
+            continue
+        seen.add(item)
+        merged.append(item)
+    return " ".join(merged)
+
+
 def merge_env_with_defaults(existing: dict[str, str], deploy_name: str) -> dict[str, str]:
-    merged = generate_default_env(deploy_name)
+    defaults = generate_default_env(deploy_name)
+    merged = defaults.copy()
     for key, value in existing.items():
         if value or key in ALLOW_EMPTY_OVERRIDE:
             merged[key] = value
+    for key in MERGED_CSV_DEFAULT_KEYS:
+        if existing.get(key):
+            merged[key] = _merge_csv_defaults(existing[key], defaults[key])
+    for key in MERGED_SOURCE_DEFAULT_KEYS:
+        if existing.get(key):
+            merged[key] = _merge_source_defaults(existing[key], defaults[key])
     merged["DEPLOY_NAME"] = deploy_name
     return merged
 

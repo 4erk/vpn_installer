@@ -133,7 +133,7 @@ GLOBAL_DOH_SERVER_NAME="${GLOBAL_DOH_SERVER_NAME:-cloudflare-dns.com}"
 GLOBAL_DOH_PATH="${GLOBAL_DOH_PATH:-/dns-query}"
 SUBSCRIPTION_PORT="${SUBSCRIPTION_PORT:-18080}"
 SUBSCRIPTION_TOKEN="${SUBSCRIPTION_TOKEN:-}"
-RU_FORCE_DIRECT_DOMAIN="${RU_FORCE_DIRECT_DOMAIN:-api.oneme.ru,mtalk.google.com,calls.okcdn.ru,gosuslugi.ru,api.ok.ru,ifconfig.me,ifconfig.co,checkip.amazonaws.com,ipapi.co,ipinfo.io,ident.me,tnedi.me,icanhazip.com}"
+RU_FORCE_DIRECT_DOMAIN="${RU_FORCE_DIRECT_DOMAIN:-api.oneme.ru,mtalk.google.com,calls.okcdn.ru,gosuslugi.ru,api.ok.ru,ifconfig.me,ifconfig.co,checkip.amazonaws.com,ipapi.co,ipinfo.io,ident.me,tnedi.me,icanhazip.com,ip.mail.ru,ipv4-internet.yandex.net,ipv6-internet.yandex.net,2ip.ru}"
 RU_FORCE_DIRECT_DOMAIN_SUFFIX="${RU_FORCE_DIRECT_DOMAIN_SUFFIX:-.gstatic.com,.gosuslugi.ru,.ipify.org,.ipinfo.io,.ident.me,.tnedi.me,.icanhazip.com}"
 RU_FORCE_DIRECT_IP_CIDR="${RU_FORCE_DIRECT_IP_CIDR:-}"
 
