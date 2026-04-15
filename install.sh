@@ -562,6 +562,21 @@ render_role_with_python() {
     "${args[@]}"
 }
 
+detect_primary_interface() {
+  ip route show default | awk '/default/ {print $5; exit}'
+}
+
+apply_runtime_qdisc() {
+  local iface="$1"
+  if [[ -z "${iface}" ]]; then
+    return 0
+  fi
+  if ! command -v tc >/dev/null 2>&1; then
+    return 0
+  fi
+  tc qdisc replace dev "${iface}" root fq_codel >/dev/null 2>&1 || true
+}
+
 find_rendered_role_dir() {
   local env_dir=""
   local candidate=""
@@ -755,8 +770,10 @@ fi
 
 mkdir -p "${VPNSTACK_ROOT}" /etc/sing-box /etc/wireguard "${RULESET_DIR}" "${SUBSCRIPTION_ROOT}" /usr/local/lib/vpn-stack /etc/systemd/system
 
+RUNTIME_QDISC_INTERFACE="$(detect_primary_interface)"
+
 if [[ "$ROLE" == "foreign-exit" ]]; then
-  WAN_INTERFACE="${WAN_INTERFACE:-$(ip route show default | awk '/default/ {print $5; exit}')}"
+  WAN_INTERFACE="${WAN_INTERFACE:-${RUNTIME_QDISC_INTERFACE}}"
   if [[ -z "${WAN_INTERFACE:-}" ]]; then
     echo "Unable to detect WAN interface. Set WAN_INTERFACE in the env file." >&2
     exit 1
@@ -769,11 +786,16 @@ copy_role_artifacts "${ROLE_ARTIFACTS_DIR}"
 
 if [[ "$ROLE" == "ru-gateway" ]]; then
   cat >"${SYSCTL_PATH}" <<EOF
+net.core.default_qdisc=fq_codel
+net.ipv4.tcp_congestion_control=bbr
+net.ipv4.tcp_mtu_probing=1
 net.ipv4.conf.all.src_valid_mark=1
 EOF
 else
   cat >"${SYSCTL_PATH}" <<EOF
 net.core.default_qdisc=fq_codel
+net.ipv4.tcp_congestion_control=bbr
+net.ipv4.tcp_mtu_probing=1
 net.ipv4.ip_forward=1
 net.ipv6.conf.all.forwarding=1
 EOF
@@ -783,6 +805,7 @@ stage_preseed_assets
 record_install_metadata
 
 sysctl --system >/dev/null
+apply_runtime_qdisc "${RUNTIME_QDISC_INTERFACE}"
 systemctl daemon-reload
 systemctl enable nftables
 systemctl restart nftables
