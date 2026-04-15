@@ -4,6 +4,7 @@ import io
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from vpn_installer.models import AppError, ROLE_RU, RemoteTarget
@@ -76,6 +77,26 @@ class RemoteTests(unittest.TestCase):
         with patch("vpn_installer.remote.ensure_paramiko_installed", return_value=fake_paramiko):
             with self.assertRaises(AppError):
                 paramiko_connect(target)
+
+    def test_paramiko_connect_retries_password_auth_timeout(self) -> None:
+        class FakeAuthTimeout(Exception):
+            pass
+
+        first_client = Mock()
+        first_client.connect.side_effect = FakeAuthTimeout("Authentication timeout.")
+        second_client = Mock()
+        ssh_client_factory = Mock(side_effect=[first_client, second_client])
+        fake_paramiko = SimpleNamespace(
+            SSHClient=ssh_client_factory,
+            AutoAddPolicy=Mock(return_value="policy"),
+            ssh_exception=SimpleNamespace(AuthenticationException=FakeAuthTimeout),
+        )
+        target = RemoteTarget(role=ROLE_RU, ssh_host="203.0.113.10", ssh_port=22, ssh_user="root", auth_mode="password", ssh_password="secret")
+        with patch("vpn_installer.remote.ensure_paramiko_installed", return_value=fake_paramiko), patch("vpn_installer.remote.time.sleep") as sleep_mock:
+            client = paramiko_connect(target)
+        self.assertIs(client, second_client)
+        first_client.close.assert_called_once()
+        sleep_mock.assert_called_once()
 
     def test_paramiko_exec_collects_stdout_stderr_and_tolerates_shutdown_failure(self) -> None:
         channel = Mock()

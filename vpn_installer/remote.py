@@ -10,6 +10,12 @@ from .common import command_exists, fail, run_command
 from .models import AppError, RemoteTarget
 from .runtime_deps import ensure_python_package
 
+SSH_CONNECT_TIMEOUT = 20
+SSH_BANNER_TIMEOUT = 20
+SSH_AUTH_TIMEOUT = 45
+SSH_PASSWORD_AUTH_RETRIES = 3
+SSH_PASSWORD_AUTH_RETRY_DELAY = 1.0
+
 
 def ensure_paramiko_installed():
     return ensure_python_package("paramiko", "paramiko>=3.5,<4")
@@ -50,15 +56,13 @@ def build_remote_command(command_body: str, target: RemoteTarget, as_root: bool)
 
 def paramiko_connect(target: RemoteTarget):
     paramiko = ensure_paramiko_installed()
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     connect_kwargs: dict[str, Any] = {
         "hostname": target.ssh_host,
         "port": int(target.ssh_port),
         "username": target.ssh_user,
-        "timeout": 20,
-        "banner_timeout": 20,
-        "auth_timeout": 20,
+        "timeout": SSH_CONNECT_TIMEOUT,
+        "banner_timeout": SSH_BANNER_TIMEOUT,
+        "auth_timeout": SSH_AUTH_TIMEOUT,
     }
     if target.auth_mode == "password":
         if not target.ssh_password:
@@ -71,11 +75,34 @@ def paramiko_connect(target: RemoteTarget):
         connect_kwargs["allow_agent"] = not bool(target.identity_path)
         if target.identity_path:
             connect_kwargs["key_filename"] = target.identity_path
-    try:
-        client.connect(**connect_kwargs)
-    except Exception as exc:  # noqa: BLE001
-        raise AppError(f"SSH connection failed для {target.ssh_user}@{target.ssh_host}:{target.ssh_port}: {exc}") from exc
-    return client
+    auth_exception_type = getattr(getattr(paramiko, "ssh_exception", None), "AuthenticationException", Exception)
+    last_exc: Exception | None = None
+    attempts = SSH_PASSWORD_AUTH_RETRIES if target.auth_mode == "password" else 1
+    for attempt in range(1, attempts + 1):
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        try:
+            client.connect(**connect_kwargs)
+            return client
+        except Exception as exc:  # noqa: BLE001
+            client.close()
+            last_exc = exc
+            retryable_auth_timeout = (
+                target.auth_mode == "password"
+                and isinstance(exc, auth_exception_type)
+                and "timeout" in str(exc).lower()
+                and attempt < attempts
+            )
+            if retryable_auth_timeout:
+                time.sleep(SSH_PASSWORD_AUTH_RETRY_DELAY * attempt)
+                continue
+            if target.auth_mode == "password" and isinstance(exc, auth_exception_type) and "timeout" in str(exc).lower():
+                raise AppError(
+                    f"SSH connection failed для {target.ssh_user}@{target.ssh_host}:{target.ssh_port}: {exc}\n"
+                    "Сервер слишком долго отвечает на password-аутентификацию. Повтори попытку; если проблема повторяется, проверь пароль или SSH policy хоста."
+                ) from exc
+            raise AppError(f"SSH connection failed для {target.ssh_user}@{target.ssh_host}:{target.ssh_port}: {exc}") from exc
+    raise AppError(f"SSH connection failed для {target.ssh_user}@{target.ssh_host}:{target.ssh_port}: {last_exc}")
 
 
 def paramiko_exec(target: RemoteTarget, remote_command: str, *, input_text: str | None = None) -> tuple[int, str, str]:
