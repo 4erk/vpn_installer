@@ -106,9 +106,15 @@
 
 Основные клиентские файлы:
 
-- `out/<name>/client/hiddify-uri.txt`
 - `out/<name>/client/hiddify-cross-platform.json`
+- `out/<name>/client/hiddify-uri.txt`
 - `out/<name>/client/linux-sing-box.json`
+
+Пользовательский контракт:
+
+- для `Hiddify` основной профиль — `hiddify-cross-platform.json`
+- `hiddify-uri.txt` — только сырой запасной `VLESS URI`
+- на Windows для реального перехвата трафика `Hiddify` должен работать с правами администратора и с включённым `TUN/VPN` режимом
 
 ## Lifecycle
 

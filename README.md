@@ -86,23 +86,26 @@ chmod +x ./vpn.sh
 
 После успешной установки появятся:
 
-- `out/<deployment>/client/hiddify-uri.txt`
 - `out/<deployment>/client/hiddify-cross-platform.json`
+- `out/<deployment>/client/hiddify-uri.txt`
 - `out/<deployment>/client/linux-sing-box.json`
 - `out/<deployment>/NEXT-STEPS.txt`
 
 Главный результат:
 
-- строка для `Hiddify` копируется в буфер обмена
-- та же строка сохраняется в `hiddify-uri.txt`
+- JSON-профиль для `Hiddify` копируется в буфер обмена
+- основной файл для `Hiddify`: `hiddify-cross-platform.json`
+- `hiddify-uri.txt` — это только сырой запасной `VLESS URI`, без гарантии наших правил маршрутизации
 
 ## Как подключить в Hiddify
 
 1. Открой `Hiddify`
-2. Выбери добавление профиля из буфера обмена
-3. Если буфер не сработал, открой `hiddify-uri.txt` и вставь строку вручную
+2. На Windows запусти его с правами администратора и включи `VPN/TUN mode`
+3. Выбери добавление профиля из буфера обмена или импорт файла
+4. Основной вариант: `hiddify-cross-platform.json`
+5. `hiddify-uri.txt` используй только как сырой запасной URI, если осознанно нужен только транспорт без split-routing
 
-JSON-файлы нужны только как запасной вариант.
+Для `Hiddify` основной вариант теперь именно JSON-профиль. URI нужен только как запасной низкоуровневый путь.
 
 ## Если что-то не сработало
 

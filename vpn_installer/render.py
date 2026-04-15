@@ -532,16 +532,17 @@ def render_next_steps(env: dict[str, str]) -> str:
             f"Deployment: {env['DEPLOY_NAME']}",
             "",
             "Что уже готово:",
-            f"- Hiddify URI: {paths['uri']}",
-            f"- JSON backup для Hiddify: {paths['hiddify_json']}",
+            f"- Основной профиль для Hiddify: {paths['hiddify_json']}",
+            f"- Сырой VLESS URI: {paths['uri']}",
             f"- JSON backup для Linux sing-box: {paths['linux_json']}",
             "",
             "Что делать дальше:",
             "1. Открой Hiddify на Windows, Linux или Android.",
-            "2. Выбери добавление профиля из буфера обмена.",
-            f"3. Если буфер обмена недоступен, открой файл {paths['uri'].name} и вставь его вручную.",
-            f"4. Если URI не подходит, импортируй JSON-файл {paths['hiddify_json'].name}.",
-            f"5. Для проверки серверов запусти: vpn status --deployment {env['DEPLOY_NAME']}",
+            "2. На Windows запусти Hiddify с правами администратора, чтобы TUN/VPN-режим реально перехватывал трафик.",
+            "3. Импортируй профиль из буфера обмена или выбери импорт файла.",
+            f"4. Основной файл для Hiddify: {paths['hiddify_json'].name}. Именно он содержит split-routing и TUN-правила.",
+            f"5. Файл {paths['uri'].name} используй только как сырой запасной VLESS URI, если осознанно нужен только транспорт без правил маршрутизации.",
+            f"6. Для проверки серверов потом запусти: vpn status --deployment {env['DEPLOY_NAME']}",
         ]
     ) + "\n"
 

@@ -73,13 +73,21 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(rc, 0)
             self.assertFalse(out_dir.exists())
 
-    def test_finalize_install_output_uses_uri_file(self) -> None:
+    def test_finalize_install_output_prefers_hiddify_json(self) -> None:
         env = generate_default_env("demo")
         env["RU_PUBLIC_IP"] = "203.0.113.10"
         with tempfile.TemporaryDirectory() as tmp:
-            with patch("vpn_installer.workflows.client_artifact_paths", return_value={"uri": Path(tmp) / "hiddify-uri.txt", "hiddify_json": Path(tmp) / "h.json", "linux_json": Path(tmp) / "l.json", "next_steps": Path(tmp) / "NEXT-STEPS.txt"}):
-                with patch("vpn_installer.workflows.copy_to_clipboard", return_value=(False, "no clipboard")):
+            paths = {
+                "uri": Path(tmp) / "hiddify-uri.txt",
+                "hiddify_json": Path(tmp) / "h.json",
+                "linux_json": Path(tmp) / "l.json",
+                "next_steps": Path(tmp) / "NEXT-STEPS.txt",
+            }
+            paths["hiddify_json"].write_text('{"route":{"final":"ru-gateway"}}', encoding="utf-8")
+            with patch("vpn_installer.workflows.client_artifact_paths", return_value=paths):
+                with patch("vpn_installer.workflows.copy_to_clipboard", return_value=(False, "no clipboard")) as copy_mock:
                     workflows.finalize_install_output(env, "demo")
+            copy_mock.assert_called_once_with('{"route":{"final":"ru-gateway"}}')
 
     def test_verify_target_interactively_cancel_raises_user_cancelled(self) -> None:
         target = RemoteTarget(role=ROLE_RU, public_ip="203.0.113.10", ssh_host="203.0.113.10", ssh_port=22, ssh_user="root")

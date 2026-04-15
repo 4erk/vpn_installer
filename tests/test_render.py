@@ -91,6 +91,8 @@ class RenderTests(unittest.TestCase):
         text = render.render_next_steps(env)
         self.assertIn("Hiddify", text)
         self.assertIn("vpn status", text)
+        self.assertIn("hiddify-cross-platform.json", text)
+        self.assertIn("сырой запасной", text)
 
     def test_render_client_profiles_writes_user_artifacts(self) -> None:
         env = self.make_env()

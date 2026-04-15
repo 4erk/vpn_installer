@@ -34,7 +34,7 @@ from .prompts import (
     select_role_for_menu,
 )
 from .remote import ensure_remote_privilege, print_preflight, remote_preflight, scp_upload, ssh_stream
-from .render import client_artifact_paths, deployment_out_dir, render_all_artifacts, render_client_profiles, render_config_artifacts, render_next_steps, render_vless_uri
+from .render import client_artifact_paths, deployment_out_dir, render_all_artifacts, render_client_profile, render_client_profiles, render_config_artifacts, render_next_steps
 from .state import load_state, state_json_path, state_legacy_path, write_state
 
 
@@ -297,20 +297,22 @@ def postcheck_remote_role(target: RemoteTarget, wg_interface: str) -> None:
 
 def finalize_install_output(env: dict[str, str], deployment_name: str) -> None:
     paths = client_artifact_paths(env)
-    uri_payload = render_vless_uri(env)
-    clipboard_ok, clipboard_message = copy_to_clipboard(uri_payload)
+    hiddify_payload = paths["hiddify_json"].read_text(encoding="utf-8") if paths["hiddify_json"].is_file() else render_client_profile(env, auto_redirect=False)
+    clipboard_ok, clipboard_message = copy_to_clipboard(hiddify_payload)
     print_header("Готово")
     print(f"Deployment: {deployment_name}")
-    print(f"Hiddify URI: {paths['uri']}")
-    print(f"JSON backup для Hiddify: {paths['hiddify_json']}")
+    print(f"Основной профиль для Hiddify: {paths['hiddify_json']}")
+    print(f"Сырой VLESS URI: {paths['uri']}")
     print(f"JSON backup для Linux: {paths['linux_json']}")
     print(f"Следующие шаги: {paths['next_steps']}")
     print(clipboard_message)
     print("Что делать дальше:")
     print("1. Открой Hiddify.")
-    print("2. Выбери импорт из буфера обмена.")
-    print(f"3. Если буфер обмена не сработал, открой {paths['uri'].name} и вставь URI вручную.")
-    print(f"4. Для проверки серверов потом запусти: vpn status --deployment {deployment_name}")
+    print("2. На Windows запусти Hiddify с правами администратора и включи VPN/TUN режим.")
+    print("3. Импортируй профиль из буфера обмена или из файла.")
+    print(f"4. Основной файл для Hiddify: {paths['hiddify_json'].name}.")
+    print(f"5. Файл {paths['uri'].name} используй только как сырой запасной URI без наших правил маршрутизации.")
+    print(f"6. Для проверки серверов потом запусти: vpn status --deployment {deployment_name}")
 
 
 def load_env_for_render(env_path: Path) -> dict[str, str]:
