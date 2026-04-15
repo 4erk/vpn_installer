@@ -143,7 +143,7 @@ def generate_default_env(deploy_name: str) -> dict[str, str]:
         "GLOBAL_DOH_SERVER": "1.1.1.1",
         "GLOBAL_DOH_SERVER_NAME": "cloudflare-dns.com",
         "GLOBAL_DOH_PATH": "/dns-query",
-        "RU_FORCE_DIRECT_DOMAIN": "api.oneme.ru,mtalk.google.com,calls.okcdn.ru,gosuslugi.ru,api.ok.ru,ifconfig.me,ifconfig.co,checkip.amazonaws.com,ipapi.co,ipinfo.io,ident.me,tnedi.me,icanhazip.com",
+        "RU_FORCE_DIRECT_DOMAIN": "api.oneme.ru,mtalk.google.com,calls.okcdn.ru,gosuslugi.ru,api.ok.ru,ifconfig.me,ifconfig.co,checkip.amazonaws.com,ipapi.co,ipinfo.io,ident.me,tnedi.me,icanhazip.com,ip.mail.ru,ipv4-internet.yandex.net,ipv6-internet.yandex.net,2ip.ru",
         "RU_FORCE_DIRECT_DOMAIN_SUFFIX": ".gstatic.com,.gosuslugi.ru,.ipify.org,.ipinfo.io,.ident.me,.tnedi.me,.icanhazip.com",
         "RU_FORCE_DIRECT_IP_CIDR": "",
         "RULESET_DIR": "/var/lib/vpn-stack/rules",

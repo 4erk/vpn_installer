@@ -73,6 +73,10 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("api.ok.ru", env["RU_FORCE_DIRECT_DOMAIN"])
         self.assertIn("checkip.amazonaws.com", env["RU_FORCE_DIRECT_DOMAIN"])
         self.assertIn("ident.me", env["RU_FORCE_DIRECT_DOMAIN"])
+        self.assertIn("ip.mail.ru", env["RU_FORCE_DIRECT_DOMAIN"])
+        self.assertIn("ipv4-internet.yandex.net", env["RU_FORCE_DIRECT_DOMAIN"])
+        self.assertIn("ipv6-internet.yandex.net", env["RU_FORCE_DIRECT_DOMAIN"])
+        self.assertIn("2ip.ru", env["RU_FORCE_DIRECT_DOMAIN"])
         self.assertIn(".ipify.org", env["RU_FORCE_DIRECT_DOMAIN_SUFFIX"])
         self.assertIn(".ipinfo.io", env["RU_FORCE_DIRECT_DOMAIN_SUFFIX"])
 
