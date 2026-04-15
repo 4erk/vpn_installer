@@ -220,6 +220,7 @@ printf 'sing_box=%s\\n' "$(service_state sing-box)"
 printf 'nftables=%s\\n' "$(service_state nftables)"
 printf 'wireguard=%s\\n' "$(service_state wg-quick@{wg_interface})"
 printf 'sync_timer=%s\\n' "$(service_state vpn-stack-sync.timer)"
+printf 'subscription_server=%s\\n' "$(service_state vpn-stack-subscription.service)"
 """.strip()
 
 
@@ -242,6 +243,7 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
     print(f"nftables: {preflight.get('nftables', '-')}")
     print(f"wireguard: {preflight.get('wireguard', '-')}")
     print(f"sync timer: {preflight.get('sync_timer', '-')}")
+    print(f"subscription server: {preflight.get('subscription_server', '-')}")
 
 
 def ensure_remote_privilege(target: RemoteTarget, preflight: dict[str, str], *, prompt_yes_no, prompt_secret) -> None:

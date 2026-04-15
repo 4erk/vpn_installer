@@ -123,9 +123,11 @@ class AuditRunner:
             print(f"- {result.name}: {result.status}")
 
     def run(self) -> int:
-        from . import docker as docker_checks
-        from . import lab as lab_checks
-        from . import quick as quick_checks
+        import importlib
+
+        docker_checks = importlib.import_module("vpn_installer.audit.docker")
+        lab_checks = importlib.import_module("vpn_installer.audit.lab")
+        quick_checks = importlib.import_module("vpn_installer.audit.quick")
 
         try:
             if self.mode == "quick":

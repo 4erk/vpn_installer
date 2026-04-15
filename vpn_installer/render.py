@@ -284,6 +284,7 @@ def render_ru_firewall_nftables(env: dict[str, str]) -> str:
             "    ct state established,related accept",
             f"    tcp dport {env['SSH_PORT']} accept",
             f"    tcp dport {env['RU_LISTEN_PORT']} accept",
+            f"    tcp dport {env['SUBSCRIPTION_PORT']} accept",
             "  }",
             "}",
             "",
@@ -470,6 +471,36 @@ def render_vless_uri(env: dict[str, str]) -> str:
     return f"vless://{env['CLIENT_UUID']}@{env['RU_PUBLIC_IP']}:{env['RU_LISTEN_PORT']}?security=reality&sni={env['RU_REALITY_SERVER_NAME']}&pbk={env['RU_REALITY_PUBLIC_KEY']}&sid={env['RU_REALITY_SHORT_ID']}&fp={env['UTLS_FINGERPRINT']}&type=tcp&flow={env['CLIENT_FLOW']}#{env['DEPLOY_NAME']}-ru-gateway\n"
 
 
+def render_subscription_url(env: dict[str, str]) -> str:
+    return f"http://{env['RU_PUBLIC_IP']}:{env['SUBSCRIPTION_PORT']}/{env['SUBSCRIPTION_TOKEN']}/hiddify-cross-platform.json\n"
+
+
+def render_hiddify_import_url(env: dict[str, str]) -> str:
+    return f"hiddify://import/{render_subscription_url(env).strip()}#{env['DEPLOY_NAME']}\n"
+
+
+def render_subscription_service(env: dict[str, str]) -> str:
+    return "\n".join(
+        [
+            "[Unit]",
+            "Description=Serve vpn-stack subscription profiles",
+            "After=network-online.target",
+            "Wants=network-online.target",
+            "",
+            "[Service]",
+            "Type=simple",
+            "WorkingDirectory=/var/lib/vpn-stack/subscription",
+            f'ExecStart=/usr/bin/python3 -m http.server {env["SUBSCRIPTION_PORT"]} --bind 0.0.0.0 --directory /var/lib/vpn-stack/subscription',
+            "Restart=always",
+            "RestartSec=2",
+            "",
+            "[Install]",
+            "WantedBy=multi-user.target",
+            "",
+        ]
+    )
+
+
 def deployment_out_dir(env: dict[str, str]) -> Path:
     return OUT_DIR / env["DEPLOY_NAME"]
 
@@ -487,6 +518,9 @@ def rendered_files_for_role(env: dict[str, str], role: str) -> dict[str, str]:
             "sync-state.sh": render_sync_script(env),
             "vpn-stack-sync.service": render_sync_service(ROLE_RU),
             "vpn-stack-sync.timer": render_sync_timer(),
+            "vpn-stack-subscription.service": render_subscription_service(env),
+            f"subscription/{env['SUBSCRIPTION_TOKEN']}/hiddify-cross-platform.json": render_client_profile(env, auto_redirect=False),
+            f"subscription/{env['SUBSCRIPTION_TOKEN']}/vless.txt": render_vless_uri(env),
         }
     wan_iface = env.get("WAN_INTERFACE", "").strip() or "eth0"
     return {
@@ -517,6 +551,8 @@ def client_artifact_paths(env: dict[str, str]) -> dict[str, Path]:
     client_dir = deployment_out_dir(env) / "client"
     return {
         "client_dir": client_dir,
+        "subscription_url": client_dir / "hiddify-subscription-url.txt",
+        "hiddify_import_url": client_dir / "hiddify-import-url.txt",
         "hiddify_json": client_dir / "hiddify-cross-platform.json",
         "linux_json": client_dir / "linux-sing-box.json",
         "uri": client_dir / "hiddify-uri.txt",
@@ -532,17 +568,21 @@ def render_next_steps(env: dict[str, str]) -> str:
             f"Deployment: {env['DEPLOY_NAME']}",
             "",
             "Что уже готово:",
-            f"- Основной профиль для Hiddify: {paths['hiddify_json']}",
-            f"- Сырой VLESS URI: {paths['uri']}",
+            f"- Основной URL подписки для Hiddify: {paths['subscription_url']}",
+            f"- Deeplink для Hiddify: {paths['hiddify_import_url']}",
+            f"- JSON fallback для Hiddify: {paths['hiddify_json']}",
+            f"- Сырой VLESS URI fallback: {paths['uri']}",
             f"- JSON backup для Linux sing-box: {paths['linux_json']}",
             "",
             "Что делать дальше:",
             "1. Открой Hiddify на Windows, Linux или Android.",
             "2. На Windows запусти Hiddify с правами администратора, чтобы TUN/VPN-режим реально перехватывал трафик.",
-            "3. Импортируй профиль из буфера обмена или выбери импорт файла.",
-            f"4. Основной файл для Hiddify: {paths['hiddify_json'].name}. Именно он содержит split-routing и TUN-правила.",
-            f"5. Файл {paths['uri'].name} используй только как сырой запасной VLESS URI, если осознанно нужен только транспорт без правил маршрутизации.",
-            f"6. Для проверки серверов потом запусти: vpn status --deployment {env['DEPLOY_NAME']}",
+            "3. Добавь профиль по URL подписки из буфера обмена или вручную из файла.",
+            f"4. Основной файл для ручного ввода URL: {paths['subscription_url'].name}.",
+            f"5. Если клиент умеет deeplink Hiddify, используй {paths['hiddify_import_url'].name}.",
+            f"6. Если URL-подписка не подходит, используй JSON fallback {paths['hiddify_json'].name}.",
+            f"7. Файл {paths['uri'].name} используй только как сырой запасной VLESS URI без правил маршрутизации.",
+            f"8. Для проверки серверов потом запусти: vpn status --deployment {env['DEPLOY_NAME']}",
         ]
     ) + "\n"
 
@@ -569,6 +609,8 @@ def render_config_artifacts(env_path: Path, env: dict[str, str], *, fetch_assets
 def render_client_profiles(env: dict[str, str]) -> Path:
     require_env(env, REQUIRED_ENV_VARS)
     paths = client_artifact_paths(env)
+    write_text(paths["subscription_url"], render_subscription_url(env))
+    write_text(paths["hiddify_import_url"], render_hiddify_import_url(env))
     write_text(paths["hiddify_json"], render_client_profile(env, auto_redirect=False))
     write_text(paths["linux_json"], render_client_profile(env, auto_redirect=True))
     uri_payload = render_vless_uri(env)

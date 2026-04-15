@@ -12,6 +12,21 @@
 
 ## [0.2.7] - 2026-04-15
 
+## [0.2.8] - 2026-04-15
+
+### Added
+
+- российский сервер теперь может отдавать профиль подписки по отдельному URL на отдельном порту через `vpn-stack-subscription.service`
+- локально теперь генерируются:
+  - `hiddify-subscription-url.txt`
+  - `hiddify-import-url.txt`
+
+### Changed
+
+- основной пользовательский путь для `Hiddify` снова переведён на URL подписки
+- `hiddify-cross-platform.json` оставлен как fallback
+- `hiddify-uri.txt` оставлен как сырой низкоуровневый fallback без гарантии split-routing
+
 ### Fixed
 
 - клиентский сценарий для `Hiddify` больше не продвигает сырой `VLESS URI` как основной путь: главным артефактом теперь считается `hiddify-cross-platform.json`, потому что именно он содержит TUN и split-routing

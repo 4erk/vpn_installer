@@ -287,26 +287,50 @@ def test_validate_json(out_dir: Path) -> dict[str, str]:
 
 
 def test_user_artifacts(out_dir: Path) -> dict[str, str]:
+    subscription_url_path = out_dir / "client" / "hiddify-subscription-url.txt"
+    import_url_path = out_dir / "client" / "hiddify-import-url.txt"
     uri_path = out_dir / "client" / "hiddify-uri.txt"
     next_steps = out_dir / "NEXT-STEPS.txt"
+    if not subscription_url_path.is_file():
+        raise AuditFailure(f"Не найден Hiddify subscription URL файл: {subscription_url_path}")
+    if not import_url_path.is_file():
+        raise AuditFailure(f"Не найден Hiddify import URL файл: {import_url_path}")
     if not uri_path.is_file():
         raise AuditFailure(f"Не найден Hiddify URI файл: {uri_path}")
     if not next_steps.is_file():
         raise AuditFailure(f"Не найден NEXT-STEPS.txt: {next_steps}")
+    subscription_payload = subscription_url_path.read_text(encoding="utf-8")
+    if not subscription_payload.startswith("http://"):
+        raise AuditFailure("Hiddify subscription URL не похож на HTTP URL")
+    import_payload = import_url_path.read_text(encoding="utf-8")
+    if not import_payload.startswith("hiddify://import/http://"):
+        raise AuditFailure("Hiddify import URL не похож на deeplink")
     uri_payload = uri_path.read_text(encoding="utf-8")
     if not uri_payload.startswith("vless://"):
         raise AuditFailure("Hiddify URI не похожа на VLESS URI")
     next_steps_text = next_steps.read_text(encoding="utf-8")
-    if "Hiddify" not in next_steps_text or "vpn status" not in next_steps_text:
+    if "Hiddify" not in next_steps_text or "vpn status" not in next_steps_text or "URL подписки" not in next_steps_text:
         raise AuditFailure("NEXT-STEPS.txt не содержит ожидаемых инструкций")
-    return {"uri": str(uri_path), "next_steps": str(next_steps)}
+    return {"subscription_url": str(subscription_url_path), "import_url": str(import_url_path), "uri": str(uri_path), "next_steps": str(next_steps)}
 
 
 def test_validate_bundle(out_dir: Path) -> dict[str, str]:
     bundle_dir = out_dir / "bundle"
     tarballs = [bundle_dir / "ru-gateway.tar.gz", bundle_dir / "foreign-exit.tar.gz"]
+    ru_env = load_env_file(out_dir / "server" / "ru.env")
     expected = {
-        "ru-gateway.tar.gz": {"install.sh", "deployment.env", "assets/geosite-ru.srs", "assets/geoip-ru.srs", "rendered/sing-box.json", "rendered/sync-state.sh", "vpn_installer/install_support.py"},
+        "ru-gateway.tar.gz": {
+            "install.sh",
+            "deployment.env",
+            "assets/geosite-ru.srs",
+            "assets/geoip-ru.srs",
+            "rendered/sing-box.json",
+            "rendered/sync-state.sh",
+            "rendered/vpn-stack-subscription.service",
+            f"rendered/subscription/{ru_env['SUBSCRIPTION_TOKEN']}/hiddify-cross-platform.json",
+            f"rendered/subscription/{ru_env['SUBSCRIPTION_TOKEN']}/vless.txt",
+            "vpn_installer/install_support.py",
+        },
         "foreign-exit.tar.gz": {"install.sh", "deployment.env", "assets/ru-ipv4.zone", "assets/ru-ipv6.zone", "rendered/sing-box.json", "rendered/sync-state.sh", "vpn_installer/install_support.py"},
     }
     for tarball in tarballs:

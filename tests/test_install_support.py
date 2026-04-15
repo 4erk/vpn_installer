@@ -29,6 +29,8 @@ class InstallSupportTests(unittest.TestCase):
             self.assertEqual(payload["route"]["final"], "to-foreign")
             self.assertTrue((output_dir / "sync-state.sh").is_file())
             self.assertTrue((output_dir / "vpn-stack-sync.service").is_file())
+            self.assertTrue((output_dir / "vpn-stack-subscription.service").is_file())
+            self.assertTrue((output_dir / "subscription" / env["SUBSCRIPTION_TOKEN"] / "hiddify-cross-platform.json").is_file())
 
     def test_render_role_applies_wan_override(self) -> None:
         env = self.make_env()

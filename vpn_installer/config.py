@@ -4,6 +4,7 @@ import ipaddress
 import json
 import os
 import re
+import secrets
 import urllib.error
 import urllib.request
 import uuid
@@ -114,6 +115,8 @@ def generate_default_env(deploy_name: str) -> dict[str, str]:
         "CLIENT_UUID": str(uuid.uuid4()),
         "CLIENT_FLOW": "xtls-rprx-vision",
         "RU_LISTEN_PORT": "443",
+        "SUBSCRIPTION_PORT": "18080",
+        "SUBSCRIPTION_TOKEN": secrets.token_hex(16),
         "RU_REALITY_SERVER_NAME": "www.cloudflare.com",
         "RU_REALITY_HANDSHAKE_SERVER": "www.cloudflare.com",
         "RU_REALITY_HANDSHAKE_PORT": "443",

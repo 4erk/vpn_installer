@@ -38,6 +38,13 @@ class RenderTests(unittest.TestCase):
         env = self.make_env()
         self.assertTrue(render.render_vless_uri(env).startswith("vless://"))
 
+    def test_render_subscription_urls(self) -> None:
+        env = self.make_env()
+        subscription = render.render_subscription_url(env).strip()
+        deeplink = render.render_hiddify_import_url(env).strip()
+        self.assertEqual(subscription, f"http://203.0.113.10:{env['SUBSCRIPTION_PORT']}/{env['SUBSCRIPTION_TOKEN']}/hiddify-cross-platform.json")
+        self.assertEqual(deeplink, f"hiddify://import/{subscription}#demo")
+
     def test_ru_server_config_sets_default_domain_resolver(self) -> None:
         env = self.make_env()
         payload = json.loads(render.render_ru_singbox(env))
@@ -91,7 +98,8 @@ class RenderTests(unittest.TestCase):
         text = render.render_next_steps(env)
         self.assertIn("Hiddify", text)
         self.assertIn("vpn status", text)
-        self.assertIn("hiddify-cross-platform.json", text)
+        self.assertIn("hiddify-subscription-url.txt", text)
+        self.assertIn("hiddify-import-url.txt", text)
         self.assertIn("сырой запасной", text)
 
     def test_render_client_profiles_writes_user_artifacts(self) -> None:
@@ -100,6 +108,8 @@ class RenderTests(unittest.TestCase):
             with patch.object(render, "OUT_DIR", Path(tmp)):
                 render.render_client_profiles(env)
                 client_dir = Path(tmp) / "demo" / "client"
+                self.assertTrue((client_dir / "hiddify-subscription-url.txt").is_file())
+                self.assertTrue((client_dir / "hiddify-import-url.txt").is_file())
                 self.assertTrue((client_dir / "hiddify-uri.txt").is_file())
                 self.assertTrue((client_dir.parent / "NEXT-STEPS.txt").is_file())
 
@@ -155,6 +165,8 @@ class RenderTests(unittest.TestCase):
     def test_client_artifact_paths_contract(self) -> None:
         env = self.make_env()
         paths = render.client_artifact_paths(env)
+        self.assertEqual(paths["subscription_url"].name, "hiddify-subscription-url.txt")
+        self.assertEqual(paths["hiddify_import_url"].name, "hiddify-import-url.txt")
         self.assertEqual(paths["uri"].name, "hiddify-uri.txt")
         self.assertEqual(paths["next_steps"].name, "NEXT-STEPS.txt")
 
@@ -164,6 +176,8 @@ class RenderTests(unittest.TestCase):
         self.assertIn("sing-box.json", files)
         self.assertIn(f"{env['WG_INTERFACE']}.conf", files)
         self.assertIn("vpn-stack-sync.service", files)
+        self.assertIn("vpn-stack-subscription.service", files)
+        self.assertIn(f"subscription/{env['SUBSCRIPTION_TOKEN']}/hiddify-cross-platform.json", files)
 
     def test_load_env_file_from_text_parses_text_payload(self) -> None:
         payload = render.load_env_file_from_text('DEPLOY_NAME="demo"\nRU_PUBLIC_IP="203.0.113.10"\n')

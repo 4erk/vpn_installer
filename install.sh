@@ -131,6 +131,8 @@ RU_DIRECT_DNS_PORT="${RU_DIRECT_DNS_PORT:-53}"
 GLOBAL_DOH_SERVER="${GLOBAL_DOH_SERVER:-1.1.1.1}"
 GLOBAL_DOH_SERVER_NAME="${GLOBAL_DOH_SERVER_NAME:-cloudflare-dns.com}"
 GLOBAL_DOH_PATH="${GLOBAL_DOH_PATH:-/dns-query}"
+SUBSCRIPTION_PORT="${SUBSCRIPTION_PORT:-18080}"
+SUBSCRIPTION_TOKEN="${SUBSCRIPTION_TOKEN:-}"
 RU_FORCE_DIRECT_DOMAIN="${RU_FORCE_DIRECT_DOMAIN:-api.oneme.ru,mtalk.google.com,calls.okcdn.ru,gosuslugi.ru,api.ok.ru,ifconfig.me,ifconfig.co,checkip.amazonaws.com,ipapi.co,ipinfo.io,ident.me,tnedi.me,icanhazip.com}"
 RU_FORCE_DIRECT_DOMAIN_SUFFIX="${RU_FORCE_DIRECT_DOMAIN_SUFFIX:-.gstatic.com,.gosuslugi.ru,.ipify.org,.ipinfo.io,.ident.me,.tnedi.me,.icanhazip.com}"
 RU_FORCE_DIRECT_IP_CIDR="${RU_FORCE_DIRECT_IP_CIDR:-}"
@@ -147,7 +149,9 @@ NFTABLES_PATH="/etc/nftables.conf"
 RULE_SYNC_SCRIPT="/usr/local/lib/vpn-stack/sync-state.sh"
 SYNC_SERVICE_PATH="/etc/systemd/system/vpn-stack-sync.service"
 SYNC_TIMER_PATH="/etc/systemd/system/vpn-stack-sync.timer"
+SUBSCRIPTION_SERVICE_PATH="/etc/systemd/system/vpn-stack-subscription.service"
 SYSCTL_PATH="/etc/sysctl.d/90-vpn-stack.conf"
+SUBSCRIPTION_ROOT="/var/lib/vpn-stack/subscription"
 VPNSTACK_ROLE_FILE="${VPNSTACK_ROOT}/role"
 VPNSTACK_DEPLOYMENT_FILE="${VPNSTACK_ROOT}/deployment.env"
 VPNSTACK_INSTALLED_AT_FILE="${VPNSTACK_ROOT}/installed_at"
@@ -171,6 +175,8 @@ require_common_env() {
   require_var RU_PUBLIC_IP
   require_var FOREIGN_PUBLIC_IP
   require_var CLIENT_UUID
+  require_var SUBSCRIPTION_PORT
+  require_var SUBSCRIPTION_TOKEN
   require_var RU_REALITY_SERVER_NAME
   require_var RU_REALITY_HANDSHAKE_SERVER
   require_var RU_REALITY_PRIVATE_KEY
@@ -274,6 +280,8 @@ SINGBOX_ENABLED=$(service_enabled_flag sing-box)
 SINGBOX_ACTIVE=$(service_active_flag sing-box)
 SYNC_TIMER_ENABLED=$(service_enabled_flag vpn-stack-sync.timer)
 SYNC_TIMER_ACTIVE=$(service_active_flag vpn-stack-sync.timer)
+SUBSCRIPTION_ENABLED=$(service_enabled_flag vpn-stack-subscription.service)
+SUBSCRIPTION_ACTIVE=$(service_active_flag vpn-stack-subscription.service)
 EOF
 }
 
@@ -285,6 +293,8 @@ managed_paths() {
     "${RULE_SYNC_SCRIPT}" \
     "${SYNC_SERVICE_PATH}" \
     "${SYNC_TIMER_PATH}" \
+    "${SUBSCRIPTION_SERVICE_PATH}" \
+    "${SUBSCRIPTION_ROOT}" \
     "${SYSCTL_PATH}"
 }
 
@@ -378,6 +388,7 @@ restore_service_state() {
   apply_service_restore_flags "wg-quick@${WG_INTERFACE}" "${WIREGUARD_ENABLED:-0}" "${WIREGUARD_ACTIVE:-0}"
   apply_service_restore_flags vpn-stack-sync.timer "${SYNC_TIMER_ENABLED:-0}" "${SYNC_TIMER_ACTIVE:-0}"
   apply_service_restore_flags sing-box "${SINGBOX_ENABLED:-0}" "${SINGBOX_ACTIVE:-0}"
+  apply_service_restore_flags vpn-stack-subscription.service "${SUBSCRIPTION_ENABLED:-0}" "${SUBSCRIPTION_ACTIVE:-0}"
 }
 
 stop_managed_services() {
@@ -385,6 +396,7 @@ stop_managed_services() {
   systemctl stop "wg-quick@${WG_INTERFACE}" >/dev/null 2>&1 || true
   systemctl stop vpn-stack-sync.service >/dev/null 2>&1 || true
   systemctl stop vpn-stack-sync.timer >/dev/null 2>&1 || true
+  systemctl stop vpn-stack-subscription.service >/dev/null 2>&1 || true
   systemctl stop nftables >/dev/null 2>&1 || true
 }
 
@@ -392,6 +404,7 @@ disable_managed_services() {
   systemctl disable sing-box >/dev/null 2>&1 || true
   systemctl disable "wg-quick@${WG_INTERFACE}" >/dev/null 2>&1 || true
   systemctl disable vpn-stack-sync.timer >/dev/null 2>&1 || true
+  systemctl disable vpn-stack-subscription.service >/dev/null 2>&1 || true
   systemctl disable nftables >/dev/null 2>&1 || true
 }
 
@@ -403,7 +416,9 @@ remove_managed_files() {
     "${RULE_SYNC_SCRIPT}" \
     "${SYNC_SERVICE_PATH}" \
     "${SYNC_TIMER_PATH}" \
+    "${SUBSCRIPTION_SERVICE_PATH}" \
     "${SYSCTL_PATH}"
+  rm -rf "${SUBSCRIPTION_ROOT}"
   rm -rf "${RULESET_DIR}"
 }
 
@@ -481,6 +496,7 @@ print_status() {
   echo "wireguard_active=$(service_active_flag "wg-quick@${WG_INTERFACE}")"
   echo "sync_timer_active=$(service_active_flag vpn-stack-sync.timer)"
   echo "sing_box_active=$(service_active_flag sing-box)"
+  echo "subscription_active=$(service_active_flag vpn-stack-subscription.service)"
 }
 
 python_candidate_works() {
@@ -584,6 +600,16 @@ copy_role_artifacts() {
   copy_if_present "${source_dir}/sync-state.sh" "${RULE_SYNC_SCRIPT}" || { echo "Missing sync-state.sh in ${source_dir}" >&2; exit 1; }
   copy_if_present "${source_dir}/vpn-stack-sync.service" "${SYNC_SERVICE_PATH}" || { echo "Missing vpn-stack-sync.service in ${source_dir}" >&2; exit 1; }
   copy_if_present "${source_dir}/vpn-stack-sync.timer" "${SYNC_TIMER_PATH}" || { echo "Missing vpn-stack-sync.timer in ${source_dir}" >&2; exit 1; }
+  if [[ "$ROLE" == "ru-gateway" ]]; then
+    copy_if_present "${source_dir}/vpn-stack-subscription.service" "${SUBSCRIPTION_SERVICE_PATH}" || { echo "Missing vpn-stack-subscription.service in ${source_dir}" >&2; exit 1; }
+    if [[ ! -d "${source_dir}/subscription" ]]; then
+      echo "Missing subscription directory in ${source_dir}" >&2
+      exit 1
+    fi
+    rm -rf "${SUBSCRIPTION_ROOT}"
+    mkdir -p "$(dirname "${SUBSCRIPTION_ROOT}")"
+    cp -a "${source_dir}/subscription" "${SUBSCRIPTION_ROOT}"
+  fi
   chmod 0755 "${RULE_SYNC_SCRIPT}"
 }
 
@@ -727,7 +753,7 @@ if ! command -v sing-box >/dev/null 2>&1; then
   curl -fsSL https://sing-box.sagernet.org/installation/tools/install.sh | bash
 fi
 
-mkdir -p "${VPNSTACK_ROOT}" /etc/sing-box /etc/wireguard "${RULESET_DIR}" /usr/local/lib/vpn-stack /etc/systemd/system
+mkdir -p "${VPNSTACK_ROOT}" /etc/sing-box /etc/wireguard "${RULESET_DIR}" "${SUBSCRIPTION_ROOT}" /usr/local/lib/vpn-stack /etc/systemd/system
 
 if [[ "$ROLE" == "foreign-exit" ]]; then
   WAN_INTERFACE="${WAN_INTERFACE:-$(ip route show default | awk '/default/ {print $5; exit}')}"
@@ -776,6 +802,8 @@ fi
 if [[ "$ROLE" == "ru-gateway" ]]; then
   systemctl enable sing-box
   systemctl restart sing-box
+  systemctl enable vpn-stack-subscription.service
+  systemctl restart vpn-stack-subscription.service
 fi
 
 chmod 0600 "${SINGBOX_CONFIG_PATH}" "${WG_CONFIG_PATH}"
