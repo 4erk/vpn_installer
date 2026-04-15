@@ -440,12 +440,10 @@ def render_client_profile(env: dict[str, str], auto_redirect: bool) -> str:
         "dns": {
             "strategy": "ipv4_only",
             "servers": [
-                {"type": "fakeip", "tag": "dns-fakeip", "inet4_range": env["CLIENT_FAKEIP_V4"], "inet6_range": env["CLIENT_FAKEIP_V6"]},
                 {"type": "https", "tag": "dns-remote", "server": env["GLOBAL_DOH_SERVER"], "server_port": 443, "path": env["GLOBAL_DOH_PATH"], "detour": "ru-gateway", "tls": {"enabled": True, "server_name": env["GLOBAL_DOH_SERVER_NAME"]}},
             ],
-            "rules": [{"query_type": ["AAAA"], "action": "reject"}, {"query_type": ["A"], "action": "route", "server": "dns-fakeip"}],
+            "rules": [{"query_type": ["AAAA"], "action": "reject"}],
             "final": "dns-remote",
-            "reverse_mapping": True,
             "independent_cache": True,
         },
         "inbounds": [{"type": "tun", "tag": "tun-in", "interface_name": env["CLIENT_TUN_NAME"], "address": [env["CLIENT_TUN_ADDRESS_V4"], env["CLIENT_TUN_ADDRESS_V6"]], "auto_route": True, "strict_route": True, "auto_redirect": auto_redirect}],

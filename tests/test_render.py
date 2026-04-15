@@ -45,6 +45,16 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(subscription, f"http://203.0.113.10:{env['SUBSCRIPTION_PORT']}/{env['SUBSCRIPTION_TOKEN']}/hiddify-cross-platform.json")
         self.assertEqual(deeplink, f"hiddify://import/{subscription}#demo")
 
+    def test_client_profile_keeps_hiddify_as_simple_ru_tunnel(self) -> None:
+        env = self.make_env()
+        payload = json.loads(render.render_client_profile(env, auto_redirect=False))
+        servers = {server["tag"]: server for server in payload["dns"]["servers"]}
+        self.assertEqual(set(servers), {"dns-remote"})
+        self.assertNotIn("reverse_mapping", payload["dns"])
+        self.assertEqual(payload["dns"]["rules"], [{"query_type": ["AAAA"], "action": "reject"}])
+        self.assertEqual(payload["route"]["final"], "ru-gateway")
+        self.assertEqual(payload["route"]["default_domain_resolver"]["server"], "dns-remote")
+
     def test_ru_server_config_sets_default_domain_resolver(self) -> None:
         env = self.make_env()
         payload = json.loads(render.render_ru_singbox(env))
