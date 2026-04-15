@@ -43,6 +43,14 @@ class RenderTests(unittest.TestCase):
         payload = json.loads(render.render_ru_singbox(env))
         self.assertEqual(payload["route"]["default_domain_resolver"]["server"], "dns-ru-direct")
 
+    def test_ru_server_dns_servers_keep_global_detour_but_not_direct_detour(self) -> None:
+        env = self.make_env()
+        payload = json.loads(render.render_ru_singbox(env))
+        servers = {server["tag"]: server for server in payload["dns"]["servers"]}
+        self.assertIn("dns-ru-direct", servers)
+        self.assertNotIn("detour", servers["dns-ru-direct"])
+        self.assertEqual(servers["dns-global"]["detour"], "to-foreign")
+
     def test_ru_server_config_forces_selected_domains_and_suffixes_direct(self) -> None:
         env = self.make_env()
         payload = json.loads(render.render_ru_singbox(env))
@@ -214,6 +222,7 @@ class RenderTests(unittest.TestCase):
             payload = json.loads((output_dir / "sing-box.json").read_text(encoding="utf-8"))
         dns_rules = payload["dns"]["rules"]
         route_rules = payload["route"]["rules"]
+        servers = {server["tag"]: server for server in payload["dns"]["servers"]}
         direct_domain_rule = next(rule for rule in route_rules if rule.get("outbound") == "direct-ru" and "domain" in rule)
         self.assertIn("api.ok.ru", direct_domain_rule["domain"])
         self.assertIn("checkip.amazonaws.com", direct_domain_rule["domain"])
@@ -223,6 +232,8 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(cidr_rule["ip_cidr"], ["203.0.113.0/24"])
         dns_direct_rule = next(rule for rule in dns_rules if "domain" in rule)
         self.assertIn("api.oneme.ru", dns_direct_rule["domain"])
+        self.assertNotIn("detour", servers["dns-ru-direct"])
+        self.assertEqual(servers["dns-global"]["detour"], "to-foreign")
 
 
 if __name__ == "__main__":

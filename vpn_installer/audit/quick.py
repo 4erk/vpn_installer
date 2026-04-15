@@ -138,22 +138,26 @@ def run(runner: AuditRunner) -> None:
     runner.record("quick-validate-json", lambda: test_validate_json(out_dir))
     runner.record("quick-user-artifacts", lambda: test_user_artifacts(out_dir))
     runner.record("quick-validate-bundle", lambda: test_validate_bundle(out_dir))
-    if dev_mode and docker_available:
+    if docker_available:
         runner.record("quick-singbox-check", lambda: test_singbox_check(runner, out_dir))
+        runner.record("quick-singbox-runtime-ru", lambda: test_ru_singbox_runtime_smoke(runner, out_dir))
+    else:
+        runner.skip("quick-singbox-check", "docker не найден, sing-box container check пропущен")
+        runner.skip("quick-singbox-runtime-ru", "docker не найден, runtime smoke для RU sing-box пропущен")
+
+    if dev_mode and docker_available:
         runner.record("quick-cloud-init-schema", lambda: test_cloud_init_schema(runner, out_dir))
         runner.record("quick-cloud-init-render-only", lambda: test_cloud_init_render_only(runner, out_dir))
         runner.record("quick-bundle-render-only", lambda: test_bundle_render_only(runner, out_dir))
         runner.record("quick-linux-launcher-no-python", lambda: test_linux_launcher_no_python(runner))
         runner.record("quick-linux-launcher-python", lambda: test_linux_launcher_with_python(runner))
     elif dev_mode:
-        runner.skip("quick-singbox-check", "docker не найден, sing-box container check пропущен")
         runner.skip("quick-cloud-init-schema", "docker не найден, cloud-init schema check пропущен")
         runner.skip("quick-cloud-init-render-only", "docker не найден, cloud-init render-only check пропущен")
         runner.skip("quick-bundle-render-only", "docker не найден, bundle render-only check пропущен")
         runner.skip("quick-linux-launcher-no-python", "docker не найден, Linux launcher test пропущен")
         runner.skip("quick-linux-launcher-python", "docker не найден, Linux launcher test пропущен")
     else:
-        runner.skip("quick-singbox-check", "dev-only: Docker/container проверки выполняются только в полном аудите")
         runner.skip("quick-cloud-init-schema", "dev-only: cloud-init schema выполняется только в полном аудите")
         runner.skip("quick-cloud-init-render-only", "dev-only: cloud-init render-only выполняется только в полном аудите")
         runner.skip("quick-bundle-render-only", "dev-only: bundle render-only выполняется только в полном аудите")
@@ -332,6 +336,22 @@ def test_singbox_check(runner: AuditRunner, out_dir: Path) -> dict[str, str]:
             runner.docker_copy(container, path, f"/work/{path.name}")
             runner.docker_exec(container, f"sing-box check -c /work/{path.name}")
     return {"checked_configs": ", ".join(path.name for path in configs)}
+
+
+def test_ru_singbox_runtime_smoke(runner: AuditRunner, out_dir: Path) -> dict[str, str]:
+    container = f"audit-singbox-runtime-ru-{runner.run_id}"
+    config_path = out_dir / "preview" / "ru" / "sing-box.json"
+    with runner.docker_container(container, AUDIT_IMAGE):
+        runner.docker_exec(container, "mkdir -p /work /var/lib/vpn-stack/rules")
+        for asset in ("geosite-ru.srs", "geoip-ru.srs"):
+            runner.docker_copy(container, out_dir / "assets" / asset, f"/var/lib/vpn-stack/rules/{asset}")
+        runner.docker_copy(container, config_path, "/work/ru-sing-box.json")
+        runner.docker_exec(
+            container,
+            "timeout 3s sing-box run -c /work/ru-sing-box.json >/tmp/ru-singbox.log 2>&1",
+            expected_codes={124},
+        )
+    return {"config": str(config_path), "result": "runtime-smoke-ok"}
 
 
 def test_cloud_init_schema(runner: AuditRunner, out_dir: Path) -> dict[str, str]:
