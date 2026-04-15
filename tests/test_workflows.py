@@ -222,6 +222,27 @@ class WorkflowTests(unittest.TestCase):
             workflows.run_selected_remote_action("install", "demo", Path("deployments/demo.env"), env, [ru, foreign], role_arg="all")
         self.assertEqual(order, [ROLE_FOREIGN, ROLE_RU])
 
+    def test_run_selected_remote_action_remove_noops_when_targets_empty(self) -> None:
+        env = generate_default_env("demo")
+        env["RU_PUBLIC_IP"] = "203.0.113.10"
+        env["FOREIGN_PUBLIC_IP"] = "198.51.100.20"
+        with patch("vpn_installer.workflows.install_remote_role") as install_remote, patch("vpn_installer.workflows.remote_preflight") as remote_preflight, patch("vpn_installer.workflows.print_preflight") as print_preflight:
+            workflows.run_selected_remote_action("remove", "demo", Path("deployments/demo.env"), env, [], role_arg=ROLE_RU)
+        install_remote.assert_not_called()
+        remote_preflight.assert_not_called()
+        print_preflight.assert_not_called()
+
+    def test_run_selected_remote_action_remove_all_uses_only_available_roles(self) -> None:
+        env = generate_default_env("demo")
+        env["RU_PUBLIC_IP"] = "203.0.113.10"
+        env["FOREIGN_PUBLIC_IP"] = "198.51.100.20"
+        foreign = RemoteTarget(role=ROLE_FOREIGN)
+        with patch("vpn_installer.workflows.install_remote_role") as install_remote, patch("vpn_installer.workflows.remote_preflight", return_value={"installed": "1"}) as remote_preflight, patch("vpn_installer.workflows.print_preflight") as print_preflight:
+            workflows.run_selected_remote_action("remove", "demo", Path("deployments/demo.env"), env, [foreign], role_arg="all")
+        install_remote.assert_called_once_with(foreign, "demo", env, "remove")
+        remote_preflight.assert_called_once()
+        print_preflight.assert_called_once()
+
     def test_install_workflow_returns_zero_when_all_skipped(self) -> None:
         env = generate_default_env("demo")
         env["RU_PUBLIC_IP"] = "203.0.113.10"
@@ -263,6 +284,32 @@ class WorkflowTests(unittest.TestCase):
         prompt_yes_no.assert_not_called()
         run_selected.assert_not_called()
         self.assertIn("Подходящих серверов для действия не найдено.", stream.getvalue())
+
+    def test_remote_action_workflow_remove_all_runs_only_remaining_role(self) -> None:
+        env = generate_default_env("demo")
+        env["RU_PUBLIC_IP"] = "203.0.113.10"
+        env["FOREIGN_PUBLIC_IP"] = "198.51.100.20"
+        ru = RemoteTarget(role=ROLE_RU)
+        foreign = RemoteTarget(role=ROLE_FOREIGN)
+        with patch(
+            "vpn_installer.workflows.prepare_remote_session",
+            return_value=(
+                "demo",
+                Path("deployments/demo.env"),
+                env,
+                {},
+                [ru, foreign],
+                {ROLE_RU: {"installed": "0"}, ROLE_FOREIGN: {"installed": "1"}},
+            ),
+        ), patch("vpn_installer.workflows.print_summary") as print_summary, patch("vpn_installer.workflows.prompt_yes_no", return_value=True) as prompt_yes_no, patch("vpn_installer.workflows.run_selected_remote_action") as run_selected, patch("sys.stdout", new_callable=__import__('io').StringIO) as stream:
+            self.assertEqual(workflows.remote_action_workflow("demo", "all", "remove"), 0)
+        print_summary.assert_called_once()
+        prompt_yes_no.assert_called_once()
+        run_selected.assert_called_once()
+        call_args = run_selected.call_args
+        self.assertEqual(call_args.args[4], [foreign])
+        self.assertEqual(call_args.kwargs["role_arg"], "all")
+        self.assertIn("Российский сервер: стек не найден на сервере, действие remove пропущено.", stream.getvalue())
 
     def test_remote_action_workflow_reinstall_updates_env_and_finalizes(self) -> None:
         env = generate_default_env("demo")

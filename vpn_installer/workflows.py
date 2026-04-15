@@ -331,12 +331,13 @@ def run_selected_remote_action(
     role_arg: str = "all",
 ) -> None:
     target_map = {target.role: target for target in targets}
-    roles = requested_roles(role_arg)
+    requested = requested_roles(role_arg)
+    available_roles = [role for role in requested if role in target_map]
     wg_interface = current_wg_interface(env)
     if action in {"install", "reinstall"}:
         print_header("Локальная сборка артефактов")
         render_all_artifacts(env_path, env)
-    for role in execution_roles(action, roles):
+    for role in execution_roles(action, available_roles):
         target = target_map[role]
         install_remote_role(target, deployment_name, env, action)
         if action in {"install", "reinstall"}:
