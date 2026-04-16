@@ -59,6 +59,10 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(payload["route"]["final"], "ru-gateway")
         self.assertEqual(payload["route"]["default_domain_resolver"]["server"], "dns-remote")
         self.assertEqual(payload["inbounds"][0]["address"], [env["CLIENT_TUN_ADDRESS_V4"], env["CLIENT_TUN_ADDRESS_V6"]])
+        self.assertEqual(
+            payload["inbounds"][0]["route_exclude_address"][:2],
+            [f"{env['RU_PUBLIC_IP']}/32", f"{env['FOREIGN_PUBLIC_IP']}/32"],
+        )
 
     def test_android_client_profile_is_ipv4_only_and_sets_android_override(self) -> None:
         env = self.make_env()
@@ -66,6 +70,26 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(payload["inbounds"][0]["address"], [env["CLIENT_TUN_ADDRESS_V4"]])
         self.assertTrue(payload["route"]["override_android_vpn"])
         self.assertEqual(payload["route"]["final"], "ru-gateway")
+        self.assertEqual(
+            payload["inbounds"][0]["route_exclude_address"][:2],
+            [f"{env['RU_PUBLIC_IP']}/32", f"{env['FOREIGN_PUBLIC_IP']}/32"],
+        )
+
+    def test_client_profile_preserves_manual_route_excludes_after_server_ips(self) -> None:
+        env = self.make_env()
+        env["CLIENT_ROUTE_EXCLUDE_V4"] = "198.51.100.10/32,198.51.100.11/32"
+        env["CLIENT_ROUTE_EXCLUDE_V6"] = "2001:db8::/32"
+        payload = json.loads(render.render_client_profile(env, auto_redirect=False))
+        self.assertEqual(
+            payload["inbounds"][0]["route_exclude_address"],
+            [
+                f"{env['RU_PUBLIC_IP']}/32",
+                f"{env['FOREIGN_PUBLIC_IP']}/32",
+                "198.51.100.10/32",
+                "198.51.100.11/32",
+                "2001:db8::/32",
+            ],
+        )
 
     def test_ru_server_config_sets_default_domain_resolver(self) -> None:
         env = self.make_env()

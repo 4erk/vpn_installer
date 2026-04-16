@@ -438,6 +438,12 @@ def render_client_profile(env: dict[str, str], auto_redirect: bool, *, android_s
     tun_addresses = [env["CLIENT_TUN_ADDRESS_V4"]]
     if not android_safe:
         tun_addresses.append(env["CLIENT_TUN_ADDRESS_V6"])
+    route_excludes: list[str] = []
+    for auto_exclude in (env.get("RU_PUBLIC_IP", "").strip(), env.get("FOREIGN_PUBLIC_IP", "").strip()):
+        if auto_exclude:
+            cidr = auto_exclude if "/" in auto_exclude else f"{auto_exclude}/32"
+            if cidr not in route_excludes:
+                route_excludes.append(cidr)
     payload: dict[str, Any] = {
         "log": {"level": "info", "timestamp": True},
         "dns": {
@@ -464,9 +470,12 @@ def render_client_profile(env: dict[str, str], auto_redirect: bool, *, android_s
     }
     if android_safe:
         payload["route"]["override_android_vpn"] = True
-    excludes = [entry.strip() for entry in (env.get("CLIENT_ROUTE_EXCLUDE_V4", "") + "," + env.get("CLIENT_ROUTE_EXCLUDE_V6", "")).split(",") if entry.strip()]
-    if excludes:
-        payload["inbounds"][0]["route_exclude_address"] = excludes
+    extra_excludes = [entry.strip() for entry in (env.get("CLIENT_ROUTE_EXCLUDE_V4", "") + "," + env.get("CLIENT_ROUTE_EXCLUDE_V6", "")).split(",") if entry.strip()]
+    for entry in extra_excludes:
+        if entry not in route_excludes:
+            route_excludes.append(entry)
+    if route_excludes:
+        payload["inbounds"][0]["route_exclude_address"] = route_excludes
     return render_json(payload)
 
 def render_vless_uri(env: dict[str, str]) -> str:
