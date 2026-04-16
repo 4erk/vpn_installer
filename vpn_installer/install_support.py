@@ -4,7 +4,7 @@ import argparse
 from pathlib import Path
 
 from .common import sanitize_name, write_text
-from .config import load_env_file, merge_env_with_defaults, render_example_env_text
+from .config import apply_ru_direct_overlays, load_env_file, merge_env_with_defaults, render_example_env_text
 from .models import ROLE_FOREIGN, ROLE_RU
 from .render import write_role_rendered_files
 
@@ -15,7 +15,7 @@ def load_runtime_env(env_file: Path, overrides: dict[str, str] | None = None) ->
     env = merge_env_with_defaults(loaded, deploy_name)
     if overrides:
         env.update(overrides)
-    return env
+    return apply_ru_direct_overlays(env, env_file)
 
 
 def build_parser() -> argparse.ArgumentParser:

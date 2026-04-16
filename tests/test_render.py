@@ -253,15 +253,41 @@ class RenderTests(unittest.TestCase):
         files = render.rendered_files_for_role(env, render.ROLE_RU)
         self.assertIn("sing-box.json", files)
         self.assertIn(f"{env['WG_INTERFACE']}.conf", files)
+        self.assertIn("sshd-vpn-stack.conf", files)
+        self.assertIn("health-check.sh", files)
         self.assertIn("vpn-stack-sync.service", files)
+        self.assertIn("vpn-stack-health.service", files)
+        self.assertIn("vpn-stack-health.timer", files)
         self.assertIn("vpn-stack-subscription.service", files)
         self.assertIn(f"subscription/{env['SUBSCRIPTION_TOKEN']}/hiddify-cross-platform.json", files)
         self.assertIn(f"subscription/{env['SUBSCRIPTION_TOKEN']}/hiddify-android.json", files)
 
-    def test_load_env_file_from_text_parses_text_payload(self) -> None:
-        payload = render.load_env_file_from_text('DEPLOY_NAME="demo"\nRU_PUBLIC_IP="203.0.113.10"\n')
-        self.assertEqual(payload["DEPLOY_NAME"], "demo")
-        self.assertEqual(payload["RU_PUBLIC_IP"], "203.0.113.10")
+    def test_render_health_script_hardens_ru_runtime(self) -> None:
+        env = self.make_env()
+        script = render.render_health_script(env, render.ROLE_RU)
+        self.assertIn('ROLE="ru-gateway"', script)
+        self.assertIn('systemctl restart ssh.service || true', script)
+        self.assertIn('systemctl restart "wg-quick@${WG_INTERFACE}" || true', script)
+        self.assertIn("systemctl restart sing-box || true", script)
+        self.assertIn('--interface "${WG_INTERFACE}"', script)
+        self.assertIn("ssh_banner_ok", script)
+
+    def test_render_health_script_hardens_foreign_runtime(self) -> None:
+        env = self.make_env()
+        script = render.render_health_script(env, render.ROLE_FOREIGN)
+        self.assertIn('ROLE="foreign-exit"', script)
+        self.assertIn('systemctl restart ssh.service || true', script)
+        self.assertIn("systemctl restart nftables || true", script)
+        self.assertIn("systemctl restart vpn-stack-sync.service || true", script)
+        self.assertIn('curl -4fsS --max-time 8 "${HEALTHCHECK_URL}"', script)
+
+    def test_render_sshd_hardening_uses_expected_limits(self) -> None:
+        env = self.make_env()
+        config = render.render_sshd_hardening(env)
+        self.assertIn("LoginGraceTime 20", config)
+        self.assertIn("MaxAuthTries 3", config)
+        self.assertIn("MaxStartups 5:30:20", config)
+        self.assertIn("PerSourceMaxStartups 2", config)
 
     def test_write_role_rendered_files_and_package_bundle(self) -> None:
         env = self.make_env()
@@ -281,6 +307,19 @@ class RenderTests(unittest.TestCase):
                 bundle_dir = render.package_bundle(env)
                 self.assertTrue((bundle_dir / "ru-gateway.tar.gz").is_file())
                 self.assertTrue((bundle_dir / "foreign-exit.tar.gz").is_file())
+
+    def test_render_all_artifacts_merges_local_ru_direct_overlay_files(self) -> None:
+        env = self.make_env()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            env_path = tmp_path / "demo.env"
+            env_path.write_text(render.render_env_text(env), encoding="utf-8")
+            (tmp_path / "demo.ru-direct-domains.txt").write_text("overlay.example\n", encoding="utf-8")
+            with patch.object(render, "OUT_DIR", tmp_path / "out"), patch.object(render, "fetch_assets", return_value={}):
+                render.render_all_artifacts(env_path, env)
+                payload = json.loads((tmp_path / "out" / "demo" / "preview" / "ru" / "sing-box.json").read_text(encoding="utf-8"))
+        direct_domain_rule = next(rule for rule in payload["route"]["rules"] if rule.get("outbound") == "direct-ru" and "domain" in rule)
+        self.assertIn("overlay.example", direct_domain_rule["domain"])
 
     @unittest.skipUnless(preferred_bash(), "bash is required for install.sh render-only test")
     def test_install_sh_render_only_contains_forced_direct_rules(self) -> None:

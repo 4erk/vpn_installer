@@ -9,8 +9,8 @@ import urllib.error
 from pathlib import Path
 from typing import Any
 
-from .common import INSTALL_SCRIPT_PATH, OUT_DIR, ROOT_DIR, ensure_file_parent, parse_env_value, print_header, warn, write_text
-from .config import download_asset, render_env_text, require_env, split_asset_sources
+from .common import INSTALL_SCRIPT_PATH, OUT_DIR, ROOT_DIR, ensure_file_parent, print_header, warn, write_text
+from .config import apply_ru_direct_overlays, download_asset, parse_env_text, render_env_text, require_env, split_asset_sources
 from .models import DEFAULT_ASSET_TIMEOUT, REQUIRED_ENV_VARS, ROLE_FOREIGN, ROLE_RU
 
 
@@ -70,17 +70,6 @@ def env_list(env: dict[str, str], key: str) -> list[str]:
         if item:
             result.append(item)
     return result
-
-
-def load_env_file_from_text(env_text: str) -> dict[str, str]:
-    env: dict[str, str] = {}
-    for raw_line in env_text.splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, raw_value = line.split("=", 1)
-        env[key.strip()] = parse_env_value(raw_value)
-    return env
 
 
 def wg_host_address(cidr: str) -> str:
@@ -520,6 +509,169 @@ def render_subscription_service(env: dict[str, str]) -> str:
     )
 
 
+def render_sshd_hardening(env: dict[str, str]) -> str:
+    return "\n".join(
+        [
+            "# Managed by vpn-stack",
+            f"LoginGraceTime {env['SSH_LOGIN_GRACE_TIME']}",
+            f"MaxAuthTries {env['SSH_MAX_AUTH_TRIES']}",
+            f"MaxStartups {env['SSH_MAX_STARTUPS']}",
+            f"PerSourceMaxStartups {env['SSH_PER_SOURCE_MAX_STARTUPS']}",
+            f"PerSourceNetBlockSize {env['SSH_PER_SOURCE_NETBLOCK_SIZE']}",
+            "UseDNS no",
+            "KbdInteractiveAuthentication no",
+            "PasswordAuthentication yes",
+            "AllowTcpForwarding yes",
+            "",
+        ]
+    )
+
+
+def render_health_script(env: dict[str, str], role: str) -> str:
+    role_specific_probe = (
+        "\n".join(
+            [
+                'if ! curl -4fsS --interface "${WG_INTERFACE}" --max-time 8 "${HEALTHCHECK_URL}" >/dev/null 2>&1; then',
+                '  reasons+=("ru_wg_egress")',
+                "fi",
+            ]
+        )
+        if role == ROLE_RU
+        else "\n".join(
+            [
+                'if ! curl -4fsS --max-time 8 "${HEALTHCHECK_URL}" >/dev/null 2>&1; then',
+                '  reasons+=("foreign_direct_egress")',
+                "fi",
+            ]
+        )
+    )
+    role_specific_repair = (
+        "\n".join(
+            [
+                'systemctl restart "wg-quick@${WG_INTERFACE}" || true',
+                "systemctl restart sing-box || true",
+            ]
+        )
+        if role == ROLE_RU
+        else "\n".join(
+            [
+                'systemctl restart "wg-quick@${WG_INTERFACE}" || true',
+                "systemctl restart nftables || true",
+                "systemctl restart vpn-stack-sync.service || true",
+            ]
+        )
+    )
+    return textwrap.dedent(
+        f"""\
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        ROLE="{role}"
+        WG_INTERFACE="{env['WG_INTERFACE']}"
+        SSH_PORT="{env['SSH_PORT']}"
+        HEALTHCHECK_URL="{env['HEALTHCHECK_URL']}"
+        HANDSHAKE_GRACE="{env['HEALTH_HANDSHAKE_GRACE_SECONDS']}"
+
+        log() {{
+          echo "vpn-stack-health[$ROLE]: $*" >&2
+        }}
+
+        ssh_banner_ok() {{
+          timeout 5 bash -lc 'exec 3<>/dev/tcp/127.0.0.1/'"${{SSH_PORT}}"'; head -c 4 <&3' 2>/dev/null | grep -q '^SSH-'
+        }}
+
+        wg_handshake_age() {{
+          local value=""
+          local now=""
+          value="$(wg show "${{WG_INTERFACE}}" latest-handshakes 2>/dev/null | awk 'NR==1 {{print $2}}')"
+          if [[ -z "${{value}}" || "${{value}}" == "0" ]]; then
+            printf '999999'
+            return 0
+          fi
+          now="$(date +%s)"
+          if [[ "${{value}}" =~ ^[0-9]+$ && "${{now}}" =~ ^[0-9]+$ && "${{now}}" -ge "${{value}}" ]]; then
+            printf '%s' "$((now - value))"
+            return 0
+          fi
+          printf '999999'
+        }}
+
+        collect_reasons() {{
+          local reasons=()
+          local age=""
+          if ! ssh_banner_ok; then
+            reasons+=("ssh_banner")
+          fi
+          age="$(wg_handshake_age)"
+          if [[ "${{age}}" =~ ^[0-9]+$ && "${{age}}" -gt "${{HANDSHAKE_GRACE}}" ]]; then
+            reasons+=("wg_handshake_stale=${{age}}")
+          fi
+        {textwrap.indent(role_specific_probe, '  ')}
+          if [[ "${{#reasons[@]}}" -gt 0 ]]; then
+            printf '%s\\n' "${{reasons[@]}}"
+          fi
+        }}
+
+        mapfile -t reasons < <(collect_reasons)
+        if [[ "${{#reasons[@]}}" -eq 0 ]]; then
+          exit 0
+        fi
+
+        log "repairing unhealthy runtime: ${{reasons[*]}}"
+        systemctl restart ssh.service || true
+        {role_specific_repair}
+        sleep 5
+
+        mapfile -t reasons < <(collect_reasons)
+        if [[ "${{#reasons[@]}}" -eq 0 ]]; then
+          log "runtime recovered"
+          exit 0
+        fi
+
+        log "runtime still unhealthy: ${{reasons[*]}}"
+        exit 1
+        """
+    ).strip() + "\n"
+
+
+def render_health_service() -> str:
+    return "\n".join(
+        [
+            "[Unit]",
+            "Description=Check and repair vpn-stack runtime health",
+            "After=network-online.target ssh.service",
+            "Wants=network-online.target",
+            "",
+            "[Service]",
+            "Type=oneshot",
+            "ExecStart=/usr/local/lib/vpn-stack/health-check.sh",
+            "",
+            "[Install]",
+            "WantedBy=multi-user.target",
+            "",
+        ]
+    )
+
+
+def render_health_timer(env: dict[str, str]) -> str:
+    return "\n".join(
+        [
+            "[Unit]",
+            "Description=Periodic vpn-stack runtime health repair",
+            "",
+            "[Timer]",
+            "OnBootSec=1min",
+            f"OnUnitActiveSec={env['HEALTH_CHECK_INTERVAL_MINUTES']}min",
+            "AccuracySec=15s",
+            "Unit=vpn-stack-health.service",
+            "",
+            "[Install]",
+            "WantedBy=timers.target",
+            "",
+        ]
+    )
+
+
 def deployment_out_dir(env: dict[str, str]) -> Path:
     return OUT_DIR / env["DEPLOY_NAME"]
 
@@ -534,9 +686,13 @@ def rendered_files_for_role(env: dict[str, str], role: str) -> dict[str, str]:
             "sing-box.json": render_ru_singbox(env),
             f"{env['WG_INTERFACE']}.conf": render_ru_wg(env),
             "nftables.conf": render_ru_firewall_nftables(env),
+            "sshd-vpn-stack.conf": render_sshd_hardening(env),
             "sync-state.sh": render_sync_script(env),
+            "health-check.sh": render_health_script(env, ROLE_RU),
             "vpn-stack-sync.service": render_sync_service(ROLE_RU),
             "vpn-stack-sync.timer": render_sync_timer(),
+            "vpn-stack-health.service": render_health_service(),
+            "vpn-stack-health.timer": render_health_timer(env),
             "vpn-stack-subscription.service": render_subscription_service(env),
             f"subscription/{env['SUBSCRIPTION_TOKEN']}/hiddify-cross-platform.json": render_client_profile(env, auto_redirect=False),
             f"subscription/{env['SUBSCRIPTION_TOKEN']}/hiddify-android.json": render_client_profile(env, auto_redirect=False, android_safe=True),
@@ -547,9 +703,13 @@ def rendered_files_for_role(env: dict[str, str], role: str) -> dict[str, str]:
         "sing-box.json": render_foreign_singbox(),
         f"{env['WG_INTERFACE']}.conf": render_foreign_wg(env),
         "nftables.conf": render_foreign_nftables(env, wan_iface),
+        "sshd-vpn-stack.conf": render_sshd_hardening(env),
         "sync-state.sh": render_sync_script(env),
+        "health-check.sh": render_health_script(env, ROLE_FOREIGN),
         "vpn-stack-sync.service": render_sync_service(ROLE_FOREIGN),
         "vpn-stack-sync.timer": render_sync_timer(),
+        "vpn-stack-health.service": render_health_service(),
+        "vpn-stack-health.timer": render_health_timer(env),
     }
 
 
@@ -682,7 +842,7 @@ def render_cloud_init_role(role: str, env_text: str, assets_dir: Path) -> str:
         write_text(cloud_root / "install.sh", INSTALL_SCRIPT_PATH.read_text(encoding="utf-8"))
         write_text(cloud_root / "deployment.env", env_text)
         copy_python_package(cloud_root)
-        write_role_rendered_files(env=load_env_file_from_text(env_text), role=role, output_dir=cloud_root / "rendered")
+        write_role_rendered_files(env=parse_env_text(env_text), role=role, output_dir=cloud_root / "rendered")
         lines = [
             "#cloud-config",
             "package_update: true",
@@ -754,8 +914,9 @@ def package_bundle(env: dict[str, str]) -> Path:
 
 
 def render_all_artifacts(env_path: Path, env: dict[str, str]) -> Path:
-    out_dir = render_config_artifacts(env_path, env, fetch_assets_first=True)
-    render_client_profiles(env)
-    render_cloud_init_artifacts(env)
-    package_bundle(env)
+    effective_env = apply_ru_direct_overlays(env, env_path)
+    out_dir = render_config_artifacts(env_path, effective_env, fetch_assets_first=True)
+    render_client_profiles(effective_env)
+    render_cloud_init_artifacts(effective_env)
+    package_bundle(effective_env)
     return out_dir

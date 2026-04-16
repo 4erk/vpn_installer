@@ -96,6 +96,9 @@
 Для каждого deployment создаются:
 
 - `deployments/<name>.env`
+- `deployments/<name>.ru-direct-domains.txt`
+- `deployments/<name>.ru-direct-suffixes.txt`
+- `deployments/<name>.ru-direct-cidrs.txt`
 - `state/<name>.json`
 - `out/<name>/assets`
 - `out/<name>/bundle`
@@ -125,6 +128,7 @@
 - `hiddify-uri.txt` — совместимый alias того же `VLESS URI`
 - клиентские профили intentionally простые: без product-critical split-routing на клиенте; вся маршрутизация живёт на серверной стороне
 - IP самих `российского` и `зарубежного` серверов автоматически исключаются из клиентского туннеля, чтобы `status/reinstall/remove` не упирались в SSH hairpin при уже активном VPN
+- optional `ru-direct` overlay-файлы мерджатся только в server-side routing и не переписывают основной `deployments/<name>.env`
 
 ## Lifecycle
 
@@ -134,12 +138,18 @@
 - загружает bundle на сервер
 - запускает `install.sh` с нужной ролью
 - выполняет postcheck по сервисам
+- затем делает deployment-level dataplane health pass:
+  - свежесть `WireGuard` handshake
+  - прямой IPv4 egress на `зарубежном сервере`
+  - IPv4 egress на `российском сервере` через `wg0`
+- при неуспехе делает один repair cycle и только потом валится с явной причиной вроде `wg_handshake_stale` или `ru_wg_egress_failed`
 
 ### status
 
 - читает только существующий deployment
 - не создаёт новый deployment
-- не переписывает локальные `env/state`
+- не переписывает `state`
+- если локальный `deployments/<name>.env` разъехался с уже установленным сервером, синхронизирует его из живого `/etc/vpn-stack/deployment.env` и сразу пересобирает локальные клиентские артефакты
 - печатает runtime-диагностику по сети и тюнингу:
   - default/WAN interface
   - активный `qdisc`
@@ -147,6 +157,9 @@
   - `netdev backlog`
   - drops по интерфейсу
   - `WireGuard` transfer/handshake summary
+  - observed public IPv4 на `зарубежном сервере`
+  - observed public IPv4 на `российском сервере` через `wg0`
+  - итоговый `health verdict`
 
 ### remove / purge
 

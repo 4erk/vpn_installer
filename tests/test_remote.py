@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import logging
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,7 +11,9 @@ from unittest.mock import Mock, patch
 from vpn_installer.models import AppError, ROLE_RU, RemoteTarget
 from vpn_installer.remote import (
     build_remote_command,
+    configure_paramiko_logging,
     ensure_remote_privilege,
+    fetch_remote_deployment_env,
     parse_kv_output,
     paramiko_connect,
     paramiko_exec,
@@ -30,6 +33,9 @@ from vpn_installer.remote import (
 class RemoteTests(unittest.TestCase):
     def test_preflight_uses_configured_interface(self) -> None:
         self.assertIn("wg-quick@wg-test", preflight_script("wg-test"))
+        self.assertIn("wg_latest_handshake_age_s", preflight_script("wg-test"))
+        self.assertIn("observed_ipv4", preflight_script("wg-test"))
+        self.assertIn("wg_observed_ipv4", preflight_script("wg-test"))
 
     def test_password_mode_forces_python_backend(self) -> None:
         target = RemoteTarget(role=ROLE_RU, auth_mode="password")
@@ -97,6 +103,42 @@ class RemoteTests(unittest.TestCase):
         self.assertIs(client, second_client)
         first_client.close.assert_called_once()
         sleep_mock.assert_called_once()
+
+    def test_configure_paramiko_logging_installs_null_handler(self) -> None:
+        logger = logging.getLogger("paramiko")
+        original_handlers = list(logger.handlers)
+        original_level = logger.level
+        original_propagate = logger.propagate
+        try:
+            logger.handlers = []
+            logger.setLevel(logging.NOTSET)
+            logger.propagate = True
+            with patch("vpn_installer.remote._PARAMIKO_LOGGER_CONFIGURED", False):
+                configure_paramiko_logging()
+            self.assertTrue(any(isinstance(handler, logging.NullHandler) for handler in logger.handlers))
+            self.assertEqual(logger.level, logging.CRITICAL)
+            self.assertFalse(logger.propagate)
+        finally:
+            logger.handlers = original_handlers
+            logger.setLevel(original_level)
+            logger.propagate = original_propagate
+
+    def test_paramiko_connect_rewrites_banner_timeout(self) -> None:
+        class FakeSshException(Exception):
+            pass
+
+        fake_client = Mock()
+        fake_client.connect.side_effect = FakeSshException("Error reading SSH protocol banner")
+        fake_paramiko = SimpleNamespace(
+            SSHClient=Mock(return_value=fake_client),
+            AutoAddPolicy=Mock(return_value="policy"),
+            ssh_exception=SimpleNamespace(AuthenticationException=Exception),
+        )
+        target = RemoteTarget(role=ROLE_RU, ssh_host="203.0.113.10", ssh_port=22, ssh_user="root")
+        with patch("vpn_installer.remote.ensure_paramiko_installed", return_value=fake_paramiko), patch("vpn_installer.remote.configure_paramiko_logging"):
+            with self.assertRaises(AppError) as ctx:
+                paramiko_connect(target)
+        self.assertIn("Сервер не отдал SSH banner вовремя", str(ctx.exception))
 
     def test_paramiko_exec_collects_stdout_stderr_and_tolerates_shutdown_failure(self) -> None:
         channel = Mock()
@@ -177,6 +219,12 @@ class RemoteTests(unittest.TestCase):
         mocked.assert_called_once()
         self.assertEqual(payload["role"], "ru-gateway")
 
+    def test_fetch_remote_deployment_env_uses_root_capture(self) -> None:
+        with patch("vpn_installer.remote.ssh_capture", return_value='DEPLOY_NAME="demo"\n') as mocked:
+            payload = fetch_remote_deployment_env(RemoteTarget(role=ROLE_RU))
+        self.assertEqual(payload, 'DEPLOY_NAME="demo"\n')
+        mocked.assert_called_once_with(unittest.mock.ANY, "cat /etc/vpn-stack/deployment.env", as_root=True)
+
     def test_print_preflight_emits_expected_lines(self) -> None:
         with patch("sys.stdout", new_callable=io.StringIO) as stream:
             print_preflight(
@@ -208,6 +256,9 @@ class RemoteTests(unittest.TestCase):
                     "wg_transfer_rx": "1",
                     "wg_transfer_tx": "2",
                     "wg_latest_handshake": "3",
+                    "wg_latest_handshake_age_s": "4",
+                    "observed_ipv4": "198.51.100.20",
+                    "wg_observed_ipv4": "198.51.100.20",
                     "sync_timer": "active",
                 },
             )
@@ -216,6 +267,9 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("configured WAN iface: eth0", output)
         self.assertIn("tcp cc: bbr", output)
         self.assertIn("wireguard transfer rx/tx: 1/2", output)
+        self.assertIn("wireguard handshake age (s): 4", output)
+        self.assertIn("observed IPv4: 198.51.100.20", output)
+        self.assertIn("RU over wg IPv4: 198.51.100.20", output)
 
     def test_ensure_remote_privilege_paths(self) -> None:
         target = RemoteTarget(role=ROLE_RU)

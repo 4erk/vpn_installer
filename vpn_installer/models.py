@@ -32,7 +32,7 @@ ALLOW_EMPTY_OVERRIDE = {
 ENV_SECTIONS = [
     ("", ["DEPLOY_NAME"]),
     ("# Public addresses", ["RU_PUBLIC_IP", "FOREIGN_PUBLIC_IP"]),
-    ("# SSH hardening and firewall", ["SSH_PORT"]),
+    ("# SSH access and daemon hardening", ["SSH_PORT", "SSH_LOGIN_GRACE_TIME", "SSH_MAX_AUTH_TRIES", "SSH_MAX_STARTUPS", "SSH_PER_SOURCE_MAX_STARTUPS", "SSH_PER_SOURCE_NETBLOCK_SIZE"]),
     ("# Foreign egress NIC override. Leave empty to auto-detect on the foreign host.", ["WAN_INTERFACE"]),
     ("# sing-box / VLESS + REALITY", ["CLIENT_UUID", "CLIENT_FLOW", "RU_LISTEN_PORT", "RU_REALITY_SERVER_NAME", "RU_REALITY_HANDSHAKE_SERVER", "RU_REALITY_HANDSHAKE_PORT", "RU_REALITY_PRIVATE_KEY", "RU_REALITY_PUBLIC_KEY", "RU_REALITY_SHORT_ID", "UTLS_FINGERPRINT"]),
     ("# Subscription delivery from the Russian server", ["SUBSCRIPTION_PORT", "SUBSCRIPTION_TOKEN"]),
@@ -41,6 +41,7 @@ ENV_SECTIONS = [
     ("# Forced policy rules for the Russian server: Russian APIs, reachability checks, IP-check services", ["RU_FORCE_DIRECT_DOMAIN", "RU_FORCE_DIRECT_DOMAIN_SUFFIX", "RU_FORCE_DIRECT_IP_CIDR"]),
     ("# Rule assets for the RU server. Several source URLs can be listed through spaces.", ["RULESET_DIR", "RU_GEOSITE_URL", "RU_GEOIP_URL"]),
     ("# Optional RU egress deny list on the foreign server. Several source URLs can be listed through spaces.", ["FOREIGN_BLOCK_RU", "FOREIGN_RU_IPV4_LIST_URL", "FOREIGN_RU_IPV6_LIST_URL"]),
+    ("# Runtime self-heal for SSH / WireGuard / dataplane", ["HEALTHCHECK_URL", "HEALTH_HANDSHAKE_GRACE_SECONDS", "HEALTH_CHECK_INTERVAL_MINUTES"]),
     ("# Client tun profile", ["CLIENT_TUN_NAME", "CLIENT_TUN_ADDRESS_V4", "CLIENT_TUN_ADDRESS_V6", "CLIENT_FAKEIP_V4", "CLIENT_FAKEIP_V6"]),
     ("# Optional extra route exclusions on the client profile", ["CLIENT_ROUTE_EXCLUDE_V4", "CLIENT_ROUTE_EXCLUDE_V6"]),
 ]

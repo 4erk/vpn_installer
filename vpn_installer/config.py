@@ -34,6 +34,29 @@ MERGED_SOURCE_DEFAULT_KEYS = {
     "FOREIGN_RU_IPV6_LIST_URL",
 }
 
+REMOTE_ENV_CRITICAL_KEYS = {
+    "DEPLOY_NAME",
+    "CLIENT_UUID",
+    "RU_REALITY_PUBLIC_KEY",
+    "RU_REALITY_SHORT_ID",
+    "SUBSCRIPTION_TOKEN",
+    "WAN_INTERFACE",
+    "RU_FORCE_DIRECT_DOMAIN",
+    "RU_FORCE_DIRECT_DOMAIN_SUFFIX",
+    "RU_FORCE_DIRECT_IP_CIDR",
+    "RU_GEOSITE_URL",
+    "RU_GEOIP_URL",
+    "FOREIGN_BLOCK_RU",
+    "FOREIGN_RU_IPV4_LIST_URL",
+    "FOREIGN_RU_IPV6_LIST_URL",
+}
+
+RU_DIRECT_OVERLAY_FILES = {
+    "RU_FORCE_DIRECT_DOMAIN": "ru-direct-domains.txt",
+    "RU_FORCE_DIRECT_DOMAIN_SUFFIX": "ru-direct-suffixes.txt",
+    "RU_FORCE_DIRECT_IP_CIDR": "ru-direct-cidrs.txt",
+}
+
 
 def validate_deployment_name(raw_name: str) -> str:
     cleaned = sanitize_name(raw_name)
@@ -42,15 +65,19 @@ def validate_deployment_name(raw_name: str) -> str:
     return cleaned
 
 
-def load_env_file(path: Path) -> dict[str, str]:
+def parse_env_text(env_text: str) -> dict[str, str]:
     env: dict[str, str] = {}
-    for raw_line in read_text(path).splitlines():
+    for raw_line in env_text.splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, raw_value = line.split("=", 1)
         env[key.strip()] = parse_env_value(raw_value)
     return env
+
+
+def load_env_file(path: Path) -> dict[str, str]:
+    return parse_env_text(read_text(path))
 
 
 def render_env_text(env: dict[str, str]) -> str:
@@ -124,6 +151,11 @@ def generate_default_env(deploy_name: str) -> dict[str, str]:
         "RU_PUBLIC_IP": "",
         "FOREIGN_PUBLIC_IP": "",
         "SSH_PORT": "22",
+        "SSH_LOGIN_GRACE_TIME": "20",
+        "SSH_MAX_AUTH_TRIES": "3",
+        "SSH_MAX_STARTUPS": "5:30:20",
+        "SSH_PER_SOURCE_MAX_STARTUPS": "2",
+        "SSH_PER_SOURCE_NETBLOCK_SIZE": "24:64",
         "WAN_INTERFACE": "",
         "CLIENT_UUID": str(uuid.uuid4()),
         "CLIENT_FLOW": "xtls-rprx-vision",
@@ -165,6 +197,9 @@ def generate_default_env(deploy_name: str) -> dict[str, str]:
         "FOREIGN_BLOCK_RU": "1",
         "FOREIGN_RU_IPV4_LIST_URL": "https://www.ipdeny.com/ipblocks/data/aggregated/ru-aggregated.zone https://stat.ripe.net/data/country-resource-list/data.json?resource=ru&v4_format=prefix",
         "FOREIGN_RU_IPV6_LIST_URL": "https://www.ipdeny.com/ipv6/ipaddresses/aggregated/ru-aggregated.zone https://stat.ripe.net/data/country-resource-list/data.json?resource=ru",
+        "HEALTHCHECK_URL": "https://api.ipify.org",
+        "HEALTH_HANDSHAKE_GRACE_SECONDS": "120",
+        "HEALTH_CHECK_INTERVAL_MINUTES": "2",
         "CLIENT_TUN_NAME": "tun0",
         "CLIENT_TUN_ADDRESS_V4": "172.19.0.1/30",
         "CLIENT_TUN_ADDRESS_V6": "fdfe:dcba:9876::1/126",
@@ -189,6 +224,16 @@ def base64_url_nopad(data: bytes) -> str:
 
 def _split_csv_values(raw_value: str) -> list[str]:
     return [item.strip() for item in raw_value.replace("\n", ",").split(",") if item.strip()]
+
+
+def _split_overlay_values(raw_value: str) -> list[str]:
+    values: list[str] = []
+    for raw_line in raw_value.splitlines():
+        line = raw_line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        values.extend(_split_csv_values(line))
+    return values
 
 
 def _merge_csv_defaults(existing_value: str, default_value: str) -> str:
@@ -227,6 +272,32 @@ def merge_env_with_defaults(existing: dict[str, str], deploy_name: str) -> dict[
             merged[key] = _merge_source_defaults(existing[key], defaults[key])
     merged["DEPLOY_NAME"] = deploy_name
     return merged
+
+
+def overlay_file_path(env_path: Path, deploy_name: str, overlay_name: str) -> Path:
+    return env_path.with_name(f"{deploy_name}.{overlay_name}")
+
+
+def apply_ru_direct_overlays(env: dict[str, str], env_path: Path | None) -> dict[str, str]:
+    if env_path is None:
+        return env.copy()
+    deploy_name = env.get("DEPLOY_NAME", "").strip() or sanitize_name(env_path.stem)
+    effective = env.copy()
+    for env_key, overlay_name in RU_DIRECT_OVERLAY_FILES.items():
+        path = overlay_file_path(env_path, deploy_name, overlay_name)
+        if not path.is_file():
+            continue
+        overlay_items = _split_overlay_values(read_text(path))
+        if not overlay_items:
+            continue
+        effective[env_key] = _merge_csv_defaults(effective.get(env_key, ""), ",".join(overlay_items))
+    return effective
+
+
+def critical_env_view(env: dict[str, str]) -> dict[str, str]:
+    relevant_keys = set(REMOTE_ENV_CRITICAL_KEYS)
+    relevant_keys.update(key for key in env if key.startswith("WG_"))
+    return {key: env.get(key, "") for key in sorted(relevant_keys)}
 
 
 def generate_example_env() -> dict[str, str]:

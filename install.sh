@@ -110,6 +110,11 @@ fi
 
 DEPLOY_NAME="${DEPLOY_NAME:-vpn-stack}"
 SSH_PORT="${SSH_PORT:-22}"
+SSH_LOGIN_GRACE_TIME="${SSH_LOGIN_GRACE_TIME:-20}"
+SSH_MAX_AUTH_TRIES="${SSH_MAX_AUTH_TRIES:-3}"
+SSH_MAX_STARTUPS="${SSH_MAX_STARTUPS:-5:30:20}"
+SSH_PER_SOURCE_MAX_STARTUPS="${SSH_PER_SOURCE_MAX_STARTUPS:-2}"
+SSH_PER_SOURCE_NETBLOCK_SIZE="${SSH_PER_SOURCE_NETBLOCK_SIZE:-24:64}"
 
 CLIENT_FLOW="${CLIENT_FLOW:-xtls-rprx-vision}"
 RU_LISTEN_PORT="${RU_LISTEN_PORT:-443}"
@@ -143,12 +148,19 @@ RU_GEOIP_URL="${RU_GEOIP_URL:-https://raw.githubusercontent.com/SagerNet/sing-ge
 FOREIGN_BLOCK_RU="${FOREIGN_BLOCK_RU:-1}"
 FOREIGN_RU_IPV4_LIST_URL="${FOREIGN_RU_IPV4_LIST_URL:-https://www.ipdeny.com/ipblocks/data/aggregated/ru-aggregated.zone https://stat.ripe.net/data/country-resource-list/data.json?resource=ru&v4_format=prefix}"
 FOREIGN_RU_IPV6_LIST_URL="${FOREIGN_RU_IPV6_LIST_URL:-https://www.ipdeny.com/ipv6/ipaddresses/aggregated/ru-aggregated.zone https://stat.ripe.net/data/country-resource-list/data.json?resource=ru}"
+HEALTHCHECK_URL="${HEALTHCHECK_URL:-https://api.ipify.org}"
+HEALTH_HANDSHAKE_GRACE_SECONDS="${HEALTH_HANDSHAKE_GRACE_SECONDS:-120}"
+HEALTH_CHECK_INTERVAL_MINUTES="${HEALTH_CHECK_INTERVAL_MINUTES:-2}"
 SINGBOX_CONFIG_PATH="/etc/sing-box/config.json"
 WG_CONFIG_PATH="/etc/wireguard/${WG_INTERFACE}.conf"
 NFTABLES_PATH="/etc/nftables.conf"
+SSHD_CONFIG_PATH="/etc/ssh/sshd_config.d/90-vpn-stack.conf"
 RULE_SYNC_SCRIPT="/usr/local/lib/vpn-stack/sync-state.sh"
+HEALTH_SCRIPT_PATH="/usr/local/lib/vpn-stack/health-check.sh"
 SYNC_SERVICE_PATH="/etc/systemd/system/vpn-stack-sync.service"
 SYNC_TIMER_PATH="/etc/systemd/system/vpn-stack-sync.timer"
+HEALTH_SERVICE_PATH="/etc/systemd/system/vpn-stack-health.service"
+HEALTH_TIMER_PATH="/etc/systemd/system/vpn-stack-health.timer"
 SUBSCRIPTION_SERVICE_PATH="/etc/systemd/system/vpn-stack-subscription.service"
 SYSCTL_PATH="/etc/sysctl.d/90-vpn-stack.conf"
 SUBSCRIPTION_ROOT="/var/lib/vpn-stack/subscription"
@@ -280,8 +292,14 @@ SINGBOX_ENABLED=$(service_enabled_flag sing-box)
 SINGBOX_ACTIVE=$(service_active_flag sing-box)
 SYNC_TIMER_ENABLED=$(service_enabled_flag vpn-stack-sync.timer)
 SYNC_TIMER_ACTIVE=$(service_active_flag vpn-stack-sync.timer)
+HEALTH_TIMER_ENABLED=$(service_enabled_flag vpn-stack-health.timer)
+HEALTH_TIMER_ACTIVE=$(service_active_flag vpn-stack-health.timer)
 SUBSCRIPTION_ENABLED=$(service_enabled_flag vpn-stack-subscription.service)
 SUBSCRIPTION_ACTIVE=$(service_active_flag vpn-stack-subscription.service)
+SSH_SERVICE_ENABLED=$(service_enabled_flag ssh.service)
+SSH_SERVICE_ACTIVE=$(service_active_flag ssh.service)
+SSH_SOCKET_ENABLED=$(service_enabled_flag ssh.socket)
+SSH_SOCKET_ACTIVE=$(service_active_flag ssh.socket)
 EOF
 }
 
@@ -290,9 +308,13 @@ managed_paths() {
     "${SINGBOX_CONFIG_PATH}" \
     "${WG_CONFIG_PATH}" \
     "${NFTABLES_PATH}" \
+    "${SSHD_CONFIG_PATH}" \
     "${RULE_SYNC_SCRIPT}" \
+    "${HEALTH_SCRIPT_PATH}" \
     "${SYNC_SERVICE_PATH}" \
     "${SYNC_TIMER_PATH}" \
+    "${HEALTH_SERVICE_PATH}" \
+    "${HEALTH_TIMER_PATH}" \
     "${SUBSCRIPTION_SERVICE_PATH}" \
     "${SUBSCRIPTION_ROOT}" \
     "${SYSCTL_PATH}"
@@ -387,8 +409,11 @@ restore_service_state() {
   apply_service_restore_flags nftables "${NFTABLES_ENABLED:-0}" "${NFTABLES_ACTIVE:-0}"
   apply_service_restore_flags "wg-quick@${WG_INTERFACE}" "${WIREGUARD_ENABLED:-0}" "${WIREGUARD_ACTIVE:-0}"
   apply_service_restore_flags vpn-stack-sync.timer "${SYNC_TIMER_ENABLED:-0}" "${SYNC_TIMER_ACTIVE:-0}"
+  apply_service_restore_flags vpn-stack-health.timer "${HEALTH_TIMER_ENABLED:-0}" "${HEALTH_TIMER_ACTIVE:-0}"
   apply_service_restore_flags sing-box "${SINGBOX_ENABLED:-0}" "${SINGBOX_ACTIVE:-0}"
   apply_service_restore_flags vpn-stack-subscription.service "${SUBSCRIPTION_ENABLED:-0}" "${SUBSCRIPTION_ACTIVE:-0}"
+  apply_service_restore_flags ssh.service "${SSH_SERVICE_ENABLED:-0}" "${SSH_SERVICE_ACTIVE:-0}"
+  apply_service_restore_flags ssh.socket "${SSH_SOCKET_ENABLED:-0}" "${SSH_SOCKET_ACTIVE:-0}"
 }
 
 stop_managed_services() {
@@ -396,6 +421,8 @@ stop_managed_services() {
   systemctl stop "wg-quick@${WG_INTERFACE}" >/dev/null 2>&1 || true
   systemctl stop vpn-stack-sync.service >/dev/null 2>&1 || true
   systemctl stop vpn-stack-sync.timer >/dev/null 2>&1 || true
+  systemctl stop vpn-stack-health.service >/dev/null 2>&1 || true
+  systemctl stop vpn-stack-health.timer >/dev/null 2>&1 || true
   systemctl stop vpn-stack-subscription.service >/dev/null 2>&1 || true
   systemctl stop nftables >/dev/null 2>&1 || true
 }
@@ -404,6 +431,7 @@ disable_managed_services() {
   systemctl disable sing-box >/dev/null 2>&1 || true
   systemctl disable "wg-quick@${WG_INTERFACE}" >/dev/null 2>&1 || true
   systemctl disable vpn-stack-sync.timer >/dev/null 2>&1 || true
+  systemctl disable vpn-stack-health.timer >/dev/null 2>&1 || true
   systemctl disable vpn-stack-subscription.service >/dev/null 2>&1 || true
   systemctl disable nftables >/dev/null 2>&1 || true
 }
@@ -413,9 +441,13 @@ remove_managed_files() {
     "${SINGBOX_CONFIG_PATH}" \
     "${WG_CONFIG_PATH}" \
     "${NFTABLES_PATH}" \
+    "${SSHD_CONFIG_PATH}" \
     "${RULE_SYNC_SCRIPT}" \
+    "${HEALTH_SCRIPT_PATH}" \
     "${SYNC_SERVICE_PATH}" \
     "${SYNC_TIMER_PATH}" \
+    "${HEALTH_SERVICE_PATH}" \
+    "${HEALTH_TIMER_PATH}" \
     "${SUBSCRIPTION_SERVICE_PATH}" \
     "${SYSCTL_PATH}"
   rm -rf "${SUBSCRIPTION_ROOT}"
@@ -622,6 +654,12 @@ apply_runtime_qdisc() {
   tc qdisc replace dev "${iface}" root fq_codel >/dev/null 2>&1 || true
 }
 
+configure_ssh_daemon_mode() {
+  systemctl disable --now ssh.socket >/dev/null 2>&1 || true
+  systemctl enable ssh.service >/dev/null 2>&1 || true
+  systemctl restart ssh.service >/dev/null 2>&1 || systemctl start ssh.service >/dev/null 2>&1 || true
+}
+
 find_rendered_role_dir() {
   local env_dir=""
   local candidate=""
@@ -657,9 +695,13 @@ copy_role_artifacts() {
   copy_if_present "${source_dir}/sing-box.json" "${SINGBOX_CONFIG_PATH}" || { echo "Missing sing-box.json in ${source_dir}" >&2; exit 1; }
   copy_if_present "${source_dir}/${WG_INTERFACE}.conf" "${WG_CONFIG_PATH}" || { echo "Missing ${WG_INTERFACE}.conf in ${source_dir}" >&2; exit 1; }
   copy_if_present "${source_dir}/nftables.conf" "${NFTABLES_PATH}" || { echo "Missing nftables.conf in ${source_dir}" >&2; exit 1; }
+  copy_if_present "${source_dir}/sshd-vpn-stack.conf" "${SSHD_CONFIG_PATH}" || { echo "Missing sshd-vpn-stack.conf in ${source_dir}" >&2; exit 1; }
   copy_if_present "${source_dir}/sync-state.sh" "${RULE_SYNC_SCRIPT}" || { echo "Missing sync-state.sh in ${source_dir}" >&2; exit 1; }
+  copy_if_present "${source_dir}/health-check.sh" "${HEALTH_SCRIPT_PATH}" || { echo "Missing health-check.sh in ${source_dir}" >&2; exit 1; }
   copy_if_present "${source_dir}/vpn-stack-sync.service" "${SYNC_SERVICE_PATH}" || { echo "Missing vpn-stack-sync.service in ${source_dir}" >&2; exit 1; }
   copy_if_present "${source_dir}/vpn-stack-sync.timer" "${SYNC_TIMER_PATH}" || { echo "Missing vpn-stack-sync.timer in ${source_dir}" >&2; exit 1; }
+  copy_if_present "${source_dir}/vpn-stack-health.service" "${HEALTH_SERVICE_PATH}" || { echo "Missing vpn-stack-health.service in ${source_dir}" >&2; exit 1; }
+  copy_if_present "${source_dir}/vpn-stack-health.timer" "${HEALTH_TIMER_PATH}" || { echo "Missing vpn-stack-health.timer in ${source_dir}" >&2; exit 1; }
   if [[ "$ROLE" == "ru-gateway" ]]; then
     copy_if_present "${source_dir}/vpn-stack-subscription.service" "${SUBSCRIPTION_SERVICE_PATH}" || { echo "Missing vpn-stack-subscription.service in ${source_dir}" >&2; exit 1; }
     if [[ ! -d "${source_dir}/subscription" ]]; then
@@ -670,7 +712,8 @@ copy_role_artifacts() {
     mkdir -p "$(dirname "${SUBSCRIPTION_ROOT}")"
     cp -a "${source_dir}/subscription" "${SUBSCRIPTION_ROOT}"
   fi
-  chmod 0755 "${RULE_SYNC_SCRIPT}"
+  chmod 0644 "${SSHD_CONFIG_PATH}"
+  chmod 0755 "${RULE_SYNC_SCRIPT}" "${HEALTH_SCRIPT_PATH}"
 }
 
 write_preview_files() {
@@ -813,7 +856,7 @@ if ! command -v sing-box >/dev/null 2>&1; then
   curl -fsSL https://sing-box.sagernet.org/installation/tools/install.sh | bash
 fi
 
-mkdir -p "${VPNSTACK_ROOT}" /etc/sing-box /etc/wireguard "${RULESET_DIR}" "${SUBSCRIPTION_ROOT}" /usr/local/lib/vpn-stack /etc/systemd/system
+mkdir -p "${VPNSTACK_ROOT}" /etc/sing-box /etc/wireguard /etc/ssh/sshd_config.d "${RULESET_DIR}" "${SUBSCRIPTION_ROOT}" /usr/local/lib/vpn-stack /etc/systemd/system
 
 RUNTIME_QDISC_INTERFACE="$(detect_primary_interface)"
 
@@ -841,6 +884,7 @@ net.core.rmem_max=8388608
 net.core.wmem_max=8388608
 net.ipv4.tcp_congestion_control=bbr
 net.ipv4.tcp_mtu_probing=1
+net.ipv4.tcp_max_syn_backlog=2048
 net.ipv4.udp_rmem_min=16384
 net.ipv4.udp_wmem_min=16384
 net.ipv4.conf.all.src_valid_mark=1
@@ -857,6 +901,7 @@ net.core.rmem_max=8388608
 net.core.wmem_max=8388608
 net.ipv4.tcp_congestion_control=bbr
 net.ipv4.tcp_mtu_probing=1
+net.ipv4.tcp_max_syn_backlog=2048
 net.ipv4.udp_rmem_min=16384
 net.ipv4.udp_wmem_min=16384
 net.ipv4.ip_forward=1
@@ -876,6 +921,7 @@ if [[ -n "${WG_INTERFACE:-}" ]]; then
   apply_runtime_qdisc "${WG_INTERFACE}"
 fi
 systemctl daemon-reload
+configure_ssh_daemon_mode
 systemctl enable nftables
 systemctl restart nftables
 if [[ "$ROLE" == "foreign-exit" ]]; then
@@ -891,6 +937,8 @@ if ! systemctl start vpn-stack-sync.service; then
     exit 1
   fi
 fi
+systemctl enable vpn-stack-health.timer
+systemctl restart vpn-stack-health.timer
 
 if [[ "$ROLE" == "ru-gateway" ]]; then
   systemctl enable sing-box

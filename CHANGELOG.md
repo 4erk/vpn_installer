@@ -6,6 +6,15 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.2.18] - 2026-04-17
+
+### Fixed
+
+- `зарубежный сервер` после деградации больше не должен оставаться в состоянии «TCP до 22 есть, но SSH banner не отдаётся»: installer теперь переводит `ssh` с socket activation на обычный `ssh.service`
+- для `sshd` добавлен managed hardening-конфиг с более жёсткими preauth-лимитами (`LoginGraceTime`, `MaxAuthTries`, `MaxStartups`, `PerSourceMaxStartups`, `PerSourceNetBlockSize`), чтобы слабый foreign VPS меньше залипал под внешним password-bruteforce шумом
+- добавлен `vpn-stack-health.service` + `vpn-stack-health.timer`: после `reinstall` сервер теперь сам проверяет `ssh banner`, `WireGuard` handshake и dataplane egress и делает один локальный repair-cycle, вместо ситуации «лечится только ребутом из панели»
+- `postcheck` и `preflight/status` теперь учитывают `vpn-stack-health.timer`, `ssh.service` и `ssh.socket`, чтобы такие деградации было видно сразу, а не по косвенным таймаутам с клиента
+
 ## [0.2.17] - 2026-04-16
 
 ### Fixed

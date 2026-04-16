@@ -13,9 +13,12 @@ from typing import Any
 from .clipboard import copy_to_clipboard
 from .common import DEPLOYMENTS_DIR, OUT_DIR, RUNTIME_DIR, INSTALL_SCRIPT_PATH, ensure_directories, fail, print_header, sanitize_name, warn, write_text
 from .config import (
+    apply_ru_direct_overlays,
+    critical_env_view,
     load_existing_deployment_env,
     load_env_file,
     merge_env_with_defaults,
+    parse_env_text,
     render_env_text,
     require_env,
     ensure_deployment_env,
@@ -34,7 +37,7 @@ from .prompts import (
     select_existing_deployment,
     select_role_for_menu,
 )
-from .remote import ensure_remote_privilege, print_preflight, remote_preflight, scp_upload, ssh_stream
+from .remote import ensure_remote_privilege, fetch_remote_deployment_env, print_preflight, remote_preflight, scp_upload, ssh_stream
 from .render import client_artifact_paths, deployment_out_dir, render_all_artifacts, render_client_profiles, render_config_artifacts, render_next_steps
 from .state import load_state, state_json_path, state_legacy_path, write_state
 
@@ -83,6 +86,198 @@ def execution_roles(action: str, roles: list[str]) -> list[str]:
 def update_env_with_targets(env: dict[str, str], targets: list[RemoteTarget]) -> None:
     for target in targets:
         env[ROLE_META[target.role]["public_ip_key"]] = target.public_ip
+
+
+def sync_targets_from_env(env: dict[str, str], targets: list[RemoteTarget]) -> None:
+    for target in targets:
+        public_ip = env.get(ROLE_META[target.role]["public_ip_key"], "").strip()
+        if public_ip:
+            target.public_ip = public_ip
+
+
+def remote_env_matches_target(target: RemoteTarget, deployment_name: str, preflight: dict[str, str]) -> bool:
+    return (
+        preflight.get("installed") == "1"
+        and preflight.get("deployment_name", "").strip() == deployment_name
+        and preflight.get("role", "").strip() == target.role
+    )
+
+
+def can_fetch_remote_env(target: RemoteTarget) -> bool:
+    return target.ssh_user == "root" or target.sudo_mode in {"root", "nopasswd", "password"}
+
+
+def load_remote_authoritative_env(
+    deployment_name: str,
+    env_path: Path,
+    env: dict[str, str],
+    targets: list[RemoteTarget],
+    preflights: dict[str, dict[str, str]],
+) -> tuple[dict[str, str], bool]:
+    remote_envs: dict[str, dict[str, str]] = {}
+    for target in targets:
+        preflight = preflights.get(target.role, {})
+        if not remote_env_matches_target(target, deployment_name, preflight):
+            continue
+        if not can_fetch_remote_env(target):
+            continue
+        remote_env_text = fetch_remote_deployment_env(target)
+        remote_envs[target.role] = merge_env_with_defaults(parse_env_text(remote_env_text), deployment_name)
+    if len(remote_envs) > 1:
+        role_items = list(remote_envs.items())
+        baseline_role, baseline_env = role_items[0]
+        baseline_view = critical_env_view(baseline_env)
+        for role, candidate_env in role_items[1:]:
+            candidate_view = critical_env_view(candidate_env)
+            if candidate_view != baseline_view:
+                diff_keys = [key for key in sorted(set(baseline_view) | set(candidate_view)) if baseline_view.get(key, "") != candidate_view.get(key, "")]
+                preview = ", ".join(diff_keys[:6])
+                if len(diff_keys) > 6:
+                    preview += ", ..."
+                raise AppError(
+                    f"Remote env mismatch between roles: {baseline_role} vs {role}. "
+                    f"Отличаются критичные поля: {preview}"
+                )
+    if not remote_envs:
+        return env, False
+    source_env = remote_envs.get(ROLE_RU) or remote_envs.get(ROLE_FOREIGN) or env
+    if source_env == env:
+        return env, False
+    write_text(env_path, render_env_text(source_env))
+    render_client_profiles(source_env)
+    sync_targets_from_env(source_env, targets)
+    print("Локальный deployment env синхронизирован из установленного сервера.")
+    return source_env, True
+
+
+def handshake_age_seconds(preflight: dict[str, str]) -> int:
+    raw_value = preflight.get("wg_latest_handshake_age_s", "").strip()
+    try:
+        return int(raw_value)
+    except ValueError:
+        return -1
+
+
+def handshake_grace_seconds(env: dict[str, str]) -> int:
+    try:
+        keepalive = int(env.get("WG_KEEPALIVE", "25"))
+    except ValueError:
+        keepalive = 25
+    return max(120, keepalive * 4)
+
+
+def deployment_health_snapshot(env: dict[str, str], preflights: dict[str, dict[str, str]]) -> dict[str, str]:
+    foreign = preflights.get(ROLE_FOREIGN, {})
+    ru = preflights.get(ROLE_RU, {})
+    foreign_ip = foreign.get("observed_ipv4", "").strip()
+    ru_wg_ip = ru.get("wg_observed_ipv4", "").strip()
+    ru_handshake_age = handshake_age_seconds(ru)
+    foreign_handshake_age = handshake_age_seconds(foreign)
+    max_age = handshake_grace_seconds(env)
+    verdict = "ok"
+    if not foreign_ip:
+        verdict = "foreign_direct_egress_failed"
+    elif not ru_wg_ip:
+        verdict = "ru_wg_egress_failed"
+    elif ru_wg_ip != foreign_ip:
+        verdict = "foreign_ru_ip_mismatch"
+    elif ru_handshake_age < 0 or foreign_handshake_age < 0 or ru_handshake_age > max_age or foreign_handshake_age > max_age:
+        verdict = "wg_handshake_stale"
+    return {
+        "health_verdict": verdict,
+        "foreign_direct_observed_ipv4": foreign_ip or "-",
+        "ru_wg_observed_ipv4": ru_wg_ip or "-",
+        "ru_handshake_age_s": str(ru_handshake_age),
+        "foreign_handshake_age_s": str(foreign_handshake_age),
+        "handshake_grace_s": str(max_age),
+    }
+
+
+def print_deployment_health(health: dict[str, str]) -> None:
+    print_header("Dataplane health")
+    print(f"foreign direct IPv4: {health['foreign_direct_observed_ipv4']}")
+    print(f"RU over wg IPv4: {health['ru_wg_observed_ipv4']}")
+    print(f"RU handshake age (s): {health['ru_handshake_age_s']}")
+    print(f"foreign handshake age (s): {health['foreign_handshake_age_s']}")
+    print(f"handshake grace (s): {health['handshake_grace_s']}")
+    print(f"health verdict: {health['health_verdict']}")
+
+
+def deployment_is_healthy(env: dict[str, str], preflights: dict[str, dict[str, str]]) -> tuple[bool, dict[str, str]]:
+    health = deployment_health_snapshot(env, preflights)
+    return health["health_verdict"] == "ok", health
+
+
+def collect_role_preflights(targets: list[RemoteTarget], wg_interface: str) -> dict[str, dict[str, str]]:
+    return {target.role: remote_preflight(target, wg_interface) for target in targets}
+
+
+def health_failure_message(health: dict[str, str]) -> str:
+    return (
+        f"{health['health_verdict']}: "
+        f"foreign_direct_observed_ipv4={health['foreign_direct_observed_ipv4']}, "
+        f"ru_wg_observed_ipv4={health['ru_wg_observed_ipv4']}, "
+        f"ru_handshake_age_s={health['ru_handshake_age_s']}, "
+        f"foreign_handshake_age_s={health['foreign_handshake_age_s']}, "
+        f"handshake_grace_s={health['handshake_grace_s']}"
+    )
+
+
+def run_dataplane_repair_cycle(target_map: dict[str, RemoteTarget], wg_interface: str) -> None:
+    print_header("Dataplane repair")
+    ssh_stream(
+        target_map[ROLE_FOREIGN],
+        f"systemctl restart wg-quick@{shlex.quote(wg_interface)} nftables vpn-stack-sync.service",
+        as_root=True,
+    )
+    ssh_stream(
+        target_map[ROLE_RU],
+        f"systemctl restart wg-quick@{shlex.quote(wg_interface)} sing-box",
+        as_root=True,
+    )
+
+
+def wait_for_dataplane_health(
+    env: dict[str, str],
+    targets: list[RemoteTarget],
+    *,
+    timeout_sec: int = 45,
+    interval_sec: int = 5,
+) -> tuple[dict[str, dict[str, str]], dict[str, str]]:
+    deadline = time.time() + timeout_sec
+    wg_interface = current_wg_interface(env)
+    latest_preflights: dict[str, dict[str, str]] = {}
+    latest_health = deployment_health_snapshot(env, latest_preflights)
+    while time.time() < deadline:
+        latest_preflights = collect_role_preflights(targets, wg_interface)
+        healthy, latest_health = deployment_is_healthy(env, latest_preflights)
+        if healthy:
+            return latest_preflights, latest_health
+        time.sleep(interval_sec)
+    return latest_preflights, latest_health
+
+
+def ensure_deployment_health(
+    env: dict[str, str],
+    targets: list[RemoteTarget],
+    *,
+    auto_repair: bool,
+) -> dict[str, dict[str, str]]:
+    if {target.role for target in targets} != {ROLE_RU, ROLE_FOREIGN}:
+        return {}
+    preflights, health = wait_for_dataplane_health(env, targets, timeout_sec=20, interval_sec=5)
+    print_deployment_health(health)
+    if health["health_verdict"] == "ok":
+        return preflights
+    if not auto_repair:
+        return preflights
+    target_map = {target.role: target for target in targets}
+    run_dataplane_repair_cycle(target_map, current_wg_interface(env))
+    repaired_preflights, repaired_health = wait_for_dataplane_health(env, targets)
+    print_deployment_health(repaired_health)
+    if repaired_health["health_verdict"] != "ok":
+        raise AppError(f"Dataplane health check failed after repair: {health_failure_message(repaired_health)}")
+    return repaired_preflights
 
 
 def ensure_foreign_wan_interface(env: dict[str, str], foreign_preflight: dict[str, str]) -> None:
@@ -191,8 +386,10 @@ def prepare_remote_session(
         targets.append(target)
         preflights[role] = preflight
     update_env_with_targets(env, targets)
-    if persist_local:
+    env, synced_from_remote = load_remote_authoritative_env(deployment_name, env_path, env, targets, preflights)
+    if persist_local or synced_from_remote:
         write_text(env_path, render_env_text(env))
+    if persist_local:
         write_state(deployment_name, targets, existing_state=state)
     return deployment_name, env_path, env, state, targets, preflights
 
@@ -232,6 +429,7 @@ def postcheck_command(role: str, wg_interface: str) -> str:
         }}
         check_service_active nftables nftables
         check_service_active vpn-stack-sync.timer vpn-stack-sync.timer
+        check_service_active vpn-stack-health.timer vpn-stack-health.timer
         check_service_active wg-quick@{wg_interface} wg-quick@{wg_interface}
         {ru_service_checks}
         printf 'role='
@@ -363,7 +561,7 @@ def load_env_for_render(env_path: Path) -> dict[str, str]:
         fail(f"Не найден deployment env: {env_path}")
     env = merge_env_with_defaults(load_env_file(env_path), sanitize_name(env_path.stem))
     write_text(env_path, render_env_text(env))
-    return env
+    return apply_ru_direct_overlays(env, env_path)
 
 
 def run_selected_remote_action(
@@ -445,6 +643,7 @@ def install_workflow(deployment: str | None) -> int:
         print_step(step, total_steps, f"{ROLE_META[role]['label']}: пост-проверка")
         postcheck_remote_role(target_map[role], current_wg_interface(env))
         step += 1
+    ensure_deployment_health(env, targets, auto_repair=True)
     finalize_install_output(env, deployment_name)
     print(f"Deployment env: {env_path}")
     print(f"Локальное состояние: {state_json_path(deployment_name)}")
@@ -463,6 +662,8 @@ def status_workflow(deployment: str | None, role: str) -> int:
         confirm_existing_connections=False,
     )
     print_summary(deployment_name, env, targets)
+    if set(roles) == {ROLE_RU, ROLE_FOREIGN} and {target.role for target in targets} == {ROLE_RU, ROLE_FOREIGN}:
+        ensure_deployment_health(env, targets, auto_repair=False)
     print(f"Deployment env: {env_path}")
     return 0
 
@@ -492,6 +693,8 @@ def remote_action_workflow(deployment: str | None, role: str, action: str) -> in
         return 0
     run_selected_remote_action(action, deployment_name, env_path, env, targets, role_arg=role)
     if action in {"install", "reinstall"}:
+        if {target.role for target in targets} == {ROLE_RU, ROLE_FOREIGN}:
+            ensure_deployment_health(env, targets, auto_repair=True)
         finalize_install_output(env, deployment_name)
     else:
         print_header("Готово")

@@ -91,6 +91,11 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(loaded["DEPLOY_NAME"], "sample")
         self.assertEqual(loaded["RU_PUBLIC_IP"], "203.0.113.10")
 
+    def test_parse_env_text_parses_payload(self) -> None:
+        payload = config.parse_env_text('DEPLOY_NAME="demo"\nRU_PUBLIC_IP="203.0.113.10"\n')
+        self.assertEqual(payload["DEPLOY_NAME"], "demo")
+        self.assertEqual(payload["RU_PUBLIC_IP"], "203.0.113.10")
+
     def test_merge_env_with_defaults_preserves_allowed_empty(self) -> None:
         merged = config.merge_env_with_defaults({"WAN_INTERFACE": ""}, "sample")
         self.assertIn("WAN_INTERFACE", merged)
@@ -121,6 +126,31 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(geosite_sources[0], "https://legacy.example/geosite.srs")
         self.assertTrue(any("raw.githubusercontent.com/SagerNet/sing-geosite" in source for source in geosite_sources))
         self.assertTrue(any("cdn.jsdelivr.net/gh/SagerNet/sing-geosite" in source for source in geosite_sources))
+
+    def test_apply_ru_direct_overlays_merges_files_with_comments_and_deduplicates(self) -> None:
+        env = config.generate_default_env("demo")
+        env["RU_FORCE_DIRECT_DOMAIN"] = "api.oneme.ru"
+        env["RU_FORCE_DIRECT_DOMAIN_SUFFIX"] = ".gstatic.com"
+        env["RU_FORCE_DIRECT_IP_CIDR"] = "203.0.113.0/24"
+        with tempfile.TemporaryDirectory() as tmp:
+            env_path = Path(tmp) / "demo.env"
+            env_path.write_text(config.render_env_text(env), encoding="utf-8")
+            (Path(tmp) / "demo.ru-direct-domains.txt").write_text("# comment\napi.oneme.ru,example.com\nanother.example\n", encoding="utf-8")
+            (Path(tmp) / "demo.ru-direct-suffixes.txt").write_text(".gstatic.com\n# keep\n.example.com\n", encoding="utf-8")
+            (Path(tmp) / "demo.ru-direct-cidrs.txt").write_text("203.0.113.0/24\n198.51.100.10/32\n", encoding="utf-8")
+            merged = config.apply_ru_direct_overlays(env, env_path)
+        self.assertEqual(merged["RU_FORCE_DIRECT_DOMAIN"], "api.oneme.ru,example.com,another.example")
+        self.assertEqual(merged["RU_FORCE_DIRECT_DOMAIN_SUFFIX"], ".gstatic.com,.example.com")
+        self.assertEqual(merged["RU_FORCE_DIRECT_IP_CIDR"], "203.0.113.0/24,198.51.100.10/32")
+
+    def test_critical_env_view_includes_expected_keys(self) -> None:
+        env = config.generate_default_env("demo")
+        view = config.critical_env_view(env)
+        self.assertEqual(view["DEPLOY_NAME"], "demo")
+        self.assertIn("CLIENT_UUID", view)
+        self.assertIn("RU_REALITY_PUBLIC_KEY", view)
+        self.assertIn("WG_RU_PRIVATE_KEY", view)
+        self.assertIn("RU_FORCE_DIRECT_DOMAIN", view)
 
     def test_generate_example_env_contains_public_ip_placeholders(self) -> None:
         env = config.generate_example_env()

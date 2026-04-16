@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import shlex
 import sys
 import time
@@ -15,10 +16,23 @@ SSH_BANNER_TIMEOUT = 20
 SSH_AUTH_TIMEOUT = 45
 SSH_PASSWORD_AUTH_RETRIES = 3
 SSH_PASSWORD_AUTH_RETRY_DELAY = 1.0
+_PARAMIKO_LOGGER_CONFIGURED = False
 
 
 def ensure_paramiko_installed():
     return ensure_python_package("paramiko", "paramiko>=3.5,<4")
+
+
+def configure_paramiko_logging() -> None:
+    global _PARAMIKO_LOGGER_CONFIGURED
+    if _PARAMIKO_LOGGER_CONFIGURED:
+        return
+    logger = logging.getLogger("paramiko")
+    if not any(isinstance(handler, logging.NullHandler) for handler in logger.handlers):
+        logger.addHandler(logging.NullHandler())
+    logger.setLevel(logging.CRITICAL)
+    logger.propagate = False
+    _PARAMIKO_LOGGER_CONFIGURED = True
 
 
 def use_python_ssh_backend(target: RemoteTarget) -> bool:
@@ -56,6 +70,7 @@ def build_remote_command(command_body: str, target: RemoteTarget, as_root: bool)
 
 def paramiko_connect(target: RemoteTarget):
     paramiko = ensure_paramiko_installed()
+    configure_paramiko_logging()
     connect_kwargs: dict[str, Any] = {
         "hostname": target.ssh_host,
         "port": int(target.ssh_port),
@@ -96,6 +111,12 @@ def paramiko_connect(target: RemoteTarget):
             if retryable_auth_timeout:
                 time.sleep(SSH_PASSWORD_AUTH_RETRY_DELAY * attempt)
                 continue
+            banner_timeout = "error reading ssh protocol banner" in str(exc).lower()
+            if banner_timeout:
+                raise AppError(
+                    f"SSH connection failed для {target.ssh_user}@{target.ssh_host}:{target.ssh_port}: {exc}\n"
+                    "Сервер не отдал SSH banner вовремя. Обычно это означает перегруженный или подвисший SSH на хосте, сетевой фильтр перед ним или только что перезагружающийся сервер."
+                ) from exc
             if target.auth_mode == "password" and isinstance(exc, auth_exception_type) and "timeout" in str(exc).lower():
                 raise AppError(
                     f"SSH connection failed для {target.ssh_user}@{target.ssh_host}:{target.ssh_port}: {exc}\n"
@@ -190,6 +211,10 @@ def parse_kv_output(payload: str) -> dict[str, str]:
     return result
 
 
+def fetch_remote_deployment_env(target: RemoteTarget) -> str:
+    return ssh_capture(target, "cat /etc/vpn-stack/deployment.env", as_root=True)
+
+
 def preflight_script(wg_interface: str) -> str:
     return f"""\
 set -euo pipefail
@@ -200,6 +225,13 @@ service_state() {{
   else
     printf 'unavailable'
   fi
+}}
+
+probe_public_ipv4() {{
+  if ! command -v curl >/dev/null 2>&1; then
+    return 0
+  fi
+  curl -4fsS --max-time 8 https://api.ipify.org 2>/dev/null || true
 }}
 
 login_user="$(id -un)"
@@ -247,6 +279,9 @@ udp_wmem_min="$(sysctl -n net.ipv4.udp_wmem_min 2>/dev/null || true)"
 wg_transfer_rx="-"
 wg_transfer_tx="-"
 wg_latest_handshake="-"
+wg_latest_handshake_age_s="-1"
+observed_ipv4="$(probe_public_ipv4)"
+wg_observed_ipv4=""
 
 if [[ -n "${{default_iface}}" ]]; then
   default_qdisc="$(tc qdisc show dev "${{default_iface}}" 2>/dev/null | awk 'NR==1 {{print $2; exit}}')"
@@ -267,7 +302,17 @@ if command -v wg >/dev/null 2>&1; then
   fi
   if [[ -n "${{handshake_row}}" ]]; then
     wg_latest_handshake="$(awk '{{print $2}}' <<<"${{handshake_row}}")"
+    if [[ -n "${{wg_latest_handshake}}" && "${{wg_latest_handshake}}" != "0" ]]; then
+      now_epoch="$(date +%s)"
+      if [[ "${{wg_latest_handshake}}" =~ ^[0-9]+$ && "${{now_epoch}}" =~ ^[0-9]+$ && "${{now_epoch}}" -ge "${{wg_latest_handshake}}" ]]; then
+        wg_latest_handshake_age_s="$((now_epoch - wg_latest_handshake))"
+      fi
+    fi
   fi
+fi
+
+if [[ "${{role}}" == "ru-gateway" ]] && ip link show dev {wg_interface} >/dev/null 2>&1; then
+  wg_observed_ipv4="$(curl -4fsS --interface {wg_interface} --max-time 8 https://api.ipify.org 2>/dev/null || true)"
 fi
 
 printf 'login_user=%s\\n' "${{login_user}}"
@@ -292,6 +337,9 @@ printf 'udp_wmem_min=%s\\n' "${{udp_wmem_min}}"
 printf 'wg_transfer_rx=%s\\n' "${{wg_transfer_rx}}"
 printf 'wg_transfer_tx=%s\\n' "${{wg_transfer_tx}}"
 printf 'wg_latest_handshake=%s\\n' "${{wg_latest_handshake}}"
+printf 'wg_latest_handshake_age_s=%s\\n' "${{wg_latest_handshake_age_s}}"
+printf 'observed_ipv4=%s\\n' "${{observed_ipv4}}"
+printf 'wg_observed_ipv4=%s\\n' "${{wg_observed_ipv4}}"
 printf 'installed=%s\\n' "${{installed}}"
 printf 'deployment_name=%s\\n' "${{deployment_name}}"
 printf 'role=%s\\n' "${{role}}"
@@ -300,7 +348,10 @@ printf 'sing_box=%s\\n' "$(service_state sing-box)"
 printf 'nftables=%s\\n' "$(service_state nftables)"
 printf 'wireguard=%s\\n' "$(service_state wg-quick@{wg_interface})"
 printf 'sync_timer=%s\\n' "$(service_state vpn-stack-sync.timer)"
+printf 'health_timer=%s\\n' "$(service_state vpn-stack-health.timer)"
 printf 'subscription_server=%s\\n' "$(service_state vpn-stack-subscription.service)"
+printf 'ssh_service=%s\\n' "$(service_state ssh.service)"
+printf 'ssh_socket=%s\\n' "$(service_state ssh.socket)"
 """.strip()
 
 
@@ -333,8 +384,14 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
     print(f"wireguard: {preflight.get('wireguard', '-')}")
     print(f"wireguard transfer rx/tx: {preflight.get('wg_transfer_rx', '-')}/{preflight.get('wg_transfer_tx', '-')}")
     print(f"wireguard latest handshake: {preflight.get('wg_latest_handshake', '-')}")
+    print(f"wireguard handshake age (s): {preflight.get('wg_latest_handshake_age_s', '-')}")
+    print(f"observed IPv4: {preflight.get('observed_ipv4', '-')}")
+    print(f"RU over wg IPv4: {preflight.get('wg_observed_ipv4', '-')}")
     print(f"sync timer: {preflight.get('sync_timer', '-')}")
+    print(f"health timer: {preflight.get('health_timer', '-')}")
     print(f"subscription server: {preflight.get('subscription_server', '-')}")
+    print(f"ssh service: {preflight.get('ssh_service', '-')}")
+    print(f"ssh socket: {preflight.get('ssh_socket', '-')}")
 
 
 def ensure_remote_privilege(target: RemoteTarget, preflight: dict[str, str], *, prompt_yes_no, prompt_secret) -> None:
