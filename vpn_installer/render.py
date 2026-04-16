@@ -434,7 +434,10 @@ def render_sync_timer() -> str:
     )
 
 
-def render_client_profile(env: dict[str, str], auto_redirect: bool) -> str:
+def render_client_profile(env: dict[str, str], auto_redirect: bool, *, android_safe: bool = False) -> str:
+    tun_addresses = [env["CLIENT_TUN_ADDRESS_V4"]]
+    if not android_safe:
+        tun_addresses.append(env["CLIENT_TUN_ADDRESS_V6"])
     payload: dict[str, Any] = {
         "log": {"level": "info", "timestamp": True},
         "dns": {
@@ -446,7 +449,7 @@ def render_client_profile(env: dict[str, str], auto_redirect: bool) -> str:
             "final": "dns-remote",
             "independent_cache": True,
         },
-        "inbounds": [{"type": "tun", "tag": "tun-in", "interface_name": env["CLIENT_TUN_NAME"], "address": [env["CLIENT_TUN_ADDRESS_V4"], env["CLIENT_TUN_ADDRESS_V6"]], "auto_route": True, "strict_route": True, "auto_redirect": auto_redirect}],
+        "inbounds": [{"type": "tun", "tag": "tun-in", "interface_name": env["CLIENT_TUN_NAME"], "address": tun_addresses, "auto_route": True, "strict_route": True, "auto_redirect": auto_redirect}],
         "outbounds": [
             {"type": "vless", "tag": "ru-gateway", "server": env["RU_PUBLIC_IP"], "server_port": env_int(env, "RU_LISTEN_PORT"), "uuid": env["CLIENT_UUID"], "flow": env["CLIENT_FLOW"], "packet_encoding": "xudp", "tls": {"enabled": True, "server_name": env["RU_REALITY_SERVER_NAME"], "utls": {"enabled": True, "fingerprint": env["UTLS_FINGERPRINT"]}, "reality": {"enabled": True, "public_key": env["RU_REALITY_PUBLIC_KEY"], "short_id": env["RU_REALITY_SHORT_ID"]}}},
             {"type": "direct", "tag": "direct"},
@@ -459,11 +462,12 @@ def render_client_profile(env: dict[str, str], auto_redirect: bool) -> str:
             "final": "ru-gateway",
         },
     }
+    if android_safe:
+        payload["route"]["override_android_vpn"] = True
     excludes = [entry.strip() for entry in (env.get("CLIENT_ROUTE_EXCLUDE_V4", "") + "," + env.get("CLIENT_ROUTE_EXCLUDE_V6", "")).split(",") if entry.strip()]
     if excludes:
         payload["inbounds"][0]["route_exclude_address"] = excludes
     return render_json(payload)
-
 
 def render_vless_uri(env: dict[str, str]) -> str:
     return f"vless://{env['CLIENT_UUID']}@{env['RU_PUBLIC_IP']}:{env['RU_LISTEN_PORT']}?security=reality&sni={env['RU_REALITY_SERVER_NAME']}&pbk={env['RU_REALITY_PUBLIC_KEY']}&sid={env['RU_REALITY_SHORT_ID']}&fp={env['UTLS_FINGERPRINT']}&type=tcp&flow={env['CLIENT_FLOW']}#{env['DEPLOY_NAME']}-ru-gateway\n"
@@ -475,6 +479,14 @@ def render_subscription_url(env: dict[str, str]) -> str:
 
 def render_hiddify_import_url(env: dict[str, str]) -> str:
     return f"hiddify://import/{render_subscription_url(env).strip()}#{env['DEPLOY_NAME']}\n"
+
+
+def render_android_subscription_url(env: dict[str, str]) -> str:
+    return f"http://{env['RU_PUBLIC_IP']}:{env['SUBSCRIPTION_PORT']}/{env['SUBSCRIPTION_TOKEN']}/hiddify-android.json\n"
+
+
+def render_android_hiddify_import_url(env: dict[str, str]) -> str:
+    return f"hiddify://import/{render_android_subscription_url(env).strip()}#{env['DEPLOY_NAME']}-android\n"
 
 
 def render_subscription_service(env: dict[str, str]) -> str:
@@ -518,6 +530,7 @@ def rendered_files_for_role(env: dict[str, str], role: str) -> dict[str, str]:
             "vpn-stack-sync.timer": render_sync_timer(),
             "vpn-stack-subscription.service": render_subscription_service(env),
             f"subscription/{env['SUBSCRIPTION_TOKEN']}/hiddify-cross-platform.json": render_client_profile(env, auto_redirect=False),
+            f"subscription/{env['SUBSCRIPTION_TOKEN']}/hiddify-android.json": render_client_profile(env, auto_redirect=False, android_safe=True),
             f"subscription/{env['SUBSCRIPTION_TOKEN']}/vless.txt": render_vless_uri(env),
         }
     wan_iface = env.get("WAN_INTERFACE", "").strip() or "eth0"
@@ -550,8 +563,11 @@ def client_artifact_paths(env: dict[str, str]) -> dict[str, Path]:
     return {
         "client_dir": client_dir,
         "subscription_url": client_dir / "hiddify-subscription-url.txt",
+        "android_subscription_url": client_dir / "hiddify-android-subscription-url.txt",
         "hiddify_import_url": client_dir / "hiddify-import-url.txt",
+        "android_hiddify_import_url": client_dir / "hiddify-android-import-url.txt",
         "hiddify_json": client_dir / "hiddify-cross-platform.json",
+        "android_hiddify_json": client_dir / "hiddify-android.json",
         "linux_json": client_dir / "linux-sing-box.json",
         "uri": client_dir / "hiddify-uri.txt",
         "legacy_uri": client_dir / "vless-uri.txt",
@@ -567,20 +583,25 @@ def render_next_steps(env: dict[str, str]) -> str:
             "",
             "Что уже готово:",
             f"- Основной URL подписки для Hiddify: {paths['subscription_url']}",
+            f"- Android-safe URL подписки для Hiddify: {paths['android_subscription_url']}",
             f"- Deeplink для Hiddify: {paths['hiddify_import_url']}",
+            f"- Android deeplink для Hiddify: {paths['android_hiddify_import_url']}",
             f"- JSON fallback для Hiddify: {paths['hiddify_json']}",
+            f"- Android JSON fallback для Hiddify: {paths['android_hiddify_json']}",
             f"- Сырой VLESS URI fallback: {paths['uri']}",
             f"- JSON backup для Linux sing-box: {paths['linux_json']}",
             "",
             "Что делать дальше:",
             "1. Открой Hiddify на Windows, Linux или Android.",
             "2. На Windows запусти Hiddify с правами администратора, чтобы TUN/VPN-режим реально перехватывал трафик.",
-            "3. Добавь профиль по URL подписки из буфера обмена или вручную из файла.",
-            f"4. Основной файл для ручного ввода URL: {paths['subscription_url'].name}.",
-            f"5. Если клиент умеет deeplink Hiddify, используй {paths['hiddify_import_url'].name}.",
-            f"6. Если URL-подписка не подходит, используй JSON fallback {paths['hiddify_json'].name}.",
-            f"7. Файл {paths['uri'].name} используй только как сырой запасной VLESS URI без правил маршрутизации.",
-            f"8. Для проверки серверов потом запусти: vpn status --deployment {env['DEPLOY_NAME']}",
+            "3. На Android используй отдельный Android-safe URL подписки, чтобы Hiddify не спотыкался о tun-конфиг для других платформ.",
+            "4. На Windows и Linux добавь профиль по обычному URL подписки из буфера обмена или вручную из файла.",
+            f"5. Основной файл для ручного ввода URL на Windows/Linux: {paths['subscription_url'].name}.",
+            f"6. Основной файл для ручного ввода URL на Android: {paths['android_subscription_url'].name}.",
+            f"7. Если клиент умеет deeplink Hiddify, используй {paths['hiddify_import_url'].name} или {paths['android_hiddify_import_url'].name} для Android.",
+            f"8. Если URL-подписка не подходит, используй JSON fallback {paths['hiddify_json'].name}. Для Android сначала пробуй {paths['android_hiddify_json'].name}.",
+            f"9. Файл {paths['uri'].name} используй только как сырой запасной VLESS URI без правил маршрутизации.",
+            f"10. Для проверки серверов потом запусти: vpn status --deployment {env['DEPLOY_NAME']}",
         ]
     ) + "\n"
 
@@ -608,8 +629,11 @@ def render_client_profiles(env: dict[str, str]) -> Path:
     require_env(env, REQUIRED_ENV_VARS)
     paths = client_artifact_paths(env)
     write_text(paths["subscription_url"], render_subscription_url(env))
+    write_text(paths["android_subscription_url"], render_android_subscription_url(env))
     write_text(paths["hiddify_import_url"], render_hiddify_import_url(env))
+    write_text(paths["android_hiddify_import_url"], render_android_hiddify_import_url(env))
     write_text(paths["hiddify_json"], render_client_profile(env, auto_redirect=False))
+    write_text(paths["android_hiddify_json"], render_client_profile(env, auto_redirect=False, android_safe=True))
     write_text(paths["linux_json"], render_client_profile(env, auto_redirect=True))
     uri_payload = render_vless_uri(env)
     write_text(paths["uri"], uri_payload)

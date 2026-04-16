@@ -44,6 +44,10 @@ class RenderTests(unittest.TestCase):
         deeplink = render.render_hiddify_import_url(env).strip()
         self.assertEqual(subscription, f"http://203.0.113.10:{env['SUBSCRIPTION_PORT']}/{env['SUBSCRIPTION_TOKEN']}/hiddify-cross-platform.json")
         self.assertEqual(deeplink, f"hiddify://import/{subscription}#demo")
+        android_subscription = render.render_android_subscription_url(env).strip()
+        android_deeplink = render.render_android_hiddify_import_url(env).strip()
+        self.assertEqual(android_subscription, f"http://203.0.113.10:{env['SUBSCRIPTION_PORT']}/{env['SUBSCRIPTION_TOKEN']}/hiddify-android.json")
+        self.assertEqual(android_deeplink, f"hiddify://import/{android_subscription}#demo-android")
 
     def test_client_profile_keeps_hiddify_as_simple_ru_tunnel(self) -> None:
         env = self.make_env()
@@ -54,6 +58,14 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(payload["dns"]["rules"], [{"query_type": ["AAAA"], "action": "reject"}])
         self.assertEqual(payload["route"]["final"], "ru-gateway")
         self.assertEqual(payload["route"]["default_domain_resolver"]["server"], "dns-remote")
+        self.assertEqual(payload["inbounds"][0]["address"], [env["CLIENT_TUN_ADDRESS_V4"], env["CLIENT_TUN_ADDRESS_V6"]])
+
+    def test_android_client_profile_is_ipv4_only_and_sets_android_override(self) -> None:
+        env = self.make_env()
+        payload = json.loads(render.render_client_profile(env, auto_redirect=False, android_safe=True))
+        self.assertEqual(payload["inbounds"][0]["address"], [env["CLIENT_TUN_ADDRESS_V4"]])
+        self.assertTrue(payload["route"]["override_android_vpn"])
+        self.assertEqual(payload["route"]["final"], "ru-gateway")
 
     def test_ru_server_config_sets_default_domain_resolver(self) -> None:
         env = self.make_env()
@@ -117,7 +129,9 @@ class RenderTests(unittest.TestCase):
         self.assertIn("Hiddify", text)
         self.assertIn("vpn status", text)
         self.assertIn("hiddify-subscription-url.txt", text)
+        self.assertIn("hiddify-android-subscription-url.txt", text)
         self.assertIn("hiddify-import-url.txt", text)
+        self.assertIn("hiddify-android-import-url.txt", text)
         self.assertIn("сырой запасной", text)
 
     def test_render_client_profiles_writes_user_artifacts(self) -> None:
@@ -127,7 +141,10 @@ class RenderTests(unittest.TestCase):
                 render.render_client_profiles(env)
                 client_dir = Path(tmp) / "demo" / "client"
                 self.assertTrue((client_dir / "hiddify-subscription-url.txt").is_file())
+                self.assertTrue((client_dir / "hiddify-android-subscription-url.txt").is_file())
                 self.assertTrue((client_dir / "hiddify-import-url.txt").is_file())
+                self.assertTrue((client_dir / "hiddify-android-import-url.txt").is_file())
+                self.assertTrue((client_dir / "hiddify-android.json").is_file())
                 self.assertTrue((client_dir / "hiddify-uri.txt").is_file())
                 self.assertTrue((client_dir.parent / "NEXT-STEPS.txt").is_file())
 
@@ -184,7 +201,9 @@ class RenderTests(unittest.TestCase):
         env = self.make_env()
         paths = render.client_artifact_paths(env)
         self.assertEqual(paths["subscription_url"].name, "hiddify-subscription-url.txt")
+        self.assertEqual(paths["android_subscription_url"].name, "hiddify-android-subscription-url.txt")
         self.assertEqual(paths["hiddify_import_url"].name, "hiddify-import-url.txt")
+        self.assertEqual(paths["android_hiddify_import_url"].name, "hiddify-android-import-url.txt")
         self.assertEqual(paths["uri"].name, "hiddify-uri.txt")
         self.assertEqual(paths["next_steps"].name, "NEXT-STEPS.txt")
 
@@ -196,6 +215,7 @@ class RenderTests(unittest.TestCase):
         self.assertIn("vpn-stack-sync.service", files)
         self.assertIn("vpn-stack-subscription.service", files)
         self.assertIn(f"subscription/{env['SUBSCRIPTION_TOKEN']}/hiddify-cross-platform.json", files)
+        self.assertIn(f"subscription/{env['SUBSCRIPTION_TOKEN']}/hiddify-android.json", files)
 
     def test_load_env_file_from_text_parses_text_payload(self) -> None:
         payload = render.load_env_file_from_text('DEPLOY_NAME="demo"\nRU_PUBLIC_IP="203.0.113.10"\n')

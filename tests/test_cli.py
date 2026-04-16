@@ -38,6 +38,11 @@ class CliTests(unittest.TestCase):
         args = parser.parse_args(["reinstall", "--deployment", "demo", "--role", "ru-gateway"])
         self.assertEqual(args.role, "ru-gateway")
 
+    def test_android_diagnose_dispatch(self) -> None:
+        with patch("vpn_installer.cli.android_diagnose", return_value=0) as mocked:
+            self.assertEqual(cli.main(["android-diagnose", "--serial", "ABC123", "--logcat-lines", "50"]), 0)
+        mocked.assert_called_once_with(serial="ABC123", package_name="app.hiddify.com", logcat_lines=50)
+
 
 if __name__ == "__main__":
     unittest.main()

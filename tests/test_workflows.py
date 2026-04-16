@@ -79,9 +79,12 @@ class WorkflowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             paths = {
                 "subscription_url": Path(tmp) / "sub.txt",
+                "android_subscription_url": Path(tmp) / "sub-android.txt",
                 "hiddify_import_url": Path(tmp) / "import.txt",
+                "android_hiddify_import_url": Path(tmp) / "import-android.txt",
                 "uri": Path(tmp) / "hiddify-uri.txt",
                 "hiddify_json": Path(tmp) / "h.json",
+                "android_hiddify_json": Path(tmp) / "h-android.json",
                 "linux_json": Path(tmp) / "l.json",
                 "next_steps": Path(tmp) / "NEXT-STEPS.txt",
             }

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 
+from .android import DEFAULT_HIDDIFY_PACKAGE, android_diagnose
 from .models import AppError, ROLE_FOREIGN, ROLE_RU, UserCancelled
 from .workflows import cleanup_local_workflow, install_workflow, menu_workflow, remote_action_workflow, status_workflow
 
@@ -44,6 +45,12 @@ def build_parser() -> argparse.ArgumentParser:
     audit.add_argument("--json", action="store_true", help="Печатать итоговую summary в JSON.")
     audit.add_argument("--keep-docker", action="store_true", help="Не удалять Docker-контейнеры и сети после тестов.")
     audit.set_defaults(func=lambda args: _run_audit(args.mode, json_output=args.json, keep_docker=args.keep_docker))
+
+    android = subparsers.add_parser("android-diagnose", help="Снять USB-диагностику Android / Hiddify через adb.")
+    android.add_argument("--serial", help="ADB serial, если подключено несколько устройств.")
+    android.add_argument("--package", default=DEFAULT_HIDDIFY_PACKAGE, help="Android package name Hiddify.")
+    android.add_argument("--logcat-lines", type=int, default=400, help="Сколько последних строк logcat собирать.")
+    android.set_defaults(func=lambda args: android_diagnose(serial=args.serial, package_name=args.package, logcat_lines=args.logcat_lines))
 
     return parser
 

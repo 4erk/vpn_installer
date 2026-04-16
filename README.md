@@ -87,8 +87,11 @@ chmod +x ./vpn.sh
 После успешной установки появятся:
 
 - `out/<deployment>/client/hiddify-subscription-url.txt`
+- `out/<deployment>/client/hiddify-android-subscription-url.txt`
 - `out/<deployment>/client/hiddify-import-url.txt`
+- `out/<deployment>/client/hiddify-android-import-url.txt`
 - `out/<deployment>/client/hiddify-cross-platform.json`
+- `out/<deployment>/client/hiddify-android.json`
 - `out/<deployment>/client/hiddify-uri.txt`
 - `out/<deployment>/client/linux-sing-box.json`
 - `out/<deployment>/NEXT-STEPS.txt`
@@ -96,19 +99,22 @@ chmod +x ./vpn.sh
 Главный результат:
 
 - URL подписки для `Hiddify` копируется в буфер обмена
-- основной файл для `Hiddify`: `hiddify-subscription-url.txt`
+- основной файл для `Hiddify` на Windows/Linux: `hiddify-subscription-url.txt`
+- основной файл для `Hiddify` на Android: `hiddify-android-subscription-url.txt`
 - `hiddify-import-url.txt` — deeplink для клиентов, которые понимают схему `hiddify://import/...`
+- `hiddify-android-import-url.txt` — Android-safe deeplink для Hiddify
 - `hiddify-cross-platform.json` — fallback, если нужен локальный файл
+- `hiddify-android.json` — Android-safe fallback
 - `hiddify-uri.txt` — только сырой запасной `VLESS URI`, без гарантии наших правил маршрутизации
 
 ## Как подключить в Hiddify
 
 1. Открой `Hiddify`
 2. На Windows запусти его с правами администратора и включи `VPN/TUN mode`
-3. Выбери добавление профиля по URL из буфера обмена или вручную из файла
-4. Основной вариант: `hiddify-subscription-url.txt`
-5. Если клиент умеет deeplink `hiddify://import/...`, используй `hiddify-import-url.txt`
-6. Если URL не подходит, используй `hiddify-cross-platform.json`
+3. На Android используй `hiddify-android-subscription-url.txt`
+4. На Windows и Linux используй `hiddify-subscription-url.txt`
+5. Если клиент умеет deeplink `hiddify://import/...`, используй `hiddify-import-url.txt` или `hiddify-android-import-url.txt` на Android
+6. Если URL не подходит, используй `hiddify-cross-platform.json`; на Android сначала пробуй `hiddify-android.json`
 7. `hiddify-uri.txt` используй только как сырой запасной URI, если осознанно нужен только транспорт без split-routing
 
 Основной путь теперь — URL подписки. JSON нужен как fallback, URI — как низкоуровневый запасной путь.

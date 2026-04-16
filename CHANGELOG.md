@@ -8,11 +8,16 @@
 
 ## [0.2.14] - 2026-04-15
 
+## [0.2.15] - 2026-04-16
+
 ### Fixed
 
-- `reinstall` теперь не только пишет `fq_codel` в sysctl, но и сразу применяет его на живом WAN-интерфейсе через `tc qdisc replace`
-- на обоих ролях включены `BBR` и `tcp_mtu_probing`, чтобы TCP upload не оставался на дефолтном `cubic` при патч-обновлении
-- это закрывает сценарий, где после патча sysctl уже выглядел правильно, но фактический интерфейс продолжал жить на старом qdisc и без runtime-tuning
+- для Android добавлен отдельный `Hiddify` subscription profile без IPv6 tun-адреса и с Android-safe route options
+- это обходит класс проблем, когда `Hiddify` на Android показывает `connected`, но системный трафик реально не забирается VPN-сервисом из-за несовместимого tun-конфига
+
+### Added
+
+- новый USB-диагностический путь `vpn android-diagnose` для съёма состояния Android / Hiddify через `adb` в `out/android/<run_id>/`
 
 ## [0.2.13] - 2026-04-15
 
