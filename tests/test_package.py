@@ -34,13 +34,17 @@ class PackageTests(unittest.TestCase):
         self.assertIn('systemctl enable vpn-stack-subscription.service', install_script)
         self.assertIn('systemctl restart vpn-stack-subscription.service', install_script)
         self.assertIn('net.core.default_qdisc=fq_codel', install_script)
+        self.assertIn('net.core.netdev_max_backlog=8192', install_script)
+        self.assertIn('net.core.rmem_max=8388608', install_script)
+        self.assertIn('net.ipv4.udp_rmem_min=16384', install_script)
         self.assertIn('net.ipv4.tcp_congestion_control=bbr', install_script)
         self.assertIn('net.ipv4.tcp_mtu_probing=1', install_script)
         self.assertIn('apply_runtime_qdisc "${RUNTIME_QDISC_INTERFACE}"', install_script)
+        self.assertIn('apply_runtime_qdisc "${WG_INTERFACE}"', install_script)
 
     def test_package_exposes_version_via_getattr(self) -> None:
         package = importlib.import_module("vpn_installer")
-        self.assertEqual(package.__version__, "0.2.16")
+        self.assertEqual(package.__version__, "0.2.17")
         with self.assertRaises(AttributeError):
             package.__getattr__("nope")
 

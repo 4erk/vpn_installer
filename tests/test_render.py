@@ -49,7 +49,7 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(android_subscription, f"http://203.0.113.10:{env['SUBSCRIPTION_PORT']}/{env['SUBSCRIPTION_TOKEN']}/hiddify-android.json")
         self.assertEqual(android_deeplink, f"hiddify://import/{android_subscription}#demo-android")
 
-    def test_client_profile_keeps_hiddify_as_simple_ru_tunnel(self) -> None:
+    def test_client_profile_is_simple_ru_tunnel(self) -> None:
         env = self.make_env()
         payload = json.loads(render.render_client_profile(env, auto_redirect=False))
         servers = {server["tag"]: server for server in payload["dns"]["servers"]}
@@ -147,16 +147,20 @@ class RenderTests(unittest.TestCase):
         cidr_rule = next(rule for rule in payload["route"]["rules"] if rule.get("outbound") == "direct-ru" and "ip_cidr" in rule)
         self.assertEqual(cidr_rule["ip_cidr"], ["203.0.113.0/24", "198.51.100.4/32"])
 
-    def test_render_next_steps_mentions_hiddify_and_status(self) -> None:
+    def test_render_next_steps_mentions_uri_first_contract(self) -> None:
         env = self.make_env()
         text = render.render_next_steps(env)
+        self.assertIn("VLESS URI", text)
+        self.assertIn("v2rayNG", text)
+        self.assertIn("NekoBox", text)
         self.assertIn("Hiddify", text)
         self.assertIn("vpn status", text)
+        self.assertIn("vless-uri.txt", text)
         self.assertIn("hiddify-subscription-url.txt", text)
         self.assertIn("hiddify-android-subscription-url.txt", text)
         self.assertIn("hiddify-import-url.txt", text)
         self.assertIn("hiddify-android-import-url.txt", text)
-        self.assertIn("сырой запасной", text)
+        self.assertIn("совместимый alias", text)
 
     def test_render_client_profiles_writes_user_artifacts(self) -> None:
         env = self.make_env()
@@ -168,6 +172,7 @@ class RenderTests(unittest.TestCase):
                 self.assertTrue((client_dir / "hiddify-android-subscription-url.txt").is_file())
                 self.assertTrue((client_dir / "hiddify-import-url.txt").is_file())
                 self.assertTrue((client_dir / "hiddify-android-import-url.txt").is_file())
+                self.assertTrue((client_dir / "vless-uri.txt").is_file())
                 self.assertTrue((client_dir / "hiddify-android.json").is_file())
                 self.assertTrue((client_dir / "hiddify-uri.txt").is_file())
                 self.assertTrue((client_dir.parent / "NEXT-STEPS.txt").is_file())
@@ -224,12 +229,24 @@ class RenderTests(unittest.TestCase):
     def test_client_artifact_paths_contract(self) -> None:
         env = self.make_env()
         paths = render.client_artifact_paths(env)
+        self.assertEqual(paths["vless_uri"].name, "vless-uri.txt")
+        self.assertEqual(paths["hiddify_uri_compat"].name, "hiddify-uri.txt")
         self.assertEqual(paths["subscription_url"].name, "hiddify-subscription-url.txt")
         self.assertEqual(paths["android_subscription_url"].name, "hiddify-android-subscription-url.txt")
         self.assertEqual(paths["hiddify_import_url"].name, "hiddify-import-url.txt")
         self.assertEqual(paths["android_hiddify_import_url"].name, "hiddify-android-import-url.txt")
-        self.assertEqual(paths["uri"].name, "hiddify-uri.txt")
         self.assertEqual(paths["next_steps"].name, "NEXT-STEPS.txt")
+
+    def test_render_client_profiles_keeps_hiddify_uri_alias_equal_to_primary_uri(self) -> None:
+        env = self.make_env()
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(render, "OUT_DIR", Path(tmp)):
+                render.render_client_profiles(env)
+                client_dir = Path(tmp) / "demo" / "client"
+                self.assertEqual(
+                    (client_dir / "vless-uri.txt").read_text(encoding="utf-8"),
+                    (client_dir / "hiddify-uri.txt").read_text(encoding="utf-8"),
+                )
 
     def test_rendered_files_for_role_contains_core_contract(self) -> None:
         env = self.make_env()

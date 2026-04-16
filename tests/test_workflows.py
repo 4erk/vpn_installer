@@ -73,27 +73,30 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(rc, 0)
             self.assertFalse(out_dir.exists())
 
-    def test_finalize_install_output_prefers_subscription_url(self) -> None:
+    def test_finalize_install_output_prefers_vless_uri(self) -> None:
         env = generate_default_env("demo")
         env["RU_PUBLIC_IP"] = "203.0.113.10"
         with tempfile.TemporaryDirectory() as tmp:
             paths = {
+                "vless_uri": Path(tmp) / "vless-uri.txt",
+                "hiddify_uri_compat": Path(tmp) / "hiddify-uri.txt",
                 "subscription_url": Path(tmp) / "sub.txt",
                 "android_subscription_url": Path(tmp) / "sub-android.txt",
                 "hiddify_import_url": Path(tmp) / "import.txt",
                 "android_hiddify_import_url": Path(tmp) / "import-android.txt",
-                "uri": Path(tmp) / "hiddify-uri.txt",
                 "hiddify_json": Path(tmp) / "h.json",
                 "android_hiddify_json": Path(tmp) / "h-android.json",
                 "linux_json": Path(tmp) / "l.json",
                 "next_steps": Path(tmp) / "NEXT-STEPS.txt",
             }
+            paths["vless_uri"].write_text("vless://demo\n", encoding="utf-8")
+            paths["hiddify_uri_compat"].write_text("vless://demo\n", encoding="utf-8")
             paths["subscription_url"].write_text("http://203.0.113.10:18080/token/hiddify-cross-platform.json\n", encoding="utf-8")
             paths["hiddify_json"].write_text('{"route":{"final":"ru-gateway"}}', encoding="utf-8")
             with patch("vpn_installer.workflows.client_artifact_paths", return_value=paths):
                 with patch("vpn_installer.workflows.copy_to_clipboard", return_value=(False, "no clipboard")) as copy_mock:
                     workflows.finalize_install_output(env, "demo")
-            copy_mock.assert_called_once_with("http://203.0.113.10:18080/token/hiddify-cross-platform.json\n")
+            copy_mock.assert_called_once_with("vless://demo\n")
 
     def test_verify_target_interactively_cancel_raises_user_cancelled(self) -> None:
         target = RemoteTarget(role=ROLE_RU, public_ip="203.0.113.10", ssh_host="203.0.113.10", ssh_port=22, ssh_user="root")
@@ -235,6 +238,28 @@ class WorkflowTests(unittest.TestCase):
         with patch("vpn_installer.workflows.render_all_artifacts"), patch("vpn_installer.workflows.install_remote_role", side_effect=remember), patch("vpn_installer.workflows.postcheck_remote_role"):
             workflows.run_selected_remote_action("install", "demo", Path("deployments/demo.env"), env, [ru, foreign], role_arg="all")
         self.assertEqual(order, [ROLE_FOREIGN, ROLE_RU])
+
+    def test_run_selected_remote_action_install_recovers_after_disconnect(self) -> None:
+        env = generate_default_env("demo")
+        env["RU_PUBLIC_IP"] = "203.0.113.10"
+        env["FOREIGN_PUBLIC_IP"] = "198.51.100.20"
+        foreign = RemoteTarget(role=ROLE_FOREIGN)
+        with patch("vpn_installer.workflows.render_all_artifacts"), patch("vpn_installer.workflows.install_remote_role", side_effect=AppError("Socket exception: An existing connection was forcibly closed by the remote host (10054)")), patch("vpn_installer.workflows.wait_for_remote_recovery", return_value={"installed": "1"}) as wait_mock, patch("vpn_installer.workflows.postcheck_remote_role") as postcheck, patch("vpn_installer.workflows.warn") as warn_mock:
+            workflows.run_selected_remote_action("reinstall", "demo", Path("deployments/demo.env"), env, [foreign], role_arg=ROLE_FOREIGN)
+        wait_mock.assert_called_once()
+        postcheck.assert_called_once_with(foreign, env["WG_INTERFACE"])
+        warn_mock.assert_called()
+
+    def test_run_selected_remote_action_install_reraises_nonrecoverable_error(self) -> None:
+        env = generate_default_env("demo")
+        env["RU_PUBLIC_IP"] = "203.0.113.10"
+        env["FOREIGN_PUBLIC_IP"] = "198.51.100.20"
+        foreign = RemoteTarget(role=ROLE_FOREIGN)
+        with patch("vpn_installer.workflows.render_all_artifacts"), patch("vpn_installer.workflows.install_remote_role", side_effect=AppError("permission denied")), patch("vpn_installer.workflows.wait_for_remote_recovery") as wait_mock, patch("vpn_installer.workflows.postcheck_remote_role") as postcheck:
+            with self.assertRaises(AppError):
+                workflows.run_selected_remote_action("reinstall", "demo", Path("deployments/demo.env"), env, [foreign], role_arg=ROLE_FOREIGN)
+        wait_mock.assert_not_called()
+        postcheck.assert_not_called()
 
     def test_run_selected_remote_action_remove_noops_when_targets_empty(self) -> None:
         env = generate_default_env("demo")

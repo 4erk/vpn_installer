@@ -571,6 +571,8 @@ def client_artifact_paths(env: dict[str, str]) -> dict[str, Path]:
     client_dir = deployment_out_dir(env) / "client"
     return {
         "client_dir": client_dir,
+        "vless_uri": client_dir / "vless-uri.txt",
+        "hiddify_uri_compat": client_dir / "hiddify-uri.txt",
         "subscription_url": client_dir / "hiddify-subscription-url.txt",
         "android_subscription_url": client_dir / "hiddify-android-subscription-url.txt",
         "hiddify_import_url": client_dir / "hiddify-import-url.txt",
@@ -578,8 +580,6 @@ def client_artifact_paths(env: dict[str, str]) -> dict[str, Path]:
         "hiddify_json": client_dir / "hiddify-cross-platform.json",
         "android_hiddify_json": client_dir / "hiddify-android.json",
         "linux_json": client_dir / "linux-sing-box.json",
-        "uri": client_dir / "hiddify-uri.txt",
-        "legacy_uri": client_dir / "vless-uri.txt",
         "next_steps": deployment_out_dir(env) / "NEXT-STEPS.txt",
     }
 
@@ -591,26 +591,24 @@ def render_next_steps(env: dict[str, str]) -> str:
             f"Deployment: {env['DEPLOY_NAME']}",
             "",
             "Что уже готово:",
+            f"- Основной VLESS URI: {paths['vless_uri']}",
             f"- Основной URL подписки для Hiddify: {paths['subscription_url']}",
             f"- Android-safe URL подписки для Hiddify: {paths['android_subscription_url']}",
             f"- Deeplink для Hiddify: {paths['hiddify_import_url']}",
             f"- Android deeplink для Hiddify: {paths['android_hiddify_import_url']}",
             f"- JSON fallback для Hiddify: {paths['hiddify_json']}",
             f"- Android JSON fallback для Hiddify: {paths['android_hiddify_json']}",
-            f"- Сырой VLESS URI fallback: {paths['uri']}",
+            f"- Совместимый Hiddify URI alias: {paths['hiddify_uri_compat']}",
             f"- JSON backup для Linux sing-box: {paths['linux_json']}",
             "",
             "Что делать дальше:",
-            "1. Открой Hiddify на Windows, Linux или Android.",
-            "2. На Windows запусти Hiddify с правами администратора, чтобы TUN/VPN-режим реально перехватывал трафик.",
-            "3. На Android используй отдельный Android-safe URL подписки, чтобы Hiddify не спотыкался о tun-конфиг для других платформ.",
-            "4. На Windows и Linux добавь профиль по обычному URL подписки из буфера обмена или вручную из файла.",
-            f"5. Основной файл для ручного ввода URL на Windows/Linux: {paths['subscription_url'].name}.",
-            f"6. Основной файл для ручного ввода URL на Android: {paths['android_subscription_url'].name}.",
-            f"7. Если клиент умеет deeplink Hiddify, используй {paths['hiddify_import_url'].name} или {paths['android_hiddify_import_url'].name} для Android.",
-            f"8. Если URL-подписка не подходит, используй JSON fallback {paths['hiddify_json'].name}. Для Android сначала пробуй {paths['android_hiddify_json'].name}.",
-            f"9. Файл {paths['uri'].name} используй только как сырой запасной VLESS URI без правил маршрутизации.",
-            f"10. Для проверки серверов потом запусти: vpn status --deployment {env['DEPLOY_NAME']}",
+            "1. На любой платформе сначала попробуй прямой VLESS URI в совместимом клиенте.",
+            f"2. Основной нейтральный файл: {paths['vless_uri'].name}. На Android предпочтительны v2rayNG или NekoBox.",
+            f"3. Если хочешь использовать Hiddify на Windows/Linux, добавь профиль по {paths['subscription_url'].name} или через {paths['hiddify_import_url'].name}.",
+            f"4. Если нужен Hiddify на Android, используй {paths['android_subscription_url'].name} или {paths['android_hiddify_import_url'].name}. Этот путь считается совместимым, но не эталонным.",
+            f"5. Если URL-подписка не подходит, используй JSON fallback {paths['hiddify_json'].name}. Для Android сначала пробуй {paths['android_hiddify_json'].name}.",
+            f"6. Файл {paths['hiddify_uri_compat'].name} оставлен как совместимый alias того же VLESS URI для старых сценариев.",
+            f"7. Для проверки серверов потом запусти: vpn status --deployment {env['DEPLOY_NAME']}",
         ]
     ) + "\n"
 
@@ -645,8 +643,8 @@ def render_client_profiles(env: dict[str, str]) -> Path:
     write_text(paths["android_hiddify_json"], render_client_profile(env, auto_redirect=False, android_safe=True))
     write_text(paths["linux_json"], render_client_profile(env, auto_redirect=True))
     uri_payload = render_vless_uri(env)
-    write_text(paths["uri"], uri_payload)
-    write_text(paths["legacy_uri"], uri_payload)
+    write_text(paths["vless_uri"], uri_payload)
+    write_text(paths["hiddify_uri_compat"], uri_payload)
     write_text(paths["next_steps"], render_next_steps(env))
     return paths["client_dir"]
 

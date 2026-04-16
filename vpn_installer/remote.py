@@ -222,15 +222,53 @@ installed="0"
 deployment_name=""
 role=""
 installed_at=""
+configured_wan_interface=""
 if [[ -r /etc/vpn-stack/deployment.env ]]; then
   installed="1"
   deployment_name="$(grep -E '^DEPLOY_NAME=' /etc/vpn-stack/deployment.env | head -n1 | cut -d= -f2- | sed 's/^"//; s/"$//')"
+  configured_wan_interface="$(grep -E '^WAN_INTERFACE=' /etc/vpn-stack/deployment.env | head -n1 | cut -d= -f2- | sed 's/^"//; s/"$//')"
 fi
 if [[ -r /etc/vpn-stack/role ]]; then role="$(tr -d '\\r\\n' </etc/vpn-stack/role)"; fi
 if [[ -r /etc/vpn-stack/installed_at ]]; then installed_at="$(tr -d '\\r\\n' </etc/vpn-stack/installed_at)"; fi
 
 default_iface="$(ip route show default 2>/dev/null | awk '/default/ {{print $5; exit}}')"
 hostname_value="$(hostname -f 2>/dev/null || hostname)"
+default_qdisc="-"
+iface_rx_drops="0"
+iface_tx_drops="0"
+wan_mtu="-"
+tcp_cc="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)"
+tcp_mtu_probing="$(sysctl -n net.ipv4.tcp_mtu_probing 2>/dev/null || true)"
+netdev_backlog="$(sysctl -n net.core.netdev_max_backlog 2>/dev/null || true)"
+rmem_max="$(sysctl -n net.core.rmem_max 2>/dev/null || true)"
+wmem_max="$(sysctl -n net.core.wmem_max 2>/dev/null || true)"
+udp_rmem_min="$(sysctl -n net.ipv4.udp_rmem_min 2>/dev/null || true)"
+udp_wmem_min="$(sysctl -n net.ipv4.udp_wmem_min 2>/dev/null || true)"
+wg_transfer_rx="-"
+wg_transfer_tx="-"
+wg_latest_handshake="-"
+
+if [[ -n "${{default_iface}}" ]]; then
+  default_qdisc="$(tc qdisc show dev "${{default_iface}}" 2>/dev/null | awk 'NR==1 {{print $2; exit}}')"
+  wan_mtu="$(ip link show dev "${{default_iface}}" 2>/dev/null | awk '/mtu/ {{for (i=1; i<=NF; i++) if ($i == "mtu") {{print $(i+1); exit}}}}')"
+  proc_row="$(grep -E "^[[:space:]]*${{default_iface}}:" /proc/net/dev 2>/dev/null || true)"
+  if [[ -n "${{proc_row}}" ]]; then
+    iface_rx_drops="$(awk '{{gsub(":", "", $1); print $5}}' <<<"${{proc_row}}")"
+    iface_tx_drops="$(awk '{{gsub(":", "", $1); print $13}}' <<<"${{proc_row}}")"
+  fi
+fi
+
+if command -v wg >/dev/null 2>&1; then
+  transfer_row="$(wg show {wg_interface} transfer 2>/dev/null | awk 'NR==1')"
+  handshake_row="$(wg show {wg_interface} latest-handshakes 2>/dev/null | awk 'NR==1')"
+  if [[ -n "${{transfer_row}}" ]]; then
+    wg_transfer_rx="$(awk '{{print $2}}' <<<"${{transfer_row}}")"
+    wg_transfer_tx="$(awk '{{print $3}}' <<<"${{transfer_row}}")"
+  fi
+  if [[ -n "${{handshake_row}}" ]]; then
+    wg_latest_handshake="$(awk '{{print $2}}' <<<"${{handshake_row}}")"
+  fi
+fi
 
 printf 'login_user=%s\\n' "${{login_user}}"
 printf 'is_root=%s\\n' "${{is_root}}"
@@ -239,6 +277,21 @@ printf 'os_id=%s\\n' "${{os_id}}"
 printf 'os_version=%s\\n' "${{os_version}}"
 printf 'hostname=%s\\n' "${{hostname_value}}"
 printf 'default_iface=%s\\n' "${{default_iface}}"
+printf 'configured_wan_interface=%s\\n' "${{configured_wan_interface}}"
+printf 'wan_mtu=%s\\n' "${{wan_mtu}}"
+printf 'default_qdisc=%s\\n' "${{default_qdisc}}"
+printf 'iface_rx_drops=%s\\n' "${{iface_rx_drops}}"
+printf 'iface_tx_drops=%s\\n' "${{iface_tx_drops}}"
+printf 'tcp_cc=%s\\n' "${{tcp_cc}}"
+printf 'tcp_mtu_probing=%s\\n' "${{tcp_mtu_probing}}"
+printf 'netdev_backlog=%s\\n' "${{netdev_backlog}}"
+printf 'rmem_max=%s\\n' "${{rmem_max}}"
+printf 'wmem_max=%s\\n' "${{wmem_max}}"
+printf 'udp_rmem_min=%s\\n' "${{udp_rmem_min}}"
+printf 'udp_wmem_min=%s\\n' "${{udp_wmem_min}}"
+printf 'wg_transfer_rx=%s\\n' "${{wg_transfer_rx}}"
+printf 'wg_transfer_tx=%s\\n' "${{wg_transfer_tx}}"
+printf 'wg_latest_handshake=%s\\n' "${{wg_latest_handshake}}"
 printf 'installed=%s\\n' "${{installed}}"
 printf 'deployment_name=%s\\n' "${{deployment_name}}"
 printf 'role=%s\\n' "${{role}}"
@@ -263,12 +316,23 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
     print(f"login user: {preflight.get('login_user', '-')}")
     print(f"os: {preflight.get('os_id', '-')} {preflight.get('os_version', '-')}")
     print(f"default iface: {preflight.get('default_iface', '-')}")
+    print(f"configured WAN iface: {preflight.get('configured_wan_interface', '-')}")
+    print(f"wan mtu: {preflight.get('wan_mtu', '-')}")
+    print(f"qdisc: {preflight.get('default_qdisc', '-')}")
+    print(f"tcp cc: {preflight.get('tcp_cc', '-')}")
+    print(f"tcp mtu probing: {preflight.get('tcp_mtu_probing', '-')}")
+    print(f"netdev backlog: {preflight.get('netdev_backlog', '-')}")
+    print(f"rmem/wmem max: {preflight.get('rmem_max', '-')}/{preflight.get('wmem_max', '-')}")
+    print(f"udp rmem/wmem min: {preflight.get('udp_rmem_min', '-')}/{preflight.get('udp_wmem_min', '-')}")
+    print(f"iface drops rx/tx: {preflight.get('iface_rx_drops', '0')}/{preflight.get('iface_tx_drops', '0')}")
     print(f"installed: {preflight.get('installed', '0')}")
     print(f"role: {preflight.get('role', '-')}")
     print(f"deployment: {preflight.get('deployment_name', '-')}")
     print(f"sing-box: {preflight.get('sing_box', '-')}")
     print(f"nftables: {preflight.get('nftables', '-')}")
     print(f"wireguard: {preflight.get('wireguard', '-')}")
+    print(f"wireguard transfer rx/tx: {preflight.get('wg_transfer_rx', '-')}/{preflight.get('wg_transfer_tx', '-')}")
+    print(f"wireguard latest handshake: {preflight.get('wg_latest_handshake', '-')}")
     print(f"sync timer: {preflight.get('sync_timer', '-')}")
     print(f"subscription server: {preflight.get('subscription_server', '-')}")
 

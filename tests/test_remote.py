@@ -181,9 +181,41 @@ class RemoteTests(unittest.TestCase):
         with patch("sys.stdout", new_callable=io.StringIO) as stream:
             print_preflight(
                 RemoteTarget(role=ROLE_RU),
-                {"hostname": "demo", "login_user": "root", "os_id": "ubuntu", "os_version": "24.04", "default_iface": "eth0", "installed": "1", "role": "ru-gateway", "deployment_name": "demo", "sing_box": "active", "nftables": "active", "wireguard": "active", "sync_timer": "active"},
+                {
+                    "hostname": "demo",
+                    "login_user": "root",
+                    "os_id": "ubuntu",
+                    "os_version": "24.04",
+                    "default_iface": "eth0",
+                    "configured_wan_interface": "eth0",
+                    "wan_mtu": "1500",
+                    "default_qdisc": "fq_codel",
+                    "tcp_cc": "bbr",
+                    "tcp_mtu_probing": "1",
+                    "netdev_backlog": "8192",
+                    "rmem_max": "8388608",
+                    "wmem_max": "8388608",
+                    "udp_rmem_min": "16384",
+                    "udp_wmem_min": "16384",
+                    "iface_rx_drops": "0",
+                    "iface_tx_drops": "0",
+                    "installed": "1",
+                    "role": "ru-gateway",
+                    "deployment_name": "demo",
+                    "sing_box": "active",
+                    "nftables": "active",
+                    "wireguard": "active",
+                    "wg_transfer_rx": "1",
+                    "wg_transfer_tx": "2",
+                    "wg_latest_handshake": "3",
+                    "sync_timer": "active",
+                },
             )
-        self.assertIn("host: demo", stream.getvalue())
+        output = stream.getvalue()
+        self.assertIn("host: demo", output)
+        self.assertIn("configured WAN iface: eth0", output)
+        self.assertIn("tcp cc: bbr", output)
+        self.assertIn("wireguard transfer rx/tx: 1/2", output)
 
     def test_ensure_remote_privilege_paths(self) -> None:
         target = RemoteTarget(role=ROLE_RU)

@@ -5,6 +5,7 @@ import os
 import shlex
 import shutil
 import textwrap
+import time
 import traceback
 from pathlib import Path
 from typing import Any
@@ -250,6 +251,36 @@ def cleanup_remote_workdir(target: RemoteTarget, remote_root: str) -> None:
         warn(f"Не удалось очистить временную папку на {target.label}: {exc}")
 
 
+def is_recoverable_remote_disconnect(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(
+        marker in text
+        for marker in (
+            "socket exception",
+            "forcibly closed by the remote host",
+            "connection reset",
+            "connection aborted",
+            "broken pipe",
+            "closed by remote host",
+            "eof during negotiation",
+        )
+    )
+
+
+def wait_for_remote_recovery(target: RemoteTarget, wg_interface: str, *, timeout_sec: int = 120, interval_sec: int = 5) -> dict[str, str]:
+    deadline = time.time() + timeout_sec
+    last_error: Exception | None = None
+    while time.time() < deadline:
+        try:
+            return remote_preflight(target, wg_interface)
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            time.sleep(interval_sec)
+    if last_error is not None:
+        raise AppError(f"{target.label}: SSH-сессия оборвалась и сервер не вернулся в доступное состояние за {timeout_sec} секунд: {last_error}") from last_error
+    raise AppError(f"{target.label}: SSH-сессия оборвалась и сервер не вернулся в доступное состояние за {timeout_sec} секунд.")
+
+
 def filter_targets_for_action(
     action: str,
     targets: list[RemoteTarget],
@@ -302,31 +333,29 @@ def postcheck_remote_role(target: RemoteTarget, wg_interface: str) -> None:
 
 def finalize_install_output(env: dict[str, str], deployment_name: str) -> None:
     paths = client_artifact_paths(env)
-    subscription_payload = paths["subscription_url"].read_text(encoding="utf-8") if paths["subscription_url"].is_file() else ""
-    clipboard_ok, clipboard_message = copy_to_clipboard(subscription_payload)
+    uri_payload = paths["vless_uri"].read_text(encoding="utf-8") if paths["vless_uri"].is_file() else ""
+    clipboard_ok, clipboard_message = copy_to_clipboard(uri_payload)
     print_header("Готово")
     print(f"Deployment: {deployment_name}")
+    print(f"Основной VLESS URI: {paths['vless_uri']}")
     print(f"Основной URL подписки для Hiddify: {paths['subscription_url']}")
     print(f"Android-safe URL подписки для Hiddify: {paths['android_subscription_url']}")
     print(f"Deeplink для Hiddify: {paths['hiddify_import_url']}")
     print(f"Android deeplink для Hiddify: {paths['android_hiddify_import_url']}")
     print(f"JSON fallback для Hiddify: {paths['hiddify_json']}")
     print(f"Android JSON fallback для Hiddify: {paths['android_hiddify_json']}")
-    print(f"Сырой VLESS URI fallback: {paths['uri']}")
+    print(f"Hiddify URI alias: {paths['hiddify_uri_compat']}")
     print(f"JSON backup для Linux: {paths['linux_json']}")
     print(f"Следующие шаги: {paths['next_steps']}")
     print(clipboard_message)
     print("Что делать дальше:")
-    print("1. Открой Hiddify.")
-    print("2. На Windows запусти Hiddify с правами администратора и включи VPN/TUN режим.")
-    print("3. На Android используй отдельный Android-safe URL подписки.")
-    print("4. На Windows и Linux используй обычный URL подписки.")
-    print(f"5. Основной файл с URL подписки на Windows/Linux: {paths['subscription_url'].name}.")
-    print(f"6. Основной файл с URL подписки на Android: {paths['android_subscription_url'].name}.")
-    print(f"7. Если клиент умеет deeplink Hiddify, используй {paths['hiddify_import_url'].name} или {paths['android_hiddify_import_url'].name} для Android.")
-    print(f"8. Если URL не подходит, используй JSON fallback {paths['hiddify_json'].name}. Для Android сначала пробуй {paths['android_hiddify_json'].name}.")
-    print(f"9. Файл {paths['uri'].name} используй только как сырой запасной URI без наших правил маршрутизации.")
-    print(f"10. Для проверки серверов потом запусти: vpn status --deployment {deployment_name}")
+    print("1. На любой платформе сначала используй прямой VLESS URI.")
+    print(f"2. Основной файл: {paths['vless_uri'].name}. На Android эталонные клиенты: v2rayNG или NekoBox.")
+    print(f"3. Если хочешь Hiddify на Windows/Linux, используй {paths['subscription_url'].name} или {paths['hiddify_import_url'].name}.")
+    print(f"4. Если нужен Hiddify на Android, используй {paths['android_subscription_url'].name} или {paths['android_hiddify_import_url'].name}.")
+    print(f"5. Если URL не подходит, используй JSON fallback {paths['hiddify_json'].name}. Для Android сначала пробуй {paths['android_hiddify_json'].name}.")
+    print(f"6. Файл {paths['hiddify_uri_compat'].name} оставлен как совместимый alias того же VLESS URI.")
+    print(f"7. Для проверки серверов потом запусти: vpn status --deployment {deployment_name}")
 
 
 def load_env_for_render(env_path: Path) -> dict[str, str]:
@@ -355,7 +384,14 @@ def run_selected_remote_action(
         render_all_artifacts(env_path, env)
     for role in execution_roles(action, available_roles):
         target = target_map[role]
-        install_remote_role(target, deployment_name, env, action)
+        try:
+            install_remote_role(target, deployment_name, env, action)
+        except AppError as exc:
+            if action in {"install", "reinstall"} and is_recoverable_remote_disconnect(exc):
+                warn(f"{target.label}: SSH-сессия оборвалась во время {action}. Жду повторной доступности сервера и проверяю итоговое состояние.")
+                wait_for_remote_recovery(target, wg_interface)
+            else:
+                raise
         if action in {"install", "reinstall"}:
             postcheck_remote_role(target, wg_interface)
         else:

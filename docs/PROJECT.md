@@ -106,6 +106,7 @@
 
 Основные клиентские файлы:
 
+- `out/<name>/client/vless-uri.txt`
 - `out/<name>/client/hiddify-subscription-url.txt`
 - `out/<name>/client/hiddify-import-url.txt`
 - `out/<name>/client/hiddify-cross-platform.json`
@@ -114,12 +115,16 @@
 
 Пользовательский контракт:
 
-- для `Hiddify` основной путь — URL подписки из `hiddify-subscription-url.txt`
+- основной публичный артефакт — `vless-uri.txt`
+- на Android эталонные клиенты: `v2rayNG` и `NekoBox`
+- `Hiddify`-артефакты остаются совместимым вторичным путём, а не основным контрактом
+- для `Hiddify` на Windows/Linux основной удобный путь — `hiddify-subscription-url.txt`
+- для `Hiddify` на Android — `hiddify-android-subscription-url.txt`
 - `hiddify-import-url.txt` — deeplink для Hiddify-клиентов, которые умеют `hiddify://import/...`
 - `hiddify-cross-platform.json` — локальный fallback
-- `hiddify-uri.txt` — только сырой запасной `VLESS URI`
-- на Windows для реального перехвата трафика `Hiddify` должен работать с правами администратора и с включённым `TUN/VPN` режимом
-- клиентский профиль intentionally простой: без `fakeip`-логики, чтобы подписка в `Hiddify` работала как предсказуемый туннель до `российского сервера`, а split-routing оставался на серверной стороне
+- `hiddify-uri.txt` — совместимый alias того же `VLESS URI`
+- клиентские профили intentionally простые: без product-critical split-routing на клиенте; вся маршрутизация живёт на серверной стороне
+- IP самих `российского` и `зарубежного` серверов автоматически исключаются из клиентского туннеля, чтобы `status/reinstall/remove` не упирались в SSH hairpin при уже активном VPN
 
 ## Lifecycle
 
@@ -135,6 +140,13 @@
 - читает только существующий deployment
 - не создаёт новый deployment
 - не переписывает локальные `env/state`
+- печатает runtime-диагностику по сети и тюнингу:
+  - default/WAN interface
+  - активный `qdisc`
+  - активный TCP congestion control
+  - `netdev backlog`
+  - drops по интерфейсу
+  - `WireGuard` transfer/handshake summary
 
 ### remove / purge
 
@@ -215,7 +227,7 @@
 - реальный `root/sudo` путь на удалённые серверы
 - реальный публичный российский и зарубежный egress
 - DNS leak в обычной сети вне Docker
-- импорт профиля в `Hiddify` на реальных клиентах
+- поведение каждого конкретного стороннего клиента на реальных устройствах
 
 Итог: локальный и Docker-контур покрыт, но финальный production-подтверждающий шаг всё равно остаётся за live staging на двух реальных `Ubuntu 24.04` VPS.
 

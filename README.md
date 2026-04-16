@@ -12,7 +12,7 @@ Self-hosted VPN для личного использования и своего
 
 - один `российский сервер` с `Ubuntu 24.04`, публичным `IPv4` и доступом по `SSH`
 - один `зарубежный сервер` с `Ubuntu 24.04`, публичным `IPv4` и доступом по `SSH`
-- установленный клиент `Hiddify`
+- установленный клиент, который умеет `VLESS/Reality`
 
 Подходят оба варианта доступа:
 
@@ -21,11 +21,11 @@ Self-hosted VPN для личного использования и своего
 
 Если вход не под `root`, нужен `sudo`.
 
-## Установи Hiddify
+Рекомендуемые клиенты:
 
-- Windows / Linux / Android: [Hiddify install page](https://hiddify.com/app/How-to-install-Hiddify-app/)
-- GitHub Releases: [hiddify-app releases](https://github.com/hiddify/hiddify-app/releases/latest)
-- Android в Google Play: [Hiddify on Google Play](https://play.google.com/store/apps/details?id=app.hiddify.com)
+- Android: `v2rayNG` или `NekoBox`
+- Windows / Linux: любой клиент с поддержкой `VLESS/Reality`; `Hiddify` остаётся совместимым вариантом, но не обязательным
+- `Hiddify`-артефакты по-прежнему генерируются, но считаются вторичным удобным путём
 
 ## Запуск
 
@@ -86,6 +86,7 @@ chmod +x ./vpn.sh
 
 После успешной установки появятся:
 
+- `out/<deployment>/client/vless-uri.txt`
 - `out/<deployment>/client/hiddify-subscription-url.txt`
 - `out/<deployment>/client/hiddify-android-subscription-url.txt`
 - `out/<deployment>/client/hiddify-import-url.txt`
@@ -98,28 +99,28 @@ chmod +x ./vpn.sh
 
 Главный результат:
 
-- URL подписки для `Hiddify` копируется в буфер обмена
-- основной файл для `Hiddify` на Windows/Linux: `hiddify-subscription-url.txt`
-- основной файл для `Hiddify` на Android: `hiddify-android-subscription-url.txt`
+- основной `VLESS URI` копируется в буфер обмена
+- основной нейтральный файл: `vless-uri.txt`
+- на Android эталонный путь: вставить `vless-uri.txt` в `v2rayNG` или `NekoBox`
+- `hiddify-subscription-url.txt` и `hiddify-android-subscription-url.txt` остаются как совместимый вторичный путь для `Hiddify`
 - `hiddify-import-url.txt` — deeplink для клиентов, которые понимают схему `hiddify://import/...`
 - `hiddify-android-import-url.txt` — Android-safe deeplink для Hiddify
 - `hiddify-cross-platform.json` — fallback, если нужен локальный файл
 - `hiddify-android.json` — Android-safe fallback
-- `hiddify-uri.txt` — только сырой запасной `VLESS URI`, без гарантии наших правил маршрутизации
+- `hiddify-uri.txt` — совместимый alias того же `VLESS URI` для старых сценариев
 
-## Как подключить в Hiddify
+## Как подключить клиент
 
-1. Открой `Hiddify`
-2. На Windows запусти его с правами администратора и включи `VPN/TUN mode`
-3. На Android используй `hiddify-android-subscription-url.txt`
-4. На Windows и Linux используй `hiddify-subscription-url.txt`
-5. Если клиент умеет deeplink `hiddify://import/...`, используй `hiddify-import-url.txt` или `hiddify-android-import-url.txt` на Android
-6. Если URL не подходит, используй `hiddify-cross-platform.json`; на Android сначала пробуй `hiddify-android.json`
-7. `hiddify-uri.txt` используй только как сырой запасной URI, если осознанно нужен только транспорт без split-routing
+1. На любой платформе сначала попробуй `vless-uri.txt`
+2. На Android предпочтительны `v2rayNG` или `NekoBox`
+3. Если используешь `Hiddify` на Windows/Linux, добавляй профиль по `hiddify-subscription-url.txt` или `hiddify-import-url.txt`
+4. Если используешь `Hiddify` на Android, сначала пробуй `hiddify-android-subscription-url.txt` или `hiddify-android-import-url.txt`
+5. Если URL-подписка для `Hiddify` не подходит, используй `hiddify-cross-platform.json`; на Android сначала пробуй `hiddify-android.json`
+6. `hiddify-uri.txt` оставлен как совместимый alias того же `VLESS URI`
 
-Основной путь теперь — URL подписки. JSON нужен как fallback, URI — как низкоуровневый запасной путь.
+Основной путь теперь — сырой `VLESS URI`. `Hiddify`-подписка и JSON остаются как вторичный совместимый путь.
 
-Профиль подписки специально делает клиент максимально простым: сам клиент не решает, что считать российским или зарубежным трафиком, а просто отправляет публичный IPv4 в `российский сервер`. Вся split-маршрутизация живёт уже на серверной стороне.
+Сервер остаётся источником истины для split-маршрутизации: клиенту не нужно знать, что считать российским или зарубежным трафиком. Он просто даёт туннель до `российского сервера`, а сама логика маршрутов живёт на серверной стороне.
 
 IP самих `российского` и `зарубежного` серверов автоматически исключаются из клиентского туннеля. Это нужно, чтобы можно было запускать `vpn status/reinstall/remove` с того же компьютера даже при уже активном VPN-подключении.
 
@@ -136,7 +137,7 @@ IP самих `российского` и `зарубежного` сервер�
 Если установка дошла до конца, смотри:
 
 - `out/<deployment>/NEXT-STEPS.txt`
-- `out/<deployment>/client/hiddify-uri.txt`
+- `out/<deployment>/client/vless-uri.txt`
 
 Если сценарий упал или окно закрылось слишком быстро, смотри лог ошибки:
 

@@ -6,6 +6,20 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.2.17] - 2026-04-16
+
+### Fixed
+
+- runtime-тюнинг по сети на серверах расширен и теперь через обычный `reinstall` включает `fq_codel`, `bbr`, `tcp_mtu_probing`, backlog и UDP buffer sysctl, чтобы не оставлять `зарубежный сервер` на узких receive-side настройках после переустановки
+- `status`/preflight теперь показывают runtime-сетевые значения, которые реально нужны для диагностики: интерфейс, `qdisc`, TCP CC, backlog, drops и `WireGuard` counters
+- `reinstall`/`install` теперь переживают recoverable SSH-disconnect во время remote action: после разрыва сессии мастер ждёт возврата сервера и добивает итоговый postcheck, вместо ложного общего фейла
+
+### Changed
+
+- публичный клиентский контракт переведён на `URI-first`: основной артефакт и clipboard теперь используют `vless-uri.txt`
+- `Hiddify`-подписки, deeplink и JSON сохранены как совместимые вторичные артефакты
+- Android reference path в документации теперь `v2rayNG/NekoBox`, а не обязательный `Hiddify`
+
 ## [0.2.16] - 2026-04-16
 
 ### Fixed

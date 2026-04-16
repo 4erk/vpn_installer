@@ -468,6 +468,16 @@ print_status() {
   local removed_at=""
   local baseline_present="0"
   local snapshots_present="0"
+  local default_iface=""
+  local configured_wan_interface=""
+  local default_qdisc="-"
+  local tcp_cc="-"
+  local tcp_mtu_probing="-"
+  local netdev_backlog="-"
+  local iface_rx_drops="0"
+  local iface_tx_drops="0"
+  local wg_transfer="-/-"
+  local wg_handshake="-"
   if is_currently_installed; then
     installed="1"
   fi
@@ -483,6 +493,31 @@ print_status() {
   if [[ -d "${VPNSTACK_SNAPSHOT_DIR}" ]]; then
     snapshots_present="$(find "${VPNSTACK_SNAPSHOT_DIR}" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d '[:space:]')"
   fi
+  if [[ -r "${VPNSTACK_DEPLOYMENT_FILE}" ]]; then
+    configured_wan_interface="$(grep -E '^WAN_INTERFACE=' "${VPNSTACK_DEPLOYMENT_FILE}" | head -n1 | cut -d= -f2- | sed 's/^"//; s/"$//')"
+  fi
+  default_iface="$(ip route show default 2>/dev/null | awk '/default/ {print $5; exit}')"
+  tcp_cc="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)"
+  tcp_mtu_probing="$(sysctl -n net.ipv4.tcp_mtu_probing 2>/dev/null || true)"
+  netdev_backlog="$(sysctl -n net.core.netdev_max_backlog 2>/dev/null || true)"
+  if [[ -n "${default_iface}" ]]; then
+    default_qdisc="$(tc qdisc show dev "${default_iface}" 2>/dev/null | awk 'NR==1 {print $2; exit}')"
+    proc_row="$(grep -E "^[[:space:]]*${default_iface}:" /proc/net/dev 2>/dev/null || true)"
+    if [[ -n "${proc_row}" ]]; then
+      iface_rx_drops="$(awk '{gsub(":", "", $1); print $5}' <<<"${proc_row}")"
+      iface_tx_drops="$(awk '{gsub(":", "", $1); print $13}' <<<"${proc_row}")"
+    fi
+  fi
+  if command -v wg >/dev/null 2>&1; then
+    transfer_row="$(wg show "${WG_INTERFACE}" transfer 2>/dev/null | awk 'NR==1')"
+    handshake_row="$(wg show "${WG_INTERFACE}" latest-handshakes 2>/dev/null | awk 'NR==1')"
+    if [[ -n "${transfer_row}" ]]; then
+      wg_transfer="$(awk '{print $2 "/" $3}' <<<"${transfer_row}")"
+    fi
+    if [[ -n "${handshake_row}" ]]; then
+      wg_handshake="$(awk '{print $2}' <<<"${handshake_row}")"
+    fi
+  fi
 
   echo "role=${ROLE}"
   echo "installed=${installed}"
@@ -492,6 +527,16 @@ print_status() {
   echo "removed_at=${removed_at}"
   echo "baseline_present=${baseline_present}"
   echo "snapshots_present=${snapshots_present}"
+  echo "default_iface=${default_iface}"
+  echo "configured_wan_interface=${configured_wan_interface}"
+  echo "default_qdisc=${default_qdisc}"
+  echo "tcp_cc=${tcp_cc}"
+  echo "tcp_mtu_probing=${tcp_mtu_probing}"
+  echo "netdev_backlog=${netdev_backlog}"
+  echo "iface_rx_drops=${iface_rx_drops}"
+  echo "iface_tx_drops=${iface_tx_drops}"
+  echo "wireguard_transfer=${wg_transfer}"
+  echo "wireguard_latest_handshake=${wg_handshake}"
   echo "nftables_active=$(service_active_flag nftables)"
   echo "wireguard_active=$(service_active_flag "wg-quick@${WG_INTERFACE}")"
   echo "sync_timer_active=$(service_active_flag vpn-stack-sync.timer)"
@@ -787,15 +832,33 @@ copy_role_artifacts "${ROLE_ARTIFACTS_DIR}"
 if [[ "$ROLE" == "ru-gateway" ]]; then
   cat >"${SYSCTL_PATH}" <<EOF
 net.core.default_qdisc=fq_codel
+net.core.netdev_max_backlog=8192
+net.core.netdev_budget=600
+net.core.netdev_budget_usecs=6000
+net.core.rmem_default=1048576
+net.core.wmem_default=1048576
+net.core.rmem_max=8388608
+net.core.wmem_max=8388608
 net.ipv4.tcp_congestion_control=bbr
 net.ipv4.tcp_mtu_probing=1
+net.ipv4.udp_rmem_min=16384
+net.ipv4.udp_wmem_min=16384
 net.ipv4.conf.all.src_valid_mark=1
 EOF
 else
   cat >"${SYSCTL_PATH}" <<EOF
 net.core.default_qdisc=fq_codel
+net.core.netdev_max_backlog=8192
+net.core.netdev_budget=600
+net.core.netdev_budget_usecs=6000
+net.core.rmem_default=1048576
+net.core.wmem_default=1048576
+net.core.rmem_max=8388608
+net.core.wmem_max=8388608
 net.ipv4.tcp_congestion_control=bbr
 net.ipv4.tcp_mtu_probing=1
+net.ipv4.udp_rmem_min=16384
+net.ipv4.udp_wmem_min=16384
 net.ipv4.ip_forward=1
 net.ipv6.conf.all.forwarding=1
 EOF
@@ -806,6 +869,12 @@ record_install_metadata
 
 sysctl --system >/dev/null
 apply_runtime_qdisc "${RUNTIME_QDISC_INTERFACE}"
+if [[ -n "${WAN_INTERFACE:-}" && "${WAN_INTERFACE}" != "${RUNTIME_QDISC_INTERFACE}" ]]; then
+  apply_runtime_qdisc "${WAN_INTERFACE}"
+fi
+if [[ -n "${WG_INTERFACE:-}" ]]; then
+  apply_runtime_qdisc "${WG_INTERFACE}"
+fi
 systemctl daemon-reload
 systemctl enable nftables
 systemctl restart nftables

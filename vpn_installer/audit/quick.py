@@ -287,31 +287,43 @@ def test_validate_json(out_dir: Path) -> dict[str, str]:
 
 
 def test_user_artifacts(out_dir: Path) -> dict[str, str]:
+    vless_uri_path = out_dir / "client" / "vless-uri.txt"
+    compat_uri_path = out_dir / "client" / "hiddify-uri.txt"
     subscription_url_path = out_dir / "client" / "hiddify-subscription-url.txt"
     import_url_path = out_dir / "client" / "hiddify-import-url.txt"
-    uri_path = out_dir / "client" / "hiddify-uri.txt"
     next_steps = out_dir / "NEXT-STEPS.txt"
+    if not vless_uri_path.is_file():
+        raise AuditFailure(f"Не найден основной VLESS URI файл: {vless_uri_path}")
     if not subscription_url_path.is_file():
         raise AuditFailure(f"Не найден Hiddify subscription URL файл: {subscription_url_path}")
     if not import_url_path.is_file():
         raise AuditFailure(f"Не найден Hiddify import URL файл: {import_url_path}")
-    if not uri_path.is_file():
-        raise AuditFailure(f"Не найден Hiddify URI файл: {uri_path}")
+    if not compat_uri_path.is_file():
+        raise AuditFailure(f"Не найден Hiddify URI alias файл: {compat_uri_path}")
     if not next_steps.is_file():
         raise AuditFailure(f"Не найден NEXT-STEPS.txt: {next_steps}")
+    vless_uri_payload = vless_uri_path.read_text(encoding="utf-8")
+    if not vless_uri_payload.startswith("vless://"):
+        raise AuditFailure("Основной VLESS URI не похож на VLESS URI")
     subscription_payload = subscription_url_path.read_text(encoding="utf-8")
     if not subscription_payload.startswith("http://"):
         raise AuditFailure("Hiddify subscription URL не похож на HTTP URL")
     import_payload = import_url_path.read_text(encoding="utf-8")
     if not import_payload.startswith("hiddify://import/http://"):
         raise AuditFailure("Hiddify import URL не похож на deeplink")
-    uri_payload = uri_path.read_text(encoding="utf-8")
-    if not uri_payload.startswith("vless://"):
-        raise AuditFailure("Hiddify URI не похожа на VLESS URI")
+    compat_uri_payload = compat_uri_path.read_text(encoding="utf-8")
+    if compat_uri_payload != vless_uri_payload:
+        raise AuditFailure("Совместимый Hiddify URI alias расходится с основным VLESS URI")
     next_steps_text = next_steps.read_text(encoding="utf-8")
-    if "Hiddify" not in next_steps_text or "vpn status" not in next_steps_text or "URL подписки" not in next_steps_text:
-        raise AuditFailure("NEXT-STEPS.txt не содержит ожидаемых инструкций")
-    return {"subscription_url": str(subscription_url_path), "import_url": str(import_url_path), "uri": str(uri_path), "next_steps": str(next_steps)}
+    if "VLESS URI" not in next_steps_text or "vpn status" not in next_steps_text or "v2rayNG" not in next_steps_text:
+        raise AuditFailure("NEXT-STEPS.txt не содержит ожидаемых URI-first инструкций")
+    return {
+        "vless_uri": str(vless_uri_path),
+        "compat_uri": str(compat_uri_path),
+        "subscription_url": str(subscription_url_path),
+        "import_url": str(import_url_path),
+        "next_steps": str(next_steps),
+    }
 
 
 def test_validate_bundle(out_dir: Path) -> dict[str, str]:
