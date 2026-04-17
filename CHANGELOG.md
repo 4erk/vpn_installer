@@ -6,6 +6,14 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.2.19] - 2026-04-17
+
+### Fixed
+
+- публичные порты `RU` и `foreign` теперь больше не живут на голом `accept` в `nftables`: installer добавляет rate-limit на новые TCP-подключения к `ssh`, `RU 443` и `subscription`-порту, чтобы слабые VPS меньше деградировали под внешним шумом и invalid REALITY / brute-force попытками
+- в firewall добавлен явный `ct state invalid drop`, чтобы раньше отбрасывать мусорные соединения вместо лишней нагрузки на userspace
+- runtime sysctl усилен `net.core.somaxconn=4096` и `net.ipv4.tcp_syncookies=1`, чтобы `reinstall` докручивал и TCP backlog hardening, а не только `fq_codel`/`bbr`
+
 ## [0.2.18] - 2026-04-17
 
 ### Fixed

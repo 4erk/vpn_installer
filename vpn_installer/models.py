@@ -33,6 +33,7 @@ ENV_SECTIONS = [
     ("", ["DEPLOY_NAME"]),
     ("# Public addresses", ["RU_PUBLIC_IP", "FOREIGN_PUBLIC_IP"]),
     ("# SSH access and daemon hardening", ["SSH_PORT", "SSH_LOGIN_GRACE_TIME", "SSH_MAX_AUTH_TRIES", "SSH_MAX_STARTUPS", "SSH_PER_SOURCE_MAX_STARTUPS", "SSH_PER_SOURCE_NETBLOCK_SIZE"]),
+    ("# Public port admission control", ["SSH_INPUT_RATE", "SSH_INPUT_BURST", "RU_HTTPS_INPUT_RATE", "RU_HTTPS_INPUT_BURST", "SUBSCRIPTION_INPUT_RATE", "SUBSCRIPTION_INPUT_BURST"]),
     ("# Foreign egress NIC override. Leave empty to auto-detect on the foreign host.", ["WAN_INTERFACE"]),
     ("# sing-box / VLESS + REALITY", ["CLIENT_UUID", "CLIENT_FLOW", "RU_LISTEN_PORT", "RU_REALITY_SERVER_NAME", "RU_REALITY_HANDSHAKE_SERVER", "RU_REALITY_HANDSHAKE_PORT", "RU_REALITY_PRIVATE_KEY", "RU_REALITY_PUBLIC_KEY", "RU_REALITY_SHORT_ID", "UTLS_FINGERPRINT"]),
     ("# Subscription delivery from the Russian server", ["SUBSCRIPTION_PORT", "SUBSCRIPTION_TOKEN"]),

@@ -204,33 +204,43 @@ def render_foreign_wg(env: dict[str, str]) -> str:
     )
 
 
+def render_rate_limited_tcp_accept(service_tag: str, port: str, rate: str, burst: str) -> list[str]:
+    return [
+        f'    tcp dport {port} ct state new meter {service_tag} {{ ip saddr limit rate {rate} burst {burst} packets }} accept',
+        f"    tcp dport {port} drop",
+    ]
+
+
 def render_foreign_nftables(env: dict[str, str], wan_iface: str) -> str:
-    return "\n".join(
+    lines = [
+        "flush ruleset",
+        "",
+        "table inet vpnstack {",
+        "  set ru_ipv4 {",
+        "    type ipv4_addr",
+        "    flags interval",
+        "    auto-merge",
+        "  }",
+        "",
+        "  set ru_ipv6 {",
+        "    type ipv6_addr",
+        "    flags interval",
+        "    auto-merge",
+        "  }",
+        "",
+        "  chain input {",
+        "    type filter hook input priority 0;",
+        "    policy drop;",
+        "",
+        '    iifname "lo" accept',
+        "    ct state invalid drop",
+        "    ip6 nexthdr icmpv6 accept",
+        "    ip protocol icmp accept",
+        "    ct state established,related accept",
+    ]
+    lines.extend(render_rate_limited_tcp_accept("ssh_guard", env["SSH_PORT"], env["SSH_INPUT_RATE"], env["SSH_INPUT_BURST"]))
+    lines.extend(
         [
-            "flush ruleset",
-            "",
-            "table inet vpnstack {",
-            "  set ru_ipv4 {",
-            "    type ipv4_addr",
-            "    flags interval",
-            "    auto-merge",
-            "  }",
-            "",
-            "  set ru_ipv6 {",
-            "    type ipv6_addr",
-            "    flags interval",
-            "    auto-merge",
-            "  }",
-            "",
-            "  chain input {",
-            "    type filter hook input priority 0;",
-            "    policy drop;",
-            "",
-            '    iifname "lo" accept',
-            "    ip6 nexthdr icmpv6 accept",
-            "    ip protocol icmp accept",
-            "    ct state established,related accept",
-            f"    tcp dport {env['SSH_PORT']} accept",
             f"    udp dport {env['WG_PORT']} accept",
             "  }",
             "",
@@ -238,6 +248,7 @@ def render_foreign_nftables(env: dict[str, str], wan_iface: str) -> str:
             "    type filter hook forward priority 0;",
             "    policy drop;",
             "",
+            "    ct state invalid drop",
             "    ct state established,related accept",
             f'    iifname "{env["WG_INTERFACE"]}" oifname "{wan_iface}" ip daddr @ru_ipv4 drop',
             f'    iifname "{env["WG_INTERFACE"]}" oifname "{wan_iface}" ip6 daddr @ru_ipv6 drop',
@@ -255,30 +266,29 @@ def render_foreign_nftables(env: dict[str, str], wan_iface: str) -> str:
             "",
         ]
     )
+    return "\n".join(lines)
 
 
 def render_ru_firewall_nftables(env: dict[str, str]) -> str:
-    return "\n".join(
-        [
-            "flush ruleset",
-            "",
-            "table inet vpnstack {",
-            "  chain input {",
-            "    type filter hook input priority 0;",
-            "    policy drop;",
-            "",
-            '    iifname "lo" accept',
-            "    ip6 nexthdr icmpv6 accept",
-            "    ip protocol icmp accept",
-            "    ct state established,related accept",
-            f"    tcp dport {env['SSH_PORT']} accept",
-            f"    tcp dport {env['RU_LISTEN_PORT']} accept",
-            f"    tcp dport {env['SUBSCRIPTION_PORT']} accept",
-            "  }",
-            "}",
-            "",
-        ]
-    )
+    lines = [
+        "flush ruleset",
+        "",
+        "table inet vpnstack {",
+        "  chain input {",
+        "    type filter hook input priority 0;",
+        "    policy drop;",
+        "",
+        '    iifname "lo" accept',
+        "    ct state invalid drop",
+        "    ip6 nexthdr icmpv6 accept",
+        "    ip protocol icmp accept",
+        "    ct state established,related accept",
+    ]
+    lines.extend(render_rate_limited_tcp_accept("ssh_guard", env["SSH_PORT"], env["SSH_INPUT_RATE"], env["SSH_INPUT_BURST"]))
+    lines.extend(render_rate_limited_tcp_accept("vless_guard", env["RU_LISTEN_PORT"], env["RU_HTTPS_INPUT_RATE"], env["RU_HTTPS_INPUT_BURST"]))
+    lines.extend(render_rate_limited_tcp_accept("subscription_guard", env["SUBSCRIPTION_PORT"], env["SUBSCRIPTION_INPUT_RATE"], env["SUBSCRIPTION_INPUT_BURST"]))
+    lines.extend(["  }", "}", ""])
+    return "\n".join(lines)
 
 
 def render_sync_script(env: dict[str, str]) -> str:

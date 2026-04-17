@@ -875,6 +875,7 @@ copy_role_artifacts "${ROLE_ARTIFACTS_DIR}"
 if [[ "$ROLE" == "ru-gateway" ]]; then
   cat >"${SYSCTL_PATH}" <<EOF
 net.core.default_qdisc=fq_codel
+net.core.somaxconn=4096
 net.core.netdev_max_backlog=8192
 net.core.netdev_budget=600
 net.core.netdev_budget_usecs=6000
@@ -882,6 +883,7 @@ net.core.rmem_default=1048576
 net.core.wmem_default=1048576
 net.core.rmem_max=8388608
 net.core.wmem_max=8388608
+net.ipv4.tcp_syncookies=1
 net.ipv4.tcp_congestion_control=bbr
 net.ipv4.tcp_mtu_probing=1
 net.ipv4.tcp_max_syn_backlog=2048
@@ -892,6 +894,7 @@ EOF
 else
   cat >"${SYSCTL_PATH}" <<EOF
 net.core.default_qdisc=fq_codel
+net.core.somaxconn=4096
 net.core.netdev_max_backlog=8192
 net.core.netdev_budget=600
 net.core.netdev_budget_usecs=6000
@@ -899,6 +902,7 @@ net.core.rmem_default=1048576
 net.core.wmem_default=1048576
 net.core.rmem_max=8388608
 net.core.wmem_max=8388608
+net.ipv4.tcp_syncookies=1
 net.ipv4.tcp_congestion_control=bbr
 net.ipv4.tcp_mtu_probing=1
 net.ipv4.tcp_max_syn_backlog=2048

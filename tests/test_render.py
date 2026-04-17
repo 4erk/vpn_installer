@@ -289,6 +289,25 @@ class RenderTests(unittest.TestCase):
         self.assertIn("MaxStartups 5:30:20", config)
         self.assertIn("PerSourceMaxStartups 2", config)
 
+    def test_render_ru_nftables_rate_limits_public_ports(self) -> None:
+        env = self.make_env()
+        rules = render.render_ru_firewall_nftables(env)
+        self.assertIn("ct state invalid drop", rules)
+        self.assertIn(f"tcp dport {env['SSH_PORT']} ct state new meter ssh_guard", rules)
+        self.assertIn(f"limit rate {env['SSH_INPUT_RATE']} burst {env['SSH_INPUT_BURST']} packets", rules)
+        self.assertIn(f"tcp dport {env['RU_LISTEN_PORT']} ct state new meter vless_guard", rules)
+        self.assertIn(f"limit rate {env['RU_HTTPS_INPUT_RATE']} burst {env['RU_HTTPS_INPUT_BURST']} packets", rules)
+        self.assertIn(f"tcp dport {env['SUBSCRIPTION_PORT']} ct state new meter subscription_guard", rules)
+        self.assertIn(f"limit rate {env['SUBSCRIPTION_INPUT_RATE']} burst {env['SUBSCRIPTION_INPUT_BURST']} packets", rules)
+
+    def test_render_foreign_nftables_rate_limits_ssh(self) -> None:
+        env = self.make_env()
+        rules = render.render_foreign_nftables(env, "eth0")
+        self.assertIn("ct state invalid drop", rules)
+        self.assertIn(f"tcp dport {env['SSH_PORT']} ct state new meter ssh_guard", rules)
+        self.assertIn(f"limit rate {env['SSH_INPUT_RATE']} burst {env['SSH_INPUT_BURST']} packets", rules)
+        self.assertIn(f"udp dport {env['WG_PORT']} accept", rules)
+
     def test_write_role_rendered_files_and_package_bundle(self) -> None:
         env = self.make_env()
         with tempfile.TemporaryDirectory() as tmp:
