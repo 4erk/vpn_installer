@@ -289,39 +289,33 @@ def test_validate_json(out_dir: Path) -> dict[str, str]:
 def test_user_artifacts(out_dir: Path) -> dict[str, str]:
     vless_uri_path = out_dir / "client" / "vless-uri.txt"
     compat_uri_path = out_dir / "client" / "hiddify-uri.txt"
-    subscription_url_path = out_dir / "client" / "hiddify-subscription-url.txt"
-    import_url_path = out_dir / "client" / "hiddify-import-url.txt"
+    hiddify_json_path = out_dir / "client" / "hiddify-cross-platform.json"
+    android_hiddify_json_path = out_dir / "client" / "hiddify-android.json"
     next_steps = out_dir / "NEXT-STEPS.txt"
     if not vless_uri_path.is_file():
         raise AuditFailure(f"Не найден основной VLESS URI файл: {vless_uri_path}")
-    if not subscription_url_path.is_file():
-        raise AuditFailure(f"Не найден Hiddify subscription URL файл: {subscription_url_path}")
-    if not import_url_path.is_file():
-        raise AuditFailure(f"Не найден Hiddify import URL файл: {import_url_path}")
     if not compat_uri_path.is_file():
         raise AuditFailure(f"Не найден Hiddify URI alias файл: {compat_uri_path}")
+    if not hiddify_json_path.is_file():
+        raise AuditFailure(f"Не найден Hiddify JSON файл: {hiddify_json_path}")
+    if not android_hiddify_json_path.is_file():
+        raise AuditFailure(f"Не найден Android Hiddify JSON файл: {android_hiddify_json_path}")
     if not next_steps.is_file():
         raise AuditFailure(f"Не найден NEXT-STEPS.txt: {next_steps}")
     vless_uri_payload = vless_uri_path.read_text(encoding="utf-8")
     if not vless_uri_payload.startswith("vless://"):
         raise AuditFailure("Основной VLESS URI не похож на VLESS URI")
-    subscription_payload = subscription_url_path.read_text(encoding="utf-8")
-    if not subscription_payload.startswith("http://"):
-        raise AuditFailure("Hiddify subscription URL не похож на HTTP URL")
-    import_payload = import_url_path.read_text(encoding="utf-8")
-    if not import_payload.startswith("hiddify://import/http://"):
-        raise AuditFailure("Hiddify import URL не похож на deeplink")
     compat_uri_payload = compat_uri_path.read_text(encoding="utf-8")
     if compat_uri_payload != vless_uri_payload:
         raise AuditFailure("Совместимый Hiddify URI alias расходится с основным VLESS URI")
     next_steps_text = next_steps.read_text(encoding="utf-8")
-    if "VLESS URI" not in next_steps_text or "vpn status" not in next_steps_text or "v2rayNG" not in next_steps_text:
+    if "VLESS URI" not in next_steps_text or "vpn status" not in next_steps_text or "v2rayNG" not in next_steps_text or "hiddify-cross-platform.json" not in next_steps_text:
         raise AuditFailure("NEXT-STEPS.txt не содержит ожидаемых URI-first инструкций")
     return {
         "vless_uri": str(vless_uri_path),
         "compat_uri": str(compat_uri_path),
-        "subscription_url": str(subscription_url_path),
-        "import_url": str(import_url_path),
+        "hiddify_json": str(hiddify_json_path),
+        "android_hiddify_json": str(android_hiddify_json_path),
         "next_steps": str(next_steps),
     }
 
@@ -329,7 +323,6 @@ def test_user_artifacts(out_dir: Path) -> dict[str, str]:
 def test_validate_bundle(out_dir: Path) -> dict[str, str]:
     bundle_dir = out_dir / "bundle"
     tarballs = [bundle_dir / "ru-gateway.tar.gz", bundle_dir / "foreign-exit.tar.gz"]
-    ru_env = load_env_file(out_dir / "server" / "ru.env")
     expected = {
         "ru-gateway.tar.gz": {
             "install.sh",
@@ -338,9 +331,6 @@ def test_validate_bundle(out_dir: Path) -> dict[str, str]:
             "assets/geoip-ru.srs",
             "rendered/sing-box.json",
             "rendered/sync-state.sh",
-            "rendered/vpn-stack-subscription.service",
-            f"rendered/subscription/{ru_env['SUBSCRIPTION_TOKEN']}/hiddify-cross-platform.json",
-            f"rendered/subscription/{ru_env['SUBSCRIPTION_TOKEN']}/vless.txt",
             "vpn_installer/install_support.py",
         },
         "foreign-exit.tar.gz": {"install.sh", "deployment.env", "assets/ru-ipv4.zone", "assets/ru-ipv6.zone", "rendered/sing-box.json", "rendered/sync-state.sh", "vpn_installer/install_support.py"},

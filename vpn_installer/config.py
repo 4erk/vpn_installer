@@ -4,7 +4,6 @@ import ipaddress
 import json
 import os
 import re
-import secrets
 import urllib.error
 import urllib.request
 import uuid
@@ -39,7 +38,6 @@ REMOTE_ENV_CRITICAL_KEYS = {
     "CLIENT_UUID",
     "RU_REALITY_PUBLIC_KEY",
     "RU_REALITY_SHORT_ID",
-    "SUBSCRIPTION_TOKEN",
     "WAN_INTERFACE",
     "RU_FORCE_DIRECT_DOMAIN",
     "RU_FORCE_DIRECT_DOMAIN_SUFFIX",
@@ -160,14 +158,10 @@ def generate_default_env(deploy_name: str) -> dict[str, str]:
         "SSH_INPUT_BURST": "6",
         "RU_HTTPS_INPUT_RATE": "120/minute",
         "RU_HTTPS_INPUT_BURST": "60",
-        "SUBSCRIPTION_INPUT_RATE": "20/minute",
-        "SUBSCRIPTION_INPUT_BURST": "20",
         "WAN_INTERFACE": "",
         "CLIENT_UUID": str(uuid.uuid4()),
         "CLIENT_FLOW": "xtls-rprx-vision",
         "RU_LISTEN_PORT": "443",
-        "SUBSCRIPTION_PORT": "18080",
-        "SUBSCRIPTION_TOKEN": secrets.token_hex(16),
         "RU_REALITY_SERVER_NAME": "www.cloudflare.com",
         "RU_REALITY_HANDSHAKE_SERVER": "www.cloudflare.com",
         "RU_REALITY_HANDSHAKE_PORT": "443",

@@ -110,9 +110,8 @@
 Основные клиентские файлы:
 
 - `out/<name>/client/vless-uri.txt`
-- `out/<name>/client/hiddify-subscription-url.txt`
-- `out/<name>/client/hiddify-import-url.txt`
 - `out/<name>/client/hiddify-cross-platform.json`
+- `out/<name>/client/hiddify-android.json`
 - `out/<name>/client/hiddify-uri.txt`
 - `out/<name>/client/linux-sing-box.json`
 
@@ -121,10 +120,9 @@
 - основной публичный артефакт — `vless-uri.txt`
 - на Android эталонные клиенты: `v2rayNG` и `NekoBox`
 - `Hiddify`-артефакты остаются совместимым вторичным путём, а не основным контрактом
-- для `Hiddify` на Windows/Linux основной удобный путь — `hiddify-subscription-url.txt`
-- для `Hiddify` на Android — `hiddify-android-subscription-url.txt`
-- `hiddify-import-url.txt` — deeplink для Hiddify-клиентов, которые умеют `hiddify://import/...`
-- `hiddify-cross-platform.json` — локальный fallback
+- для `Hiddify` на Windows/Linux основной локальный путь — `hiddify-cross-platform.json`
+- для `Hiddify` на Android — `hiddify-android.json`
+- server-hosted subscription path больше не считается штатной частью продукта
 - `hiddify-uri.txt` — совместимый alias того же `VLESS URI`
 - клиентские профили intentionally простые: без product-critical split-routing на клиенте; вся маршрутизация живёт на серверной стороне
 - IP самих `российского` и `зарубежного` серверов автоматически исключаются из клиентского туннеля, чтобы `status/reinstall/remove` не упирались в SSH hairpin при уже активном VPN

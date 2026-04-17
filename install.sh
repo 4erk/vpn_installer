@@ -136,8 +136,6 @@ RU_DIRECT_DNS_PORT="${RU_DIRECT_DNS_PORT:-53}"
 GLOBAL_DOH_SERVER="${GLOBAL_DOH_SERVER:-1.1.1.1}"
 GLOBAL_DOH_SERVER_NAME="${GLOBAL_DOH_SERVER_NAME:-cloudflare-dns.com}"
 GLOBAL_DOH_PATH="${GLOBAL_DOH_PATH:-/dns-query}"
-SUBSCRIPTION_PORT="${SUBSCRIPTION_PORT:-18080}"
-SUBSCRIPTION_TOKEN="${SUBSCRIPTION_TOKEN:-}"
 RU_FORCE_DIRECT_DOMAIN="${RU_FORCE_DIRECT_DOMAIN:-api.oneme.ru,mtalk.google.com,calls.okcdn.ru,gosuslugi.ru,api.ok.ru,ifconfig.me,ifconfig.co,checkip.amazonaws.com,ipapi.co,ipinfo.io,ident.me,tnedi.me,icanhazip.com,ip.mail.ru,ipv4-internet.yandex.net,ipv6-internet.yandex.net,2ip.ru}"
 RU_FORCE_DIRECT_DOMAIN_SUFFIX="${RU_FORCE_DIRECT_DOMAIN_SUFFIX:-.gstatic.com,.gosuslugi.ru,.ipify.org,.ipinfo.io,.ident.me,.tnedi.me,.icanhazip.com}"
 RU_FORCE_DIRECT_IP_CIDR="${RU_FORCE_DIRECT_IP_CIDR:-}"
@@ -187,8 +185,6 @@ require_common_env() {
   require_var RU_PUBLIC_IP
   require_var FOREIGN_PUBLIC_IP
   require_var CLIENT_UUID
-  require_var SUBSCRIPTION_PORT
-  require_var SUBSCRIPTION_TOKEN
   require_var RU_REALITY_SERVER_NAME
   require_var RU_REALITY_HANDSHAKE_SERVER
   require_var RU_REALITY_PRIVATE_KEY
@@ -294,8 +290,6 @@ SYNC_TIMER_ENABLED=$(service_enabled_flag vpn-stack-sync.timer)
 SYNC_TIMER_ACTIVE=$(service_active_flag vpn-stack-sync.timer)
 HEALTH_TIMER_ENABLED=$(service_enabled_flag vpn-stack-health.timer)
 HEALTH_TIMER_ACTIVE=$(service_active_flag vpn-stack-health.timer)
-SUBSCRIPTION_ENABLED=$(service_enabled_flag vpn-stack-subscription.service)
-SUBSCRIPTION_ACTIVE=$(service_active_flag vpn-stack-subscription.service)
 SSH_SERVICE_ENABLED=$(service_enabled_flag ssh.service)
 SSH_SERVICE_ACTIVE=$(service_active_flag ssh.service)
 SSH_SOCKET_ENABLED=$(service_enabled_flag ssh.socket)
@@ -411,7 +405,6 @@ restore_service_state() {
   apply_service_restore_flags vpn-stack-sync.timer "${SYNC_TIMER_ENABLED:-0}" "${SYNC_TIMER_ACTIVE:-0}"
   apply_service_restore_flags vpn-stack-health.timer "${HEALTH_TIMER_ENABLED:-0}" "${HEALTH_TIMER_ACTIVE:-0}"
   apply_service_restore_flags sing-box "${SINGBOX_ENABLED:-0}" "${SINGBOX_ACTIVE:-0}"
-  apply_service_restore_flags vpn-stack-subscription.service "${SUBSCRIPTION_ENABLED:-0}" "${SUBSCRIPTION_ACTIVE:-0}"
   apply_service_restore_flags ssh.service "${SSH_SERVICE_ENABLED:-0}" "${SSH_SERVICE_ACTIVE:-0}"
   apply_service_restore_flags ssh.socket "${SSH_SOCKET_ENABLED:-0}" "${SSH_SOCKET_ACTIVE:-0}"
 }
@@ -573,7 +566,6 @@ print_status() {
   echo "wireguard_active=$(service_active_flag "wg-quick@${WG_INTERFACE}")"
   echo "sync_timer_active=$(service_active_flag vpn-stack-sync.timer)"
   echo "sing_box_active=$(service_active_flag sing-box)"
-  echo "subscription_active=$(service_active_flag vpn-stack-subscription.service)"
 }
 
 python_candidate_works() {
@@ -702,16 +694,8 @@ copy_role_artifacts() {
   copy_if_present "${source_dir}/vpn-stack-sync.timer" "${SYNC_TIMER_PATH}" || { echo "Missing vpn-stack-sync.timer in ${source_dir}" >&2; exit 1; }
   copy_if_present "${source_dir}/vpn-stack-health.service" "${HEALTH_SERVICE_PATH}" || { echo "Missing vpn-stack-health.service in ${source_dir}" >&2; exit 1; }
   copy_if_present "${source_dir}/vpn-stack-health.timer" "${HEALTH_TIMER_PATH}" || { echo "Missing vpn-stack-health.timer in ${source_dir}" >&2; exit 1; }
-  if [[ "$ROLE" == "ru-gateway" ]]; then
-    copy_if_present "${source_dir}/vpn-stack-subscription.service" "${SUBSCRIPTION_SERVICE_PATH}" || { echo "Missing vpn-stack-subscription.service in ${source_dir}" >&2; exit 1; }
-    if [[ ! -d "${source_dir}/subscription" ]]; then
-      echo "Missing subscription directory in ${source_dir}" >&2
-      exit 1
-    fi
-    rm -rf "${SUBSCRIPTION_ROOT}"
-    mkdir -p "$(dirname "${SUBSCRIPTION_ROOT}")"
-    cp -a "${source_dir}/subscription" "${SUBSCRIPTION_ROOT}"
-  fi
+  rm -f "${SUBSCRIPTION_SERVICE_PATH}"
+  rm -rf "${SUBSCRIPTION_ROOT}"
   chmod 0644 "${SSHD_CONFIG_PATH}"
   chmod 0755 "${RULE_SYNC_SCRIPT}" "${HEALTH_SCRIPT_PATH}"
 }
@@ -856,7 +840,7 @@ if ! command -v sing-box >/dev/null 2>&1; then
   curl -fsSL https://sing-box.sagernet.org/installation/tools/install.sh | bash
 fi
 
-mkdir -p "${VPNSTACK_ROOT}" /etc/sing-box /etc/wireguard /etc/ssh/sshd_config.d "${RULESET_DIR}" "${SUBSCRIPTION_ROOT}" /usr/local/lib/vpn-stack /etc/systemd/system
+mkdir -p "${VPNSTACK_ROOT}" /etc/sing-box /etc/wireguard /etc/ssh/sshd_config.d "${RULESET_DIR}" /usr/local/lib/vpn-stack /etc/systemd/system
 
 RUNTIME_QDISC_INTERFACE="$(detect_primary_interface)"
 
@@ -947,8 +931,6 @@ systemctl restart vpn-stack-health.timer
 if [[ "$ROLE" == "ru-gateway" ]]; then
   systemctl enable sing-box
   systemctl restart sing-box
-  systemctl enable vpn-stack-subscription.service
-  systemctl restart vpn-stack-subscription.service
 fi
 
 chmod 0600 "${SINGBOX_CONFIG_PATH}" "${WG_CONFIG_PATH}"

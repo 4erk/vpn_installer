@@ -286,7 +286,6 @@ def render_ru_firewall_nftables(env: dict[str, str]) -> str:
     ]
     lines.extend(render_rate_limited_tcp_accept("ssh_guard", env["SSH_PORT"], env["SSH_INPUT_RATE"], env["SSH_INPUT_BURST"]))
     lines.extend(render_rate_limited_tcp_accept("vless_guard", env["RU_LISTEN_PORT"], env["RU_HTTPS_INPUT_RATE"], env["RU_HTTPS_INPUT_BURST"]))
-    lines.extend(render_rate_limited_tcp_accept("subscription_guard", env["SUBSCRIPTION_PORT"], env["SUBSCRIPTION_INPUT_RATE"], env["SUBSCRIPTION_INPUT_BURST"]))
     lines.extend(["  }", "}", ""])
     return "\n".join(lines)
 
@@ -481,44 +480,6 @@ def render_vless_uri(env: dict[str, str]) -> str:
     return f"vless://{env['CLIENT_UUID']}@{env['RU_PUBLIC_IP']}:{env['RU_LISTEN_PORT']}?security=reality&sni={env['RU_REALITY_SERVER_NAME']}&pbk={env['RU_REALITY_PUBLIC_KEY']}&sid={env['RU_REALITY_SHORT_ID']}&fp={env['UTLS_FINGERPRINT']}&type=tcp&flow={env['CLIENT_FLOW']}#{env['DEPLOY_NAME']}-ru-gateway\n"
 
 
-def render_subscription_url(env: dict[str, str]) -> str:
-    return f"http://{env['RU_PUBLIC_IP']}:{env['SUBSCRIPTION_PORT']}/{env['SUBSCRIPTION_TOKEN']}/hiddify-cross-platform.json\n"
-
-
-def render_hiddify_import_url(env: dict[str, str]) -> str:
-    return f"hiddify://import/{render_subscription_url(env).strip()}#{env['DEPLOY_NAME']}\n"
-
-
-def render_android_subscription_url(env: dict[str, str]) -> str:
-    return f"http://{env['RU_PUBLIC_IP']}:{env['SUBSCRIPTION_PORT']}/{env['SUBSCRIPTION_TOKEN']}/hiddify-android.json\n"
-
-
-def render_android_hiddify_import_url(env: dict[str, str]) -> str:
-    return f"hiddify://import/{render_android_subscription_url(env).strip()}#{env['DEPLOY_NAME']}-android\n"
-
-
-def render_subscription_service(env: dict[str, str]) -> str:
-    return "\n".join(
-        [
-            "[Unit]",
-            "Description=Serve vpn-stack subscription profiles",
-            "After=network-online.target",
-            "Wants=network-online.target",
-            "",
-            "[Service]",
-            "Type=simple",
-            "WorkingDirectory=/var/lib/vpn-stack/subscription",
-            f'ExecStart=/usr/bin/python3 -m http.server {env["SUBSCRIPTION_PORT"]} --bind 0.0.0.0 --directory /var/lib/vpn-stack/subscription',
-            "Restart=always",
-            "RestartSec=2",
-            "",
-            "[Install]",
-            "WantedBy=multi-user.target",
-            "",
-        ]
-    )
-
-
 def render_sshd_hardening(env: dict[str, str]) -> str:
     return "\n".join(
         [
@@ -703,10 +664,6 @@ def rendered_files_for_role(env: dict[str, str], role: str) -> dict[str, str]:
             "vpn-stack-sync.timer": render_sync_timer(),
             "vpn-stack-health.service": render_health_service(),
             "vpn-stack-health.timer": render_health_timer(env),
-            "vpn-stack-subscription.service": render_subscription_service(env),
-            f"subscription/{env['SUBSCRIPTION_TOKEN']}/hiddify-cross-platform.json": render_client_profile(env, auto_redirect=False),
-            f"subscription/{env['SUBSCRIPTION_TOKEN']}/hiddify-android.json": render_client_profile(env, auto_redirect=False, android_safe=True),
-            f"subscription/{env['SUBSCRIPTION_TOKEN']}/vless.txt": render_vless_uri(env),
         }
     wan_iface = env.get("WAN_INTERFACE", "").strip() or "eth0"
     return {
@@ -743,10 +700,6 @@ def client_artifact_paths(env: dict[str, str]) -> dict[str, Path]:
         "client_dir": client_dir,
         "vless_uri": client_dir / "vless-uri.txt",
         "hiddify_uri_compat": client_dir / "hiddify-uri.txt",
-        "subscription_url": client_dir / "hiddify-subscription-url.txt",
-        "android_subscription_url": client_dir / "hiddify-android-subscription-url.txt",
-        "hiddify_import_url": client_dir / "hiddify-import-url.txt",
-        "android_hiddify_import_url": client_dir / "hiddify-android-import-url.txt",
         "hiddify_json": client_dir / "hiddify-cross-platform.json",
         "android_hiddify_json": client_dir / "hiddify-android.json",
         "linux_json": client_dir / "linux-sing-box.json",
@@ -762,10 +715,6 @@ def render_next_steps(env: dict[str, str]) -> str:
             "",
             "Что уже готово:",
             f"- Основной VLESS URI: {paths['vless_uri']}",
-            f"- Основной URL подписки для Hiddify: {paths['subscription_url']}",
-            f"- Android-safe URL подписки для Hiddify: {paths['android_subscription_url']}",
-            f"- Deeplink для Hiddify: {paths['hiddify_import_url']}",
-            f"- Android deeplink для Hiddify: {paths['android_hiddify_import_url']}",
             f"- JSON fallback для Hiddify: {paths['hiddify_json']}",
             f"- Android JSON fallback для Hiddify: {paths['android_hiddify_json']}",
             f"- Совместимый Hiddify URI alias: {paths['hiddify_uri_compat']}",
@@ -774,11 +723,10 @@ def render_next_steps(env: dict[str, str]) -> str:
             "Что делать дальше:",
             "1. На любой платформе сначала попробуй прямой VLESS URI в совместимом клиенте.",
             f"2. Основной нейтральный файл: {paths['vless_uri'].name}. На Android предпочтительны v2rayNG или NekoBox.",
-            f"3. Если хочешь использовать Hiddify на Windows/Linux, добавь профиль по {paths['subscription_url'].name} или через {paths['hiddify_import_url'].name}.",
-            f"4. Если нужен Hiddify на Android, используй {paths['android_subscription_url'].name} или {paths['android_hiddify_import_url'].name}. Этот путь считается совместимым, но не эталонным.",
-            f"5. Если URL-подписка не подходит, используй JSON fallback {paths['hiddify_json'].name}. Для Android сначала пробуй {paths['android_hiddify_json'].name}.",
-            f"6. Файл {paths['hiddify_uri_compat'].name} оставлен как совместимый alias того же VLESS URI для старых сценариев.",
-            f"7. Для проверки серверов потом запусти: vpn status --deployment {env['DEPLOY_NAME']}",
+            f"3. Если хочешь Hiddify на Windows/Linux, используй локальный JSON {paths['hiddify_json'].name}.",
+            f"4. Если нужен Hiddify на Android, используй локальный JSON {paths['android_hiddify_json'].name}. Этот путь считается совместимым, но не эталонным.",
+            f"5. Файл {paths['hiddify_uri_compat'].name} оставлен как совместимый alias того же VLESS URI для старых сценариев.",
+            f"6. Для проверки серверов потом запусти: vpn status --deployment {env['DEPLOY_NAME']}",
         ]
     ) + "\n"
 
@@ -805,10 +753,6 @@ def render_config_artifacts(env_path: Path, env: dict[str, str], *, fetch_assets
 def render_client_profiles(env: dict[str, str]) -> Path:
     require_env(env, REQUIRED_ENV_VARS)
     paths = client_artifact_paths(env)
-    write_text(paths["subscription_url"], render_subscription_url(env))
-    write_text(paths["android_subscription_url"], render_android_subscription_url(env))
-    write_text(paths["hiddify_import_url"], render_hiddify_import_url(env))
-    write_text(paths["android_hiddify_import_url"], render_android_hiddify_import_url(env))
     write_text(paths["hiddify_json"], render_client_profile(env, auto_redirect=False))
     write_text(paths["android_hiddify_json"], render_client_profile(env, auto_redirect=False, android_safe=True))
     write_text(paths["linux_json"], render_client_profile(env, auto_redirect=True))

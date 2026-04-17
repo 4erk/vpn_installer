@@ -82,7 +82,7 @@ class AuditModuleTests(unittest.TestCase):
             cloud.mkdir(parents=True)
             server = out_dir / "server"
             server.mkdir(parents=True)
-            (server / "ru.env").write_text('DEPLOY_NAME="demo"\nSUBSCRIPTION_TOKEN="token"\n', encoding="utf-8")
+            (server / "ru.env").write_text('DEPLOY_NAME="demo"\n', encoding="utf-8")
             for path in [
                 preview / "ru" / "sing-box.json",
                 preview / "foreign" / "sing-box.json",
@@ -91,10 +91,10 @@ class AuditModuleTests(unittest.TestCase):
             ]:
                 path.write_text("{}\n", encoding="utf-8")
             (client / "vless-uri.txt").write_text("vless://demo\n", encoding="utf-8")
-            (client / "hiddify-subscription-url.txt").write_text("http://203.0.113.10:18080/token/hiddify-cross-platform.json\n", encoding="utf-8")
-            (client / "hiddify-import-url.txt").write_text("hiddify://import/http://203.0.113.10:18080/token/hiddify-cross-platform.json#demo\n", encoding="utf-8")
+            (client / "hiddify-cross-platform.json").write_text("{}\n", encoding="utf-8")
+            (client / "hiddify-android.json").write_text("{}\n", encoding="utf-8")
             (client / "hiddify-uri.txt").write_text("vless://demo\n", encoding="utf-8")
-            (out_dir / "NEXT-STEPS.txt").write_text("VLESS URI\nv2rayNG\nvpn status\n", encoding="utf-8")
+            (out_dir / "NEXT-STEPS.txt").write_text("VLESS URI\nv2rayNG\nhiddify-cross-platform.json\nvpn status\n", encoding="utf-8")
             for name in ("ru-gateway.tar.gz", "foreign-exit.tar.gz"):
                 with tarfile.open(bundle / name, "w:gz") as archive:
                     keep = out_dir / f"{name}.txt"

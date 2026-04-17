@@ -87,10 +87,6 @@ chmod +x ./vpn.sh
 После успешной установки появятся:
 
 - `out/<deployment>/client/vless-uri.txt`
-- `out/<deployment>/client/hiddify-subscription-url.txt`
-- `out/<deployment>/client/hiddify-android-subscription-url.txt`
-- `out/<deployment>/client/hiddify-import-url.txt`
-- `out/<deployment>/client/hiddify-android-import-url.txt`
 - `out/<deployment>/client/hiddify-cross-platform.json`
 - `out/<deployment>/client/hiddify-android.json`
 - `out/<deployment>/client/hiddify-uri.txt`
@@ -102,9 +98,6 @@ chmod +x ./vpn.sh
 - основной `VLESS URI` копируется в буфер обмена
 - основной нейтральный файл: `vless-uri.txt`
 - на Android эталонный путь: вставить `vless-uri.txt` в `v2rayNG` или `NekoBox`
-- `hiddify-subscription-url.txt` и `hiddify-android-subscription-url.txt` остаются как совместимый вторичный путь для `Hiddify`
-- `hiddify-import-url.txt` — deeplink для клиентов, которые понимают схему `hiddify://import/...`
-- `hiddify-android-import-url.txt` — Android-safe deeplink для Hiddify
 - `hiddify-cross-platform.json` — fallback, если нужен локальный файл
 - `hiddify-android.json` — Android-safe fallback
 - `hiddify-uri.txt` — совместимый alias того же `VLESS URI` для старых сценариев
@@ -113,12 +106,12 @@ chmod +x ./vpn.sh
 
 1. На любой платформе сначала попробуй `vless-uri.txt`
 2. На Android предпочтительны `v2rayNG` или `NekoBox`
-3. Если используешь `Hiddify` на Windows/Linux, добавляй профиль по `hiddify-subscription-url.txt` или `hiddify-import-url.txt`
-4. Если используешь `Hiddify` на Android, сначала пробуй `hiddify-android-subscription-url.txt` или `hiddify-android-import-url.txt`
-5. Если URL-подписка для `Hiddify` не подходит, используй `hiddify-cross-platform.json`; на Android сначала пробуй `hiddify-android.json`
+3. Если используешь `Hiddify` на Windows/Linux, добавляй локальный `hiddify-cross-platform.json`
+4. Если используешь `Hiddify` на Android, сначала пробуй локальный `hiddify-android.json`
+5. Если нужен максимально нейтральный путь, используй `vless-uri.txt`, а не клиент-специфичные форматы
 6. `hiddify-uri.txt` оставлен как совместимый alias того же `VLESS URI`
 
-Основной путь теперь — сырой `VLESS URI`. `Hiddify`-подписка и JSON остаются как вторичный совместимый путь.
+Основной путь теперь — сырой `VLESS URI`. Внешняя подписка с сервера больше не считается штатным путём; локальные JSON для `Hiddify` остаются только как вторичный совместимый вариант.
 
 Сервер остаётся источником истины для split-маршрутизации: клиенту не нужно знать, что считать российским или зарубежным трафиком. Он просто даёт туннель до `российского сервера`, а сама логика маршрутов живёт на серверной стороне.
 

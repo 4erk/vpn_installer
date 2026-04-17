@@ -349,7 +349,6 @@ printf 'nftables=%s\\n' "$(service_state nftables)"
 printf 'wireguard=%s\\n' "$(service_state wg-quick@{wg_interface})"
 printf 'sync_timer=%s\\n' "$(service_state vpn-stack-sync.timer)"
 printf 'health_timer=%s\\n' "$(service_state vpn-stack-health.timer)"
-printf 'subscription_server=%s\\n' "$(service_state vpn-stack-subscription.service)"
 printf 'ssh_service=%s\\n' "$(service_state ssh.service)"
 printf 'ssh_socket=%s\\n' "$(service_state ssh.socket)"
 """.strip()
@@ -389,7 +388,6 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
     print(f"RU over wg IPv4: {preflight.get('wg_observed_ipv4', '-')}")
     print(f"sync timer: {preflight.get('sync_timer', '-')}")
     print(f"health timer: {preflight.get('health_timer', '-')}")
-    print(f"subscription server: {preflight.get('subscription_server', '-')}")
     print(f"ssh service: {preflight.get('ssh_service', '-')}")
     print(f"ssh socket: {preflight.get('ssh_socket', '-')}")
 

@@ -33,8 +33,6 @@ class PackageTests(unittest.TestCase):
         self.assertIn('systemctl restart vpn-stack-sync.timer', install_script)
         self.assertIn('systemctl enable vpn-stack-health.timer', install_script)
         self.assertIn('systemctl restart vpn-stack-health.timer', install_script)
-        self.assertIn('systemctl enable vpn-stack-subscription.service', install_script)
-        self.assertIn('systemctl restart vpn-stack-subscription.service', install_script)
         self.assertIn('systemctl disable --now ssh.socket', install_script)
         self.assertIn('systemctl enable ssh.service', install_script)
         self.assertIn('SSHD_CONFIG_PATH="/etc/ssh/sshd_config.d/90-vpn-stack.conf"', install_script)
@@ -53,7 +51,7 @@ class PackageTests(unittest.TestCase):
 
     def test_package_exposes_version_via_getattr(self) -> None:
         package = importlib.import_module("vpn_installer")
-        self.assertEqual(package.__version__, "0.2.19")
+        self.assertEqual(package.__version__, "0.2.20")
         with self.assertRaises(AttributeError):
             package.__getattr__("nope")
 

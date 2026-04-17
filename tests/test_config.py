@@ -63,10 +63,10 @@ class ConfigTests(unittest.TestCase):
         self.assertNotIn("+", env["RU_REALITY_PRIVATE_KEY"])
         self.assertNotIn("/", env["RU_REALITY_PRIVATE_KEY"])
 
-    def test_default_subscription_settings_are_present(self) -> None:
+    def test_default_subscription_settings_are_not_generated_anymore(self) -> None:
         env = config.generate_default_env("sample")
-        self.assertEqual(env["SUBSCRIPTION_PORT"], "18080")
-        self.assertRegex(env["SUBSCRIPTION_TOKEN"], r"^[0-9a-f]{32}$")
+        self.assertNotIn("SUBSCRIPTION_PORT", env)
+        self.assertNotIn("SUBSCRIPTION_TOKEN", env)
 
     def test_default_ru_forced_direct_domains_include_ip_check_services(self) -> None:
         env = config.generate_default_env("sample")
@@ -199,8 +199,6 @@ class ConfigTests(unittest.TestCase):
                 "RU_PUBLIC_IP": "203.0.113.10",
                 "FOREIGN_PUBLIC_IP": "198.51.100.20",
                 "CLIENT_UUID": "x",
-                "SUBSCRIPTION_PORT": "18080",
-                "SUBSCRIPTION_TOKEN": "0123456789abcdef0123456789abcdef",
                 "RU_REALITY_SERVER_NAME": "a",
                 "RU_REALITY_HANDSHAKE_SERVER": "a",
                 "RU_REALITY_PRIVATE_KEY": "a",

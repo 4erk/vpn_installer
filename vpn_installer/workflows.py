@@ -399,7 +399,6 @@ def postcheck_command(role: str, wg_interface: str) -> str:
         '\n'.join(
             [
                 'check_service_active sing-box sing-box',
-                'check_service_active vpn-stack-subscription.service vpn-stack-subscription.service',
             ]
         )
         if role == ROLE_RU
@@ -536,10 +535,6 @@ def finalize_install_output(env: dict[str, str], deployment_name: str) -> None:
     print_header("Готово")
     print(f"Deployment: {deployment_name}")
     print(f"Основной VLESS URI: {paths['vless_uri']}")
-    print(f"Основной URL подписки для Hiddify: {paths['subscription_url']}")
-    print(f"Android-safe URL подписки для Hiddify: {paths['android_subscription_url']}")
-    print(f"Deeplink для Hiddify: {paths['hiddify_import_url']}")
-    print(f"Android deeplink для Hiddify: {paths['android_hiddify_import_url']}")
     print(f"JSON fallback для Hiddify: {paths['hiddify_json']}")
     print(f"Android JSON fallback для Hiddify: {paths['android_hiddify_json']}")
     print(f"Hiddify URI alias: {paths['hiddify_uri_compat']}")
@@ -549,11 +544,10 @@ def finalize_install_output(env: dict[str, str], deployment_name: str) -> None:
     print("Что делать дальше:")
     print("1. На любой платформе сначала используй прямой VLESS URI.")
     print(f"2. Основной файл: {paths['vless_uri'].name}. На Android эталонные клиенты: v2rayNG или NekoBox.")
-    print(f"3. Если хочешь Hiddify на Windows/Linux, используй {paths['subscription_url'].name} или {paths['hiddify_import_url'].name}.")
-    print(f"4. Если нужен Hiddify на Android, используй {paths['android_subscription_url'].name} или {paths['android_hiddify_import_url'].name}.")
-    print(f"5. Если URL не подходит, используй JSON fallback {paths['hiddify_json'].name}. Для Android сначала пробуй {paths['android_hiddify_json'].name}.")
-    print(f"6. Файл {paths['hiddify_uri_compat'].name} оставлен как совместимый alias того же VLESS URI.")
-    print(f"7. Для проверки серверов потом запусти: vpn status --deployment {deployment_name}")
+    print(f"3. Если хочешь Hiddify на Windows/Linux, используй локальный JSON {paths['hiddify_json'].name}.")
+    print(f"4. Если нужен Hiddify на Android, используй локальный JSON {paths['android_hiddify_json'].name}.")
+    print(f"5. Файл {paths['hiddify_uri_compat'].name} оставлен как совместимый alias того же VLESS URI.")
+    print(f"6. Для проверки серверов потом запусти: vpn status --deployment {deployment_name}")
 
 
 def load_env_for_render(env_path: Path) -> dict[str, str]:

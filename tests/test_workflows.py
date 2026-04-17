@@ -80,10 +80,6 @@ class WorkflowTests(unittest.TestCase):
             paths = {
                 "vless_uri": Path(tmp) / "vless-uri.txt",
                 "hiddify_uri_compat": Path(tmp) / "hiddify-uri.txt",
-                "subscription_url": Path(tmp) / "sub.txt",
-                "android_subscription_url": Path(tmp) / "sub-android.txt",
-                "hiddify_import_url": Path(tmp) / "import.txt",
-                "android_hiddify_import_url": Path(tmp) / "import-android.txt",
                 "hiddify_json": Path(tmp) / "h.json",
                 "android_hiddify_json": Path(tmp) / "h-android.json",
                 "linux_json": Path(tmp) / "l.json",
@@ -91,7 +87,6 @@ class WorkflowTests(unittest.TestCase):
             }
             paths["vless_uri"].write_text("vless://demo\n", encoding="utf-8")
             paths["hiddify_uri_compat"].write_text("vless://demo\n", encoding="utf-8")
-            paths["subscription_url"].write_text("http://203.0.113.10:18080/token/hiddify-cross-platform.json\n", encoding="utf-8")
             paths["hiddify_json"].write_text('{"route":{"final":"ru-gateway"}}', encoding="utf-8")
             with patch("vpn_installer.workflows.client_artifact_paths", return_value=paths):
                 with patch("vpn_installer.workflows.copy_to_clipboard", return_value=(False, "no clipboard")) as copy_mock:
@@ -208,6 +203,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("journalctl -u \"$service\" -n 20 --no-pager", command)
         self.assertIn("check_service_active sing-box sing-box", command)
         self.assertIn("check_service_active vpn-stack-health.timer vpn-stack-health.timer", command)
+        self.assertNotIn("vpn-stack-subscription.service", command)
 
         foreign_command = workflows.postcheck_command(ROLE_FOREIGN, "wg-test")
         self.assertNotIn("check_service_active sing-box sing-box", foreign_command)
