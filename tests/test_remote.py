@@ -36,6 +36,8 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("wg_latest_handshake_age_s", preflight_script("wg-test"))
         self.assertIn("observed_ipv4", preflight_script("wg-test"))
         self.assertIn("wg_observed_ipv4", preflight_script("wg-test"))
+        self.assertIn("wan_offload_gro", preflight_script("wg-test"))
+        self.assertIn("wan_offload_tso", preflight_script("wg-test"))
 
     def test_password_mode_forces_python_backend(self) -> None:
         target = RemoteTarget(role=ROLE_RU, auth_mode="password")
@@ -238,6 +240,9 @@ class RemoteTests(unittest.TestCase):
                     "configured_wan_interface": "eth0",
                     "wan_mtu": "1500",
                     "default_qdisc": "fq_codel",
+                    "wan_offload_gro": "off",
+                    "wan_offload_gso": "off",
+                    "wan_offload_tso": "off",
                     "tcp_cc": "bbr",
                     "tcp_mtu_probing": "1",
                     "netdev_backlog": "8192",
@@ -265,6 +270,7 @@ class RemoteTests(unittest.TestCase):
         output = stream.getvalue()
         self.assertIn("host: demo", output)
         self.assertIn("configured WAN iface: eth0", output)
+        self.assertIn("wan offloads gro/gso/tso: off/off/off", output)
         self.assertIn("tcp cc: bbr", output)
         self.assertIn("wireguard transfer rx/tx: 1/2", output)
         self.assertIn("wireguard handshake age (s): 4", output)

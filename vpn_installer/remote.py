@@ -269,6 +269,9 @@ default_qdisc="-"
 iface_rx_drops="0"
 iface_tx_drops="0"
 wan_mtu="-"
+wan_offload_gro="-"
+wan_offload_gso="-"
+wan_offload_tso="-"
 tcp_cc="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)"
 tcp_mtu_probing="$(sysctl -n net.ipv4.tcp_mtu_probing 2>/dev/null || true)"
 netdev_backlog="$(sysctl -n net.core.netdev_max_backlog 2>/dev/null || true)"
@@ -290,6 +293,11 @@ if [[ -n "${{default_iface}}" ]]; then
   if [[ -n "${{proc_row}}" ]]; then
     iface_rx_drops="$(awk '{{gsub(":", "", $1); print $5}}' <<<"${{proc_row}}")"
     iface_tx_drops="$(awk '{{gsub(":", "", $1); print $13}}' <<<"${{proc_row}}")"
+  fi
+  if command -v ethtool >/dev/null 2>&1; then
+    wan_offload_gro="$(ethtool -k "${{default_iface}}" 2>/dev/null | awk '/generic-receive-offload:/ {{print $2; exit}}')"
+    wan_offload_gso="$(ethtool -k "${{default_iface}}" 2>/dev/null | awk '/generic-segmentation-offload:/ {{print $2; exit}}')"
+    wan_offload_tso="$(ethtool -k "${{default_iface}}" 2>/dev/null | awk '/tcp-segmentation-offload:/ {{print $2; exit}}')"
   fi
 fi
 
@@ -325,6 +333,9 @@ printf 'default_iface=%s\\n' "${{default_iface}}"
 printf 'configured_wan_interface=%s\\n' "${{configured_wan_interface}}"
 printf 'wan_mtu=%s\\n' "${{wan_mtu}}"
 printf 'default_qdisc=%s\\n' "${{default_qdisc}}"
+printf 'wan_offload_gro=%s\\n' "${{wan_offload_gro}}"
+printf 'wan_offload_gso=%s\\n' "${{wan_offload_gso}}"
+printf 'wan_offload_tso=%s\\n' "${{wan_offload_tso}}"
 printf 'iface_rx_drops=%s\\n' "${{iface_rx_drops}}"
 printf 'iface_tx_drops=%s\\n' "${{iface_tx_drops}}"
 printf 'tcp_cc=%s\\n' "${{tcp_cc}}"
@@ -369,6 +380,12 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
     print(f"configured WAN iface: {preflight.get('configured_wan_interface', '-')}")
     print(f"wan mtu: {preflight.get('wan_mtu', '-')}")
     print(f"qdisc: {preflight.get('default_qdisc', '-')}")
+    print(
+        "wan offloads gro/gso/tso: "
+        f"{preflight.get('wan_offload_gro', '-')}/"
+        f"{preflight.get('wan_offload_gso', '-')}/"
+        f"{preflight.get('wan_offload_tso', '-')}"
+    )
     print(f"tcp cc: {preflight.get('tcp_cc', '-')}")
     print(f"tcp mtu probing: {preflight.get('tcp_mtu_probing', '-')}")
     print(f"netdev backlog: {preflight.get('netdev_backlog', '-')}")

@@ -46,12 +46,16 @@ class PackageTests(unittest.TestCase):
         self.assertIn('net.ipv4.tcp_congestion_control=bbr', install_script)
         self.assertIn('net.ipv4.tcp_mtu_probing=1', install_script)
         self.assertIn('net.ipv4.tcp_max_syn_backlog=2048', install_script)
-        self.assertIn('apply_runtime_qdisc "${RUNTIME_QDISC_INTERFACE}"', install_script)
+        self.assertIn("ethtool", install_script)
+        self.assertIn('ethtool -K "${iface}" gro off', install_script)
+        self.assertIn('ethtool -K "${iface}" gso off', install_script)
+        self.assertIn('ethtool -K "${iface}" tso off', install_script)
+        self.assertIn('apply_runtime_interface_tuning "${RUNTIME_QDISC_INTERFACE}"', install_script)
         self.assertIn('apply_runtime_qdisc "${WG_INTERFACE}"', install_script)
 
     def test_package_exposes_version_via_getattr(self) -> None:
         package = importlib.import_module("vpn_installer")
-        self.assertEqual(package.__version__, "0.2.20")
+        self.assertEqual(package.__version__, "0.2.21")
         with self.assertRaises(AttributeError):
             package.__getattr__("nope")
 

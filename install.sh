@@ -149,6 +149,7 @@ FOREIGN_RU_IPV6_LIST_URL="${FOREIGN_RU_IPV6_LIST_URL:-https://www.ipdeny.com/ipv
 HEALTHCHECK_URL="${HEALTHCHECK_URL:-https://api.ipify.org}"
 HEALTH_HANDSHAKE_GRACE_SECONDS="${HEALTH_HANDSHAKE_GRACE_SECONDS:-120}"
 HEALTH_CHECK_INTERVAL_MINUTES="${HEALTH_CHECK_INTERVAL_MINUTES:-2}"
+DISABLE_NIC_OFFLOADS="${DISABLE_NIC_OFFLOADS:-1}"
 SINGBOX_CONFIG_PATH="/etc/sing-box/config.json"
 WG_CONFIG_PATH="/etc/wireguard/${WG_INTERFACE}.conf"
 NFTABLES_PATH="/etc/nftables.conf"
@@ -501,6 +502,9 @@ print_status() {
   local netdev_backlog="-"
   local iface_rx_drops="0"
   local iface_tx_drops="0"
+  local wan_offload_gro="-"
+  local wan_offload_gso="-"
+  local wan_offload_tso="-"
   local wg_transfer="-/-"
   local wg_handshake="-"
   if is_currently_installed; then
@@ -532,6 +536,11 @@ print_status() {
       iface_rx_drops="$(awk '{gsub(":", "", $1); print $5}' <<<"${proc_row}")"
       iface_tx_drops="$(awk '{gsub(":", "", $1); print $13}' <<<"${proc_row}")"
     fi
+    if command -v ethtool >/dev/null 2>&1; then
+      wan_offload_gro="$(ethtool -k "${default_iface}" 2>/dev/null | awk '/generic-receive-offload:/ {print $2; exit}')"
+      wan_offload_gso="$(ethtool -k "${default_iface}" 2>/dev/null | awk '/generic-segmentation-offload:/ {print $2; exit}')"
+      wan_offload_tso="$(ethtool -k "${default_iface}" 2>/dev/null | awk '/tcp-segmentation-offload:/ {print $2; exit}')"
+    fi
   fi
   if command -v wg >/dev/null 2>&1; then
     transfer_row="$(wg show "${WG_INTERFACE}" transfer 2>/dev/null | awk 'NR==1')"
@@ -555,6 +564,9 @@ print_status() {
   echo "default_iface=${default_iface}"
   echo "configured_wan_interface=${configured_wan_interface}"
   echo "default_qdisc=${default_qdisc}"
+  echo "wan_offload_gro=${wan_offload_gro}"
+  echo "wan_offload_gso=${wan_offload_gso}"
+  echo "wan_offload_tso=${wan_offload_tso}"
   echo "tcp_cc=${tcp_cc}"
   echo "tcp_mtu_probing=${tcp_mtu_probing}"
   echo "netdev_backlog=${netdev_backlog}"
@@ -644,6 +656,25 @@ apply_runtime_qdisc() {
     return 0
   fi
   tc qdisc replace dev "${iface}" root fq_codel >/dev/null 2>&1 || true
+}
+
+disable_interface_offloads() {
+  local iface="$1"
+  if [[ -z "${iface}" || "${DISABLE_NIC_OFFLOADS}" != "1" ]]; then
+    return 0
+  fi
+  if ! command -v ethtool >/dev/null 2>&1; then
+    return 0
+  fi
+  ethtool -K "${iface}" gro off >/dev/null 2>&1 || true
+  ethtool -K "${iface}" gso off >/dev/null 2>&1 || true
+  ethtool -K "${iface}" tso off >/dev/null 2>&1 || true
+}
+
+apply_runtime_interface_tuning() {
+  local iface="$1"
+  apply_runtime_qdisc "${iface}"
+  disable_interface_offloads "${iface}"
 }
 
 configure_ssh_daemon_mode() {
@@ -829,6 +860,7 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y \
   apt-transport-https \
   ca-certificates \
   curl \
+  ethtool \
   gnupg \
   nftables \
   python3 \
@@ -901,9 +933,9 @@ stage_preseed_assets
 record_install_metadata
 
 sysctl --system >/dev/null
-apply_runtime_qdisc "${RUNTIME_QDISC_INTERFACE}"
+apply_runtime_interface_tuning "${RUNTIME_QDISC_INTERFACE}"
 if [[ -n "${WAN_INTERFACE:-}" && "${WAN_INTERFACE}" != "${RUNTIME_QDISC_INTERFACE}" ]]; then
-  apply_runtime_qdisc "${WAN_INTERFACE}"
+  apply_runtime_interface_tuning "${WAN_INTERFACE}"
 fi
 if [[ -n "${WG_INTERFACE:-}" ]]; then
   apply_runtime_qdisc "${WG_INTERFACE}"

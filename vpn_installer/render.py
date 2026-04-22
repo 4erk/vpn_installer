@@ -502,7 +502,7 @@ def render_health_script(env: dict[str, str], role: str) -> str:
     role_specific_probe = (
         "\n".join(
             [
-                'if ! curl -4fsS --interface "${WG_INTERFACE}" --max-time 8 "${HEALTHCHECK_URL}" >/dev/null 2>&1; then',
+                'if ! probe_http_ipv4 "${WG_INTERFACE}"; then',
                 '  reasons+=("ru_wg_egress")',
                 "fi",
             ]
@@ -510,7 +510,7 @@ def render_health_script(env: dict[str, str], role: str) -> str:
         if role == ROLE_RU
         else "\n".join(
             [
-                'if ! curl -4fsS --max-time 8 "${HEALTHCHECK_URL}" >/dev/null 2>&1; then',
+                'if ! probe_http_ipv4 ""; then',
                 '  reasons+=("foreign_direct_egress")',
                 "fi",
             ]
@@ -539,12 +539,67 @@ def render_health_script(env: dict[str, str], role: str) -> str:
 
         ROLE="{role}"
         WG_INTERFACE="{env['WG_INTERFACE']}"
+        WAN_INTERFACE="{env.get('WAN_INTERFACE', '')}"
         SSH_PORT="{env['SSH_PORT']}"
         HEALTHCHECK_URL="{env['HEALTHCHECK_URL']}"
         HANDSHAKE_GRACE="{env['HEALTH_HANDSHAKE_GRACE_SECONDS']}"
+        DISABLE_NIC_OFFLOADS="{env.get('DISABLE_NIC_OFFLOADS', '1')}"
 
         log() {{
           echo "vpn-stack-health[$ROLE]: $*" >&2
+        }}
+
+        detect_default_iface() {{
+          ip route show default 2>/dev/null | awk '/default/ {{print $5; exit}}'
+        }}
+
+        apply_qdisc() {{
+          local iface="$1"
+          [[ -n "${{iface}}" ]] || return 0
+          command -v tc >/dev/null 2>&1 || return 0
+          tc qdisc replace dev "${{iface}}" root fq_codel >/dev/null 2>&1 || true
+        }}
+
+        disable_offloads() {{
+          local iface="$1"
+          [[ -n "${{iface}}" ]] || return 0
+          [[ "${{DISABLE_NIC_OFFLOADS}}" == "1" ]] || return 0
+          command -v ethtool >/dev/null 2>&1 || return 0
+          ethtool -K "${{iface}}" gro off >/dev/null 2>&1 || true
+          ethtool -K "${{iface}}" gso off >/dev/null 2>&1 || true
+          ethtool -K "${{iface}}" tso off >/dev/null 2>&1 || true
+        }}
+
+        harden_interface() {{
+          local iface="$1"
+          [[ -n "${{iface}}" ]] || return 0
+          apply_qdisc "${{iface}}"
+          disable_offloads "${{iface}}"
+        }}
+
+        harden_runtime() {{
+          local default_iface=""
+          default_iface="$(detect_default_iface)"
+          harden_interface "${{default_iface}}"
+          if [[ -n "${{WAN_INTERFACE}}" && "${{WAN_INTERFACE}}" != "${{default_iface}}" ]]; then
+            harden_interface "${{WAN_INTERFACE}}"
+          fi
+          apply_qdisc "${{WG_INTERFACE}}"
+        }}
+
+        probe_http_ipv4() {{
+          local bind_iface="$1"
+          local curl_args=(-4fsS --max-time 8 -o /dev/null)
+          local url=""
+          if [[ -n "${{bind_iface}}" ]]; then
+            curl_args+=(--interface "${{bind_iface}}")
+          fi
+          for url in "${{HEALTHCHECK_URL}}" "https://cloudflare.com/cdn-cgi/trace" "https://connectivitycheck.gstatic.com/generate_204"; do
+            if curl "${{curl_args[@]}}" "${{url}}" >/dev/null 2>&1; then
+              return 0
+            fi
+          done
+          return 1
         }}
 
         ssh_banner_ok() {{
@@ -583,6 +638,7 @@ def render_health_script(env: dict[str, str], role: str) -> str:
           fi
         }}
 
+        harden_runtime
         mapfile -t reasons < <(collect_reasons)
         if [[ "${{#reasons[@]}}" -eq 0 ]]; then
           exit 0
@@ -591,6 +647,7 @@ def render_health_script(env: dict[str, str], role: str) -> str:
         log "repairing unhealthy runtime: ${{reasons[*]}}"
         systemctl restart ssh.service || true
         {role_specific_repair}
+        harden_runtime
         sleep 5
 
         mapfile -t reasons < <(collect_reasons)
