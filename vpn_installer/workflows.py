@@ -166,6 +166,20 @@ def handshake_grace_seconds(env: dict[str, str]) -> int:
     return max(120, keepalive * 4)
 
 
+def env_int(env: dict[str, str], key: str, default: int) -> int:
+    try:
+        return int(env.get(key, str(default)).strip())
+    except ValueError:
+        return default
+
+
+def preflight_int(preflight: dict[str, str], key: str, default: int = -1) -> int:
+    try:
+        return int(preflight.get(key, str(default)).strip())
+    except ValueError:
+        return default
+
+
 def deployment_health_snapshot(env: dict[str, str], preflights: dict[str, dict[str, str]]) -> dict[str, str]:
     foreign = preflights.get(ROLE_FOREIGN, {})
     ru = preflights.get(ROLE_RU, {})
@@ -174,6 +188,10 @@ def deployment_health_snapshot(env: dict[str, str], preflights: dict[str, dict[s
     ru_handshake_age = handshake_age_seconds(ru)
     foreign_handshake_age = handshake_age_seconds(foreign)
     max_age = handshake_grace_seconds(env)
+    foreign_download_bps = preflight_int(foreign, "direct_download_bps")
+    ru_wg_download_bps = preflight_int(ru, "wg_download_bps")
+    min_foreign_download_bps = env_int(env, "HEALTH_MIN_FOREIGN_DIRECT_DOWNLOAD_BPS", 500000)
+    min_ru_wg_download_bps = env_int(env, "HEALTH_MIN_RU_WG_DOWNLOAD_BPS", 500000)
     verdict = "ok"
     if not foreign_ip:
         verdict = "foreign_direct_egress_failed"
@@ -183,6 +201,10 @@ def deployment_health_snapshot(env: dict[str, str], preflights: dict[str, dict[s
         verdict = "foreign_ru_ip_mismatch"
     elif ru_handshake_age < 0 or foreign_handshake_age < 0 or ru_handshake_age > max_age or foreign_handshake_age > max_age:
         verdict = "wg_handshake_stale"
+    elif foreign_download_bps >= 0 and foreign_download_bps < min_foreign_download_bps:
+        verdict = "foreign_direct_download_degraded"
+    elif ru_wg_download_bps >= 0 and ru_wg_download_bps < min_ru_wg_download_bps:
+        verdict = "ru_wg_download_degraded"
     return {
         "health_verdict": verdict,
         "foreign_direct_observed_ipv4": foreign_ip or "-",
@@ -190,6 +212,10 @@ def deployment_health_snapshot(env: dict[str, str], preflights: dict[str, dict[s
         "ru_handshake_age_s": str(ru_handshake_age),
         "foreign_handshake_age_s": str(foreign_handshake_age),
         "handshake_grace_s": str(max_age),
+        "foreign_direct_download_bps": str(foreign_download_bps),
+        "ru_wg_download_bps": str(ru_wg_download_bps),
+        "min_foreign_direct_download_bps": str(min_foreign_download_bps),
+        "min_ru_wg_download_bps": str(min_ru_wg_download_bps),
     }
 
 
@@ -200,6 +226,16 @@ def print_deployment_health(health: dict[str, str]) -> None:
     print(f"RU handshake age (s): {health['ru_handshake_age_s']}")
     print(f"foreign handshake age (s): {health['foreign_handshake_age_s']}")
     print(f"handshake grace (s): {health['handshake_grace_s']}")
+    print(
+        "foreign direct download B/s: "
+        f"{health.get('foreign_direct_download_bps', '-')} "
+        f"(min {health.get('min_foreign_direct_download_bps', '-')})"
+    )
+    print(
+        "RU over wg download B/s: "
+        f"{health.get('ru_wg_download_bps', '-')} "
+        f"(min {health.get('min_ru_wg_download_bps', '-')})"
+    )
     print(f"health verdict: {health['health_verdict']}")
 
 
@@ -219,7 +255,11 @@ def health_failure_message(health: dict[str, str]) -> str:
         f"ru_wg_observed_ipv4={health['ru_wg_observed_ipv4']}, "
         f"ru_handshake_age_s={health['ru_handshake_age_s']}, "
         f"foreign_handshake_age_s={health['foreign_handshake_age_s']}, "
-        f"handshake_grace_s={health['handshake_grace_s']}"
+        f"handshake_grace_s={health['handshake_grace_s']}, "
+        f"foreign_direct_download_bps={health.get('foreign_direct_download_bps', '-')}, "
+        f"ru_wg_download_bps={health.get('ru_wg_download_bps', '-')}, "
+        f"min_foreign_direct_download_bps={health.get('min_foreign_direct_download_bps', '-')}, "
+        f"min_ru_wg_download_bps={health.get('min_ru_wg_download_bps', '-')}"
     )
 
 

@@ -42,7 +42,7 @@ ENV_SECTIONS = [
     ("# Forced policy rules for the Russian server: Russian APIs, reachability checks, IP-check services", ["RU_FORCE_DIRECT_DOMAIN", "RU_FORCE_DIRECT_DOMAIN_SUFFIX", "RU_FORCE_DIRECT_IP_CIDR"]),
     ("# Rule assets for the RU server. Several source URLs can be listed through spaces.", ["RULESET_DIR", "RU_GEOSITE_URL", "RU_GEOIP_URL"]),
     ("# Optional RU egress deny list on the foreign server. Several source URLs can be listed through spaces.", ["FOREIGN_BLOCK_RU", "FOREIGN_RU_IPV4_LIST_URL", "FOREIGN_RU_IPV6_LIST_URL"]),
-    ("# Runtime self-heal for SSH / WireGuard / dataplane", ["HEALTHCHECK_URL", "HEALTH_HANDSHAKE_GRACE_SECONDS", "HEALTH_CHECK_INTERVAL_MINUTES"]),
+    ("# Runtime self-heal for SSH / WireGuard / dataplane", ["HEALTHCHECK_URL", "HEALTH_THROUGHPUT_URL", "HEALTH_MIN_FOREIGN_DIRECT_DOWNLOAD_BPS", "HEALTH_MIN_RU_WG_DOWNLOAD_BPS", "HEALTH_HANDSHAKE_GRACE_SECONDS", "HEALTH_CHECK_INTERVAL_MINUTES"]),
     ("# Client tun profile", ["CLIENT_TUN_NAME", "CLIENT_TUN_ADDRESS_V4", "CLIENT_TUN_ADDRESS_V6", "CLIENT_FAKEIP_V4", "CLIENT_FAKEIP_V6"]),
     ("# Optional extra route exclusions on the client profile", ["CLIENT_ROUTE_EXCLUDE_V4", "CLIENT_ROUTE_EXCLUDE_V6"]),
 ]

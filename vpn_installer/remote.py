@@ -234,6 +234,33 @@ probe_public_ipv4() {{
   curl -4fsS --max-time 8 https://api.ipify.org 2>/dev/null || true
 }}
 
+env_value() {{
+  local key="$1"
+  if [[ -r /etc/vpn-stack/deployment.env ]]; then
+    awk -F= -v key="${{key}}" '$1 == key {{ sub(/^[^=]*=/, ""); gsub(/^"/, ""); gsub(/"$/, ""); print; exit }}' /etc/vpn-stack/deployment.env
+  fi
+}}
+
+probe_download_bps() {{
+  local bind_iface="$1"
+  local url="$2"
+  if ! command -v curl >/dev/null 2>&1 || [[ -z "${{url}}" ]]; then
+    printf -- '-1'
+    return 0
+  fi
+  local speed
+  if [[ -n "${{bind_iface}}" ]]; then
+    speed="$(curl -4fsS --interface "${{bind_iface}}" --max-time 15 -o /dev/null -w '%{{speed_download}}' "${{url}}" 2>/dev/null || true)"
+  else
+    speed="$(curl -4fsS --max-time 15 -o /dev/null -w '%{{speed_download}}' "${{url}}" 2>/dev/null || true)"
+  fi
+  if [[ "${{speed}}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    awk -v speed="${{speed}}" 'BEGIN {{ printf "%.0f", speed }}'
+  else
+    printf -- '-1'
+  fi
+}}
+
 login_user="$(id -un)"
 uid="$(id -u)"
 is_root="0"
@@ -285,6 +312,10 @@ wg_latest_handshake="-"
 wg_latest_handshake_age_s="-1"
 observed_ipv4="$(probe_public_ipv4)"
 wg_observed_ipv4=""
+throughput_url="$(env_value HEALTH_THROUGHPUT_URL)"
+if [[ -z "${{throughput_url}}" ]]; then throughput_url="https://speed.cloudflare.com/__down?bytes=2000000"; fi
+direct_download_bps="-1"
+wg_download_bps="-1"
 
 if [[ -n "${{default_iface}}" ]]; then
   default_qdisc="$(tc qdisc show dev "${{default_iface}}" 2>/dev/null | awk 'NR==1 {{print $2; exit}}')"
@@ -323,6 +354,13 @@ if [[ "${{role}}" == "ru-gateway" ]] && ip link show dev {wg_interface} >/dev/nu
   wg_observed_ipv4="$(curl -4fsS --interface {wg_interface} --max-time 8 https://api.ipify.org 2>/dev/null || true)"
 fi
 
+if [[ "${{installed}}" == "1" ]]; then
+  direct_download_bps="$(probe_download_bps "" "${{throughput_url}}")"
+fi
+if [[ "${{installed}}" == "1" && "${{role}}" == "ru-gateway" ]] && ip link show dev {wg_interface} >/dev/null 2>&1; then
+  wg_download_bps="$(probe_download_bps "{wg_interface}" "${{throughput_url}}")"
+fi
+
 printf 'login_user=%s\\n' "${{login_user}}"
 printf 'is_root=%s\\n' "${{is_root}}"
 printf 'has_sudo=%s\\n' "${{has_sudo}}"
@@ -351,6 +389,8 @@ printf 'wg_latest_handshake=%s\\n' "${{wg_latest_handshake}}"
 printf 'wg_latest_handshake_age_s=%s\\n' "${{wg_latest_handshake_age_s}}"
 printf 'observed_ipv4=%s\\n' "${{observed_ipv4}}"
 printf 'wg_observed_ipv4=%s\\n' "${{wg_observed_ipv4}}"
+printf 'direct_download_bps=%s\\n' "${{direct_download_bps}}"
+printf 'wg_download_bps=%s\\n' "${{wg_download_bps}}"
 printf 'installed=%s\\n' "${{installed}}"
 printf 'deployment_name=%s\\n' "${{deployment_name}}"
 printf 'role=%s\\n' "${{role}}"
@@ -403,6 +443,8 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
     print(f"wireguard handshake age (s): {preflight.get('wg_latest_handshake_age_s', '-')}")
     print(f"observed IPv4: {preflight.get('observed_ipv4', '-')}")
     print(f"RU over wg IPv4: {preflight.get('wg_observed_ipv4', '-')}")
+    print(f"direct download B/s: {preflight.get('direct_download_bps', '-')}")
+    print(f"RU over wg download B/s: {preflight.get('wg_download_bps', '-')}")
     print(f"sync timer: {preflight.get('sync_timer', '-')}")
     print(f"health timer: {preflight.get('health_timer', '-')}")
     print(f"ssh service: {preflight.get('ssh_service', '-')}")

@@ -36,6 +36,8 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("wg_latest_handshake_age_s", preflight_script("wg-test"))
         self.assertIn("observed_ipv4", preflight_script("wg-test"))
         self.assertIn("wg_observed_ipv4", preflight_script("wg-test"))
+        self.assertIn("direct_download_bps", preflight_script("wg-test"))
+        self.assertIn("wg_download_bps", preflight_script("wg-test"))
         self.assertIn("wan_offload_gro", preflight_script("wg-test"))
         self.assertIn("wan_offload_tso", preflight_script("wg-test"))
 
@@ -264,6 +266,8 @@ class RemoteTests(unittest.TestCase):
                     "wg_latest_handshake_age_s": "4",
                     "observed_ipv4": "198.51.100.20",
                     "wg_observed_ipv4": "198.51.100.20",
+                    "direct_download_bps": "6000000",
+                    "wg_download_bps": "700000",
                     "sync_timer": "active",
                 },
             )
@@ -276,6 +280,8 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("wireguard handshake age (s): 4", output)
         self.assertIn("observed IPv4: 198.51.100.20", output)
         self.assertIn("RU over wg IPv4: 198.51.100.20", output)
+        self.assertIn("direct download B/s: 6000000", output)
+        self.assertIn("RU over wg download B/s: 700000", output)
 
     def test_ensure_remote_privilege_paths(self) -> None:
         target = RemoteTarget(role=ROLE_RU)

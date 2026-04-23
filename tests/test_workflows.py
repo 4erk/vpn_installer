@@ -213,11 +213,12 @@ class WorkflowTests(unittest.TestCase):
         healthy = workflows.deployment_health_snapshot(
             env,
             {
-                ROLE_RU: {"wg_observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "20"},
-                ROLE_FOREIGN: {"observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "15"},
+                ROLE_RU: {"wg_observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "20", "wg_download_bps": "800000"},
+                ROLE_FOREIGN: {"observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "15", "direct_download_bps": "700000"},
             },
         )
         self.assertEqual(healthy["health_verdict"], "ok")
+        self.assertEqual(healthy["ru_wg_download_bps"], "800000")
 
         mismatch = workflows.deployment_health_snapshot(
             env,
@@ -236,6 +237,15 @@ class WorkflowTests(unittest.TestCase):
             },
         )
         self.assertEqual(stale["health_verdict"], "wg_handshake_stale")
+
+        degraded = workflows.deployment_health_snapshot(
+            env,
+            {
+                ROLE_RU: {"wg_observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "20", "wg_download_bps": "120000"},
+                ROLE_FOREIGN: {"observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "15", "direct_download_bps": "900000"},
+            },
+        )
+        self.assertEqual(degraded["health_verdict"], "ru_wg_download_degraded")
 
     def test_cleanup_remote_workdir_warns_on_error(self) -> None:
         with patch("vpn_installer.workflows.ssh_stream", side_effect=AppError("fail")), patch("vpn_installer.workflows.warn") as warn_mock:

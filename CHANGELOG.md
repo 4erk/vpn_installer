@@ -6,6 +6,14 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.2.22] - 2026-04-23
+
+### Fixed
+
+- `status` / deployment health теперь проверяют не только свежий WireGuard handshake и IPv4 egress, но и реальную скорость HTTP download на `зарубежном сервере` и через `российский сервер -> wg0 -> зарубежный сервер`
+- деградация bulk-пути теперь получает явные verdict'ы `foreign_direct_download_degraded` и `ru_wg_download_degraded`, чтобы плохой маршрут провайдера больше не выглядел как исправный контур
+- `preflight` показывает download B/s рядом с qdisc/offload/WireGuard counters, чтобы диагностика долгоживущих VPS не упиралась только в ручной speedtest
+
 ## [0.2.21] - 2026-04-22
 
 ### Fixed
