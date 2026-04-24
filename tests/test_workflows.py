@@ -213,12 +213,13 @@ class WorkflowTests(unittest.TestCase):
         healthy = workflows.deployment_health_snapshot(
             env,
             {
-                ROLE_RU: {"wg_observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "20", "wg_download_bps": "800000"},
-                ROLE_FOREIGN: {"observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "15", "direct_download_bps": "700000"},
+                ROLE_RU: {"wg_observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "20", "deep_ru_wg_download_min_bps": "800000", "deep_ru_wg_upload_bps": "1200000"},
+                ROLE_FOREIGN: {"observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "15", "deep_foreign_direct_download_min_bps": "700000", "deep_foreign_direct_upload_bps": "1400000", "deep_foreign_ru_ping_loss_pct": "0", "deep_foreign_internet_ping_loss_pct": "0"},
             },
         )
         self.assertEqual(healthy["health_verdict"], "ok")
         self.assertEqual(healthy["ru_wg_download_bps"], "800000")
+        self.assertEqual(healthy["foreign_direct_upload_bps"], "1400000")
 
         mismatch = workflows.deployment_health_snapshot(
             env,
@@ -241,11 +242,27 @@ class WorkflowTests(unittest.TestCase):
         degraded = workflows.deployment_health_snapshot(
             env,
             {
-                ROLE_RU: {"wg_observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "20", "wg_download_bps": "120000"},
-                ROLE_FOREIGN: {"observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "15", "direct_download_bps": "900000"},
+                ROLE_RU: {"wg_observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "20", "wg_download_bps": "900000", "deep_ru_wg_download_min_bps": "120000"},
+                ROLE_FOREIGN: {"observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "15", "direct_download_bps": "900000", "deep_foreign_direct_download_min_bps": "900000"},
             },
         )
         self.assertEqual(degraded["health_verdict"], "ru_wg_download_degraded")
+
+        loss_degraded = workflows.deployment_health_snapshot(
+            env,
+            {
+                ROLE_RU: {"wg_observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "20", "deep_ru_wg_download_min_bps": "900000"},
+                ROLE_FOREIGN: {
+                    "observed_ipv4": "198.51.100.20",
+                    "wg_latest_handshake_age_s": "15",
+                    "deep_foreign_direct_download_min_bps": "900000",
+                    "deep_foreign_direct_upload_bps": "1400000",
+                    "deep_foreign_ru_ping_loss_pct": "12",
+                    "deep_foreign_internet_ping_loss_pct": "1",
+                },
+            },
+        )
+        self.assertEqual(loss_degraded["health_verdict"], "foreign_ru_ping_loss_degraded")
 
     def test_cleanup_remote_workdir_warns_on_error(self) -> None:
         with patch("vpn_installer.workflows.ssh_stream", side_effect=AppError("fail")), patch("vpn_installer.workflows.warn") as warn_mock:

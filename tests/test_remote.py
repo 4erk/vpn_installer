@@ -38,6 +38,9 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("wg_observed_ipv4", preflight_script("wg-test"))
         self.assertIn("direct_download_bps", preflight_script("wg-test"))
         self.assertIn("wg_download_bps", preflight_script("wg-test"))
+        self.assertIn("deep_probe_verdict", preflight_script("wg-test"))
+        self.assertIn("deep_foreign_direct_download_min_bps", preflight_script("wg-test"))
+        self.assertIn("deep_ru_wg_upload_bps", preflight_script("wg-test"))
         self.assertIn("wan_offload_gro", preflight_script("wg-test"))
         self.assertIn("wan_offload_tso", preflight_script("wg-test"))
 
@@ -268,6 +271,15 @@ class RemoteTests(unittest.TestCase):
                     "wg_observed_ipv4": "198.51.100.20",
                     "direct_download_bps": "6000000",
                     "wg_download_bps": "700000",
+                    "deep_probe_at": "2026-04-24T12:00:00+00:00",
+                    "deep_probe_verdict": "degraded",
+                    "deep_probe_reasons": "ru_wg_download=120000",
+                    "deep_foreign_direct_download_min_bps": "300000",
+                    "deep_foreign_direct_upload_bps": "900000",
+                    "deep_foreign_ru_ping_loss_pct": "10",
+                    "deep_foreign_internet_ping_loss_pct": "5",
+                    "deep_ru_wg_download_min_bps": "120000",
+                    "deep_ru_wg_upload_bps": "800000",
                     "sync_timer": "active",
                 },
             )
@@ -282,6 +294,9 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("RU over wg IPv4: 198.51.100.20", output)
         self.assertIn("direct download B/s: 6000000", output)
         self.assertIn("RU over wg download B/s: 700000", output)
+        self.assertIn("deep probe verdict: degraded", output)
+        self.assertIn("foreign direct min download B/s: 300000", output)
+        self.assertIn("RU over wg upload B/s: 800000", output)
 
     def test_ensure_remote_privilege_paths(self) -> None:
         target = RemoteTarget(role=ROLE_RU)

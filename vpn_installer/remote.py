@@ -241,6 +241,13 @@ env_value() {{
   fi
 }}
 
+state_value() {{
+  local key="$1"
+  if [[ -r /var/lib/vpn-stack/health-state.env ]]; then
+    awk -F= -v key="${{key}}" '$1 == key {{ sub(/^[^=]*=/, ""); gsub(/^"/, ""); gsub(/"$/, ""); print; exit }}' /var/lib/vpn-stack/health-state.env
+  fi
+}}
+
 probe_download_bps() {{
   local bind_iface="$1"
   local url="$2"
@@ -312,10 +319,22 @@ wg_latest_handshake="-"
 wg_latest_handshake_age_s="-1"
 observed_ipv4="$(probe_public_ipv4)"
 wg_observed_ipv4=""
-throughput_url="$(env_value HEALTH_THROUGHPUT_URL)"
-if [[ -z "${{throughput_url}}" ]]; then throughput_url="https://speed.cloudflare.com/__down?bytes=2000000"; fi
+throughput_urls="$(env_value HEALTH_THROUGHPUT_URLS)"
+throughput_url="${{throughput_urls%% *}}"
+if [[ -z "${{throughput_url}}" ]]; then throughput_url="https://cachefly.cachefly.net/1mb.test"; fi
 direct_download_bps="-1"
 wg_download_bps="-1"
+deep_probe_at="$(state_value DEEP_PROBE_AT)"
+deep_probe_verdict="$(state_value DEEP_PROBE_VERDICT)"
+deep_probe_reasons="$(state_value DEEP_PROBE_REASONS)"
+deep_foreign_direct_download_min_bps="$(state_value DEEP_FOREIGN_DIRECT_DOWNLOAD_MIN_BPS)"
+deep_foreign_direct_download_detail="$(state_value DEEP_FOREIGN_DIRECT_DOWNLOAD_DETAIL)"
+deep_foreign_direct_upload_bps="$(state_value DEEP_FOREIGN_DIRECT_UPLOAD_BPS)"
+deep_foreign_ru_ping_loss_pct="$(state_value DEEP_FOREIGN_RU_PING_LOSS_PCT)"
+deep_foreign_internet_ping_loss_pct="$(state_value DEEP_FOREIGN_INTERNET_PING_LOSS_PCT)"
+deep_ru_wg_download_min_bps="$(state_value DEEP_RU_WG_DOWNLOAD_MIN_BPS)"
+deep_ru_wg_download_detail="$(state_value DEEP_RU_WG_DOWNLOAD_DETAIL)"
+deep_ru_wg_upload_bps="$(state_value DEEP_RU_WG_UPLOAD_BPS)"
 
 if [[ -n "${{default_iface}}" ]]; then
   default_qdisc="$(tc qdisc show dev "${{default_iface}}" 2>/dev/null | awk 'NR==1 {{print $2; exit}}')"
@@ -391,6 +410,17 @@ printf 'observed_ipv4=%s\\n' "${{observed_ipv4}}"
 printf 'wg_observed_ipv4=%s\\n' "${{wg_observed_ipv4}}"
 printf 'direct_download_bps=%s\\n' "${{direct_download_bps}}"
 printf 'wg_download_bps=%s\\n' "${{wg_download_bps}}"
+printf 'deep_probe_at=%s\\n' "${{deep_probe_at}}"
+printf 'deep_probe_verdict=%s\\n' "${{deep_probe_verdict}}"
+printf 'deep_probe_reasons=%s\\n' "${{deep_probe_reasons}}"
+printf 'deep_foreign_direct_download_min_bps=%s\\n' "${{deep_foreign_direct_download_min_bps}}"
+printf 'deep_foreign_direct_download_detail=%s\\n' "${{deep_foreign_direct_download_detail}}"
+printf 'deep_foreign_direct_upload_bps=%s\\n' "${{deep_foreign_direct_upload_bps}}"
+printf 'deep_foreign_ru_ping_loss_pct=%s\\n' "${{deep_foreign_ru_ping_loss_pct}}"
+printf 'deep_foreign_internet_ping_loss_pct=%s\\n' "${{deep_foreign_internet_ping_loss_pct}}"
+printf 'deep_ru_wg_download_min_bps=%s\\n' "${{deep_ru_wg_download_min_bps}}"
+printf 'deep_ru_wg_download_detail=%s\\n' "${{deep_ru_wg_download_detail}}"
+printf 'deep_ru_wg_upload_bps=%s\\n' "${{deep_ru_wg_upload_bps}}"
 printf 'installed=%s\\n' "${{installed}}"
 printf 'deployment_name=%s\\n' "${{deployment_name}}"
 printf 'role=%s\\n' "${{role}}"
@@ -445,6 +475,16 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
     print(f"RU over wg IPv4: {preflight.get('wg_observed_ipv4', '-')}")
     print(f"direct download B/s: {preflight.get('direct_download_bps', '-')}")
     print(f"RU over wg download B/s: {preflight.get('wg_download_bps', '-')}")
+    if preflight.get("deep_probe_at"):
+        print(f"deep probe at: {preflight.get('deep_probe_at', '-')}")
+        print(f"deep probe verdict: {preflight.get('deep_probe_verdict', '-')}")
+        print(f"deep probe reasons: {preflight.get('deep_probe_reasons', '-')}")
+        print(f"foreign direct min download B/s: {preflight.get('deep_foreign_direct_download_min_bps', '-')}")
+        print(f"foreign direct upload B/s: {preflight.get('deep_foreign_direct_upload_bps', '-')}")
+        print(f"foreign ping loss to RU (%): {preflight.get('deep_foreign_ru_ping_loss_pct', '-')}")
+        print(f"foreign ping loss to internet (%): {preflight.get('deep_foreign_internet_ping_loss_pct', '-')}")
+        print(f"RU over wg min download B/s: {preflight.get('deep_ru_wg_download_min_bps', '-')}")
+        print(f"RU over wg upload B/s: {preflight.get('deep_ru_wg_upload_bps', '-')}")
     print(f"sync timer: {preflight.get('sync_timer', '-')}")
     print(f"health timer: {preflight.get('health_timer', '-')}")
     print(f"ssh service: {preflight.get('ssh_service', '-')}")

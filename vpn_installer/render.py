@@ -540,14 +540,45 @@ def render_health_script(env: dict[str, str], role: str) -> str:
         ROLE="{role}"
         WG_INTERFACE="{env['WG_INTERFACE']}"
         WAN_INTERFACE="{env.get('WAN_INTERFACE', '')}"
+        RU_PUBLIC_IP="{env['RU_PUBLIC_IP']}"
         SSH_PORT="{env['SSH_PORT']}"
         HEALTHCHECK_URL="{env['HEALTHCHECK_URL']}"
+        HEALTH_THROUGHPUT_URLS="{env['HEALTH_THROUGHPUT_URLS']}"
+        HEALTH_UPLOAD_URL="{env['HEALTH_UPLOAD_URL']}"
+        HEALTH_UPLOAD_BYTES="{env['HEALTH_UPLOAD_BYTES']}"
+        DEEP_PROBE_INTERVAL_MINUTES="{env['HEALTH_DEEP_PROBE_INTERVAL_MINUTES']}"
+        MIN_FOREIGN_DIRECT_DOWNLOAD_BPS="{env['HEALTH_MIN_FOREIGN_DIRECT_DOWNLOAD_BPS']}"
+        MIN_RU_WG_DOWNLOAD_BPS="{env['HEALTH_MIN_RU_WG_DOWNLOAD_BPS']}"
+        MIN_FOREIGN_DIRECT_UPLOAD_BPS="{env['HEALTH_MIN_FOREIGN_DIRECT_UPLOAD_BPS']}"
+        MIN_RU_WG_UPLOAD_BPS="{env['HEALTH_MIN_RU_WG_UPLOAD_BPS']}"
+        MAX_FOREIGN_RU_PING_LOSS_PCT="{env['HEALTH_MAX_FOREIGN_RU_PING_LOSS_PCT']}"
+        MAX_FOREIGN_INTERNET_PING_LOSS_PCT="{env['HEALTH_MAX_FOREIGN_INTERNET_PING_LOSS_PCT']}"
         HANDSHAKE_GRACE="{env['HEALTH_HANDSHAKE_GRACE_SECONDS']}"
         DISABLE_NIC_OFFLOADS="{env.get('DISABLE_NIC_OFFLOADS', '1')}"
+        HEALTH_STATE_PATH="/var/lib/vpn-stack/health-state.env"
 
         log() {{
           echo "vpn-stack-health[$ROLE]: $*" >&2
         }}
+
+        number_or_default() {{
+          local value="$1"
+          local fallback="$2"
+          if [[ "${{value}}" =~ ^[0-9]+$ ]]; then
+            printf '%s' "${{value}}"
+          else
+            printf '%s' "${{fallback}}"
+          fi
+        }}
+
+        DEEP_PROBE_INTERVAL_MINUTES="$(number_or_default "${{DEEP_PROBE_INTERVAL_MINUTES}}" 30)"
+        MIN_FOREIGN_DIRECT_DOWNLOAD_BPS="$(number_or_default "${{MIN_FOREIGN_DIRECT_DOWNLOAD_BPS}}" 300000)"
+        MIN_RU_WG_DOWNLOAD_BPS="$(number_or_default "${{MIN_RU_WG_DOWNLOAD_BPS}}" 300000)"
+        MIN_FOREIGN_DIRECT_UPLOAD_BPS="$(number_or_default "${{MIN_FOREIGN_DIRECT_UPLOAD_BPS}}" 1000000)"
+        MIN_RU_WG_UPLOAD_BPS="$(number_or_default "${{MIN_RU_WG_UPLOAD_BPS}}" 1000000)"
+        MAX_FOREIGN_RU_PING_LOSS_PCT="$(number_or_default "${{MAX_FOREIGN_RU_PING_LOSS_PCT}}" 5)"
+        MAX_FOREIGN_INTERNET_PING_LOSS_PCT="$(number_or_default "${{MAX_FOREIGN_INTERNET_PING_LOSS_PCT}}" 5)"
+        HEALTH_UPLOAD_BYTES="$(number_or_default "${{HEALTH_UPLOAD_BYTES}}" 1048576)"
 
         detect_default_iface() {{
           ip route show default 2>/dev/null | awk '/default/ {{print $5; exit}}'
@@ -602,6 +633,106 @@ def render_health_script(env: dict[str, str], role: str) -> str:
           return 1
         }}
 
+        state_value() {{
+          local key="$1"
+          if [[ -r "${{HEALTH_STATE_PATH}}" ]]; then
+            awk -F= -v key="${{key}}" '$1 == key {{ sub(/^[^=]*=/, ""); gsub(/^"/, ""); gsub(/"$/, ""); print; exit }}' "${{HEALTH_STATE_PATH}}"
+          fi
+        }}
+
+        probe_download_bps() {{
+          local bind_iface="$1"
+          local url="$2"
+          if ! command -v curl >/dev/null 2>&1 || [[ -z "${{url}}" ]]; then
+            printf -- '-1'
+            return 0
+          fi
+          local speed
+          if [[ -n "${{bind_iface}}" ]]; then
+            speed="$(curl -4fsS --interface "${{bind_iface}}" --max-time 15 -o /dev/null -w '%{{speed_download}}' "${{url}}" 2>/dev/null || true)"
+          else
+            speed="$(curl -4fsS --max-time 15 -o /dev/null -w '%{{speed_download}}' "${{url}}" 2>/dev/null || true)"
+          fi
+          if [[ "${{speed}}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+            awk -v speed="${{speed}}" 'BEGIN {{ printf "%.0f", speed }}'
+          else
+            printf -- '-1'
+          fi
+        }}
+
+        probe_upload_bps() {{
+          local bind_iface="$1"
+          local url="$2"
+          local bytes="$3"
+          if ! command -v curl >/dev/null 2>&1 || [[ -z "${{url}}" ]] || [[ ! "${{bytes}}" =~ ^[0-9]+$ ]]; then
+            printf -- '-1'
+            return 0
+          fi
+          local speed
+          if [[ -n "${{bind_iface}}" ]]; then
+            speed="$(head -c "${{bytes}}" /dev/zero | curl -4fsS --interface "${{bind_iface}}" --max-time 20 -o /dev/null -w '%{{speed_upload}}' --data-binary @- "${{url}}" 2>/dev/null || true)"
+          else
+            speed="$(head -c "${{bytes}}" /dev/zero | curl -4fsS --max-time 20 -o /dev/null -w '%{{speed_upload}}' --data-binary @- "${{url}}" 2>/dev/null || true)"
+          fi
+          if [[ "${{speed}}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+            awk -v speed="${{speed}}" 'BEGIN {{ printf "%.0f", speed }}'
+          else
+            printf -- '-1'
+          fi
+        }}
+
+        probe_ping_loss_pct() {{
+          local host="$1"
+          if ! command -v ping >/dev/null 2>&1 || [[ -z "${{host}}" ]]; then
+            printf -- '-1'
+            return 0
+          fi
+          local output loss
+          output="$(ping -4 -c 10 -W 1 "${{host}}" 2>/dev/null || true)"
+          loss="$(awk -F', ' '/packets transmitted/ {{ gsub(/% packet loss/, "", $3); print $3; exit }}' <<<"${{output}}")"
+          if [[ "${{loss}}" =~ ^[0-9]+$ ]]; then
+            printf '%s' "${{loss}}"
+          else
+            printf -- '-1'
+          fi
+        }}
+
+        probe_multi_download_summary() {{
+          local bind_iface="$1"
+          local min_speed="-1"
+          local detail=""
+          local url="" label="" speed=""
+          for url in ${{HEALTH_THROUGHPUT_URLS}}; do
+            speed="$(probe_download_bps "${{bind_iface}}" "${{url}}")"
+            label="${{url#*://}}"
+            label="${{label%%/*}}"
+            if [[ -n "${{detail}}" ]]; then
+              detail="${{detail}},"
+            fi
+            detail="${{detail}}${{label}}:${{speed}}"
+            if [[ "${{speed}}" =~ ^[0-9]+$ && "${{speed}}" -ge 0 ]]; then
+              if [[ "${{min_speed}}" == "-1" || "${{speed}}" -lt "${{min_speed}}" ]]; then
+                min_speed="${{speed}}"
+              fi
+            fi
+          done
+          printf '%s|%s' "${{min_speed}}" "${{detail}}"
+        }}
+
+        should_run_deep_probe() {{
+          local last_epoch="" now="" interval_s=""
+          last_epoch="$(state_value DEEP_PROBE_AT_EPOCH)"
+          if [[ ! "${{last_epoch}}" =~ ^[0-9]+$ ]]; then
+            return 0
+          fi
+          now="$(date +%s)"
+          interval_s="$((DEEP_PROBE_INTERVAL_MINUTES * 60))"
+          if [[ ! "${{now}}" =~ ^[0-9]+$ ]]; then
+            return 0
+          fi
+          [[ $((now - last_epoch)) -ge $interval_s ]]
+        }}
+
         ssh_banner_ok() {{
           timeout 5 bash -lc 'exec 3<>/dev/tcp/127.0.0.1/'"${{SSH_PORT}}"'; head -c 4 <&3' 2>/dev/null | grep -q '^SSH-'
         }}
@@ -622,6 +753,74 @@ def render_health_script(env: dict[str, str], role: str) -> str:
           printf '999999'
         }}
 
+        run_deep_probe() {{
+          local probe_at="" probe_epoch="" verdict="ok" reasons_joined=""
+          local direct_summary="" direct_min="-1" direct_detail="" direct_upload="-1"
+          local wg_summary="" wg_min="-1" wg_detail="" wg_upload="-1"
+          local peer_ping_loss="-1" internet_ping_loss="-1"
+          local -a reasons=()
+
+          probe_at="$(date -Is)"
+          probe_epoch="$(date +%s)"
+
+          if [[ "${{ROLE}}" == "foreign-exit" ]]; then
+            direct_summary="$(probe_multi_download_summary "")"
+            direct_min="${{direct_summary%%|*}}"
+            direct_detail="${{direct_summary#*|}}"
+            direct_upload="$(probe_upload_bps "" "${{HEALTH_UPLOAD_URL}}" "${{HEALTH_UPLOAD_BYTES}}")"
+            peer_ping_loss="$(probe_ping_loss_pct "${{RU_PUBLIC_IP}}")"
+            internet_ping_loss="$(probe_ping_loss_pct "1.1.1.1")"
+            if [[ "${{direct_min}}" =~ ^[0-9]+$ && "${{direct_min}}" -ge 0 && "${{direct_min}}" -lt "${{MIN_FOREIGN_DIRECT_DOWNLOAD_BPS}}" ]]; then
+              reasons+=("foreign_direct_download=${{direct_min}}")
+            fi
+            if [[ "${{direct_upload}}" =~ ^[0-9]+$ && "${{direct_upload}}" -ge 0 && "${{direct_upload}}" -lt "${{MIN_FOREIGN_DIRECT_UPLOAD_BPS}}" ]]; then
+              reasons+=("foreign_direct_upload=${{direct_upload}}")
+            fi
+            if [[ "${{peer_ping_loss}}" =~ ^[0-9]+$ && "${{peer_ping_loss}}" -gt "${{MAX_FOREIGN_RU_PING_LOSS_PCT}}" ]]; then
+              reasons+=("foreign_ru_ping_loss=${{peer_ping_loss}}")
+            fi
+            if [[ "${{internet_ping_loss}}" =~ ^[0-9]+$ && "${{internet_ping_loss}}" -gt "${{MAX_FOREIGN_INTERNET_PING_LOSS_PCT}}" ]]; then
+              reasons+=("foreign_internet_ping_loss=${{internet_ping_loss}}")
+            fi
+          else
+            wg_summary="$(probe_multi_download_summary "${{WG_INTERFACE}}")"
+            wg_min="${{wg_summary%%|*}}"
+            wg_detail="${{wg_summary#*|}}"
+            wg_upload="$(probe_upload_bps "${{WG_INTERFACE}}" "${{HEALTH_UPLOAD_URL}}" "${{HEALTH_UPLOAD_BYTES}}")"
+            if [[ "${{wg_min}}" =~ ^[0-9]+$ && "${{wg_min}}" -ge 0 && "${{wg_min}}" -lt "${{MIN_RU_WG_DOWNLOAD_BPS}}" ]]; then
+              reasons+=("ru_wg_download=${{wg_min}}")
+            fi
+            if [[ "${{wg_upload}}" =~ ^[0-9]+$ && "${{wg_upload}}" -ge 0 && "${{wg_upload}}" -lt "${{MIN_RU_WG_UPLOAD_BPS}}" ]]; then
+              reasons+=("ru_wg_upload=${{wg_upload}}")
+            fi
+          fi
+
+          if [[ "${{#reasons[@]}}" -gt 0 ]]; then
+            verdict="degraded"
+            reasons_joined="$(IFS=,; echo "${{reasons[*]}}")"
+          fi
+
+          cat > "${{HEALTH_STATE_PATH}}.tmp" <<EOF
+DEEP_PROBE_AT="${{probe_at}}"
+DEEP_PROBE_AT_EPOCH="${{probe_epoch}}"
+DEEP_PROBE_VERDICT="${{verdict}}"
+DEEP_PROBE_REASONS="${{reasons_joined}}"
+DEEP_FOREIGN_DIRECT_DOWNLOAD_MIN_BPS="${{direct_min}}"
+DEEP_FOREIGN_DIRECT_DOWNLOAD_DETAIL="${{direct_detail}}"
+DEEP_FOREIGN_DIRECT_UPLOAD_BPS="${{direct_upload}}"
+DEEP_FOREIGN_RU_PING_LOSS_PCT="${{peer_ping_loss}}"
+DEEP_FOREIGN_INTERNET_PING_LOSS_PCT="${{internet_ping_loss}}"
+DEEP_RU_WG_DOWNLOAD_MIN_BPS="${{wg_min}}"
+DEEP_RU_WG_DOWNLOAD_DETAIL="${{wg_detail}}"
+DEEP_RU_WG_UPLOAD_BPS="${{wg_upload}}"
+EOF
+          mv "${{HEALTH_STATE_PATH}}.tmp" "${{HEALTH_STATE_PATH}}"
+
+          if [[ "${{#reasons[@]}}" -gt 0 ]]; then
+            printf '%s\\n' "${{reasons[@]}}"
+          fi
+        }}
+
         collect_reasons() {{
           local reasons=()
           local age=""
@@ -633,6 +832,13 @@ def render_health_script(env: dict[str, str], role: str) -> str:
             reasons+=("wg_handshake_stale=${{age}}")
           fi
         {textwrap.indent(role_specific_probe, '  ')}
+          if should_run_deep_probe; then
+            local deep_reasons=()
+            mapfile -t deep_reasons < <(run_deep_probe)
+            if [[ "${{#deep_reasons[@]}}" -gt 0 ]]; then
+              reasons+=("${{deep_reasons[@]}}")
+            fi
+          fi
           if [[ "${{#reasons[@]}}" -gt 0 ]]; then
             printf '%s\\n' "${{reasons[@]}}"
           fi

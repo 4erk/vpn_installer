@@ -180,6 +180,18 @@ def preflight_int(preflight: dict[str, str], key: str, default: int = -1) -> int
         return default
 
 
+def preflight_int_any(preflight: dict[str, str], keys: list[str], default: int = -1) -> int:
+    for key in keys:
+        value = preflight.get(key, "").strip()
+        if not value:
+            continue
+        try:
+            return int(value)
+        except ValueError:
+            continue
+    return default
+
+
 def deployment_health_snapshot(env: dict[str, str], preflights: dict[str, dict[str, str]]) -> dict[str, str]:
     foreign = preflights.get(ROLE_FOREIGN, {})
     ru = preflights.get(ROLE_RU, {})
@@ -188,10 +200,18 @@ def deployment_health_snapshot(env: dict[str, str], preflights: dict[str, dict[s
     ru_handshake_age = handshake_age_seconds(ru)
     foreign_handshake_age = handshake_age_seconds(foreign)
     max_age = handshake_grace_seconds(env)
-    foreign_download_bps = preflight_int(foreign, "direct_download_bps")
-    ru_wg_download_bps = preflight_int(ru, "wg_download_bps")
+    foreign_download_bps = preflight_int_any(foreign, ["deep_foreign_direct_download_min_bps", "direct_download_bps"])
+    ru_wg_download_bps = preflight_int_any(ru, ["deep_ru_wg_download_min_bps", "wg_download_bps"])
+    foreign_upload_bps = preflight_int_any(foreign, ["deep_foreign_direct_upload_bps"])
+    ru_wg_upload_bps = preflight_int_any(ru, ["deep_ru_wg_upload_bps"])
+    foreign_ru_ping_loss_pct = preflight_int_any(foreign, ["deep_foreign_ru_ping_loss_pct"])
+    foreign_internet_ping_loss_pct = preflight_int_any(foreign, ["deep_foreign_internet_ping_loss_pct"])
     min_foreign_download_bps = env_int(env, "HEALTH_MIN_FOREIGN_DIRECT_DOWNLOAD_BPS", 500000)
     min_ru_wg_download_bps = env_int(env, "HEALTH_MIN_RU_WG_DOWNLOAD_BPS", 500000)
+    min_foreign_upload_bps = env_int(env, "HEALTH_MIN_FOREIGN_DIRECT_UPLOAD_BPS", 1000000)
+    min_ru_wg_upload_bps = env_int(env, "HEALTH_MIN_RU_WG_UPLOAD_BPS", 1000000)
+    max_foreign_ru_ping_loss_pct = env_int(env, "HEALTH_MAX_FOREIGN_RU_PING_LOSS_PCT", 5)
+    max_foreign_internet_ping_loss_pct = env_int(env, "HEALTH_MAX_FOREIGN_INTERNET_PING_LOSS_PCT", 5)
     verdict = "ok"
     if not foreign_ip:
         verdict = "foreign_direct_egress_failed"
@@ -201,10 +221,18 @@ def deployment_health_snapshot(env: dict[str, str], preflights: dict[str, dict[s
         verdict = "foreign_ru_ip_mismatch"
     elif ru_handshake_age < 0 or foreign_handshake_age < 0 or ru_handshake_age > max_age or foreign_handshake_age > max_age:
         verdict = "wg_handshake_stale"
+    elif foreign_ru_ping_loss_pct >= 0 and foreign_ru_ping_loss_pct > max_foreign_ru_ping_loss_pct:
+        verdict = "foreign_ru_ping_loss_degraded"
+    elif foreign_internet_ping_loss_pct >= 0 and foreign_internet_ping_loss_pct > max_foreign_internet_ping_loss_pct:
+        verdict = "foreign_internet_ping_loss_degraded"
     elif foreign_download_bps >= 0 and foreign_download_bps < min_foreign_download_bps:
         verdict = "foreign_direct_download_degraded"
     elif ru_wg_download_bps >= 0 and ru_wg_download_bps < min_ru_wg_download_bps:
         verdict = "ru_wg_download_degraded"
+    elif foreign_upload_bps >= 0 and foreign_upload_bps < min_foreign_upload_bps:
+        verdict = "foreign_direct_upload_degraded"
+    elif ru_wg_upload_bps >= 0 and ru_wg_upload_bps < min_ru_wg_upload_bps:
+        verdict = "ru_wg_upload_degraded"
     return {
         "health_verdict": verdict,
         "foreign_direct_observed_ipv4": foreign_ip or "-",
@@ -216,6 +244,14 @@ def deployment_health_snapshot(env: dict[str, str], preflights: dict[str, dict[s
         "ru_wg_download_bps": str(ru_wg_download_bps),
         "min_foreign_direct_download_bps": str(min_foreign_download_bps),
         "min_ru_wg_download_bps": str(min_ru_wg_download_bps),
+        "foreign_direct_upload_bps": str(foreign_upload_bps),
+        "ru_wg_upload_bps": str(ru_wg_upload_bps),
+        "min_foreign_direct_upload_bps": str(min_foreign_upload_bps),
+        "min_ru_wg_upload_bps": str(min_ru_wg_upload_bps),
+        "foreign_ru_ping_loss_pct": str(foreign_ru_ping_loss_pct),
+        "foreign_internet_ping_loss_pct": str(foreign_internet_ping_loss_pct),
+        "max_foreign_ru_ping_loss_pct": str(max_foreign_ru_ping_loss_pct),
+        "max_foreign_internet_ping_loss_pct": str(max_foreign_internet_ping_loss_pct),
     }
 
 
@@ -235,6 +271,23 @@ def print_deployment_health(health: dict[str, str]) -> None:
         "RU over wg download B/s: "
         f"{health.get('ru_wg_download_bps', '-')} "
         f"(min {health.get('min_ru_wg_download_bps', '-')})"
+    )
+    print(
+        "foreign direct upload B/s: "
+        f"{health.get('foreign_direct_upload_bps', '-')} "
+        f"(min {health.get('min_foreign_direct_upload_bps', '-')})"
+    )
+    print(
+        "RU over wg upload B/s: "
+        f"{health.get('ru_wg_upload_bps', '-')} "
+        f"(min {health.get('min_ru_wg_upload_bps', '-')})"
+    )
+    print(
+        "foreign ping loss to RU / internet (%): "
+        f"{health.get('foreign_ru_ping_loss_pct', '-')}/"
+        f"{health.get('foreign_internet_ping_loss_pct', '-')} "
+        f"(max {health.get('max_foreign_ru_ping_loss_pct', '-')}/"
+        f"{health.get('max_foreign_internet_ping_loss_pct', '-')})"
     )
     print(f"health verdict: {health['health_verdict']}")
 
@@ -259,7 +312,15 @@ def health_failure_message(health: dict[str, str]) -> str:
         f"foreign_direct_download_bps={health.get('foreign_direct_download_bps', '-')}, "
         f"ru_wg_download_bps={health.get('ru_wg_download_bps', '-')}, "
         f"min_foreign_direct_download_bps={health.get('min_foreign_direct_download_bps', '-')}, "
-        f"min_ru_wg_download_bps={health.get('min_ru_wg_download_bps', '-')}"
+        f"min_ru_wg_download_bps={health.get('min_ru_wg_download_bps', '-')}, "
+        f"foreign_direct_upload_bps={health.get('foreign_direct_upload_bps', '-')}, "
+        f"ru_wg_upload_bps={health.get('ru_wg_upload_bps', '-')}, "
+        f"min_foreign_direct_upload_bps={health.get('min_foreign_direct_upload_bps', '-')}, "
+        f"min_ru_wg_upload_bps={health.get('min_ru_wg_upload_bps', '-')}, "
+        f"foreign_ru_ping_loss_pct={health.get('foreign_ru_ping_loss_pct', '-')}, "
+        f"foreign_internet_ping_loss_pct={health.get('foreign_internet_ping_loss_pct', '-')}, "
+        f"max_foreign_ru_ping_loss_pct={health.get('max_foreign_ru_ping_loss_pct', '-')}, "
+        f"max_foreign_internet_ping_loss_pct={health.get('max_foreign_internet_ping_loss_pct', '-')}"
     )
 
 
@@ -275,6 +336,14 @@ def run_dataplane_repair_cycle(target_map: dict[str, RemoteTarget], wg_interface
         f"systemctl restart wg-quick@{shlex.quote(wg_interface)} sing-box",
         as_root=True,
     )
+
+
+def prime_runtime_health(targets: list[RemoteTarget]) -> None:
+    print_header("Runtime health")
+    for target in targets:
+        if not target.ssh_host:
+            continue
+        ssh_stream(target, "/usr/local/lib/vpn-stack/health-check.sh", as_root=True)
 
 
 def wait_for_dataplane_health(
@@ -305,6 +374,8 @@ def ensure_deployment_health(
 ) -> dict[str, dict[str, str]]:
     if {target.role for target in targets} != {ROLE_RU, ROLE_FOREIGN}:
         return {}
+    if auto_repair:
+        prime_runtime_health(targets)
     preflights, health = wait_for_dataplane_health(env, targets, timeout_sec=20, interval_sec=5)
     print_deployment_health(health)
     if health["health_verdict"] == "ok":
