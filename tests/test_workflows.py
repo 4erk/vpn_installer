@@ -375,6 +375,76 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(wait_mock.call_count, 2)
         repair_mock.assert_called_once()
 
+    def test_ensure_deployment_health_soft_degradation_warns_without_repair(self) -> None:
+        env = generate_default_env("demo")
+        ru = RemoteTarget(role=ROLE_RU)
+        foreign = RemoteTarget(role=ROLE_FOREIGN)
+        degraded_health = {
+            "health_verdict": "foreign_direct_download_degraded",
+            "foreign_direct_observed_ipv4": "198.51.100.20",
+            "ru_wg_observed_ipv4": "198.51.100.20",
+            "ru_handshake_age_s": "20",
+            "foreign_handshake_age_s": "15",
+            "handshake_grace_s": "120",
+            "foreign_direct_download_bps": "120000",
+            "ru_wg_download_bps": "700000",
+            "min_foreign_direct_download_bps": "500000",
+            "min_ru_wg_download_bps": "500000",
+            "foreign_direct_upload_bps": "1200000",
+            "ru_wg_upload_bps": "1200000",
+            "min_foreign_direct_upload_bps": "1000000",
+            "min_ru_wg_upload_bps": "1000000",
+            "foreign_ru_ping_loss_pct": "0",
+            "foreign_internet_ping_loss_pct": "0",
+            "max_foreign_ru_ping_loss_pct": "5",
+            "max_foreign_internet_ping_loss_pct": "5",
+        }
+        with patch("vpn_installer.workflows.wait_for_dataplane_health", return_value=({ROLE_RU: {}, ROLE_FOREIGN: {}}, degraded_health)) as wait_mock, patch("vpn_installer.workflows.run_dataplane_repair_cycle") as repair_mock, patch("vpn_installer.workflows.warn") as warn_mock:
+            result = workflows.ensure_deployment_health(env, [ru, foreign], auto_repair=True)
+        self.assertEqual(result, {ROLE_RU: {}, ROLE_FOREIGN: {}})
+        wait_mock.assert_called_once()
+        repair_mock.assert_not_called()
+        warn_mock.assert_called_once()
+
+    def test_ensure_deployment_health_soft_degradation_after_repair_warns_and_returns(self) -> None:
+        env = generate_default_env("demo")
+        ru = RemoteTarget(role=ROLE_RU)
+        foreign = RemoteTarget(role=ROLE_FOREIGN)
+        broken_health = {
+            "health_verdict": "ru_wg_egress_failed",
+            "foreign_direct_observed_ipv4": "198.51.100.20",
+            "ru_wg_observed_ipv4": "-",
+            "ru_handshake_age_s": "500",
+            "foreign_handshake_age_s": "500",
+            "handshake_grace_s": "120",
+        }
+        degraded_health = {
+            "health_verdict": "foreign_ru_ping_loss_degraded",
+            "foreign_direct_observed_ipv4": "198.51.100.20",
+            "ru_wg_observed_ipv4": "198.51.100.20",
+            "ru_handshake_age_s": "20",
+            "foreign_handshake_age_s": "15",
+            "handshake_grace_s": "120",
+            "foreign_direct_download_bps": "700000",
+            "ru_wg_download_bps": "700000",
+            "min_foreign_direct_download_bps": "500000",
+            "min_ru_wg_download_bps": "500000",
+            "foreign_direct_upload_bps": "1200000",
+            "ru_wg_upload_bps": "1200000",
+            "min_foreign_direct_upload_bps": "1000000",
+            "min_ru_wg_upload_bps": "1000000",
+            "foreign_ru_ping_loss_pct": "20",
+            "foreign_internet_ping_loss_pct": "0",
+            "max_foreign_ru_ping_loss_pct": "5",
+            "max_foreign_internet_ping_loss_pct": "5",
+        }
+        with patch("vpn_installer.workflows.wait_for_dataplane_health", side_effect=[({}, broken_health), ({ROLE_RU: {}, ROLE_FOREIGN: {}}, degraded_health)]) as wait_mock, patch("vpn_installer.workflows.run_dataplane_repair_cycle") as repair_mock, patch("vpn_installer.workflows.warn") as warn_mock:
+            result = workflows.ensure_deployment_health(env, [ru, foreign], auto_repair=True)
+        self.assertEqual(result, {ROLE_RU: {}, ROLE_FOREIGN: {}})
+        self.assertEqual(wait_mock.call_count, 2)
+        repair_mock.assert_called_once()
+        warn_mock.assert_called_once()
+
     def test_run_dataplane_repair_cycle_uses_nonblocking_systemctl_restart(self) -> None:
         ru = RemoteTarget(role=ROLE_RU)
         foreign = RemoteTarget(role=ROLE_FOREIGN)

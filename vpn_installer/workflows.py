@@ -297,6 +297,25 @@ def deployment_is_healthy(env: dict[str, str], preflights: dict[str, dict[str, s
     return health["health_verdict"] == "ok", health
 
 
+def is_soft_health_verdict(verdict: str) -> bool:
+    return verdict in {
+        "foreign_ru_ping_loss_degraded",
+        "foreign_internet_ping_loss_degraded",
+        "foreign_direct_download_degraded",
+        "ru_wg_download_degraded",
+        "foreign_direct_upload_degraded",
+        "ru_wg_upload_degraded",
+    }
+
+
+def is_hard_health_verdict(verdict: str) -> bool:
+    if verdict == "ok":
+        return False
+    if is_soft_health_verdict(verdict):
+        return False
+    return True
+
+
 def collect_role_preflights(targets: list[RemoteTarget], wg_interface: str) -> dict[str, dict[str, str]]:
     return {target.role: remote_preflight(target, wg_interface) for target in targets}
 
@@ -363,6 +382,7 @@ def wait_for_dataplane_health(
     *,
     timeout_sec: int = 45,
     interval_sec: int = 5,
+    allow_soft_degraded: bool = False,
 ) -> tuple[dict[str, dict[str, str]], dict[str, str]]:
     deadline = time.time() + timeout_sec
     wg_interface = current_wg_interface(env)
@@ -371,7 +391,7 @@ def wait_for_dataplane_health(
     while time.time() < deadline:
         latest_preflights = collect_role_preflights(targets, wg_interface)
         healthy, latest_health = deployment_is_healthy(env, latest_preflights)
-        if healthy:
+        if healthy or (allow_soft_degraded and not is_hard_health_verdict(latest_health["health_verdict"])):
             return latest_preflights, latest_health
         time.sleep(interval_sec)
     return latest_preflights, latest_health
@@ -387,17 +407,25 @@ def ensure_deployment_health(
         return {}
     if auto_repair:
         prime_runtime_health(targets)
-    preflights, health = wait_for_dataplane_health(env, targets, timeout_sec=20, interval_sec=5)
+    preflights, health = wait_for_dataplane_health(env, targets, timeout_sec=20, interval_sec=5, allow_soft_degraded=True)
     print_deployment_health(health)
     if health["health_verdict"] == "ok":
+        return preflights
+    if is_soft_health_verdict(health["health_verdict"]):
+        warn(f"Dataplane degraded but operational: {health_failure_message(health)}")
         return preflights
     if not auto_repair:
         return preflights
     target_map = {target.role: target for target in targets}
     run_dataplane_repair_cycle(target_map, current_wg_interface(env))
-    repaired_preflights, repaired_health = wait_for_dataplane_health(env, targets)
+    repaired_preflights, repaired_health = wait_for_dataplane_health(env, targets, allow_soft_degraded=True)
     print_deployment_health(repaired_health)
-    if repaired_health["health_verdict"] != "ok":
+    if repaired_health["health_verdict"] == "ok":
+        return repaired_preflights
+    if is_soft_health_verdict(repaired_health["health_verdict"]):
+        warn(f"Dataplane degraded but operational after repair: {health_failure_message(repaired_health)}")
+        return repaired_preflights
+    if is_hard_health_verdict(repaired_health["health_verdict"]):
         raise AppError(f"Dataplane health check failed after repair: {health_failure_message(repaired_health)}")
     return repaired_preflights
 
