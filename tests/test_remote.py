@@ -276,6 +276,7 @@ class RemoteTests(unittest.TestCase):
                     "deep_probe_reasons": "ru_wg_download=120000",
                     "deep_foreign_direct_download_min_bps": "300000",
                     "deep_foreign_direct_upload_bps": "900000",
+                    "deep_foreign_gateway_ping_loss_pct": "15",
                     "deep_foreign_ru_ping_loss_pct": "10",
                     "deep_foreign_internet_ping_loss_pct": "5",
                     "deep_ru_wg_download_min_bps": "120000",
@@ -297,6 +298,7 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("deep probe verdict: degraded", output)
         self.assertIn("foreign direct min download B/s: 300000", output)
         self.assertIn("RU over wg upload B/s: 800000", output)
+        self.assertIn("foreign ping loss to gateway (%): 15", output)
 
     def test_ensure_remote_privilege_paths(self) -> None:
         target = RemoteTarget(role=ROLE_RU)

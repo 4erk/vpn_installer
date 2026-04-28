@@ -330,6 +330,7 @@ deep_probe_reasons="$(state_value DEEP_PROBE_REASONS)"
 deep_foreign_direct_download_min_bps="$(state_value DEEP_FOREIGN_DIRECT_DOWNLOAD_MIN_BPS)"
 deep_foreign_direct_download_detail="$(state_value DEEP_FOREIGN_DIRECT_DOWNLOAD_DETAIL)"
 deep_foreign_direct_upload_bps="$(state_value DEEP_FOREIGN_DIRECT_UPLOAD_BPS)"
+deep_foreign_gateway_ping_loss_pct="$(state_value DEEP_FOREIGN_GATEWAY_PING_LOSS_PCT)"
 deep_foreign_ru_ping_loss_pct="$(state_value DEEP_FOREIGN_RU_PING_LOSS_PCT)"
 deep_foreign_internet_ping_loss_pct="$(state_value DEEP_FOREIGN_INTERNET_PING_LOSS_PCT)"
 deep_ru_wg_download_min_bps="$(state_value DEEP_RU_WG_DOWNLOAD_MIN_BPS)"
@@ -416,6 +417,7 @@ printf 'deep_probe_reasons=%s\\n' "${{deep_probe_reasons}}"
 printf 'deep_foreign_direct_download_min_bps=%s\\n' "${{deep_foreign_direct_download_min_bps}}"
 printf 'deep_foreign_direct_download_detail=%s\\n' "${{deep_foreign_direct_download_detail}}"
 printf 'deep_foreign_direct_upload_bps=%s\\n' "${{deep_foreign_direct_upload_bps}}"
+printf 'deep_foreign_gateway_ping_loss_pct=%s\\n' "${{deep_foreign_gateway_ping_loss_pct}}"
 printf 'deep_foreign_ru_ping_loss_pct=%s\\n' "${{deep_foreign_ru_ping_loss_pct}}"
 printf 'deep_foreign_internet_ping_loss_pct=%s\\n' "${{deep_foreign_internet_ping_loss_pct}}"
 printf 'deep_ru_wg_download_min_bps=%s\\n' "${{deep_ru_wg_download_min_bps}}"
@@ -481,6 +483,7 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
         print(f"deep probe reasons: {preflight.get('deep_probe_reasons', '-')}")
         print(f"foreign direct min download B/s: {preflight.get('deep_foreign_direct_download_min_bps', '-')}")
         print(f"foreign direct upload B/s: {preflight.get('deep_foreign_direct_upload_bps', '-')}")
+        print(f"foreign ping loss to gateway (%): {preflight.get('deep_foreign_gateway_ping_loss_pct', '-')}")
         print(f"foreign ping loss to RU (%): {preflight.get('deep_foreign_ru_ping_loss_pct', '-')}")
         print(f"foreign ping loss to internet (%): {preflight.get('deep_foreign_internet_ping_loss_pct', '-')}")
         print(f"RU over wg min download B/s: {preflight.get('deep_ru_wg_download_min_bps', '-')}")

@@ -757,7 +757,7 @@ def render_health_script(env: dict[str, str], role: str) -> str:
           local probe_at="" probe_epoch="" verdict="ok" reasons_joined=""
           local direct_summary="" direct_min="-1" direct_detail="" direct_upload="-1"
           local wg_summary="" wg_min="-1" wg_detail="" wg_upload="-1"
-          local peer_ping_loss="-1" internet_ping_loss="-1"
+          local gateway_ping_loss="-1" peer_ping_loss="-1" internet_ping_loss="-1"
           local -a reasons=()
 
           probe_at="$(date -Is)"
@@ -768,6 +768,7 @@ def render_health_script(env: dict[str, str], role: str) -> str:
             direct_min="${{direct_summary%%|*}}"
             direct_detail="${{direct_summary#*|}}"
             direct_upload="$(probe_upload_bps "" "${{HEALTH_UPLOAD_URL}}" "${{HEALTH_UPLOAD_BYTES}}")"
+            gateway_ping_loss="$(probe_ping_loss_pct "$(ip route show default 2>/dev/null | awk '/default/ {{print $3; exit}}')")"
             peer_ping_loss="$(probe_ping_loss_pct "${{RU_PUBLIC_IP}}")"
             internet_ping_loss="$(probe_ping_loss_pct "1.1.1.1")"
             if [[ "${{direct_min}}" =~ ^[0-9]+$ && "${{direct_min}}" -ge 0 && "${{direct_min}}" -lt "${{MIN_FOREIGN_DIRECT_DOWNLOAD_BPS}}" ]]; then
@@ -775,6 +776,9 @@ def render_health_script(env: dict[str, str], role: str) -> str:
             fi
             if [[ "${{direct_upload}}" =~ ^[0-9]+$ && "${{direct_upload}}" -ge 0 && "${{direct_upload}}" -lt "${{MIN_FOREIGN_DIRECT_UPLOAD_BPS}}" ]]; then
               reasons+=("foreign_direct_upload=${{direct_upload}}")
+            fi
+            if [[ "${{gateway_ping_loss}}" =~ ^[0-9]+$ && "${{gateway_ping_loss}}" -gt "${{MAX_FOREIGN_INTERNET_PING_LOSS_PCT}}" ]]; then
+              reasons+=("foreign_gateway_ping_loss=${{gateway_ping_loss}}")
             fi
             if [[ "${{peer_ping_loss}}" =~ ^[0-9]+$ && "${{peer_ping_loss}}" -gt "${{MAX_FOREIGN_RU_PING_LOSS_PCT}}" ]]; then
               reasons+=("foreign_ru_ping_loss=${{peer_ping_loss}}")
@@ -808,6 +812,7 @@ DEEP_PROBE_REASONS="${{reasons_joined}}"
 DEEP_FOREIGN_DIRECT_DOWNLOAD_MIN_BPS="${{direct_min}}"
 DEEP_FOREIGN_DIRECT_DOWNLOAD_DETAIL="${{direct_detail}}"
 DEEP_FOREIGN_DIRECT_UPLOAD_BPS="${{direct_upload}}"
+DEEP_FOREIGN_GATEWAY_PING_LOSS_PCT="${{gateway_ping_loss}}"
 DEEP_FOREIGN_RU_PING_LOSS_PCT="${{peer_ping_loss}}"
 DEEP_FOREIGN_INTERNET_PING_LOSS_PCT="${{internet_ping_loss}}"
 DEEP_RU_WG_DOWNLOAD_MIN_BPS="${{wg_min}}"

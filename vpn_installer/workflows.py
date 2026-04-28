@@ -204,6 +204,7 @@ def deployment_health_snapshot(env: dict[str, str], preflights: dict[str, dict[s
     ru_wg_download_bps = preflight_int_any(ru, ["deep_ru_wg_download_min_bps", "wg_download_bps"])
     foreign_upload_bps = preflight_int_any(foreign, ["deep_foreign_direct_upload_bps"])
     ru_wg_upload_bps = preflight_int_any(ru, ["deep_ru_wg_upload_bps"])
+    foreign_gateway_ping_loss_pct = preflight_int_any(foreign, ["deep_foreign_gateway_ping_loss_pct"])
     foreign_ru_ping_loss_pct = preflight_int_any(foreign, ["deep_foreign_ru_ping_loss_pct"])
     foreign_internet_ping_loss_pct = preflight_int_any(foreign, ["deep_foreign_internet_ping_loss_pct"])
     min_foreign_download_bps = env_int(env, "HEALTH_MIN_FOREIGN_DIRECT_DOWNLOAD_BPS", 500000)
@@ -221,6 +222,8 @@ def deployment_health_snapshot(env: dict[str, str], preflights: dict[str, dict[s
         verdict = "foreign_ru_ip_mismatch"
     elif ru_handshake_age < 0 or foreign_handshake_age < 0 or ru_handshake_age > max_age or foreign_handshake_age > max_age:
         verdict = "wg_handshake_stale"
+    elif foreign_gateway_ping_loss_pct >= 0 and foreign_gateway_ping_loss_pct > max_foreign_internet_ping_loss_pct:
+        verdict = "foreign_gateway_ping_loss_degraded"
     elif foreign_ru_ping_loss_pct >= 0 and foreign_ru_ping_loss_pct > max_foreign_ru_ping_loss_pct:
         verdict = "foreign_ru_ping_loss_degraded"
     elif foreign_internet_ping_loss_pct >= 0 and foreign_internet_ping_loss_pct > max_foreign_internet_ping_loss_pct:
@@ -248,6 +251,7 @@ def deployment_health_snapshot(env: dict[str, str], preflights: dict[str, dict[s
         "ru_wg_upload_bps": str(ru_wg_upload_bps),
         "min_foreign_direct_upload_bps": str(min_foreign_upload_bps),
         "min_ru_wg_upload_bps": str(min_ru_wg_upload_bps),
+        "foreign_gateway_ping_loss_pct": str(foreign_gateway_ping_loss_pct),
         "foreign_ru_ping_loss_pct": str(foreign_ru_ping_loss_pct),
         "foreign_internet_ping_loss_pct": str(foreign_internet_ping_loss_pct),
         "max_foreign_ru_ping_loss_pct": str(max_foreign_ru_ping_loss_pct),
@@ -283,10 +287,12 @@ def print_deployment_health(health: dict[str, str]) -> None:
         f"(min {health.get('min_ru_wg_upload_bps', '-')})"
     )
     print(
-        "foreign ping loss to RU / internet (%): "
+        "foreign ping loss to gateway / RU / internet (%): "
+        f"{health.get('foreign_gateway_ping_loss_pct', '-')}/"
         f"{health.get('foreign_ru_ping_loss_pct', '-')}/"
         f"{health.get('foreign_internet_ping_loss_pct', '-')} "
-        f"(max {health.get('max_foreign_ru_ping_loss_pct', '-')}/"
+        f"(max {health.get('max_foreign_internet_ping_loss_pct', '-')}/"
+        f"{health.get('max_foreign_ru_ping_loss_pct', '-')}/"
         f"{health.get('max_foreign_internet_ping_loss_pct', '-')})"
     )
     print(f"health verdict: {health['health_verdict']}")
@@ -299,6 +305,7 @@ def deployment_is_healthy(env: dict[str, str], preflights: dict[str, dict[str, s
 
 def is_soft_health_verdict(verdict: str) -> bool:
     return verdict in {
+        "foreign_gateway_ping_loss_degraded",
         "foreign_ru_ping_loss_degraded",
         "foreign_internet_ping_loss_degraded",
         "foreign_direct_download_degraded",
@@ -336,6 +343,7 @@ def health_failure_message(health: dict[str, str]) -> str:
         f"ru_wg_upload_bps={health.get('ru_wg_upload_bps', '-')}, "
         f"min_foreign_direct_upload_bps={health.get('min_foreign_direct_upload_bps', '-')}, "
         f"min_ru_wg_upload_bps={health.get('min_ru_wg_upload_bps', '-')}, "
+        f"foreign_gateway_ping_loss_pct={health.get('foreign_gateway_ping_loss_pct', '-')}, "
         f"foreign_ru_ping_loss_pct={health.get('foreign_ru_ping_loss_pct', '-')}, "
         f"foreign_internet_ping_loss_pct={health.get('foreign_internet_ping_loss_pct', '-')}, "
         f"max_foreign_ru_ping_loss_pct={health.get('max_foreign_ru_ping_loss_pct', '-')}, "
