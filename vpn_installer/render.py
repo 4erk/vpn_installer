@@ -821,7 +821,7 @@ EOF
           fi
         }}
 
-        collect_reasons() {{
+        collect_hard_reasons() {{
           local reasons=()
           local age=""
           if ! ssh_banner_ok; then
@@ -832,37 +832,67 @@ EOF
             reasons+=("wg_handshake_stale=${{age}}")
           fi
         {textwrap.indent(role_specific_probe, '  ')}
-          if should_run_deep_probe; then
-            local deep_reasons=()
-            mapfile -t deep_reasons < <(run_deep_probe)
-            if [[ "${{#deep_reasons[@]}}" -gt 0 ]]; then
-              reasons+=("${{deep_reasons[@]}}")
-            fi
-          fi
           if [[ "${{#reasons[@]}}" -gt 0 ]]; then
             printf '%s\\n' "${{reasons[@]}}"
           fi
         }}
 
+        collect_soft_reasons() {{
+          local deep_reasons=()
+          if should_run_deep_probe; then
+            mapfile -t deep_reasons < <(run_deep_probe)
+          fi
+          if [[ "${{#deep_reasons[@]}}" -gt 0 ]]; then
+            printf '%s\\n' "${{deep_reasons[@]}}"
+          fi
+        }}
+
+        wait_for_handshake_recovery() {{
+          local deadline="" now="" age=""
+          deadline="$(( $(date +%s) + 35 ))"
+          while true; do
+            age="$(wg_handshake_age)"
+            if [[ "${{age}}" =~ ^[0-9]+$ && "${{age}}" -le "${{HANDSHAKE_GRACE}}" ]]; then
+              return 0
+            fi
+            now="$(date +%s)"
+            if [[ ! "${{now}}" =~ ^[0-9]+$ || "${{now}}" -ge "${{deadline}}" ]]; then
+              return 1
+            fi
+            sleep 2
+          done
+        }}
+
         harden_runtime
-        mapfile -t reasons < <(collect_reasons)
-        if [[ "${{#reasons[@]}}" -eq 0 ]]; then
+        mapfile -t hard_reasons < <(collect_hard_reasons)
+        mapfile -t soft_reasons < <(collect_soft_reasons)
+        if [[ "${{#hard_reasons[@]}}" -eq 0 && "${{#soft_reasons[@]}}" -eq 0 ]]; then
+          exit 0
+        fi
+        if [[ "${{#hard_reasons[@]}}" -eq 0 ]]; then
+          log "runtime degraded without hard failure: ${{soft_reasons[*]}}"
           exit 0
         fi
 
-        log "repairing unhealthy runtime: ${{reasons[*]}}"
+        log "repairing unhealthy runtime: ${{hard_reasons[*]}}"
         systemctl restart ssh.service || true
         {role_specific_repair}
         harden_runtime
-        sleep 5
+        wait_for_handshake_recovery || true
 
-        mapfile -t reasons < <(collect_reasons)
-        if [[ "${{#reasons[@]}}" -eq 0 ]]; then
+        mapfile -t hard_reasons < <(collect_hard_reasons)
+        if [[ "${{#hard_reasons[@]}}" -eq 0 ]]; then
+          if [[ "${{#soft_reasons[@]}}" -gt 0 ]]; then
+            log "runtime recovered; latest deep degradation snapshot: ${{soft_reasons[*]}}"
+          fi
           log "runtime recovered"
           exit 0
         fi
 
-        log "runtime still unhealthy: ${{reasons[*]}}"
+        log "runtime still unhealthy: ${{hard_reasons[*]}}"
+        if [[ "${{#soft_reasons[@]}}" -gt 0 ]]; then
+          log "latest deep degradation snapshot: ${{soft_reasons[*]}}"
+        fi
         exit 1
         """
     ).strip() + "\n"

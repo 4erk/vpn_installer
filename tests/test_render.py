@@ -260,6 +260,11 @@ class RenderTests(unittest.TestCase):
         self.assertIn('ethtool -K "${iface}" tso off', script)
         self.assertIn("cloudflare.com/cdn-cgi/trace", script)
         self.assertIn("ssh_banner_ok", script)
+        self.assertIn("collect_hard_reasons()", script)
+        self.assertIn("collect_soft_reasons()", script)
+        self.assertIn("wait_for_handshake_recovery()", script)
+        self.assertIn('log "runtime degraded without hard failure: ${soft_reasons[*]}"', script)
+        self.assertIn("wait_for_handshake_recovery || true", script)
 
     def test_render_health_script_hardens_foreign_runtime(self) -> None:
         env = self.make_env()
@@ -274,6 +279,29 @@ class RenderTests(unittest.TestCase):
         self.assertIn('DEEP_FOREIGN_RU_PING_LOSS_PCT=', script)
         self.assertIn('probe_http_ipv4 ""', script)
         self.assertIn("detect_default_iface", script)
+        self.assertIn('log "latest deep degradation snapshot: ${soft_reasons[*]}"', script)
+
+    @unittest.skipUnless(preferred_bash(), "bash is required for health script syntax test")
+    def test_render_health_script_is_bash_valid_for_both_roles(self) -> None:
+        env = self.make_env()
+        bash = preferred_bash() or "bash"
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            for role in (render.ROLE_RU, render.ROLE_FOREIGN):
+                script_path = tmp_path / f"{role}.sh"
+                script_path.write_text(render.render_health_script(env, role), encoding="utf-8")
+                completed = subprocess.run(
+                    [bash, "-n", str(script_path)],
+                    capture_output=True,
+                    text=True,
+                    env={**os.environ, "LC_ALL": "C.UTF-8"},
+                    check=False,
+                )
+                self.assertEqual(
+                    completed.returncode,
+                    0,
+                    msg=f"{role} health script syntax error:\nstdout:\n{completed.stdout}\nstderr:\n{completed.stderr}",
+                )
 
     def test_render_sshd_hardening_uses_expected_limits(self) -> None:
         env = self.make_env()
