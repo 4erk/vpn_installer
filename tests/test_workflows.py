@@ -375,6 +375,25 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(wait_mock.call_count, 2)
         repair_mock.assert_called_once()
 
+    def test_run_dataplane_repair_cycle_uses_nonblocking_systemctl_restart(self) -> None:
+        ru = RemoteTarget(role=ROLE_RU)
+        foreign = RemoteTarget(role=ROLE_FOREIGN)
+        with patch("vpn_installer.workflows.print_header"), patch("vpn_installer.workflows.ssh_stream") as ssh_stream_mock:
+            workflows.run_dataplane_repair_cycle({ROLE_RU: ru, ROLE_FOREIGN: foreign}, "wg0")
+        self.assertEqual(ssh_stream_mock.call_count, 2)
+        foreign_call = ssh_stream_mock.call_args_list[0]
+        ru_call = ssh_stream_mock.call_args_list[1]
+        self.assertEqual(foreign_call.args[0], foreign)
+        self.assertIn("systemctl restart --no-block", foreign_call.args[1])
+        self.assertIn("wg-quick@wg0", foreign_call.args[1])
+        self.assertIn("vpn-stack-sync.service", foreign_call.args[1])
+        self.assertTrue(foreign_call.kwargs["as_root"])
+        self.assertEqual(ru_call.args[0], ru)
+        self.assertIn("systemctl restart --no-block", ru_call.args[1])
+        self.assertIn("wg-quick@wg0", ru_call.args[1])
+        self.assertIn("sing-box", ru_call.args[1])
+        self.assertTrue(ru_call.kwargs["as_root"])
+
     def test_ensure_deployment_health_fails_after_repair_exhaustion(self) -> None:
         env = generate_default_env("demo")
         ru = RemoteTarget(role=ROLE_RU)

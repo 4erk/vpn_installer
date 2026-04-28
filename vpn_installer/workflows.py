@@ -324,18 +324,29 @@ def health_failure_message(health: dict[str, str]) -> str:
     )
 
 
+def nonblocking_systemd_restart_command(*units: str) -> str:
+    quoted_units = " ".join(shlex.quote(unit) for unit in units)
+    return (
+        f"systemctl reset-failed {quoted_units} >/dev/null 2>&1 || true; "
+        f"systemctl restart --no-block {quoted_units}"
+    )
+
+
 def run_dataplane_repair_cycle(target_map: dict[str, RemoteTarget], wg_interface: str) -> None:
     print_header("Dataplane repair")
+    print(f"{target_map[ROLE_FOREIGN].label}: запускаю repair units без блокировки")
     ssh_stream(
         target_map[ROLE_FOREIGN],
-        f"systemctl restart wg-quick@{shlex.quote(wg_interface)} nftables vpn-stack-sync.service",
+        nonblocking_systemd_restart_command(f"wg-quick@{wg_interface}", "nftables", "vpn-stack-sync.service"),
         as_root=True,
     )
+    print(f"{target_map[ROLE_RU].label}: запускаю repair units без блокировки")
     ssh_stream(
         target_map[ROLE_RU],
-        f"systemctl restart wg-quick@{shlex.quote(wg_interface)} sing-box",
+        nonblocking_systemd_restart_command(f"wg-quick@{wg_interface}", "sing-box"),
         as_root=True,
     )
+    print("Repair-команды отправлены, жду восстановления dataplane.")
 
 
 def prime_runtime_health(targets: list[RemoteTarget]) -> None:
