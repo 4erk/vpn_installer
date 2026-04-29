@@ -381,7 +381,10 @@ def prime_runtime_health(targets: list[RemoteTarget]) -> None:
     for target in targets:
         if not target.ssh_host:
             continue
-        ssh_stream(target, "/usr/local/lib/vpn-stack/health-check.sh", as_root=True)
+        try:
+            ssh_stream(target, "/usr/local/lib/vpn-stack/health-check.sh", as_root=True)
+        except Exception as exc:  # noqa: BLE001
+            warn(f"{target.label}: runtime health reported a problem, продолжаю deployment-level проверку: {exc}")
 
 
 def wait_for_dataplane_health(

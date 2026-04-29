@@ -516,22 +516,6 @@ def render_health_script(env: dict[str, str], role: str) -> str:
             ]
         )
     )
-    role_specific_repair = (
-        "\n".join(
-            [
-                'systemctl restart "wg-quick@${WG_INTERFACE}" || true',
-                "systemctl restart sing-box || true",
-            ]
-        )
-        if role == ROLE_RU
-        else "\n".join(
-            [
-                'systemctl restart "wg-quick@${WG_INTERFACE}" || true',
-                "systemctl restart nftables || true",
-                "systemctl restart vpn-stack-sync.service || true",
-            ]
-        )
-    )
     return textwrap.dedent(
         f"""\
         #!/usr/bin/env bash
@@ -852,22 +836,6 @@ EOF
           fi
         }}
 
-        wait_for_handshake_recovery() {{
-          local deadline="" now="" age=""
-          deadline="$(( $(date +%s) + 35 ))"
-          while true; do
-            age="$(wg_handshake_age)"
-            if [[ "${{age}}" =~ ^[0-9]+$ && "${{age}}" -le "${{HANDSHAKE_GRACE}}" ]]; then
-              return 0
-            fi
-            now="$(date +%s)"
-            if [[ ! "${{now}}" =~ ^[0-9]+$ || "${{now}}" -ge "${{deadline}}" ]]; then
-              return 1
-            fi
-            sleep 2
-          done
-        }}
-
         harden_runtime
         mapfile -t hard_reasons < <(collect_hard_reasons)
         mapfile -t soft_reasons < <(collect_soft_reasons)
@@ -879,22 +847,7 @@ EOF
           exit 0
         fi
 
-        log "repairing unhealthy runtime: ${{hard_reasons[*]}}"
-        systemctl restart ssh.service || true
-        {role_specific_repair}
-        harden_runtime
-        wait_for_handshake_recovery || true
-
-        mapfile -t hard_reasons < <(collect_hard_reasons)
-        if [[ "${{#hard_reasons[@]}}" -eq 0 ]]; then
-          if [[ "${{#soft_reasons[@]}}" -gt 0 ]]; then
-            log "runtime recovered; latest deep degradation snapshot: ${{soft_reasons[*]}}"
-          fi
-          log "runtime recovered"
-          exit 0
-        fi
-
-        log "runtime still unhealthy: ${{hard_reasons[*]}}"
+        log "runtime hard failure: ${{hard_reasons[*]}}"
         if [[ "${{#soft_reasons[@]}}" -gt 0 ]]; then
           log "latest deep degradation snapshot: ${{soft_reasons[*]}}"
         fi
@@ -907,7 +860,7 @@ def render_health_service() -> str:
     return "\n".join(
         [
             "[Unit]",
-            "Description=Check and repair vpn-stack runtime health",
+            "Description=Check vpn-stack runtime health",
             "After=network-online.target ssh.service",
             "Wants=network-online.target",
             "",

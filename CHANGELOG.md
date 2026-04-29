@@ -6,6 +6,14 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.2.28] - 2026-04-29
+
+### Fixed
+
+- `vpn-stack-health.timer` больше не перезапускает `ssh`, `WireGuard`, `sing-box`, `nftables` или sync-service из фонового таймера: серверный health теперь только применяет безвредный runtime tuning, обновляет диагностический state и сообщает hard/soft verdict
+- install/reinstall больше не ломаются от non-zero server-side health script до deployment-level проверки: мастер пишет предупреждение и дальше сам принимает решение по полному health snapshot
+- убраны фоновые repair-действия, которые не могли исправить packet loss до шлюза VPS-провайдера и только маскировали реальную причину деградации `foreign`
+
 ## [0.2.27] - 2026-04-28
 
 ### Fixed

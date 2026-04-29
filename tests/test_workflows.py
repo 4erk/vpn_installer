@@ -393,6 +393,13 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(wait_mock.call_count, 2)
         repair_mock.assert_called_once()
 
+    def test_prime_runtime_health_warns_and_continues_on_health_failure(self) -> None:
+        target = RemoteTarget(role=ROLE_RU, ssh_host="ru.example")
+        with patch("vpn_installer.workflows.ssh_stream", side_effect=AppError("health failed")) as ssh_mock, patch("vpn_installer.workflows.warn") as warn_mock:
+            workflows.prime_runtime_health([target])
+        ssh_mock.assert_called_once()
+        warn_mock.assert_called_once()
+
     def test_ensure_deployment_health_soft_degradation_warns_without_repair(self) -> None:
         env = generate_default_env("demo")
         ru = RemoteTarget(role=ROLE_RU)
