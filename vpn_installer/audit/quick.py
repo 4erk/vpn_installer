@@ -4,6 +4,7 @@ import builtins
 import json
 import os
 import shutil
+import subprocess
 import tarfile
 import textwrap
 from pathlib import Path
@@ -55,10 +56,24 @@ def coverage_driver_text() -> str:
     return unittest_driver_text()
 
 
+def docker_readiness() -> tuple[bool, str]:
+    if shutil.which("docker") is None:
+        return False, "docker не найден"
+    try:
+        completed = subprocess.run(["docker", "info"], capture_output=True, text=True, timeout=10, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"docker daemon недоступен: {exc}"
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout).strip().splitlines()
+        reason = detail[0] if detail else f"docker info завершился с кодом {completed.returncode}"
+        return False, f"docker daemon недоступен: {reason}"
+    return True, ""
+
+
 def run(runner: AuditRunner) -> None:
     dev_mode = runner.mode == "all" or os.environ.get("VPN_AUDIT_DEV") == "1"
     windows_host = os.name == "nt"
-    docker_available = shutil.which("docker") is not None
+    docker_available, docker_skip_reason = docker_readiness()
     bash_available = shutil.which("bash") is not None
     powershell_available = shutil.which("powershell") is not None or shutil.which("pwsh") is not None
 
@@ -142,8 +157,8 @@ def run(runner: AuditRunner) -> None:
         runner.record("quick-singbox-check", lambda: test_singbox_check(runner, out_dir))
         runner.record("quick-singbox-runtime-ru", lambda: test_ru_singbox_runtime_smoke(runner, out_dir))
     else:
-        runner.skip("quick-singbox-check", "docker не найден, sing-box container check пропущен")
-        runner.skip("quick-singbox-runtime-ru", "docker не найден, runtime smoke для RU sing-box пропущен")
+        runner.skip("quick-singbox-check", f"{docker_skip_reason}, sing-box container check пропущен")
+        runner.skip("quick-singbox-runtime-ru", f"{docker_skip_reason}, runtime smoke для RU sing-box пропущен")
 
     if dev_mode and docker_available:
         runner.record("quick-cloud-init-schema", lambda: test_cloud_init_schema(runner, out_dir))
@@ -152,11 +167,11 @@ def run(runner: AuditRunner) -> None:
         runner.record("quick-linux-launcher-no-python", lambda: test_linux_launcher_no_python(runner))
         runner.record("quick-linux-launcher-python", lambda: test_linux_launcher_with_python(runner))
     elif dev_mode:
-        runner.skip("quick-cloud-init-schema", "docker не найден, cloud-init schema check пропущен")
-        runner.skip("quick-cloud-init-render-only", "docker не найден, cloud-init render-only check пропущен")
-        runner.skip("quick-bundle-render-only", "docker не найден, bundle render-only check пропущен")
-        runner.skip("quick-linux-launcher-no-python", "docker не найден, Linux launcher test пропущен")
-        runner.skip("quick-linux-launcher-python", "docker не найден, Linux launcher test пропущен")
+        runner.skip("quick-cloud-init-schema", f"{docker_skip_reason}, cloud-init schema check пропущен")
+        runner.skip("quick-cloud-init-render-only", f"{docker_skip_reason}, cloud-init render-only check пропущен")
+        runner.skip("quick-bundle-render-only", f"{docker_skip_reason}, bundle render-only check пропущен")
+        runner.skip("quick-linux-launcher-no-python", f"{docker_skip_reason}, Linux launcher test пропущен")
+        runner.skip("quick-linux-launcher-python", f"{docker_skip_reason}, Linux launcher test пропущен")
     else:
         runner.skip("quick-cloud-init-schema", "dev-only: cloud-init schema выполняется только в полном аудите")
         runner.skip("quick-cloud-init-render-only", "dev-only: cloud-init render-only выполняется только в полном аудите")

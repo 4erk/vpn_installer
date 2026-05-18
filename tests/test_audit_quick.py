@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import subprocess
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -78,11 +79,19 @@ class AuditQuickTests(unittest.TestCase):
                 self.skips.append(name)
 
         fake_runner = FakeRunner()
-        with patch("vpn_installer.audit.quick.shutil.which", return_value="found"), patch("vpn_installer.audit.quick.load_env_file", return_value={"DEPLOY_NAME": "demo"}):
+        docker_info = subprocess.CompletedProcess(["docker", "info"], 0, stdout="ok", stderr="")
+        with patch("vpn_installer.audit.quick.shutil.which", return_value="found"), patch("vpn_installer.audit.quick.subprocess.run", return_value=docker_info), patch("vpn_installer.audit.quick.load_env_file", return_value={"DEPLOY_NAME": "demo"}):
             quick.run(fake_runner)
         self.assertIn("quick-unittest", fake_runner.records)
         self.assertIn("quick-coverage", fake_runner.records)
         self.assertIn("ensure-audit-image", fake_runner.records)
+
+    def test_docker_readiness_treats_missing_daemon_as_unavailable(self) -> None:
+        docker_info = subprocess.CompletedProcess(["docker", "info"], 1, stdout="", stderr="daemon down\n")
+        with patch("vpn_installer.audit.quick.shutil.which", return_value="docker"), patch("vpn_installer.audit.quick.subprocess.run", return_value=docker_info):
+            ready, reason = quick.docker_readiness()
+        self.assertFalse(ready)
+        self.assertIn("docker daemon недоступен", reason)
 
 
 if __name__ == "__main__":

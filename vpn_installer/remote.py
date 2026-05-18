@@ -336,6 +336,14 @@ deep_foreign_internet_ping_loss_pct="$(state_value DEEP_FOREIGN_INTERNET_PING_LO
 deep_ru_wg_download_min_bps="$(state_value DEEP_RU_WG_DOWNLOAD_MIN_BPS)"
 deep_ru_wg_download_detail="$(state_value DEEP_RU_WG_DOWNLOAD_DETAIL)"
 deep_ru_wg_upload_bps="$(state_value DEEP_RU_WG_UPLOAD_BPS)"
+fast_foreign_ru_ping_loss_pct="$(state_value FAST_FOREIGN_RU_PING_LOSS_PCT)"
+fast_ru_foreign_ping_loss_pct="$(state_value FAST_RU_FOREIGN_PING_LOSS_PCT)"
+self_heal_last_reason="$(state_value SELF_HEAL_LAST_REASON)"
+self_heal_consecutive="$(state_value SELF_HEAL_CONSECUTIVE)"
+self_heal_last_action="$(state_value SELF_HEAL_LAST_ACTION)"
+self_heal_last_action_reason="$(state_value SELF_HEAL_LAST_ACTION_REASON)"
+self_heal_last_action_result="$(state_value SELF_HEAL_LAST_ACTION_RESULT)"
+self_heal_last_action_epoch="$(state_value SELF_HEAL_LAST_ACTION_EPOCH)"
 
 if [[ -n "${{default_iface}}" ]]; then
   default_qdisc="$(tc qdisc show dev "${{default_iface}}" 2>/dev/null | awk 'NR==1 {{print $2; exit}}')"
@@ -423,6 +431,14 @@ printf 'deep_foreign_internet_ping_loss_pct=%s\\n' "${{deep_foreign_internet_pin
 printf 'deep_ru_wg_download_min_bps=%s\\n' "${{deep_ru_wg_download_min_bps}}"
 printf 'deep_ru_wg_download_detail=%s\\n' "${{deep_ru_wg_download_detail}}"
 printf 'deep_ru_wg_upload_bps=%s\\n' "${{deep_ru_wg_upload_bps}}"
+printf 'fast_foreign_ru_ping_loss_pct=%s\\n' "${{fast_foreign_ru_ping_loss_pct}}"
+printf 'fast_ru_foreign_ping_loss_pct=%s\\n' "${{fast_ru_foreign_ping_loss_pct}}"
+printf 'self_heal_last_reason=%s\\n' "${{self_heal_last_reason}}"
+printf 'self_heal_consecutive=%s\\n' "${{self_heal_consecutive}}"
+printf 'self_heal_last_action=%s\\n' "${{self_heal_last_action}}"
+printf 'self_heal_last_action_reason=%s\\n' "${{self_heal_last_action_reason}}"
+printf 'self_heal_last_action_result=%s\\n' "${{self_heal_last_action_result}}"
+printf 'self_heal_last_action_epoch=%s\\n' "${{self_heal_last_action_epoch}}"
 printf 'installed=%s\\n' "${{installed}}"
 printf 'deployment_name=%s\\n' "${{deployment_name}}"
 printf 'role=%s\\n' "${{role}}"
@@ -488,6 +504,18 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
         print(f"foreign ping loss to internet (%): {preflight.get('deep_foreign_internet_ping_loss_pct', '-')}")
         print(f"RU over wg min download B/s: {preflight.get('deep_ru_wg_download_min_bps', '-')}")
         print(f"RU over wg upload B/s: {preflight.get('deep_ru_wg_upload_bps', '-')}")
+    if preflight.get("fast_foreign_ru_ping_loss_pct") or preflight.get("fast_ru_foreign_ping_loss_pct"):
+        print(f"fast foreign->RU ping loss (%): {preflight.get('fast_foreign_ru_ping_loss_pct', '-')}")
+        print(f"fast RU->foreign ping loss (%): {preflight.get('fast_ru_foreign_ping_loss_pct', '-')}")
+    if preflight.get("self_heal_last_action") or preflight.get("self_heal_last_reason"):
+        print(f"self-heal last reason: {preflight.get('self_heal_last_reason', '-')}")
+        print(f"self-heal consecutive: {preflight.get('self_heal_consecutive', '-')}")
+        print(
+            "self-heal last action: "
+            f"{preflight.get('self_heal_last_action', '-')}/"
+            f"{preflight.get('self_heal_last_action_result', '-')}"
+        )
+        print(f"self-heal last action reason: {preflight.get('self_heal_last_action_reason', '-')}")
     print(f"sync timer: {preflight.get('sync_timer', '-')}")
     print(f"health timer: {preflight.get('health_timer', '-')}")
     print(f"ssh service: {preflight.get('ssh_service', '-')}")

@@ -39,6 +39,10 @@ class PackageTests(unittest.TestCase):
         self.assertIn('HEALTH_SCRIPT_PATH="/usr/local/lib/vpn-stack/health-check.sh"', install_script)
         self.assertIn('HEALTH_THROUGHPUT_URLS="${HEALTH_THROUGHPUT_URLS:-https://cachefly.cachefly.net/1mb.test https://proof.ovh.net/files/1Mb.dat}"', install_script)
         self.assertIn('HEALTH_DEEP_PROBE_INTERVAL_MINUTES="${HEALTH_DEEP_PROBE_INTERVAL_MINUTES:-30}"', install_script)
+        self.assertIn('HEALTH_SELF_HEAL="${HEALTH_SELF_HEAL:-1}"', install_script)
+        self.assertIn('HEALTH_SELF_HEAL_COOLDOWN_MINUTES="${HEALTH_SELF_HEAL_COOLDOWN_MINUTES:-15}"', install_script)
+        self.assertIn('HEALTH_SELF_HEAL_MAX_ACTIONS_PER_HOUR="${HEALTH_SELF_HEAL_MAX_ACTIONS_PER_HOUR:-2}"', install_script)
+        self.assertIn('HEALTH_SELF_HEAL_CONFIRMATIONS="${HEALTH_SELF_HEAL_CONFIRMATIONS:-2}"', install_script)
         self.assertIn('net.core.default_qdisc=fq_codel', install_script)
         self.assertIn('net.core.somaxconn=4096', install_script)
         self.assertIn('net.core.netdev_max_backlog=8192', install_script)
@@ -58,7 +62,7 @@ class PackageTests(unittest.TestCase):
 
     def test_package_exposes_version_via_getattr(self) -> None:
         package = importlib.import_module("vpn_installer")
-        self.assertEqual(package.__version__, "0.2.28")
+        self.assertEqual(package.__version__, "0.2.29")
         with self.assertRaises(AttributeError):
             package.__getattr__("nope")
 

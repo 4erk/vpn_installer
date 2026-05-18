@@ -281,6 +281,12 @@ class RemoteTests(unittest.TestCase):
                     "deep_foreign_internet_ping_loss_pct": "5",
                     "deep_ru_wg_download_min_bps": "120000",
                     "deep_ru_wg_upload_bps": "800000",
+                    "fast_ru_foreign_ping_loss_pct": "25",
+                    "self_heal_last_reason": "soft:wireguard_path",
+                    "self_heal_consecutive": "2",
+                    "self_heal_last_action": "restart-wireguard",
+                    "self_heal_last_action_result": "scheduled",
+                    "self_heal_last_action_reason": "soft:wireguard_path",
                     "sync_timer": "active",
                 },
             )
@@ -299,6 +305,8 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("foreign direct min download B/s: 300000", output)
         self.assertIn("RU over wg upload B/s: 800000", output)
         self.assertIn("foreign ping loss to gateway (%): 15", output)
+        self.assertIn("fast RU->foreign ping loss (%): 25", output)
+        self.assertIn("self-heal last action: restart-wireguard/scheduled", output)
 
     def test_ensure_remote_privilege_paths(self) -> None:
         target = RemoteTarget(role=ROLE_RU)

@@ -525,6 +525,7 @@ def render_health_script(env: dict[str, str], role: str) -> str:
         WG_INTERFACE="{env['WG_INTERFACE']}"
         WAN_INTERFACE="{env.get('WAN_INTERFACE', '')}"
         RU_PUBLIC_IP="{env['RU_PUBLIC_IP']}"
+        FOREIGN_PUBLIC_IP="{env['FOREIGN_PUBLIC_IP']}"
         SSH_PORT="{env['SSH_PORT']}"
         HEALTHCHECK_URL="{env['HEALTHCHECK_URL']}"
         HEALTH_THROUGHPUT_URLS="{env['HEALTH_THROUGHPUT_URLS']}"
@@ -539,6 +540,10 @@ def render_health_script(env: dict[str, str], role: str) -> str:
         MAX_FOREIGN_INTERNET_PING_LOSS_PCT="{env['HEALTH_MAX_FOREIGN_INTERNET_PING_LOSS_PCT']}"
         HANDSHAKE_GRACE="{env['HEALTH_HANDSHAKE_GRACE_SECONDS']}"
         DISABLE_NIC_OFFLOADS="{env.get('DISABLE_NIC_OFFLOADS', '1')}"
+        SELF_HEAL_ENABLED="{env.get('HEALTH_SELF_HEAL', '1')}"
+        SELF_HEAL_COOLDOWN_MINUTES="{env.get('HEALTH_SELF_HEAL_COOLDOWN_MINUTES', '15')}"
+        SELF_HEAL_MAX_ACTIONS_PER_HOUR="{env.get('HEALTH_SELF_HEAL_MAX_ACTIONS_PER_HOUR', '2')}"
+        SELF_HEAL_CONFIRMATIONS="{env.get('HEALTH_SELF_HEAL_CONFIRMATIONS', '2')}"
         HEALTH_STATE_PATH="/var/lib/vpn-stack/health-state.env"
 
         log() {{
@@ -563,6 +568,9 @@ def render_health_script(env: dict[str, str], role: str) -> str:
         MAX_FOREIGN_RU_PING_LOSS_PCT="$(number_or_default "${{MAX_FOREIGN_RU_PING_LOSS_PCT}}" 5)"
         MAX_FOREIGN_INTERNET_PING_LOSS_PCT="$(number_or_default "${{MAX_FOREIGN_INTERNET_PING_LOSS_PCT}}" 5)"
         HEALTH_UPLOAD_BYTES="$(number_or_default "${{HEALTH_UPLOAD_BYTES}}" 1048576)"
+        SELF_HEAL_COOLDOWN_MINUTES="$(number_or_default "${{SELF_HEAL_COOLDOWN_MINUTES}}" 15)"
+        SELF_HEAL_MAX_ACTIONS_PER_HOUR="$(number_or_default "${{SELF_HEAL_MAX_ACTIONS_PER_HOUR}}" 2)"
+        SELF_HEAL_CONFIRMATIONS="$(number_or_default "${{SELF_HEAL_CONFIRMATIONS}}" 2)"
 
         detect_default_iface() {{
           ip route show default 2>/dev/null | awk '/default/ {{print $5; exit}}'
@@ -624,6 +632,32 @@ def render_health_script(env: dict[str, str], role: str) -> str:
           fi
         }}
 
+        state_escape() {{
+          sed 's/\\\\/\\\\\\\\/g; s/"/\\\\"/g' <<<"$1"
+        }}
+
+        set_state_value() {{
+          local key="$1"
+          local value="$2"
+          local tmp=""
+          mkdir -p "$(dirname "${{HEALTH_STATE_PATH}}")"
+          tmp="${{HEALTH_STATE_PATH}}.tmp.$$"
+          if [[ -r "${{HEALTH_STATE_PATH}}" ]]; then
+            awk -F= -v key="${{key}}" '$1 != key {{ print }}' "${{HEALTH_STATE_PATH}}" > "${{tmp}}"
+          else
+            : > "${{tmp}}"
+          fi
+          printf '%s="%s"\\n' "${{key}}" "$(state_escape "${{value}}")" >> "${{tmp}}"
+          mv "${{tmp}}" "${{HEALTH_STATE_PATH}}"
+        }}
+
+        reset_self_heal_observation() {{
+          if [[ -n "$(state_value SELF_HEAL_LAST_REASON)" || -n "$(state_value SELF_HEAL_CONSECUTIVE)" ]]; then
+            set_state_value SELF_HEAL_LAST_REASON ""
+            set_state_value SELF_HEAL_CONSECUTIVE "0"
+          fi
+        }}
+
         probe_download_bps() {{
           local bind_iface="$1"
           local url="$2"
@@ -673,6 +707,22 @@ def render_health_script(env: dict[str, str], role: str) -> str:
           fi
           local output loss
           output="$(ping -4 -c 10 -W 1 "${{host}}" 2>/dev/null || true)"
+          loss="$(awk -F', ' '/packets transmitted/ {{ gsub(/% packet loss/, "", $3); print $3; exit }}' <<<"${{output}}")"
+          if [[ "${{loss}}" =~ ^[0-9]+$ ]]; then
+            printf '%s' "${{loss}}"
+          else
+            printf -- '-1'
+          fi
+        }}
+
+        probe_ping_loss_pct_fast() {{
+          local host="$1"
+          if ! command -v ping >/dev/null 2>&1 || [[ -z "${{host}}" ]]; then
+            printf -- '-1'
+            return 0
+          fi
+          local output loss
+          output="$(ping -4 -c 4 -W 1 "${{host}}" 2>/dev/null || true)"
           loss="$(awk -F', ' '/packets transmitted/ {{ gsub(/% packet loss/, "", $3); print $3; exit }}' <<<"${{output}}")"
           if [[ "${{loss}}" =~ ^[0-9]+$ ]]; then
             printf '%s' "${{loss}}"
@@ -742,10 +792,23 @@ def render_health_script(env: dict[str, str], role: str) -> str:
           local direct_summary="" direct_min="-1" direct_detail="" direct_upload="-1"
           local wg_summary="" wg_min="-1" wg_detail="" wg_upload="-1"
           local gateway_ping_loss="-1" peer_ping_loss="-1" internet_ping_loss="-1"
+          local self_heal_last_reason="" self_heal_consecutive="0" self_heal_last_action_epoch="0"
+          local self_heal_action_window_epoch="0" self_heal_action_window_count="0"
+          local self_heal_last_action="" self_heal_last_action_result=""
+          local fast_foreign_ru_ping_loss="-1" fast_ru_foreign_ping_loss="-1"
           local -a reasons=()
 
           probe_at="$(date -Is)"
           probe_epoch="$(date +%s)"
+          self_heal_last_reason="$(state_value SELF_HEAL_LAST_REASON)"
+          self_heal_consecutive="$(state_value SELF_HEAL_CONSECUTIVE)"
+          self_heal_last_action_epoch="$(state_value SELF_HEAL_LAST_ACTION_EPOCH)"
+          self_heal_action_window_epoch="$(state_value SELF_HEAL_ACTION_WINDOW_EPOCH)"
+          self_heal_action_window_count="$(state_value SELF_HEAL_ACTION_WINDOW_COUNT)"
+          self_heal_last_action="$(state_value SELF_HEAL_LAST_ACTION)"
+          self_heal_last_action_result="$(state_value SELF_HEAL_LAST_ACTION_RESULT)"
+          fast_foreign_ru_ping_loss="$(state_value FAST_FOREIGN_RU_PING_LOSS_PCT)"
+          fast_ru_foreign_ping_loss="$(state_value FAST_RU_FOREIGN_PING_LOSS_PCT)"
 
           if [[ "${{ROLE}}" == "foreign-exit" ]]; then
             direct_summary="$(probe_multi_download_summary "")"
@@ -802,12 +865,135 @@ DEEP_FOREIGN_INTERNET_PING_LOSS_PCT="${{internet_ping_loss}}"
 DEEP_RU_WG_DOWNLOAD_MIN_BPS="${{wg_min}}"
 DEEP_RU_WG_DOWNLOAD_DETAIL="${{wg_detail}}"
 DEEP_RU_WG_UPLOAD_BPS="${{wg_upload}}"
+FAST_FOREIGN_RU_PING_LOSS_PCT="${{fast_foreign_ru_ping_loss:-1}}"
+FAST_RU_FOREIGN_PING_LOSS_PCT="${{fast_ru_foreign_ping_loss:-1}}"
+SELF_HEAL_LAST_REASON="${{self_heal_last_reason}}"
+SELF_HEAL_CONSECUTIVE="${{self_heal_consecutive:-0}}"
+SELF_HEAL_LAST_ACTION_EPOCH="${{self_heal_last_action_epoch:-0}}"
+SELF_HEAL_ACTION_WINDOW_EPOCH="${{self_heal_action_window_epoch:-0}}"
+SELF_HEAL_ACTION_WINDOW_COUNT="${{self_heal_action_window_count:-0}}"
+SELF_HEAL_LAST_ACTION="${{self_heal_last_action}}"
+SELF_HEAL_LAST_ACTION_RESULT="${{self_heal_last_action_result}}"
 EOF
           mv "${{HEALTH_STATE_PATH}}.tmp" "${{HEALTH_STATE_PATH}}"
 
           if [[ "${{#reasons[@]}}" -gt 0 ]]; then
             printf '%s\\n' "${{reasons[@]}}"
           fi
+        }}
+
+        self_heal_reason_key() {{
+          local reason=""
+          local key=""
+          for reason in "$@"; do
+            case "${{reason}}" in
+              wg_handshake_stale=*|ru_wg_egress|foreign_ru_ping_loss=*|foreign_ru_ping_loss_fast=*|ru_foreign_ping_loss_fast=*|ru_wg_download=*|ru_wg_upload=*)
+                if [[ "${{key}}" != *wireguard_path* ]]; then
+                  key="${{key}},wireguard_path"
+                fi
+                ;;
+              foreign_direct_egress|foreign_direct_download=*|foreign_direct_upload=*)
+                if [[ "${{key}}" != *foreign_nftables* ]]; then
+                  key="${{key}},foreign_nftables"
+                fi
+                ;;
+            esac
+          done
+          key="${{key#,}}"
+          printf '%s' "${{key}}"
+        }}
+
+        self_heal_action_for_key() {{
+          local key="$1"
+          if [[ "${{key}}" == *wireguard_path* ]]; then
+            printf 'restart-wireguard'
+          elif [[ "${{ROLE}}" == "foreign-exit" && "${{key}}" == *foreign_nftables* ]]; then
+            printf 'restart-foreign-nftables'
+          else
+            printf 'none'
+          fi
+        }}
+
+        perform_self_heal_action() {{
+          local action="$1"
+          case "${{action}}" in
+            restart-wireguard)
+              systemctl restart --no-block "wg-quick@${{WG_INTERFACE}}"
+              ;;
+            restart-foreign-nftables)
+              systemctl restart --no-block nftables vpn-stack-sync.service
+              ;;
+            *)
+              return 1
+              ;;
+          esac
+        }}
+
+        maybe_self_heal() {{
+          local severity="$1"
+          shift || true
+          local reason_key="" action="" now="" last_reason="" consecutive="0"
+          local last_action_epoch="0" cooldown_s="0" window_epoch="0" window_count="0"
+          local result="scheduled"
+
+          [[ "${{SELF_HEAL_ENABLED}}" == "1" ]] || return 0
+          [[ "$#" -gt 0 ]] || return 0
+
+          reason_key="$(self_heal_reason_key "$@")"
+          [[ -n "${{reason_key}}" ]] || return 0
+
+          action="$(self_heal_action_for_key "${{reason_key}}")"
+          [[ "${{action}}" != "none" ]] || return 0
+
+          now="$(date +%s)"
+          [[ "${{now}}" =~ ^[0-9]+$ ]] || return 0
+
+          last_reason="$(state_value SELF_HEAL_LAST_REASON)"
+          consecutive="$(number_or_default "$(state_value SELF_HEAL_CONSECUTIVE)" 0)"
+          if [[ "${{last_reason}}" == "${{severity}}:${{reason_key}}" ]]; then
+            consecutive="$((consecutive + 1))"
+          else
+            consecutive="1"
+          fi
+          set_state_value SELF_HEAL_LAST_REASON "${{severity}}:${{reason_key}}"
+          set_state_value SELF_HEAL_CONSECUTIVE "${{consecutive}}"
+          set_state_value SELF_HEAL_LAST_SEEN_EPOCH "${{now}}"
+
+          if [[ "${{consecutive}}" -lt "${{SELF_HEAL_CONFIRMATIONS}}" ]]; then
+            log "self-heal pending confirmation ${{consecutive}}/${{SELF_HEAL_CONFIRMATIONS}} for ${{reason_key}}"
+            return 0
+          fi
+
+          last_action_epoch="$(number_or_default "$(state_value SELF_HEAL_LAST_ACTION_EPOCH)" 0)"
+          cooldown_s="$((SELF_HEAL_COOLDOWN_MINUTES * 60))"
+          if [[ "${{last_action_epoch}}" -gt 0 && "$((now - last_action_epoch))" -lt "${{cooldown_s}}" ]]; then
+            log "self-heal cooldown active for ${{reason_key}}"
+            return 0
+          fi
+
+          window_epoch="$(number_or_default "$(state_value SELF_HEAL_ACTION_WINDOW_EPOCH)" 0)"
+          window_count="$(number_or_default "$(state_value SELF_HEAL_ACTION_WINDOW_COUNT)" 0)"
+          if [[ "${{window_epoch}}" -le 0 || "$((now - window_epoch))" -ge 3600 ]]; then
+            window_epoch="${{now}}"
+            window_count="0"
+          fi
+          if [[ "${{window_count}}" -ge "${{SELF_HEAL_MAX_ACTIONS_PER_HOUR}}" ]]; then
+            log "self-heal hourly limit reached for ${{reason_key}}"
+            return 0
+          fi
+
+          log "self-heal action=${{action}} reason=${{reason_key}}"
+          if perform_self_heal_action "${{action}}"; then
+            result="scheduled"
+          else
+            result="failed"
+          fi
+          set_state_value SELF_HEAL_LAST_ACTION_EPOCH "${{now}}"
+          set_state_value SELF_HEAL_ACTION_WINDOW_EPOCH "${{window_epoch}}"
+          set_state_value SELF_HEAL_ACTION_WINDOW_COUNT "$((window_count + 1))"
+          set_state_value SELF_HEAL_LAST_ACTION "${{action}}"
+          set_state_value SELF_HEAL_LAST_ACTION_REASON "${{severity}}:${{reason_key}}"
+          set_state_value SELF_HEAL_LAST_ACTION_RESULT "${{result}}"
         }}
 
         collect_hard_reasons() {{
@@ -828,6 +1014,20 @@ EOF
 
         collect_soft_reasons() {{
           local deep_reasons=()
+          local fast_loss="-1"
+          if [[ "${{ROLE}}" == "foreign-exit" ]]; then
+            fast_loss="$(probe_ping_loss_pct_fast "${{RU_PUBLIC_IP}}")"
+            set_state_value FAST_FOREIGN_RU_PING_LOSS_PCT "${{fast_loss}}"
+            if [[ "${{fast_loss}}" =~ ^[0-9]+$ && "${{fast_loss}}" -gt "${{MAX_FOREIGN_RU_PING_LOSS_PCT}}" ]]; then
+              printf '%s\\n' "foreign_ru_ping_loss_fast=${{fast_loss}}"
+            fi
+          else
+            fast_loss="$(probe_ping_loss_pct_fast "${{FOREIGN_PUBLIC_IP}}")"
+            set_state_value FAST_RU_FOREIGN_PING_LOSS_PCT "${{fast_loss}}"
+            if [[ "${{fast_loss}}" =~ ^[0-9]+$ && "${{fast_loss}}" -gt "${{MAX_FOREIGN_RU_PING_LOSS_PCT}}" ]]; then
+              printf '%s\\n' "ru_foreign_ping_loss_fast=${{fast_loss}}"
+            fi
+          fi
           if should_run_deep_probe; then
             mapfile -t deep_reasons < <(run_deep_probe)
           fi
@@ -840,10 +1040,12 @@ EOF
         mapfile -t hard_reasons < <(collect_hard_reasons)
         mapfile -t soft_reasons < <(collect_soft_reasons)
         if [[ "${{#hard_reasons[@]}}" -eq 0 && "${{#soft_reasons[@]}}" -eq 0 ]]; then
+          reset_self_heal_observation
           exit 0
         fi
         if [[ "${{#hard_reasons[@]}}" -eq 0 ]]; then
           log "runtime degraded without hard failure: ${{soft_reasons[*]}}"
+          maybe_self_heal "soft" "${{soft_reasons[@]}}"
           exit 0
         fi
 
@@ -851,6 +1053,7 @@ EOF
         if [[ "${{#soft_reasons[@]}}" -gt 0 ]]; then
           log "latest deep degradation snapshot: ${{soft_reasons[*]}}"
         fi
+        maybe_self_heal "hard" "${{hard_reasons[@]}}"
         exit 1
         """
     ).strip() + "\n"
