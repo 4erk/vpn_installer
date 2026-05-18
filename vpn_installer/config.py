@@ -185,7 +185,7 @@ def generate_default_env(deploy_name: str) -> dict[str, str]:
         "RU_REALITY_PRIVATE_KEY": base64_url_nopad(reality_private),
         "RU_REALITY_PUBLIC_KEY": base64_url_nopad(reality_public),
         "RU_REALITY_SHORT_ID": "0123456789abcdef",
-        "UTLS_FINGERPRINT": "chrome",
+        "UTLS_FINGERPRINT": "randomized",
         "WG_INTERFACE": "wg0",
         "WG_PORT": "51820",
         "WG_MTU": "1380",
@@ -302,6 +302,8 @@ def merge_env_with_defaults(existing: dict[str, str], deploy_name: str) -> dict[
     for key in MERGED_SOURCE_DEFAULT_KEYS:
         if existing.get(key):
             merged[key] = _merge_source_defaults(existing[key], defaults[key])
+    if merged.get("UTLS_FINGERPRINT") == "chrome":
+        merged["UTLS_FINGERPRINT"] = defaults["UTLS_FINGERPRINT"]
     merged["DEPLOY_NAME"] = deploy_name
     return merged
 

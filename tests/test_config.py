@@ -63,6 +63,14 @@ class ConfigTests(unittest.TestCase):
         self.assertNotIn("+", env["RU_REALITY_PRIVATE_KEY"])
         self.assertNotIn("/", env["RU_REALITY_PRIVATE_KEY"])
 
+    def test_default_utls_fingerprint_uses_singbox_public_reality_compatible_value(self) -> None:
+        env = config.generate_default_env("sample")
+        self.assertEqual(env["UTLS_FINGERPRINT"], "randomized")
+
+    def test_merge_env_with_defaults_migrates_legacy_chrome_fingerprint(self) -> None:
+        env = config.merge_env_with_defaults({"UTLS_FINGERPRINT": "chrome"}, "sample")
+        self.assertEqual(env["UTLS_FINGERPRINT"], "randomized")
+
     def test_default_subscription_settings_are_not_generated_anymore(self) -> None:
         env = config.generate_default_env("sample")
         self.assertNotIn("SUBSCRIPTION_PORT", env)

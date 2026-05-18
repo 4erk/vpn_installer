@@ -10,6 +10,7 @@
 
 ### Added
 
+- default `UTLS_FINGERPRINT` изменён на `randomized`, потому что публичный sing-box Reality client с `chrome` зависал на handshake с sing-box server
 - `status` теперь проверяет список контрольных зарубежных целей (`HEALTH_TARGET_PROBE_URLS`) напрямую с `зарубежного сервера` и через `российский сервер -> wg0 -> зарубежный сервер`
 - target-probe явно классифицирует ответ как `reachable`, `blocked` или `broken`, чтобы отличать падение dataplane от блокировки конкретного выходного IP сайтом
 - клиентские артефакты теперь включают `windows-xray.json` для v2rayN/Xray core
