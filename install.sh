@@ -166,6 +166,7 @@ HEALTH_SELF_HEAL_CONFIRMATIONS="${HEALTH_SELF_HEAL_CONFIRMATIONS:-2}"
 HEALTH_TARGET_PROBE_URLS="${HEALTH_TARGET_PROBE_URLS:-https://chatgpt.com/ https://discord.com/ https://github.com/ https://www.google.com/generate_204}"
 DISABLE_NIC_OFFLOADS="${DISABLE_NIC_OFFLOADS:-1}"
 SINGBOX_CONFIG_PATH="/etc/sing-box/config.json"
+SINGBOX_REQUIRED_VERSION="1.13.12"
 WG_CONFIG_PATH="/etc/wireguard/${WG_INTERFACE}.conf"
 NFTABLES_PATH="/etc/nftables.conf"
 SSHD_CONFIG_PATH="/etc/ssh/sshd_config.d/90-vpn-stack.conf"
@@ -905,8 +906,19 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y \
   wireguard \
   wireguard-tools
 
-if ! command -v sing-box >/dev/null 2>&1; then
-  curl -fsSL https://sing-box.sagernet.org/installation/tools/install.sh | bash
+install_sing_box() {
+  curl -fsSL https://sing-box.sagernet.org/installation/tools/install.sh | bash -s -- --version "${SINGBOX_REQUIRED_VERSION}"
+}
+
+current_singbox_version() {
+  if ! command -v sing-box >/dev/null 2>&1; then
+    return 1
+  fi
+  sing-box version 2>/dev/null | awk 'NR == 1 {print $3}'
+}
+
+if [[ "$(current_singbox_version || true)" != "${SINGBOX_REQUIRED_VERSION}" ]]; then
+  install_sing_box
 fi
 
 mkdir -p "${VPNSTACK_ROOT}" /etc/sing-box /etc/wireguard /etc/ssh/sshd_config.d "${RULESET_DIR}" /usr/local/lib/vpn-stack /etc/systemd/system
