@@ -268,6 +268,48 @@ probe_download_bps() {{
   fi
 }}
 
+target_verdict() {{
+  local code="$1"
+  local exit_code="$2"
+  if [[ "${{exit_code}}" != "0" || "${{code}}" == "000" || -z "${{code}}" ]]; then
+    printf 'broken'
+  elif [[ "${{code}}" == "403" || "${{code}}" == "429" || "${{code}}" == "451" ]]; then
+    printf 'blocked'
+  elif [[ "${{code}}" =~ ^[23] || "${{code}}" == "401" || "${{code}}" == "404" || "${{code}}" == "421" ]]; then
+    printf 'reachable'
+  else
+    printf 'http_%s' "${{code}}"
+  fi
+}}
+
+probe_target_urls() {{
+  local bind_iface="$1"
+  local urls="$2"
+  local url="" label="" result="" code="" exit_code="" remote_ip="" time_total="" verdict="" joined=""
+  if ! command -v curl >/dev/null 2>&1 || [[ -z "${{urls}}" ]]; then
+    return 0
+  fi
+  for url in ${{urls}}; do
+    label="${{url#*://}}"
+    label="${{label%%/*}}"
+    if [[ -n "${{bind_iface}}" ]]; then
+      result="$(curl -4kLsS --interface "${{bind_iface}}" --connect-timeout 8 --max-time 20 -o /dev/null -w '%{{http_code}}|%{{exitcode}}|%{{remote_ip}}|%{{time_total}}' "${{url}}" 2>/dev/null || printf '000|curl_failed||0')"
+    else
+      result="$(curl -4kLsS --connect-timeout 8 --max-time 20 -o /dev/null -w '%{{http_code}}|%{{exitcode}}|%{{remote_ip}}|%{{time_total}}' "${{url}}" 2>/dev/null || printf '000|curl_failed||0')"
+    fi
+    code="${{result%%|*}}"
+    result="${{result#*|}}"
+    exit_code="${{result%%|*}}"
+    result="${{result#*|}}"
+    remote_ip="${{result%%|*}}"
+    time_total="${{result#*|}}"
+    verdict="$(target_verdict "${{code}}" "${{exit_code}}")"
+    if [[ -n "${{joined}}" ]]; then joined="${{joined}};"; fi
+    joined="${{joined}}${{label}}:${{verdict}}:${{code}}:${{exit_code}}:${{remote_ip}}:${{time_total}}"
+  done
+  printf '%s' "${{joined}}"
+}}
+
 login_user="$(id -un)"
 uid="$(id -u)"
 is_root="0"
@@ -320,10 +362,16 @@ wg_latest_handshake_age_s="-1"
 observed_ipv4="$(probe_public_ipv4)"
 wg_observed_ipv4=""
 throughput_urls="$(env_value HEALTH_THROUGHPUT_URLS)"
+target_probe_urls="$(env_value HEALTH_TARGET_PROBE_URLS)"
+if [[ -z "${{target_probe_urls}}" ]]; then
+  target_probe_urls="https://chatgpt.com/ https://discord.com/ https://github.com/ https://www.google.com/generate_204"
+fi
 throughput_url="${{throughput_urls%% *}}"
 if [[ -z "${{throughput_url}}" ]]; then throughput_url="https://cachefly.cachefly.net/1mb.test"; fi
 direct_download_bps="-1"
 wg_download_bps="-1"
+target_probe_direct=""
+target_probe_wg=""
 deep_probe_at="$(state_value DEEP_PROBE_AT)"
 deep_probe_verdict="$(state_value DEEP_PROBE_VERDICT)"
 deep_probe_reasons="$(state_value DEEP_PROBE_REASONS)"
@@ -384,9 +432,11 @@ fi
 
 if [[ "${{installed}}" == "1" ]]; then
   direct_download_bps="$(probe_download_bps "" "${{throughput_url}}")"
+  target_probe_direct="$(probe_target_urls "" "${{target_probe_urls}}")"
 fi
 if [[ "${{installed}}" == "1" && "${{role}}" == "ru-gateway" ]] && ip link show dev {wg_interface} >/dev/null 2>&1; then
   wg_download_bps="$(probe_download_bps "{wg_interface}" "${{throughput_url}}")"
+  target_probe_wg="$(probe_target_urls "{wg_interface}" "${{target_probe_urls}}")"
 fi
 
 printf 'login_user=%s\\n' "${{login_user}}"
@@ -419,6 +469,9 @@ printf 'observed_ipv4=%s\\n' "${{observed_ipv4}}"
 printf 'wg_observed_ipv4=%s\\n' "${{wg_observed_ipv4}}"
 printf 'direct_download_bps=%s\\n' "${{direct_download_bps}}"
 printf 'wg_download_bps=%s\\n' "${{wg_download_bps}}"
+printf 'target_probe_urls=%s\\n' "${{target_probe_urls}}"
+printf 'target_probe_direct=%s\\n' "${{target_probe_direct}}"
+printf 'target_probe_wg=%s\\n' "${{target_probe_wg}}"
 printf 'deep_probe_at=%s\\n' "${{deep_probe_at}}"
 printf 'deep_probe_verdict=%s\\n' "${{deep_probe_verdict}}"
 printf 'deep_probe_reasons=%s\\n' "${{deep_probe_reasons}}"
@@ -493,6 +546,9 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
     print(f"RU over wg IPv4: {preflight.get('wg_observed_ipv4', '-')}")
     print(f"direct download B/s: {preflight.get('direct_download_bps', '-')}")
     print(f"RU over wg download B/s: {preflight.get('wg_download_bps', '-')}")
+    if preflight.get("target_probe_direct") or preflight.get("target_probe_wg"):
+        print(f"target probes direct: {preflight.get('target_probe_direct', '-')}")
+        print(f"target probes RU over wg: {preflight.get('target_probe_wg', '-')}")
     if preflight.get("deep_probe_at"):
         print(f"deep probe at: {preflight.get('deep_probe_at', '-')}")
         print(f"deep probe verdict: {preflight.get('deep_probe_verdict', '-')}")

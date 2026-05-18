@@ -83,6 +83,7 @@ class WorkflowTests(unittest.TestCase):
                 "hiddify_json": Path(tmp) / "h.json",
                 "android_hiddify_json": Path(tmp) / "h-android.json",
                 "linux_json": Path(tmp) / "l.json",
+                "windows_xray_json": Path(tmp) / "xray.json",
                 "next_steps": Path(tmp) / "NEXT-STEPS.txt",
             }
             paths["vless_uri"].write_text("vless://demo\n", encoding="utf-8")
@@ -200,6 +201,9 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("wg-quick@wg-test", command)
         self.assertIn("check_service_active", command)
         self.assertIn("postcheck_failed_service", command)
+        self.assertIn('if [[ "$state" == "active" ]]', command)
+        self.assertIn('if [[ "$state" != "activating" ]]', command)
+        self.assertIn("sleep 1", command)
         self.assertIn("journalctl -u \"$service\" -n 20 --no-pager", command)
         self.assertIn("check_service_active sing-box sing-box", command)
         self.assertIn("check_service_active vpn-stack-health.timer vpn-stack-health.timer", command)

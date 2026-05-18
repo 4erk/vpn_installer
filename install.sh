@@ -163,6 +163,7 @@ HEALTH_SELF_HEAL="${HEALTH_SELF_HEAL:-1}"
 HEALTH_SELF_HEAL_COOLDOWN_MINUTES="${HEALTH_SELF_HEAL_COOLDOWN_MINUTES:-15}"
 HEALTH_SELF_HEAL_MAX_ACTIONS_PER_HOUR="${HEALTH_SELF_HEAL_MAX_ACTIONS_PER_HOUR:-2}"
 HEALTH_SELF_HEAL_CONFIRMATIONS="${HEALTH_SELF_HEAL_CONFIRMATIONS:-2}"
+HEALTH_TARGET_PROBE_URLS="${HEALTH_TARGET_PROBE_URLS:-https://chatgpt.com/ https://discord.com/ https://github.com/ https://www.google.com/generate_204}"
 DISABLE_NIC_OFFLOADS="${DISABLE_NIC_OFFLOADS:-1}"
 SINGBOX_CONFIG_PATH="/etc/sing-box/config.json"
 WG_CONFIG_PATH="/etc/wireguard/${WG_INTERFACE}.conf"
@@ -433,6 +434,27 @@ stop_managed_services() {
   systemctl stop vpn-stack-health.timer >/dev/null 2>&1 || true
   systemctl stop vpn-stack-subscription.service >/dev/null 2>&1 || true
   systemctl stop nftables >/dev/null 2>&1 || true
+}
+
+stop_legacy_xray_port_conflicts() {
+  if [[ "$ROLE" != "ru-gateway" ]] || ! command -v ss >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if ! ss -H -ltnp "sport = :${RU_LISTEN_PORT}" 2>/dev/null | grep -q 'xray'; then
+    return 0
+  fi
+
+  echo "Stopping legacy Xray services that occupy TCP ${RU_LISTEN_PORT}." >&2
+  systemctl disable --now xray-vpnstack.service xray.service >/dev/null 2>&1 || true
+  sleep 1
+  if ss -H -ltnp "sport = :${RU_LISTEN_PORT}" 2>/dev/null | grep -q 'xray'; then
+    pkill -TERM -x xray >/dev/null 2>&1 || true
+    sleep 2
+  fi
+  if ss -H -ltnp "sport = :${RU_LISTEN_PORT}" 2>/dev/null | grep -q 'xray'; then
+    pkill -KILL -x xray >/dev/null 2>&1 || true
+  fi
 }
 
 disable_managed_services() {
@@ -976,6 +998,7 @@ systemctl enable vpn-stack-health.timer
 systemctl restart vpn-stack-health.timer
 
 if [[ "$ROLE" == "ru-gateway" ]]; then
+  stop_legacy_xray_port_conflicts
   systemctl enable sing-box
   systemctl restart sing-box
 fi

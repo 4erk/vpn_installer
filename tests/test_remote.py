@@ -271,6 +271,8 @@ class RemoteTests(unittest.TestCase):
                     "wg_observed_ipv4": "198.51.100.20",
                     "direct_download_bps": "6000000",
                     "wg_download_bps": "700000",
+                    "target_probe_direct": "chatgpt.com:blocked:403:0:172.64.0.1:0.1;github.com:reachable:200:0:140.82.0.1:0.2",
+                    "target_probe_wg": "chatgpt.com:blocked:403:0:172.64.0.1:0.1;github.com:reachable:200:0:140.82.0.1:0.2",
                     "deep_probe_at": "2026-04-24T12:00:00+00:00",
                     "deep_probe_verdict": "degraded",
                     "deep_probe_reasons": "ru_wg_download=120000",
@@ -301,6 +303,8 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("RU over wg IPv4: 198.51.100.20", output)
         self.assertIn("direct download B/s: 6000000", output)
         self.assertIn("RU over wg download B/s: 700000", output)
+        self.assertIn("target probes direct: chatgpt.com:blocked:403:0", output)
+        self.assertIn("target probes RU over wg: chatgpt.com:blocked:403:0", output)
         self.assertIn("deep probe verdict: degraded", output)
         self.assertIn("foreign direct min download B/s: 300000", output)
         self.assertIn("RU over wg upload B/s: 800000", output)

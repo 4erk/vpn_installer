@@ -43,6 +43,7 @@ class PackageTests(unittest.TestCase):
         self.assertIn('HEALTH_SELF_HEAL_COOLDOWN_MINUTES="${HEALTH_SELF_HEAL_COOLDOWN_MINUTES:-15}"', install_script)
         self.assertIn('HEALTH_SELF_HEAL_MAX_ACTIONS_PER_HOUR="${HEALTH_SELF_HEAL_MAX_ACTIONS_PER_HOUR:-2}"', install_script)
         self.assertIn('HEALTH_SELF_HEAL_CONFIRMATIONS="${HEALTH_SELF_HEAL_CONFIRMATIONS:-2}"', install_script)
+        self.assertIn('HEALTH_TARGET_PROBE_URLS="${HEALTH_TARGET_PROBE_URLS:-https://chatgpt.com/ https://discord.com/ https://github.com/ https://www.google.com/generate_204}"', install_script)
         self.assertIn('net.core.default_qdisc=fq_codel', install_script)
         self.assertIn('net.core.somaxconn=4096', install_script)
         self.assertIn('net.core.netdev_max_backlog=8192', install_script)
@@ -59,10 +60,13 @@ class PackageTests(unittest.TestCase):
         self.assertIn("iputils-ping", install_script)
         self.assertIn('apply_runtime_interface_tuning "${RUNTIME_QDISC_INTERFACE}"', install_script)
         self.assertIn('apply_runtime_qdisc "${WG_INTERFACE}"', install_script)
+        self.assertIn("stop_legacy_xray_port_conflicts()", install_script)
+        self.assertIn('systemctl disable --now xray-vpnstack.service xray.service', install_script)
+        self.assertIn("stop_legacy_xray_port_conflicts\n  systemctl enable sing-box", install_script)
 
     def test_package_exposes_version_via_getattr(self) -> None:
         package = importlib.import_module("vpn_installer")
-        self.assertEqual(package.__version__, "0.2.29")
+        self.assertEqual(package.__version__, "0.2.30")
         with self.assertRaises(AttributeError):
             package.__getattr__("nope")
 

@@ -38,6 +38,19 @@ class RenderTests(unittest.TestCase):
         env = self.make_env()
         self.assertTrue(render.render_vless_uri(env).startswith("vless://"))
 
+    def test_render_xray_client_profile_uses_reality_vless(self) -> None:
+        env = self.make_env()
+        payload = json.loads(render.render_xray_client_profile(env))
+        self.assertEqual(payload["inbounds"][0]["protocol"], "socks")
+        outbound = payload["outbounds"][0]
+        self.assertEqual(outbound["protocol"], "vless")
+        self.assertEqual(outbound["settings"]["vnext"][0]["address"], env["RU_PUBLIC_IP"])
+        self.assertEqual(outbound["settings"]["vnext"][0]["port"], int(env["RU_LISTEN_PORT"]))
+        self.assertEqual(outbound["settings"]["vnext"][0]["users"][0]["id"], env["CLIENT_UUID"])
+        self.assertEqual(outbound["streamSettings"]["security"], "reality")
+        self.assertEqual(outbound["streamSettings"]["realitySettings"]["publicKey"], env["RU_REALITY_PUBLIC_KEY"])
+        self.assertEqual(outbound["streamSettings"]["realitySettings"]["shortId"], env["RU_REALITY_SHORT_ID"])
+
     def test_client_profile_is_simple_ru_tunnel(self) -> None:
         env = self.make_env()
         payload = json.loads(render.render_client_profile(env, auto_redirect=False))
@@ -143,6 +156,8 @@ class RenderTests(unittest.TestCase):
         self.assertIn("v2rayNG", text)
         self.assertIn("NekoBox", text)
         self.assertIn("Hiddify", text)
+        self.assertIn("windows-xray.json", text)
+        self.assertIn("Xray core", text)
         self.assertIn("vpn status", text)
         self.assertIn("vless-uri.txt", text)
         self.assertIn("hiddify-cross-platform.json", text)
@@ -156,6 +171,7 @@ class RenderTests(unittest.TestCase):
                 render.render_client_profiles(env)
                 client_dir = Path(tmp) / "demo" / "client"
                 self.assertTrue((client_dir / "vless-uri.txt").is_file())
+                self.assertTrue((client_dir / "windows-xray.json").is_file())
                 self.assertTrue((client_dir / "hiddify-cross-platform.json").is_file())
                 self.assertTrue((client_dir / "hiddify-android.json").is_file())
                 self.assertTrue((client_dir / "hiddify-uri.txt").is_file())
@@ -217,6 +233,8 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(paths["hiddify_uri_compat"].name, "hiddify-uri.txt")
         self.assertEqual(paths["hiddify_json"].name, "hiddify-cross-platform.json")
         self.assertEqual(paths["android_hiddify_json"].name, "hiddify-android.json")
+        self.assertEqual(paths["linux_json"].name, "linux-sing-box.json")
+        self.assertEqual(paths["windows_xray_json"].name, "windows-xray.json")
         self.assertEqual(paths["next_steps"].name, "NEXT-STEPS.txt")
 
     def test_render_client_profiles_keeps_hiddify_uri_alias_equal_to_primary_uri(self) -> None:

@@ -476,6 +476,59 @@ def render_client_profile(env: dict[str, str], auto_redirect: bool, *, android_s
         payload["inbounds"][0]["route_exclude_address"] = route_excludes
     return render_json(payload)
 
+
+def render_xray_client_profile(env: dict[str, str]) -> str:
+    payload = {
+        "log": {"loglevel": "warning"},
+        "inbounds": [
+            {
+                "tag": "socks",
+                "listen": "127.0.0.1",
+                "port": 10808,
+                "protocol": "socks",
+                "settings": {"udp": True},
+                "sniffing": {"enabled": True, "destOverride": ["http", "tls"]},
+            },
+            {
+                "tag": "http",
+                "listen": "127.0.0.1",
+                "port": 10809,
+                "protocol": "http",
+            },
+        ],
+        "outbounds": [
+            {
+                "tag": "proxy",
+                "protocol": "vless",
+                "settings": {
+                    "vnext": [
+                        {
+                            "address": env["RU_PUBLIC_IP"],
+                            "port": env_int(env, "RU_LISTEN_PORT"),
+                            "users": [{"id": env["CLIENT_UUID"], "encryption": "none", "flow": env["CLIENT_FLOW"]}],
+                        }
+                    ]
+                },
+                "streamSettings": {
+                    "network": "tcp",
+                    "security": "reality",
+                    "realitySettings": {
+                        "serverName": env["RU_REALITY_SERVER_NAME"],
+                        "fingerprint": env["UTLS_FINGERPRINT"],
+                        "publicKey": env["RU_REALITY_PUBLIC_KEY"],
+                        "shortId": env["RU_REALITY_SHORT_ID"],
+                        "spiderX": "/",
+                    },
+                },
+            },
+            {"tag": "direct", "protocol": "freedom"},
+            {"tag": "block", "protocol": "blackhole"},
+        ],
+        "routing": {"domainStrategy": "IPIfNonMatch", "rules": []},
+    }
+    return render_json(payload)
+
+
 def render_vless_uri(env: dict[str, str]) -> str:
     return f"vless://{env['CLIENT_UUID']}@{env['RU_PUBLIC_IP']}:{env['RU_LISTEN_PORT']}?security=reality&sni={env['RU_REALITY_SERVER_NAME']}&pbk={env['RU_REALITY_PUBLIC_KEY']}&sid={env['RU_REALITY_SHORT_ID']}&fp={env['UTLS_FINGERPRINT']}&type=tcp&flow={env['CLIENT_FLOW']}#{env['DEPLOY_NAME']}-ru-gateway\n"
 
@@ -1157,6 +1210,7 @@ def client_artifact_paths(env: dict[str, str]) -> dict[str, Path]:
         "hiddify_json": client_dir / "hiddify-cross-platform.json",
         "android_hiddify_json": client_dir / "hiddify-android.json",
         "linux_json": client_dir / "linux-sing-box.json",
+        "windows_xray_json": client_dir / "windows-xray.json",
         "next_steps": deployment_out_dir(env) / "NEXT-STEPS.txt",
     }
 
@@ -1171,13 +1225,14 @@ def render_next_steps(env: dict[str, str]) -> str:
             f"- Основной VLESS URI: {paths['vless_uri']}",
             f"- JSON fallback для Hiddify: {paths['hiddify_json']}",
             f"- Android JSON fallback для Hiddify: {paths['android_hiddify_json']}",
+            f"- Windows/v2rayN Xray JSON: {paths['windows_xray_json']}",
             f"- Совместимый Hiddify URI alias: {paths['hiddify_uri_compat']}",
             f"- JSON backup для Linux sing-box: {paths['linux_json']}",
             "",
             "Что делать дальше:",
             "1. На любой платформе сначала попробуй прямой VLESS URI в совместимом клиенте.",
-            f"2. Основной нейтральный файл: {paths['vless_uri'].name}. На Android предпочтительны v2rayNG или NekoBox.",
-            f"3. Если хочешь Hiddify на Windows/Linux, используй локальный JSON {paths['hiddify_json'].name}.",
+            f"2. На Windows/v2rayN используй {paths['windows_xray_json'].name} с Xray core.",
+            f"3. Основной нейтральный файл: {paths['vless_uri'].name}. На Android предпочтительны v2rayNG или NekoBox.",
             f"4. Если нужен Hiddify на Android, используй локальный JSON {paths['android_hiddify_json'].name}. Этот путь считается совместимым, но не эталонным.",
             f"5. Файл {paths['hiddify_uri_compat'].name} оставлен как совместимый alias того же VLESS URI для старых сценариев.",
             f"6. Для проверки серверов потом запусти: vpn status --deployment {env['DEPLOY_NAME']}",
@@ -1210,6 +1265,7 @@ def render_client_profiles(env: dict[str, str]) -> Path:
     write_text(paths["hiddify_json"], render_client_profile(env, auto_redirect=False))
     write_text(paths["android_hiddify_json"], render_client_profile(env, auto_redirect=False, android_safe=True))
     write_text(paths["linux_json"], render_client_profile(env, auto_redirect=True))
+    write_text(paths["windows_xray_json"], render_xray_client_profile(env))
     uri_payload = render_vless_uri(env)
     write_text(paths["vless_uri"], uri_payload)
     write_text(paths["hiddify_uri_compat"], uri_payload)

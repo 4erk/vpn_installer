@@ -110,6 +110,7 @@
 Основные клиентские файлы:
 
 - `out/<name>/client/vless-uri.txt`
+- `out/<name>/client/windows-xray.json`
 - `out/<name>/client/hiddify-cross-platform.json`
 - `out/<name>/client/hiddify-android.json`
 - `out/<name>/client/hiddify-uri.txt`
@@ -170,6 +171,7 @@
   - `WireGuard` transfer/handshake summary
   - observed public IPv4 на `зарубежном сервере`
   - observed public IPv4 на `российском сервере` через `wg0`
+  - target probes по `HEALTH_TARGET_PROBE_URLS`: `reachable`, `blocked` или `broken`
   - итоговый `health verdict`
 
 ### remove / purge

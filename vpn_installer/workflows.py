@@ -577,11 +577,20 @@ def postcheck_command(role: str, wg_interface: str) -> str:
         check_service_active() {{
           local service="$1"
           local label="$2"
-          if systemctl is-active --quiet "$service"; then
-            return 0
-          fi
+          local state=""
+          local attempt
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            state="$(systemctl is-active "$service" 2>/dev/null || true)"
+            if [[ "$state" == "active" ]]; then
+              return 0
+            fi
+            if [[ "$state" != "activating" ]]; then
+              break
+            fi
+            sleep 1
+          done
           printf 'postcheck_failed_service=%s\\n' "${{label}}"
-          printf 'postcheck_service_state=%s\\n' "$(systemctl is-active "$service" 2>/dev/null || true)"
+          printf 'postcheck_service_state=%s\\n' "${{state:-$(systemctl is-active "$service" 2>/dev/null || true)}}"
           printf 'postcheck_service_enabled=%s\\n' "$(systemctl is-enabled "$service" 2>/dev/null || true)"
           systemctl status "$service" --no-pager --full || true
           journalctl -u "$service" -n 20 --no-pager || true
@@ -698,14 +707,15 @@ def finalize_install_output(env: dict[str, str], deployment_name: str) -> None:
     print(f"Основной VLESS URI: {paths['vless_uri']}")
     print(f"JSON fallback для Hiddify: {paths['hiddify_json']}")
     print(f"Android JSON fallback для Hiddify: {paths['android_hiddify_json']}")
+    print(f"Windows/v2rayN Xray JSON: {paths['windows_xray_json']}")
     print(f"Hiddify URI alias: {paths['hiddify_uri_compat']}")
     print(f"JSON backup для Linux: {paths['linux_json']}")
     print(f"Следующие шаги: {paths['next_steps']}")
     print(clipboard_message)
     print("Что делать дальше:")
     print("1. На любой платформе сначала используй прямой VLESS URI.")
-    print(f"2. Основной файл: {paths['vless_uri'].name}. На Android эталонные клиенты: v2rayNG или NekoBox.")
-    print(f"3. Если хочешь Hiddify на Windows/Linux, используй локальный JSON {paths['hiddify_json'].name}.")
+    print(f"2. На Windows/v2rayN используй {paths['windows_xray_json'].name} с Xray core.")
+    print(f"3. Основной файл: {paths['vless_uri'].name}. На Android эталонные клиенты: v2rayNG или NekoBox.")
     print(f"4. Если нужен Hiddify на Android, используй локальный JSON {paths['android_hiddify_json'].name}.")
     print(f"5. Файл {paths['hiddify_uri_compat'].name} оставлен как совместимый alias того же VLESS URI.")
     print(f"6. Для проверки серверов потом запусти: vpn status --deployment {deployment_name}")
