@@ -304,6 +304,10 @@ def merge_env_with_defaults(existing: dict[str, str], deploy_name: str) -> dict[
             merged[key] = _merge_source_defaults(existing[key], defaults[key])
     if merged.get("UTLS_FINGERPRINT") == "chrome":
         merged["UTLS_FINGERPRINT"] = defaults["UTLS_FINGERPRINT"]
+    if merged.get("RU_REALITY_SERVER_NAME") == "www.cloudflare.com":
+        merged["RU_REALITY_SERVER_NAME"] = defaults["RU_REALITY_SERVER_NAME"]
+    if merged.get("RU_REALITY_HANDSHAKE_SERVER") == "www.cloudflare.com":
+        merged["RU_REALITY_HANDSHAKE_SERVER"] = defaults["RU_REALITY_HANDSHAKE_SERVER"]
     merged["DEPLOY_NAME"] = deploy_name
     return merged
 
