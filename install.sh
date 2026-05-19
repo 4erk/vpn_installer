@@ -165,6 +165,8 @@ HEALTH_SELF_HEAL_MAX_ACTIONS_PER_HOUR="${HEALTH_SELF_HEAL_MAX_ACTIONS_PER_HOUR:-
 HEALTH_SELF_HEAL_CONFIRMATIONS="${HEALTH_SELF_HEAL_CONFIRMATIONS:-2}"
 HEALTH_TARGET_PROBE_URLS="${HEALTH_TARGET_PROBE_URLS:-https://chatgpt.com/ https://discord.com/ https://github.com/ https://www.google.com/generate_204}"
 DISABLE_NIC_OFFLOADS="${DISABLE_NIC_OFFLOADS:-1}"
+APT_LOCK_TIMEOUT_SECONDS="${APT_LOCK_TIMEOUT_SECONDS:-900}"
+APT_LOCK_RETRY_SECONDS="${APT_LOCK_RETRY_SECONDS:-5}"
 SINGBOX_CONFIG_PATH="/etc/sing-box/config.json"
 SINGBOX_REQUIRED_VERSION="1.13.12"
 WG_CONFIG_PATH="/etc/wireguard/${WG_INTERFACE}.conf"
@@ -185,6 +187,8 @@ VPNSTACK_INSTALLED_AT_FILE="${VPNSTACK_ROOT}/installed_at"
 VPNSTACK_REMOVED_AT_FILE="${VPNSTACK_ROOT}/removed_at"
 VPNSTACK_BASELINE_DIR="${VPNSTACK_BACKUP_DIR}/baseline"
 VPNSTACK_SNAPSHOT_DIR="${VPNSTACK_BACKUP_DIR}/snapshots"
+CURRENT_ROLLBACK_DIR=""
+INSTALL_MUTATION_STARTED=0
 
 WG_RU_ADDRESS_HOST="${WG_RU_ADDRESS%%/*}"
 WG_FOREIGN_ADDRESS_HOST="${WG_FOREIGN_ADDRESS%%/*}"
@@ -328,7 +332,11 @@ managed_paths() {
     "${HEALTH_TIMER_PATH}" \
     "${SUBSCRIPTION_SERVICE_PATH}" \
     "${SUBSCRIPTION_ROOT}" \
-    "${SYSCTL_PATH}"
+    "${SYSCTL_PATH}" \
+    "${VPNSTACK_DEPLOYMENT_FILE}" \
+    "${VPNSTACK_ROLE_FILE}" \
+    "${VPNSTACK_INSTALLED_AT_FILE}" \
+    "${VPNSTACK_REMOVED_AT_FILE}"
 }
 
 backup_target_path() {
@@ -361,6 +369,7 @@ backup_rule_directory_if_present() {
 create_baseline_backup() {
   rm -rf "${VPNSTACK_BASELINE_DIR}"
   mkdir -p "${VPNSTACK_BASELINE_DIR}"
+  CURRENT_ROLLBACK_DIR="${VPNSTACK_BASELINE_DIR}"
   write_service_state_file "${VPNSTACK_BASELINE_DIR}/service-state.env"
   while IFS= read -r path; do
     backup_path_if_present "${VPNSTACK_BASELINE_DIR}" "${path}"
@@ -371,6 +380,7 @@ create_baseline_backup() {
 create_revision_snapshot() {
   local snapshot_dir="${VPNSTACK_SNAPSHOT_DIR}/$(timestamp_utc)"
   mkdir -p "${snapshot_dir}"
+  CURRENT_ROLLBACK_DIR="${snapshot_dir}"
   write_service_state_file "${snapshot_dir}/service-state.env"
   while IFS= read -r path; do
     backup_path_if_present "${snapshot_dir}" "${path}"
@@ -426,6 +436,39 @@ restore_service_state() {
   apply_service_restore_flags ssh.socket "${SSH_SOCKET_ENABLED:-0}" "${SSH_SOCKET_ACTIVE:-0}"
 }
 
+cleanup_role_artifacts() {
+  if [[ -n "${ROLE_ARTIFACTS_DIR:-}" && "${ROLE_ARTIFACTS_DIR}" == /tmp/* ]]; then
+    rm -rf "${ROLE_ARTIFACTS_DIR}"
+  fi
+}
+
+restore_install_state_on_error() {
+  if [[ "${INSTALL_MUTATION_STARTED:-0}" != "1" ]]; then
+    return 0
+  fi
+
+  if [[ -z "${CURRENT_ROLLBACK_DIR:-}" || ! -d "${CURRENT_ROLLBACK_DIR}" ]]; then
+    echo "Install failed after managed services were stopped; no rollback snapshot is available." >&2
+    return 0
+  fi
+
+  echo "Install failed after applying changes started; restoring previous files and services." >&2
+  while IFS= read -r path; do
+    restore_path_from_backup "${CURRENT_ROLLBACK_DIR}" "${path}"
+  done < <(managed_paths)
+  restore_path_from_backup "${CURRENT_ROLLBACK_DIR}" "${RULESET_DIR}"
+  sysctl --system >/dev/null 2>&1 || true
+  restore_service_state "${CURRENT_ROLLBACK_DIR}/service-state.env"
+}
+
+install_exit_trap() {
+  local exit_code="$1"
+  if [[ "${exit_code}" -ne 0 ]]; then
+    restore_install_state_on_error || true
+  fi
+  cleanup_role_artifacts
+}
+
 stop_managed_services() {
   systemctl stop sing-box >/dev/null 2>&1 || true
   systemctl stop "wg-quick@${WG_INTERFACE}" >/dev/null 2>&1 || true
@@ -456,6 +499,45 @@ stop_legacy_xray_port_conflicts() {
   if ss -H -ltnp "sport = :${RU_LISTEN_PORT}" 2>/dev/null | grep -q 'xray'; then
     pkill -KILL -x xray >/dev/null 2>&1 || true
   fi
+}
+
+dpkg_lock_holders() {
+  if ! command -v fuser >/dev/null 2>&1; then
+    return 0
+  fi
+
+  local locks=(
+    /var/lib/dpkg/lock-frontend
+    /var/lib/dpkg/lock
+    /var/cache/apt/archives/lock
+    /var/lib/apt/lists/lock
+  )
+  fuser "${locks[@]}" 2>/dev/null || true
+}
+
+wait_for_dpkg_locks() {
+  local deadline=$((SECONDS + APT_LOCK_TIMEOUT_SECONDS))
+  local holders
+
+  while true; do
+    holders="$(dpkg_lock_holders)"
+    if [[ -z "${holders//[[:space:]]/}" ]]; then
+      return 0
+    fi
+
+    if (( SECONDS >= deadline )); then
+      echo "Timed out waiting for apt/dpkg lock holders: ${holders}" >&2
+      return 1
+    fi
+
+    echo "Waiting for apt/dpkg lock holders: ${holders}" >&2
+    sleep "${APT_LOCK_RETRY_SECONDS}"
+  done
+}
+
+run_apt_get() {
+  wait_for_dpkg_locks
+  DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout="${APT_LOCK_TIMEOUT_SECONDS}" "$@"
 }
 
 disable_managed_services() {
@@ -888,12 +970,8 @@ else
   create_revision_snapshot
 fi
 
-if [[ "$ACTION" == "reinstall" ]]; then
-  stop_managed_services
-fi
-
-apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -y \
+run_apt_get update
+run_apt_get install -y \
   apt-transport-https \
   ca-certificates \
   curl \
@@ -934,7 +1012,11 @@ if [[ "$ROLE" == "foreign-exit" ]]; then
 fi
 
 ROLE_ARTIFACTS_DIR="$(prepare_role_artifacts)"
-trap 'if [[ -n "${ROLE_ARTIFACTS_DIR:-}" && "${ROLE_ARTIFACTS_DIR}" == /tmp/* ]]; then rm -rf "${ROLE_ARTIFACTS_DIR}"; fi' EXIT
+trap 'exit_code=$?; install_exit_trap "${exit_code}"; trap - EXIT; exit "${exit_code}"' EXIT
+INSTALL_MUTATION_STARTED=1
+if [[ "$ACTION" == "reinstall" ]]; then
+  stop_managed_services
+fi
 copy_role_artifacts "${ROLE_ARTIFACTS_DIR}"
 
 if [[ "$ROLE" == "ru-gateway" ]]; then

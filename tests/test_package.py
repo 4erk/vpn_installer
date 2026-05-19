@@ -44,6 +44,10 @@ class PackageTests(unittest.TestCase):
         self.assertIn('HEALTH_SELF_HEAL_MAX_ACTIONS_PER_HOUR="${HEALTH_SELF_HEAL_MAX_ACTIONS_PER_HOUR:-2}"', install_script)
         self.assertIn('HEALTH_SELF_HEAL_CONFIRMATIONS="${HEALTH_SELF_HEAL_CONFIRMATIONS:-2}"', install_script)
         self.assertIn('HEALTH_TARGET_PROBE_URLS="${HEALTH_TARGET_PROBE_URLS:-https://chatgpt.com/ https://discord.com/ https://github.com/ https://www.google.com/generate_204}"', install_script)
+        self.assertIn('APT_LOCK_TIMEOUT_SECONDS="${APT_LOCK_TIMEOUT_SECONDS:-900}"', install_script)
+        self.assertIn('apt-get -o DPkg::Lock::Timeout="${APT_LOCK_TIMEOUT_SECONDS}" "$@"', install_script)
+        self.assertIn("restore_install_state_on_error()", install_script)
+        self.assertIn("Install failed after applying changes started; restoring previous files and services.", install_script)
         self.assertIn('net.core.default_qdisc=fq_codel', install_script)
         self.assertIn('net.core.somaxconn=4096', install_script)
         self.assertIn('net.core.netdev_max_backlog=8192', install_script)
@@ -67,9 +71,18 @@ class PackageTests(unittest.TestCase):
         self.assertIn('systemctl disable --now xray-vpnstack.service xray.service', install_script)
         self.assertIn("stop_legacy_xray_port_conflicts\n  systemctl enable sing-box", install_script)
 
+    def test_reinstall_waits_for_apt_before_stopping_services(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        install_script = (repo_root / "install.sh").read_text(encoding="utf-8")
+        apt_index = install_script.index("run_apt_get update")
+        stop_index = install_script.index('if [[ "$ACTION" == "reinstall" ]]; then\n  stop_managed_services\nfi')
+        copy_index = install_script.index('copy_role_artifacts "${ROLE_ARTIFACTS_DIR}"')
+        self.assertLess(apt_index, stop_index)
+        self.assertLess(stop_index, copy_index)
+
     def test_package_exposes_version_via_getattr(self) -> None:
         package = importlib.import_module("vpn_installer")
-        self.assertEqual(package.__version__, "0.2.32")
+        self.assertEqual(package.__version__, "0.2.33")
         with self.assertRaises(AttributeError):
             package.__getattr__("nope")
 
