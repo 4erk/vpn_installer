@@ -480,6 +480,38 @@ stop_managed_services() {
   systemctl stop nftables >/dev/null 2>&1 || true
 }
 
+cleanup_wireguard_policy_routes() {
+  if ! command -v ip >/dev/null 2>&1; then
+    return 0
+  fi
+
+  ip -4 rule del fwmark "${APP_ROUTE_MARK}" table "${WG_ROUTE_TABLE}" priority 10000 >/dev/null 2>&1 || true
+  ip -4 route del default dev "${WG_INTERFACE}" table "${WG_ROUTE_TABLE}" >/dev/null 2>&1 || true
+}
+
+cleanup_stale_wireguard_interface() {
+  if ! command -v ip >/dev/null 2>&1; then
+    return 0
+  fi
+  if systemctl is-active "wg-quick@${WG_INTERFACE}" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  cleanup_wireguard_policy_routes
+  if ip link show "${WG_INTERFACE}" >/dev/null 2>&1; then
+    echo "Removing stale WireGuard interface ${WG_INTERFACE} before start." >&2
+    ip link delete dev "${WG_INTERFACE}" >/dev/null 2>&1 || true
+  fi
+}
+
+restart_wireguard_service() {
+  systemctl stop "wg-quick@${WG_INTERFACE}" >/dev/null 2>&1 || true
+  cleanup_stale_wireguard_interface
+  systemctl reset-failed "wg-quick@${WG_INTERFACE}" >/dev/null 2>&1 || true
+  systemctl enable "wg-quick@${WG_INTERFACE}"
+  systemctl start "wg-quick@${WG_INTERFACE}"
+}
+
 stop_legacy_xray_port_conflicts() {
   if [[ "$ROLE" != "ru-gateway" ]] || ! command -v ss >/dev/null 2>&1; then
     return 0
@@ -1078,8 +1110,7 @@ systemctl restart nftables
 if [[ "$ROLE" == "foreign-exit" ]]; then
   apply_foreign_ru_block_from_local_assets
 fi
-systemctl enable "wg-quick@${WG_INTERFACE}"
-systemctl restart "wg-quick@${WG_INTERFACE}"
+restart_wireguard_service
 systemctl enable vpn-stack-sync.timer
 systemctl restart vpn-stack-sync.timer
 if ! systemctl start vpn-stack-sync.service; then

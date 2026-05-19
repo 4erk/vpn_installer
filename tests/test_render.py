@@ -259,6 +259,21 @@ class RenderTests(unittest.TestCase):
         self.assertIn("vpn-stack-health.service", files)
         self.assertIn("vpn-stack-health.timer", files)
 
+    def test_ru_wireguard_hooks_are_restart_safe(self) -> None:
+        env = self.make_env()
+        config = render.render_ru_wg(env)
+        self.assertIn(f"PostUp = ip -4 route replace default dev {env['WG_INTERFACE']} table {env['WG_ROUTE_TABLE']}", config)
+        self.assertIn(
+            f"PostUp = ip -4 rule del fwmark {env['APP_ROUTE_MARK']} table {env['WG_ROUTE_TABLE']} priority 10000 2>/dev/null || true",
+            config,
+        )
+        self.assertIn(
+            f"PreDown = ip -4 rule del fwmark {env['APP_ROUTE_MARK']} table {env['WG_ROUTE_TABLE']} priority 10000 2>/dev/null || true",
+            config,
+        )
+        self.assertIn(f"PreDown = ip -4 route del default dev {env['WG_INTERFACE']} table {env['WG_ROUTE_TABLE']} 2>/dev/null || true", config)
+        self.assertNotIn("PostUp = ip -4 route add default", config)
+
     def test_render_health_script_hardens_ru_runtime(self) -> None:
         env = self.make_env()
         script = render.render_health_script(env, render.ROLE_RU)

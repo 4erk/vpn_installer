@@ -70,6 +70,11 @@ class PackageTests(unittest.TestCase):
         self.assertIn("stop_legacy_xray_port_conflicts()", install_script)
         self.assertIn('systemctl disable --now xray-vpnstack.service xray.service', install_script)
         self.assertIn("stop_legacy_xray_port_conflicts\n  systemctl enable sing-box", install_script)
+        self.assertIn("cleanup_stale_wireguard_interface()", install_script)
+        self.assertIn('ip link delete dev "${WG_INTERFACE}"', install_script)
+        self.assertIn("restart_wireguard_service()", install_script)
+        self.assertIn('systemctl start "wg-quick@${WG_INTERFACE}"', install_script)
+        self.assertNotIn('systemctl restart "wg-quick@${WG_INTERFACE}"', install_script)
 
     def test_reinstall_waits_for_apt_before_stopping_services(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
@@ -82,7 +87,7 @@ class PackageTests(unittest.TestCase):
 
     def test_package_exposes_version_via_getattr(self) -> None:
         package = importlib.import_module("vpn_installer")
-        self.assertEqual(package.__version__, "0.2.33")
+        self.assertEqual(package.__version__, "0.2.34")
         with self.assertRaises(AttributeError):
             package.__getattr__("nope")
 

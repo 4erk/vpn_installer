@@ -6,6 +6,13 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.2.34] - 2026-05-19
+
+### Fixed
+
+- RU WireGuard hooks теперь безопасны для повторного `reinstall`: `PreDown` не валит остановку, если policy rule/route уже отсутствуют, а `PostUp` использует idempotent route replace
+- `install.sh` перед стартом `wg-quick@<iface>` удаляет stale WireGuard interface после неудачного предыдущего stop, чтобы ошибка `wg-quick: 'wg0' already exists` не блокировала переустановку
+
 ## [0.2.33] - 2026-05-19
 
 ### Fixed
