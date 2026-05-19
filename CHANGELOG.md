@@ -6,6 +6,13 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.2.36] - 2026-05-19
+
+### Fixed
+
+- `ru-gateway` health теперь явно проверяет main-route до WireGuard IP `foreign-exit`; если маршрут исчез после рестарта интерфейса, причина фиксируется как `ru_wg_peer_route_missing`
+- server-side self-heal для `ru-gateway` умеет восстановить runtime host-route до `foreign-exit`, вместо ложного зелёного статуса при сломанном обратном WG path
+
 ## [0.2.35] - 2026-05-19
 
 ### Fixed

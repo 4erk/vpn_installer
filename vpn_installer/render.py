@@ -558,11 +558,19 @@ def render_health_script(env: dict[str, str], role: str) -> str:
     role_specific_wg_probe = (
         "\n".join(
             [
+                'route_to_foreign_wg_ok() {',
+                '  ip -4 route get "${WG_FOREIGN_ADDRESS_HOST}" 2>/dev/null | grep -Eq "(^| )dev ${WG_INTERFACE}( |$)"',
+                '}',
+                "",
                 'probe_wireguard_path() {',
-                '  probe_http_ipv4 "${WG_INTERFACE}"',
+                '  route_to_foreign_wg_ok && probe_http_ipv4 "${WG_INTERFACE}"',
                 '}',
                 "",
                 "append_wireguard_path_reason() {",
+                '  if ! route_to_foreign_wg_ok; then',
+                '    reasons+=("ru_wg_peer_route_missing")',
+                "    return 0",
+                "  fi",
                 '  reasons+=("ru_wg_egress")',
                 "}",
             ]
@@ -599,6 +607,7 @@ def render_health_script(env: dict[str, str], role: str) -> str:
         ROLE="{role}"
         WG_INTERFACE="{env['WG_INTERFACE']}"
         WG_RU_ADDRESS_HOST="{wg_host_address(env['WG_RU_ADDRESS'])}"
+        WG_FOREIGN_ADDRESS_HOST="{wg_host_address(env['WG_FOREIGN_ADDRESS'])}"
         WAN_INTERFACE="{env.get('WAN_INTERFACE', '')}"
         RU_PUBLIC_IP="{env['RU_PUBLIC_IP']}"
         FOREIGN_PUBLIC_IP="{env['FOREIGN_PUBLIC_IP']}"
@@ -965,6 +974,11 @@ EOF
           local key=""
           for reason in "$@"; do
             case "${{reason}}" in
+              ru_wg_peer_route_missing)
+                if [[ "${{key}}" != *ru_wireguard_route* ]]; then
+                  key="${{key}},ru_wireguard_route"
+                fi
+                ;;
               wg_handshake_stale=*|ru_wg_egress|foreign_wg_peer_unreachable|foreign_ru_ping_loss=*|foreign_ru_ping_loss_fast=*|ru_foreign_ping_loss_fast=*|ru_wg_download=*|ru_wg_upload=*)
                 if [[ "${{key}}" != *wireguard_path* ]]; then
                   key="${{key}},wireguard_path"
@@ -983,7 +997,9 @@ EOF
 
         self_heal_action_for_key() {{
           local key="$1"
-          if [[ "${{key}}" == *wireguard_path* ]]; then
+          if [[ "${{ROLE}}" == "ru-gateway" && "${{key}}" == *ru_wireguard_route* ]]; then
+            printf 'repair-ru-wireguard-route'
+          elif [[ "${{key}}" == *wireguard_path* ]]; then
             printf 'restart-wireguard'
           elif [[ "${{ROLE}}" == "foreign-exit" && "${{key}}" == *foreign_nftables* ]]; then
             printf 'restart-foreign-nftables'
@@ -997,6 +1013,9 @@ EOF
           case "${{action}}" in
             restart-wireguard)
               systemctl restart --no-block "wg-quick@${{WG_INTERFACE}}"
+              ;;
+            repair-ru-wireguard-route)
+              ip -4 route replace "${{WG_FOREIGN_ADDRESS_HOST}}/32" dev "${{WG_INTERFACE}}"
               ;;
             restart-foreign-nftables)
               systemctl restart --no-block nftables vpn-stack-sync.service
