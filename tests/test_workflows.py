@@ -234,14 +234,14 @@ class WorkflowTests(unittest.TestCase):
         )
         self.assertEqual(mismatch["health_verdict"], "foreign_ru_ip_mismatch")
 
-        stale = workflows.deployment_health_snapshot(
+        stale_with_verified_egress = workflows.deployment_health_snapshot(
             env,
             {
                 ROLE_RU: {"wg_observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "999"},
                 ROLE_FOREIGN: {"observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "999"},
             },
         )
-        self.assertEqual(stale["health_verdict"], "wg_handshake_stale")
+        self.assertEqual(stale_with_verified_egress["health_verdict"], "ok")
 
         degraded = workflows.deployment_health_snapshot(
             env,

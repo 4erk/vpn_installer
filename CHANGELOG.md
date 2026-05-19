@@ -6,6 +6,15 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.2.35] - 2026-05-19
+
+### Fixed
+
+- primary VLESS/Reality URI снова использует `fp=chrome` при текущем `sni=www.bing.com`: live-проверка показала, что серверный вход с этим профилем работает, а `fp=randomized` давал высокий риск invalid Reality handshake у пользовательских клиентов
+- server-side health больше не считает stale WireGuard handshake самостоятельным hard-failure до проверки реального WireGuard dataplane, чтобы таймер не перезапускал `wg0` на живом канале
+- `ru-gateway` теперь добавляет явный host-route до `foreign-exit` WireGuard IP в main table, чтобы `foreign-exit` мог проверять обратный WG path и не запускал ложный self-heal
+- `status` / preflight теперь показывают недавние `REALITY: processed invalid connection` по российскому серверу, чтобы отличать неправильный клиентский URI от проблем `WireGuard` или `foreign` egress
+
 ## [0.2.34] - 2026-05-19
 
 ### Fixed

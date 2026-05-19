@@ -220,7 +220,7 @@ def deployment_health_snapshot(env: dict[str, str], preflights: dict[str, dict[s
         verdict = "ru_wg_egress_failed"
     elif ru_wg_ip != foreign_ip:
         verdict = "foreign_ru_ip_mismatch"
-    elif ru_handshake_age < 0 or foreign_handshake_age < 0 or ru_handshake_age > max_age or foreign_handshake_age > max_age:
+    elif (ru_handshake_age < 0 or foreign_handshake_age < 0 or ru_handshake_age > max_age or foreign_handshake_age > max_age) and not (foreign_ip and ru_wg_ip == foreign_ip):
         verdict = "wg_handshake_stale"
     elif foreign_gateway_ping_loss_pct >= 0 and foreign_gateway_ping_loss_pct > max_foreign_internet_ping_loss_pct:
         verdict = "foreign_gateway_ping_loss_degraded"

@@ -32,17 +32,20 @@ from vpn_installer.remote import (
 
 class RemoteTests(unittest.TestCase):
     def test_preflight_uses_configured_interface(self) -> None:
-        self.assertIn("wg-quick@wg-test", preflight_script("wg-test"))
-        self.assertIn("wg_latest_handshake_age_s", preflight_script("wg-test"))
-        self.assertIn("observed_ipv4", preflight_script("wg-test"))
-        self.assertIn("wg_observed_ipv4", preflight_script("wg-test"))
-        self.assertIn("direct_download_bps", preflight_script("wg-test"))
-        self.assertIn("wg_download_bps", preflight_script("wg-test"))
-        self.assertIn("deep_probe_verdict", preflight_script("wg-test"))
-        self.assertIn("deep_foreign_direct_download_min_bps", preflight_script("wg-test"))
-        self.assertIn("deep_ru_wg_upload_bps", preflight_script("wg-test"))
-        self.assertIn("wan_offload_gro", preflight_script("wg-test"))
-        self.assertIn("wan_offload_tso", preflight_script("wg-test"))
+        script = preflight_script("wg-test")
+        self.assertIn("wg-quick@wg-test", script)
+        self.assertIn("wg_latest_handshake_age_s", script)
+        self.assertIn("observed_ipv4", script)
+        self.assertIn("wg_observed_ipv4", script)
+        self.assertIn("direct_download_bps", script)
+        self.assertIn("wg_download_bps", script)
+        self.assertIn("deep_probe_verdict", script)
+        self.assertIn("deep_foreign_direct_download_min_bps", script)
+        self.assertIn("deep_ru_wg_upload_bps", script)
+        self.assertIn("wan_offload_gro", script)
+        self.assertIn("wan_offload_tso", script)
+        self.assertGreaterEqual(script.count("latest-handshakes"), 2)
+        self.assertIn("reality_invalid_recent_count", script)
 
     def test_password_mode_forces_python_backend(self) -> None:
         target = RemoteTarget(role=ROLE_RU, auth_mode="password")
@@ -289,6 +292,8 @@ class RemoteTests(unittest.TestCase):
                     "self_heal_last_action": "restart-wireguard",
                     "self_heal_last_action_result": "scheduled",
                     "self_heal_last_action_reason": "soft:wireguard_path",
+                    "reality_invalid_recent_count": "7",
+                    "reality_invalid_recent_sources": "178.66.129.100=7",
                     "sync_timer": "active",
                 },
             )
@@ -311,6 +316,8 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("foreign ping loss to gateway (%): 15", output)
         self.assertIn("fast RU->foreign ping loss (%): 25", output)
         self.assertIn("self-heal last action: restart-wireguard/scheduled", output)
+        self.assertIn("recent invalid Reality handshakes: 7", output)
+        self.assertIn("invalid Reality sources: 178.66.129.100=7", output)
 
     def test_ensure_remote_privilege_paths(self) -> None:
         target = RemoteTarget(role=ROLE_RU)

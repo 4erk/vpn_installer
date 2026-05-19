@@ -36,7 +36,10 @@ class RenderTests(unittest.TestCase):
 
     def test_render_vless_uri(self) -> None:
         env = self.make_env()
-        self.assertTrue(render.render_vless_uri(env).startswith("vless://"))
+        uri = render.render_vless_uri(env)
+        self.assertTrue(uri.startswith("vless://"))
+        self.assertIn("&sni=www.bing.com&", uri)
+        self.assertIn("&fp=chrome&", uri)
 
     def test_render_xray_client_profile_uses_reality_vless(self) -> None:
         env = self.make_env()
@@ -48,6 +51,7 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(outbound["settings"]["vnext"][0]["port"], int(env["RU_LISTEN_PORT"]))
         self.assertEqual(outbound["settings"]["vnext"][0]["users"][0]["id"], env["CLIENT_UUID"])
         self.assertEqual(outbound["streamSettings"]["security"], "reality")
+        self.assertEqual(outbound["streamSettings"]["realitySettings"]["fingerprint"], "chrome")
         self.assertEqual(outbound["streamSettings"]["realitySettings"]["publicKey"], env["RU_REALITY_PUBLIC_KEY"])
         self.assertEqual(outbound["streamSettings"]["realitySettings"]["shortId"], env["RU_REALITY_SHORT_ID"])
 
@@ -259,9 +263,26 @@ class RenderTests(unittest.TestCase):
         self.assertIn("vpn-stack-health.service", files)
         self.assertIn("vpn-stack-health.timer", files)
 
+    def test_health_script_probes_wireguard_path_before_stale_handshake_verdict(self) -> None:
+        env = self.make_env()
+        ru_script = render.render_health_script(env, render.ROLE_RU)
+        self.assertIn("probe_wireguard_path()", ru_script)
+        self.assertIn('probe_http_ipv4 "${WG_INTERFACE}"', ru_script)
+        self.assertIn('reasons+=("ru_wg_egress")', ru_script)
+        self.assertLess(ru_script.index("if ! probe_wireguard_path; then"), ru_script.index('age="$(wg_handshake_age)"'))
+
+    def test_foreign_health_script_checks_wg_peer_not_only_direct_egress(self) -> None:
+        env = self.make_env()
+        foreign_script = render.render_health_script(env, render.ROLE_FOREIGN)
+        self.assertIn('ping -4 -I "${WG_INTERFACE}" -c 1 -W 2 "${WG_RU_ADDRESS_HOST}"', foreign_script)
+        self.assertIn('reasons+=("foreign_wg_peer_unreachable")', foreign_script)
+        self.assertIn('reasons+=("foreign_direct_egress")', foreign_script)
+
     def test_ru_wireguard_hooks_are_restart_safe(self) -> None:
         env = self.make_env()
         config = render.render_ru_wg(env)
+        foreign_wg_host = render.wg_host_address(env["WG_FOREIGN_ADDRESS"])
+        self.assertIn(f"PostUp = ip -4 route replace {foreign_wg_host}/32 dev {env['WG_INTERFACE']}", config)
         self.assertIn(f"PostUp = ip -4 route replace default dev {env['WG_INTERFACE']} table {env['WG_ROUTE_TABLE']}", config)
         self.assertIn(
             f"PostUp = ip -4 rule del fwmark {env['APP_ROUTE_MARK']} table {env['WG_ROUTE_TABLE']} priority 10000 2>/dev/null || true",
@@ -272,6 +293,7 @@ class RenderTests(unittest.TestCase):
             config,
         )
         self.assertIn(f"PreDown = ip -4 route del default dev {env['WG_INTERFACE']} table {env['WG_ROUTE_TABLE']} 2>/dev/null || true", config)
+        self.assertIn(f"PreDown = ip -4 route del {foreign_wg_host}/32 dev {env['WG_INTERFACE']} 2>/dev/null || true", config)
         self.assertNotIn("PostUp = ip -4 route add default", config)
 
     def test_render_health_script_hardens_ru_runtime(self) -> None:

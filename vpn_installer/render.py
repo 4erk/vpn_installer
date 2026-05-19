@@ -170,11 +170,13 @@ def render_ru_wg(env: dict[str, str]) -> str:
             f"MTU = {env['WG_MTU']}",
             f"FwMark = {env['WG_TUNNEL_FWMARK']}",
             "Table = off",
+            f"PostUp = ip -4 route replace {wg_host_address(env['WG_FOREIGN_ADDRESS'])}/32 dev {env['WG_INTERFACE']}",
             f"PostUp = ip -4 route replace default dev {env['WG_INTERFACE']} table {env['WG_ROUTE_TABLE']}",
             f"PostUp = ip -4 rule del fwmark {env['APP_ROUTE_MARK']} table {env['WG_ROUTE_TABLE']} priority 10000 2>/dev/null || true",
             f"PostUp = ip -4 rule add fwmark {env['APP_ROUTE_MARK']} table {env['WG_ROUTE_TABLE']} priority 10000",
             f"PreDown = ip -4 rule del fwmark {env['APP_ROUTE_MARK']} table {env['WG_ROUTE_TABLE']} priority 10000 2>/dev/null || true",
             f"PreDown = ip -4 route del default dev {env['WG_INTERFACE']} table {env['WG_ROUTE_TABLE']} 2>/dev/null || true",
+            f"PreDown = ip -4 route del {wg_host_address(env['WG_FOREIGN_ADDRESS'])}/32 dev {env['WG_INTERFACE']} 2>/dev/null || true",
             "",
             "[Peer]",
             f"PublicKey = {env['WG_FOREIGN_PUBLIC_KEY']}",
@@ -553,14 +555,33 @@ def render_sshd_hardening(env: dict[str, str]) -> str:
 
 
 def render_health_script(env: dict[str, str], role: str) -> str:
-    role_specific_probe = (
+    role_specific_wg_probe = (
         "\n".join(
             [
-                'if ! probe_http_ipv4 "${WG_INTERFACE}"; then',
+                'probe_wireguard_path() {',
+                '  probe_http_ipv4 "${WG_INTERFACE}"',
+                '}',
+                "",
+                "append_wireguard_path_reason() {",
                 '  reasons+=("ru_wg_egress")',
-                "fi",
+                "}",
             ]
         )
+        if role == ROLE_RU
+        else "\n".join(
+            [
+                'probe_wireguard_path() {',
+                '  ping -4 -I "${WG_INTERFACE}" -c 1 -W 2 "${WG_RU_ADDRESS_HOST}" >/dev/null 2>&1',
+                '}',
+                "",
+                "append_wireguard_path_reason() {",
+                '  reasons+=("foreign_wg_peer_unreachable")',
+                "}",
+            ]
+        )
+    )
+    role_specific_direct_probe = (
+        ""
         if role == ROLE_RU
         else "\n".join(
             [
@@ -577,6 +598,7 @@ def render_health_script(env: dict[str, str], role: str) -> str:
 
         ROLE="{role}"
         WG_INTERFACE="{env['WG_INTERFACE']}"
+        WG_RU_ADDRESS_HOST="{wg_host_address(env['WG_RU_ADDRESS'])}"
         WAN_INTERFACE="{env.get('WAN_INTERFACE', '')}"
         RU_PUBLIC_IP="{env['RU_PUBLIC_IP']}"
         FOREIGN_PUBLIC_IP="{env['FOREIGN_PUBLIC_IP']}"
@@ -678,6 +700,8 @@ def render_health_script(env: dict[str, str], role: str) -> str:
           done
           return 1
         }}
+
+        {textwrap.indent(role_specific_wg_probe, '        ')}
 
         state_value() {{
           local key="$1"
@@ -941,7 +965,7 @@ EOF
           local key=""
           for reason in "$@"; do
             case "${{reason}}" in
-              wg_handshake_stale=*|ru_wg_egress|foreign_ru_ping_loss=*|foreign_ru_ping_loss_fast=*|ru_foreign_ping_loss_fast=*|ru_wg_download=*|ru_wg_upload=*)
+              wg_handshake_stale=*|ru_wg_egress|foreign_wg_peer_unreachable|foreign_ru_ping_loss=*|foreign_ru_ping_loss_fast=*|ru_foreign_ping_loss_fast=*|ru_wg_download=*|ru_wg_upload=*)
                 if [[ "${{key}}" != *wireguard_path* ]]; then
                   key="${{key}},wireguard_path"
                 fi
@@ -1056,11 +1080,14 @@ EOF
           if ! ssh_banner_ok; then
             reasons+=("ssh_banner")
           fi
+          if ! probe_wireguard_path; then
+            append_wireguard_path_reason
+          fi
           age="$(wg_handshake_age)"
           if [[ "${{age}}" =~ ^[0-9]+$ && "${{age}}" -gt "${{HANDSHAKE_GRACE}}" ]]; then
             reasons+=("wg_handshake_stale=${{age}}")
           fi
-        {textwrap.indent(role_specific_probe, '  ')}
+        {textwrap.indent(role_specific_direct_probe, '  ')}
           if [[ "${{#reasons[@]}}" -gt 0 ]]; then
             printf '%s\\n' "${{reasons[@]}}"
           fi

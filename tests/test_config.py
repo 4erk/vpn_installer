@@ -63,13 +63,13 @@ class ConfigTests(unittest.TestCase):
         self.assertNotIn("+", env["RU_REALITY_PRIVATE_KEY"])
         self.assertNotIn("/", env["RU_REALITY_PRIVATE_KEY"])
 
-    def test_default_utls_fingerprint_uses_singbox_public_reality_compatible_value(self) -> None:
+    def test_default_utls_fingerprint_uses_broad_client_compatible_value(self) -> None:
         env = config.generate_default_env("sample")
-        self.assertEqual(env["UTLS_FINGERPRINT"], "randomized")
+        self.assertEqual(env["UTLS_FINGERPRINT"], "chrome")
 
-    def test_merge_env_with_defaults_migrates_legacy_chrome_fingerprint(self) -> None:
-        env = config.merge_env_with_defaults({"UTLS_FINGERPRINT": "chrome"}, "sample")
-        self.assertEqual(env["UTLS_FINGERPRINT"], "randomized")
+    def test_merge_env_with_defaults_migrates_randomized_fingerprint(self) -> None:
+        env = config.merge_env_with_defaults({"UTLS_FINGERPRINT": "randomized"}, "sample")
+        self.assertEqual(env["UTLS_FINGERPRINT"], "chrome")
 
     def test_merge_env_with_defaults_migrates_legacy_cloudflare_reality_sni(self) -> None:
         env = config.merge_env_with_defaults(

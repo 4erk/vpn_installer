@@ -392,6 +392,8 @@ self_heal_last_action="$(state_value SELF_HEAL_LAST_ACTION)"
 self_heal_last_action_reason="$(state_value SELF_HEAL_LAST_ACTION_REASON)"
 self_heal_last_action_result="$(state_value SELF_HEAL_LAST_ACTION_RESULT)"
 self_heal_last_action_epoch="$(state_value SELF_HEAL_LAST_ACTION_EPOCH)"
+reality_invalid_recent_count="0"
+reality_invalid_recent_sources=""
 
 if [[ -n "${{default_iface}}" ]]; then
   default_qdisc="$(tc qdisc show dev "${{default_iface}}" 2>/dev/null | awk 'NR==1 {{print $2; exit}}')"
@@ -437,6 +439,35 @@ fi
 if [[ "${{installed}}" == "1" && "${{role}}" == "ru-gateway" ]] && ip link show dev {wg_interface} >/dev/null 2>&1; then
   wg_download_bps="$(probe_download_bps "{wg_interface}" "${{throughput_url}}")"
   target_probe_wg="$(probe_target_urls "{wg_interface}" "${{target_probe_urls}}")"
+fi
+
+if command -v wg >/dev/null 2>&1; then
+  handshake_row="$(wg show {wg_interface} latest-handshakes 2>/dev/null | awk 'NR==1')"
+  if [[ -n "${{handshake_row}}" ]]; then
+    wg_latest_handshake="$(awk '{{print $2}}' <<<"${{handshake_row}}")"
+    if [[ -n "${{wg_latest_handshake}}" && "${{wg_latest_handshake}}" != "0" ]]; then
+      now_epoch="$(date +%s)"
+      if [[ "${{wg_latest_handshake}}" =~ ^[0-9]+$ && "${{now_epoch}}" =~ ^[0-9]+$ && "${{now_epoch}}" -ge "${{wg_latest_handshake}}" ]]; then
+        wg_latest_handshake_age_s="$((now_epoch - wg_latest_handshake))"
+      fi
+    fi
+  fi
+fi
+
+if [[ "${{installed}}" == "1" && "${{role}}" == "ru-gateway" ]] && command -v journalctl >/dev/null 2>&1; then
+  reality_invalid_lines="$(journalctl -u sing-box --since '-30 minutes' --no-pager 2>/dev/null | grep 'REALITY: processed invalid connection' || true)"
+  if [[ -n "${{reality_invalid_lines}}" ]]; then
+    reality_invalid_recent_count="$(printf '%s\n' "${{reality_invalid_lines}}" | grep -c . || true)"
+    reality_invalid_recent_sources="$(
+      printf '%s\n' "${{reality_invalid_lines}}" |
+        sed -n 's/.*from \\([^: ]*\\):.*/\\1/p' |
+        sort |
+        uniq -c |
+        sort -nr |
+        head -n 5 |
+        awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
+    )"
+  fi
 fi
 
 printf 'login_user=%s\\n' "${{login_user}}"
@@ -492,6 +523,8 @@ printf 'self_heal_last_action=%s\\n' "${{self_heal_last_action}}"
 printf 'self_heal_last_action_reason=%s\\n' "${{self_heal_last_action_reason}}"
 printf 'self_heal_last_action_result=%s\\n' "${{self_heal_last_action_result}}"
 printf 'self_heal_last_action_epoch=%s\\n' "${{self_heal_last_action_epoch}}"
+printf 'reality_invalid_recent_count=%s\\n' "${{reality_invalid_recent_count}}"
+printf 'reality_invalid_recent_sources=%s\\n' "${{reality_invalid_recent_sources}}"
 printf 'installed=%s\\n' "${{installed}}"
 printf 'deployment_name=%s\\n' "${{deployment_name}}"
 printf 'role=%s\\n' "${{role}}"
@@ -572,6 +605,9 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
             f"{preflight.get('self_heal_last_action_result', '-')}"
         )
         print(f"self-heal last action reason: {preflight.get('self_heal_last_action_reason', '-')}")
+    if preflight.get("reality_invalid_recent_count") not in {"", None, "0"}:
+        print(f"recent invalid Reality handshakes: {preflight.get('reality_invalid_recent_count', '-')}")
+        print(f"invalid Reality sources: {preflight.get('reality_invalid_recent_sources', '-')}")
     print(f"sync timer: {preflight.get('sync_timer', '-')}")
     print(f"health timer: {preflight.get('health_timer', '-')}")
     print(f"ssh service: {preflight.get('ssh_service', '-')}")
