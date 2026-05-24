@@ -203,9 +203,28 @@ class RenderTests(unittest.TestCase):
         env["FOREIGN_RU_IPV4_LIST_URL"] = "http://127.0.0.1:9/ru-ipv4.zone"
         env["FOREIGN_RU_IPV6_LIST_URL"] = "http://127.0.0.1:9/ru-ipv6.zone"
         with tempfile.TemporaryDirectory() as tmp:
-            with contextlib.redirect_stderr(io.StringIO()):
+            with patch.object(render, "OUT_DIR", Path(tmp) / "out"), contextlib.redirect_stderr(io.StringIO()):
                 with self.assertRaises(Exception):
                     render.fetch_assets(env, Path(tmp))
+
+    def test_fetch_assets_uses_global_cache_after_source_failures(self) -> None:
+        env = self.make_env()
+        env["RU_GEOSITE_URL"] = "https://cache-fail.example/geosite-ru.srs"
+        env["RU_GEOIP_URL"] = "https://cache-fail.example/geoip-ru.srs"
+        env["FOREIGN_RU_IPV4_LIST_URL"] = "https://cache-fail.example/ru-ipv4.zone"
+        env["FOREIGN_RU_IPV6_LIST_URL"] = "https://cache-fail.example/ru-ipv6.zone"
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            cache_dir = tmp_path / "out" / "cached" / "assets"
+            cache_dir.mkdir(parents=True)
+            for asset_name in ("geosite-ru.srs", "geoip-ru.srs", "ru-ipv4.zone", "ru-ipv6.zone"):
+                (cache_dir / asset_name).write_text(f"cached {asset_name}\n", encoding="utf-8")
+
+            with patch.object(render, "OUT_DIR", tmp_path / "out"), patch.object(render, "download_asset", side_effect=OSError("boom")), contextlib.redirect_stderr(io.StringIO()):
+                result = render.fetch_assets(env, tmp_path / "out" / "new" / "assets")
+
+            for asset_name in ("geosite-ru.srs", "geoip-ru.srs", "ru-ipv4.zone", "ru-ipv6.zone"):
+                self.assertEqual(result[asset_name].read_text(encoding="utf-8"), f"cached {asset_name}\n")
 
     def test_fetch_assets_tries_next_source_after_failure(self) -> None:
         env = self.make_env()
@@ -251,6 +270,26 @@ class RenderTests(unittest.TestCase):
                     (client_dir / "vless-uri.txt").read_text(encoding="utf-8"),
                     (client_dir / "hiddify-uri.txt").read_text(encoding="utf-8"),
                 )
+
+    def test_render_client_profiles_removes_stale_subscription_artifacts(self) -> None:
+        env = self.make_env()
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(render, "OUT_DIR", Path(tmp)):
+                client_dir = Path(tmp) / "demo" / "client"
+                client_dir.mkdir(parents=True)
+                stale_files = [
+                    client_dir / "hiddify-subscription-url.txt",
+                    client_dir / "hiddify-import-url.txt",
+                    client_dir / "hiddify-android-subscription-url.txt",
+                ]
+                for path in stale_files:
+                    path.write_text("stale\n", encoding="utf-8")
+
+                render.render_client_profiles(env)
+
+                for path in stale_files:
+                    self.assertFalse(path.exists(), f"stale client artifact survived render: {path.name}")
+                self.assertTrue((client_dir / "vless-uri.txt").is_file())
 
     def test_rendered_files_for_role_contains_core_contract(self) -> None:
         env = self.make_env()
@@ -430,6 +469,22 @@ class RenderTests(unittest.TestCase):
                 payload = json.loads((tmp_path / "out" / "demo" / "preview" / "ru" / "sing-box.json").read_text(encoding="utf-8"))
         direct_domain_rule = next(rule for rule in payload["route"]["rules"] if rule.get("outbound") == "direct-ru" and "domain" in rule)
         self.assertIn("overlay.example", direct_domain_rule["domain"])
+
+    def test_render_config_artifacts_removes_stale_preview_subscription_tree(self) -> None:
+        env = self.make_env()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            env_path = tmp_path / "demo.env"
+            env_path.write_text(render.render_env_text(env), encoding="utf-8")
+            with patch.object(render, "OUT_DIR", tmp_path / "out"):
+                stale_file = tmp_path / "out" / "demo" / "preview" / "ru" / "subscription" / "old-token" / "vless.txt"
+                stale_file.parent.mkdir(parents=True)
+                stale_file.write_text("stale\n", encoding="utf-8")
+
+                render.render_config_artifacts(env_path, env, fetch_assets_first=False)
+
+                self.assertFalse(stale_file.exists())
+                self.assertTrue((tmp_path / "out" / "demo" / "preview" / "ru" / "sing-box.json").is_file())
 
     @unittest.skipUnless(preferred_bash(), "bash is required for install.sh render-only test")
     def test_install_sh_render_only_contains_forced_direct_rules(self) -> None:

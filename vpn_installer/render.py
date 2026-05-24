@@ -6,12 +6,42 @@ import shutil
 import tarfile
 import textwrap
 import urllib.error
+import urllib.parse
 from pathlib import Path
 from typing import Any
 
 from .common import INSTALL_SCRIPT_PATH, OUT_DIR, ROOT_DIR, ensure_file_parent, print_header, warn, write_text
 from .config import apply_ru_direct_overlays, download_asset, parse_env_text, render_env_text, require_env, split_asset_sources
 from .models import DEFAULT_ASSET_TIMEOUT, REQUIRED_ENV_VARS, ROLE_FOREIGN, ROLE_RU
+
+
+def find_cached_asset(asset_name: str, target_path: Path) -> Path | None:
+    candidates: list[Path] = []
+    try:
+        target_resolved = target_path.resolve()
+    except OSError:
+        target_resolved = target_path
+    for candidate in OUT_DIR.glob(f"*/assets/{asset_name}"):
+        if not candidate.is_file():
+            continue
+        try:
+            if candidate.resolve() == target_resolved:
+                continue
+        except OSError:
+            pass
+        if candidate.stat().st_size > 0:
+            candidates.append(candidate)
+    if not candidates:
+        return None
+    return max(candidates, key=lambda path: (path.stat().st_size, path.stat().st_mtime))
+
+
+def allow_asset_cache_fallback(sources: list[str]) -> bool:
+    for source in sources:
+        host = urllib.parse.urlparse(source).hostname or ""
+        if host in {"127.0.0.1", "::1", "localhost"}:
+            return False
+    return True
 
 
 def fetch_assets(env: dict[str, str], assets_dir: Path) -> dict[str, Path]:
@@ -43,6 +73,16 @@ def fetch_assets(env: dict[str, str], assets_dir: Path) -> dict[str, Path]:
             if path.exists() and path.stat().st_size > 0:
                 warn(f"{name}: не удалось обновить ни из одного источника, оставляю локальную копию ({joined_errors})")
                 results[name] = path
+            elif allow_asset_cache_fallback(sources):
+                cached_asset = find_cached_asset(name, path)
+                if cached_asset is not None:
+                    shutil.copy2(cached_asset, path)
+                    warn(f"{name}: не удалось обновить ни из одного источника, использую локальный cache {cached_asset} ({joined_errors})")
+                    results[name] = path
+                else:
+                    warn(f"{name}: загрузка не удалась ни из одного источника ({joined_errors})")
+                    if name in required_assets:
+                        missing_required.append(name)
             else:
                 warn(f"{name}: загрузка не удалась ни из одного источника ({joined_errors})")
                 if name in required_assets:
@@ -1205,6 +1245,12 @@ def preview_dir_for_role(preview_root: Path, role: str) -> Path:
     return preview_root / ("ru" if role == ROLE_RU else "foreign")
 
 
+def reset_generated_dir(path: Path) -> None:
+    if path.exists():
+        shutil.rmtree(path)
+    path.mkdir(parents=True, exist_ok=True)
+
+
 def rendered_files_for_role(env: dict[str, str], role: str) -> dict[str, str]:
     if role == ROLE_RU:
         return {
@@ -1288,6 +1334,8 @@ def render_next_steps(env: dict[str, str]) -> str:
 
 
 def render_preview_files(env: dict[str, str], preview_dir: Path) -> None:
+    reset_generated_dir(preview_dir_for_role(preview_dir, ROLE_RU))
+    reset_generated_dir(preview_dir_for_role(preview_dir, ROLE_FOREIGN))
     write_role_rendered_files(env, ROLE_RU, preview_dir_for_role(preview_dir, ROLE_RU))
     write_role_rendered_files(env, ROLE_FOREIGN, preview_dir_for_role(preview_dir, ROLE_FOREIGN))
 
@@ -1300,6 +1348,7 @@ def render_config_artifacts(env_path: Path, env: dict[str, str], *, fetch_assets
     preview_dir = out_dir / "preview"
     if fetch_assets_first:
         fetch_assets(env, assets_dir)
+    reset_generated_dir(server_dir)
     write_text(server_dir / "ru.env", render_env_text(env))
     write_text(server_dir / "foreign.env", render_env_text(env))
     render_preview_files(env, preview_dir)
@@ -1309,6 +1358,7 @@ def render_config_artifacts(env_path: Path, env: dict[str, str], *, fetch_assets
 def render_client_profiles(env: dict[str, str]) -> Path:
     require_env(env, REQUIRED_ENV_VARS)
     paths = client_artifact_paths(env)
+    reset_generated_dir(paths["client_dir"])
     write_text(paths["hiddify_json"], render_client_profile(env, auto_redirect=False))
     write_text(paths["android_hiddify_json"], render_client_profile(env, auto_redirect=False, android_safe=True))
     write_text(paths["linux_json"], render_client_profile(env, auto_redirect=True))
@@ -1375,7 +1425,7 @@ def render_cloud_init_artifacts(env: dict[str, str]) -> Path:
     out_dir = deployment_out_dir(env)
     assets_dir = out_dir / "assets"
     cloud_dir = out_dir / "cloud-init"
-    cloud_dir.mkdir(parents=True, exist_ok=True)
+    reset_generated_dir(cloud_dir)
     write_text(cloud_dir / "ru.yaml", render_cloud_init_role(ROLE_RU, render_env_text(env), assets_dir))
     write_text(cloud_dir / "foreign.yaml", render_cloud_init_role(ROLE_FOREIGN, render_env_text(env), assets_dir))
     return cloud_dir
