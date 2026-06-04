@@ -249,8 +249,8 @@ def render_foreign_wg(env: dict[str, str]) -> str:
 
 def render_rate_limited_tcp_accept(service_tag: str, port: str, rate: str, burst: str) -> list[str]:
     return [
-        f'    tcp dport {port} ct state new meter {service_tag} {{ ip saddr limit rate {rate} burst {burst} packets }} accept',
-        f"    tcp dport {port} drop",
+        f'    tcp dport {port} ct state new meter {service_tag} {{ ip saddr limit rate {rate} burst {burst} packets }} counter accept',
+        f"    tcp dport {port} counter drop",
     ]
 
 
@@ -475,16 +475,25 @@ def render_sync_timer() -> str:
     )
 
 
-def render_client_profile(env: dict[str, str], auto_redirect: bool, *, android_safe: bool = False) -> str:
-    tun_addresses = [env["CLIENT_TUN_ADDRESS_V4"]]
-    if not android_safe:
-        tun_addresses.append(env["CLIENT_TUN_ADDRESS_V6"])
+def client_route_excludes(env: dict[str, str]) -> list[str]:
     route_excludes: list[str] = []
     for auto_exclude in (env.get("RU_PUBLIC_IP", "").strip(), env.get("FOREIGN_PUBLIC_IP", "").strip()):
         if auto_exclude:
             cidr = auto_exclude if "/" in auto_exclude else f"{auto_exclude}/32"
             if cidr not in route_excludes:
                 route_excludes.append(cidr)
+    extra_excludes = [entry.strip() for entry in (env.get("CLIENT_ROUTE_EXCLUDE_V4", "") + "," + env.get("CLIENT_ROUTE_EXCLUDE_V6", "")).split(",") if entry.strip()]
+    for entry in extra_excludes:
+        if entry not in route_excludes:
+            route_excludes.append(entry)
+    return route_excludes
+
+
+def render_client_profile(env: dict[str, str], auto_redirect: bool, *, android_safe: bool = False) -> str:
+    tun_addresses = [env["CLIENT_TUN_ADDRESS_V4"]]
+    if not android_safe:
+        tun_addresses.append(env["CLIENT_TUN_ADDRESS_V6"])
+    route_excludes = client_route_excludes(env)
     payload: dict[str, Any] = {
         "log": {"level": "info", "timestamp": True},
         "dns": {
@@ -511,16 +520,16 @@ def render_client_profile(env: dict[str, str], auto_redirect: bool, *, android_s
     }
     if android_safe:
         payload["route"]["override_android_vpn"] = True
-    extra_excludes = [entry.strip() for entry in (env.get("CLIENT_ROUTE_EXCLUDE_V4", "") + "," + env.get("CLIENT_ROUTE_EXCLUDE_V6", "")).split(",") if entry.strip()]
-    for entry in extra_excludes:
-        if entry not in route_excludes:
-            route_excludes.append(entry)
     if route_excludes:
         payload["inbounds"][0]["route_exclude_address"] = route_excludes
     return render_json(payload)
 
 
 def render_xray_client_profile(env: dict[str, str]) -> str:
+    route_rules: list[dict[str, Any]] = []
+    route_excludes = client_route_excludes(env)
+    if route_excludes:
+        route_rules.append({"type": "field", "ip": route_excludes, "outboundTag": "direct"})
     payload = {
         "log": {"loglevel": "warning"},
         "inbounds": [
@@ -567,13 +576,13 @@ def render_xray_client_profile(env: dict[str, str]) -> str:
             {"tag": "direct", "protocol": "freedom"},
             {"tag": "block", "protocol": "blackhole"},
         ],
-        "routing": {"domainStrategy": "IPIfNonMatch", "rules": []},
+        "routing": {"domainStrategy": "IPIfNonMatch", "rules": route_rules},
     }
     return render_json(payload)
 
 
 def render_vless_uri(env: dict[str, str]) -> str:
-    return f"vless://{env['CLIENT_UUID']}@{env['RU_PUBLIC_IP']}:{env['RU_LISTEN_PORT']}?security=reality&sni={env['RU_REALITY_SERVER_NAME']}&pbk={env['RU_REALITY_PUBLIC_KEY']}&sid={env['RU_REALITY_SHORT_ID']}&fp={env['UTLS_FINGERPRINT']}&type=tcp&flow={env['CLIENT_FLOW']}#{env['DEPLOY_NAME']}-ru-gateway\n"
+    return f"vless://{env['CLIENT_UUID']}@{env['RU_PUBLIC_IP']}:{env['RU_LISTEN_PORT']}?encryption=none&security=reality&sni={env['RU_REALITY_SERVER_NAME']}&pbk={env['RU_REALITY_PUBLIC_KEY']}&sid={env['RU_REALITY_SHORT_ID']}&fp={env['UTLS_FINGERPRINT']}&type=tcp&flow={env['CLIENT_FLOW']}#{env['DEPLOY_NAME']}-ru-gateway\n"
 
 
 def render_sshd_hardening(env: dict[str, str]) -> str:
@@ -1308,6 +1317,21 @@ def client_artifact_paths(env: dict[str, str]) -> dict[str, Path]:
     }
 
 
+STALE_CLIENT_ARTIFACT_NAMES = (
+    "hiddify-subscription-url.txt",
+    "hiddify-import-url.txt",
+    "hiddify-android-subscription-url.txt",
+)
+
+
+def prepare_client_artifact_dir(client_dir: Path) -> None:
+    client_dir.mkdir(parents=True, exist_ok=True)
+    for name in STALE_CLIENT_ARTIFACT_NAMES:
+        stale_path = client_dir / name
+        if stale_path.exists():
+            stale_path.unlink()
+
+
 def render_next_steps(env: dict[str, str]) -> str:
     paths = client_artifact_paths(env)
     return "\n".join(
@@ -1328,7 +1352,8 @@ def render_next_steps(env: dict[str, str]) -> str:
             f"3. Основной нейтральный файл: {paths['vless_uri'].name}. На Android предпочтительны v2rayNG или NekoBox.",
             f"4. Если нужен Hiddify на Android, используй локальный JSON {paths['android_hiddify_json'].name}. Этот путь считается совместимым, но не эталонным.",
             f"5. Файл {paths['hiddify_uri_compat'].name} оставлен как совместимый alias того же VLESS URI для старых сценариев.",
-            f"6. Для проверки серверов потом запусти: vpn status --deployment {env['DEPLOY_NAME']}",
+            "6. Если включён TUN/full VPN, IP российского и зарубежного серверов должны идти direct, иначе клиент заворачивает подключение к самому VPN внутрь VPN.",
+            f"7. Для проверки серверов потом запусти: vpn status --deployment {env['DEPLOY_NAME']}",
         ]
     ) + "\n"
 
@@ -1358,7 +1383,7 @@ def render_config_artifacts(env_path: Path, env: dict[str, str], *, fetch_assets
 def render_client_profiles(env: dict[str, str]) -> Path:
     require_env(env, REQUIRED_ENV_VARS)
     paths = client_artifact_paths(env)
-    reset_generated_dir(paths["client_dir"])
+    prepare_client_artifact_dir(paths["client_dir"])
     write_text(paths["hiddify_json"], render_client_profile(env, auto_redirect=False))
     write_text(paths["android_hiddify_json"], render_client_profile(env, auto_redirect=False, android_safe=True))
     write_text(paths["linux_json"], render_client_profile(env, auto_redirect=True))

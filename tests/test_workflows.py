@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from vpn_installer.config import generate_default_env
+from vpn_installer.localnet import LocalRoute
 from vpn_installer.models import AppError, ROLE_FOREIGN, ROLE_RU, RemoteTarget, UserCancelled
 from vpn_installer import workflows
 
@@ -151,6 +152,29 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn(ROLE_RU, preflights)
         write_text_mock.assert_called_once()
         write_state_mock.assert_called_once()
+
+    def test_prepare_remote_session_blocks_saved_self_tunneled_server_route_before_ssh(self) -> None:
+        env = generate_default_env("demo")
+        env["RU_PUBLIC_IP"] = "203.0.113.10"
+        state = {ROLE_RU: {"public_ip": "203.0.113.10", "ssh_host": "203.0.113.10", "ssh_port": "22", "ssh_user": "root", "auth_mode": "password"}}
+        with patch("vpn_installer.workflows.ensure_directories"), patch("vpn_installer.workflows.select_existing_deployment", return_value="demo"), patch("vpn_installer.workflows.load_existing_deployment_env", return_value=(Path("deployments/demo.env"), env)), patch("vpn_installer.workflows.load_state", return_value=state), patch("vpn_installer.workflows.assert_server_route_not_self_tunneled", side_effect=AppError("идёт через VPN-интерфейс")), patch("vpn_installer.workflows.verify_target_interactively") as verify:
+            with self.assertRaises(AppError) as ctx:
+                workflows.prepare_remote_session(
+                    "demo",
+                    roles=[ROLE_RU],
+                    require_privilege=False,
+                    allow_create=False,
+                    persist_local=False,
+                )
+        verify.assert_not_called()
+        self.assertIn("идёт через VPN-интерфейс", str(ctx.exception))
+
+    def test_client_check_workflow_reports_self_tunnel(self) -> None:
+        env = generate_default_env("demo")
+        env["RU_PUBLIC_IP"] = "203.0.113.10"
+        state = {ROLE_RU: {"public_ip": "203.0.113.10", "ssh_host": "203.0.113.10", "ssh_port": "22", "ssh_user": "root", "auth_mode": "password"}}
+        with patch("vpn_installer.workflows.ensure_directories"), patch("vpn_installer.workflows.select_existing_deployment", return_value="demo"), patch("vpn_installer.workflows.load_existing_deployment_env", return_value=(Path("deployments/demo.env"), env)), patch("vpn_installer.workflows.load_state", return_value=state), patch("vpn_installer.workflows.local_route_to_server", return_value=LocalRoute(target_ip="203.0.113.10", interface_alias="singbox_tun")):
+            self.assertEqual(workflows.client_check_workflow("demo", ROLE_RU), 1)
 
     def test_load_remote_authoritative_env_syncs_local_file_and_client_artifacts(self) -> None:
         local_env = generate_default_env("demo")

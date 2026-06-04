@@ -38,6 +38,7 @@ class RenderTests(unittest.TestCase):
         env = self.make_env()
         uri = render.render_vless_uri(env)
         self.assertTrue(uri.startswith("vless://"))
+        self.assertIn("?encryption=none&", uri)
         self.assertIn("&sni=www.bing.com&", uri)
         self.assertIn("&fp=chrome&", uri)
 
@@ -54,6 +55,10 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(outbound["streamSettings"]["realitySettings"]["fingerprint"], "chrome")
         self.assertEqual(outbound["streamSettings"]["realitySettings"]["publicKey"], env["RU_REALITY_PUBLIC_KEY"])
         self.assertEqual(outbound["streamSettings"]["realitySettings"]["shortId"], env["RU_REALITY_SHORT_ID"])
+        self.assertEqual(
+            payload["routing"]["rules"][0],
+            {"type": "field", "ip": [f"{env['RU_PUBLIC_IP']}/32", f"{env['FOREIGN_PUBLIC_IP']}/32"], "outboundTag": "direct"},
+        )
 
     def test_client_profile_is_simple_ru_tunnel(self) -> None:
         env = self.make_env()
@@ -291,6 +296,21 @@ class RenderTests(unittest.TestCase):
                     self.assertFalse(path.exists(), f"stale client artifact survived render: {path.name}")
                 self.assertTrue((client_dir / "vless-uri.txt").is_file())
 
+    def test_render_client_profiles_does_not_delete_client_directory(self) -> None:
+        env = self.make_env()
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(render, "OUT_DIR", Path(tmp)):
+                client_dir = Path(tmp) / "demo" / "client"
+                client_dir.mkdir(parents=True)
+                marker = client_dir / "operator-notes.txt"
+                marker.write_text("keep\n", encoding="utf-8")
+
+                with patch.object(render.shutil, "rmtree", side_effect=AssertionError("client directory must not be reset")):
+                    render.render_client_profiles(env)
+
+                self.assertEqual(marker.read_text(encoding="utf-8"), "keep\n")
+                self.assertTrue((client_dir / "vless-uri.txt").is_file())
+
     def test_rendered_files_for_role_contains_core_contract(self) -> None:
         env = self.make_env()
         files = render.rendered_files_for_role(env, render.ROLE_RU)
@@ -426,8 +446,10 @@ class RenderTests(unittest.TestCase):
         self.assertIn("ct state invalid drop", rules)
         self.assertIn(f"tcp dport {env['SSH_PORT']} ct state new meter ssh_guard", rules)
         self.assertIn(f"limit rate {env['SSH_INPUT_RATE']} burst {env['SSH_INPUT_BURST']} packets", rules)
+        self.assertIn(f"tcp dport {env['SSH_PORT']} counter drop", rules)
         self.assertIn(f"tcp dport {env['RU_LISTEN_PORT']} ct state new meter vless_guard", rules)
         self.assertIn(f"limit rate {env['RU_HTTPS_INPUT_RATE']} burst {env['RU_HTTPS_INPUT_BURST']} packets", rules)
+        self.assertIn(f"tcp dport {env['RU_LISTEN_PORT']} counter drop", rules)
         self.assertNotIn("subscription_guard", rules)
 
     def test_render_foreign_nftables_rate_limits_ssh(self) -> None:
@@ -436,6 +458,7 @@ class RenderTests(unittest.TestCase):
         self.assertIn("ct state invalid drop", rules)
         self.assertIn(f"tcp dport {env['SSH_PORT']} ct state new meter ssh_guard", rules)
         self.assertIn(f"limit rate {env['SSH_INPUT_RATE']} burst {env['SSH_INPUT_BURST']} packets", rules)
+        self.assertIn(f"tcp dport {env['SSH_PORT']} counter drop", rules)
         self.assertIn(f"udp dport {env['WG_PORT']} accept", rules)
 
     def test_write_role_rendered_files_and_package_bundle(self) -> None:

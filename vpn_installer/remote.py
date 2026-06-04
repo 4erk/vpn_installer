@@ -248,6 +248,20 @@ state_value() {{
   fi
 }}
 
+nft_port_packets() {{
+  local port="$1"
+  local verdict="$2"
+  if ! command -v nft >/dev/null 2>&1; then
+    return 0
+  fi
+  nft -a list chain inet vpnstack input 2>/dev/null |
+    grep -F "tcp dport ${{port}} " |
+    grep -F " ${{verdict}}" |
+    grep -F " counter " |
+    sed -n 's/.* counter packets \\([0-9][0-9]*\\) bytes .*/\\1/p' |
+    head -n1 || true
+}}
+
 probe_download_bps() {{
   local bind_iface="$1"
   local url="$2"
@@ -368,10 +382,18 @@ if [[ -z "${{target_probe_urls}}" ]]; then
 fi
 throughput_url="${{throughput_urls%% *}}"
 if [[ -z "${{throughput_url}}" ]]; then throughput_url="https://cachefly.cachefly.net/1mb.test"; fi
+ssh_port="$(env_value SSH_PORT)"
+if [[ -z "${{ssh_port}}" ]]; then ssh_port="22"; fi
+ru_listen_port="$(env_value RU_LISTEN_PORT)"
+if [[ -z "${{ru_listen_port}}" ]]; then ru_listen_port="443"; fi
 direct_download_bps="-1"
 wg_download_bps="-1"
 target_probe_direct=""
 target_probe_wg=""
+nft_ssh_accept_packets=""
+nft_ssh_drop_packets=""
+nft_vless_accept_packets=""
+nft_vless_drop_packets=""
 deep_probe_at="$(state_value DEEP_PROBE_AT)"
 deep_probe_verdict="$(state_value DEEP_PROBE_VERDICT)"
 deep_probe_reasons="$(state_value DEEP_PROBE_REASONS)"
@@ -409,6 +431,11 @@ if [[ -n "${{default_iface}}" ]]; then
     wan_offload_tso="$(ethtool -k "${{default_iface}}" 2>/dev/null | awk '/tcp-segmentation-offload:/ {{print $2; exit}}')"
   fi
 fi
+
+nft_ssh_accept_packets="$(nft_port_packets "${{ssh_port}}" "accept")"
+nft_ssh_drop_packets="$(nft_port_packets "${{ssh_port}}" "drop")"
+nft_vless_accept_packets="$(nft_port_packets "${{ru_listen_port}}" "accept")"
+nft_vless_drop_packets="$(nft_port_packets "${{ru_listen_port}}" "drop")"
 
 if command -v wg >/dev/null 2>&1; then
   transfer_row="$(wg show {wg_interface} transfer 2>/dev/null | awk 'NR==1')"
@@ -500,6 +527,10 @@ printf 'observed_ipv4=%s\\n' "${{observed_ipv4}}"
 printf 'wg_observed_ipv4=%s\\n' "${{wg_observed_ipv4}}"
 printf 'direct_download_bps=%s\\n' "${{direct_download_bps}}"
 printf 'wg_download_bps=%s\\n' "${{wg_download_bps}}"
+printf 'nft_ssh_accept_packets=%s\\n' "${{nft_ssh_accept_packets}}"
+printf 'nft_ssh_drop_packets=%s\\n' "${{nft_ssh_drop_packets}}"
+printf 'nft_vless_accept_packets=%s\\n' "${{nft_vless_accept_packets}}"
+printf 'nft_vless_drop_packets=%s\\n' "${{nft_vless_drop_packets}}"
 printf 'target_probe_urls=%s\\n' "${{target_probe_urls}}"
 printf 'target_probe_direct=%s\\n' "${{target_probe_direct}}"
 printf 'target_probe_wg=%s\\n' "${{target_probe_wg}}"
@@ -571,6 +602,9 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
     print(f"deployment: {preflight.get('deployment_name', '-')}")
     print(f"sing-box: {preflight.get('sing_box', '-')}")
     print(f"nftables: {preflight.get('nftables', '-')}")
+    if any(preflight.get(key) for key in ("nft_ssh_accept_packets", "nft_ssh_drop_packets", "nft_vless_accept_packets", "nft_vless_drop_packets")):
+        print(f"nft SSH accept/drop packets: {preflight.get('nft_ssh_accept_packets', '-')}/{preflight.get('nft_ssh_drop_packets', '-')}")
+        print(f"nft VLESS accept/drop packets: {preflight.get('nft_vless_accept_packets', '-')}/{preflight.get('nft_vless_drop_packets', '-')}")
     print(f"wireguard: {preflight.get('wireguard', '-')}")
     print(f"wireguard transfer rx/tx: {preflight.get('wg_transfer_rx', '-')}/{preflight.get('wg_transfer_tx', '-')}")
     print(f"wireguard latest handshake: {preflight.get('wg_latest_handshake', '-')}")

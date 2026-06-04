@@ -5,7 +5,7 @@ import sys
 
 from .android import DEFAULT_HIDDIFY_PACKAGE, android_diagnose
 from .models import AppError, ROLE_FOREIGN, ROLE_RU, UserCancelled
-from .workflows import cleanup_local_workflow, install_workflow, menu_workflow, remote_action_workflow, status_workflow
+from .workflows import cleanup_local_workflow, client_check_workflow, install_workflow, menu_workflow, remote_action_workflow, status_workflow
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -23,6 +23,11 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--deployment", help="Имя deployment.")
     status.add_argument("--role", choices=["all", ROLE_RU, ROLE_FOREIGN], default="all", help="Какую роль проверять.")
     status.set_defaults(func=lambda args: status_workflow(args.deployment, args.role))
+
+    client_check = subparsers.add_parser("client-check", help="Проверить локальные маршруты клиента до серверов.")
+    client_check.add_argument("--deployment", help="Имя deployment.")
+    client_check.add_argument("--role", choices=["all", ROLE_RU, ROLE_FOREIGN], default="all", help="Какую роль проверять.")
+    client_check.set_defaults(func=lambda args: client_check_workflow(args.deployment, args.role))
 
     for action, help_text in (
         ("reinstall", "Переустановить одну роль или обе."),

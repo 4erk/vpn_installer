@@ -24,6 +24,7 @@ from .config import (
     ensure_deployment_env,
 )
 from .error_logging import log_exception
+from .localnet import assert_server_route_not_self_tunneled, local_route_to_server, route_uses_self_tunnel
 from .models import AppError, ROLE_FOREIGN, ROLE_META, ROLE_RU, RemoteTarget, UserCancelled
 from .prompts import (
     ask_install_action,
@@ -537,6 +538,8 @@ def prepare_remote_session(
     wg_interface = current_wg_interface(env)
     for role in roles:
         target = build_target(role, env, state)
+        if target.saved_connection:
+            assert_server_route_not_self_tunneled(target, env)
         target, preflight = verify_target_interactively(
             target,
             wg_interface=wg_interface,
@@ -718,7 +721,8 @@ def finalize_install_output(env: dict[str, str], deployment_name: str) -> None:
     print(f"3. Основной файл: {paths['vless_uri'].name}. На Android эталонные клиенты: v2rayNG или NekoBox.")
     print(f"4. Если нужен Hiddify на Android, используй локальный JSON {paths['android_hiddify_json'].name}.")
     print(f"5. Файл {paths['hiddify_uri_compat'].name} оставлен как совместимый alias того же VLESS URI.")
-    print(f"6. Для проверки серверов потом запусти: vpn status --deployment {deployment_name}")
+    print("6. Если включён TUN/full VPN, IP российского и зарубежного серверов должны идти direct.")
+    print(f"7. Для проверки серверов потом запусти: vpn status --deployment {deployment_name}")
 
 
 def load_env_for_render(env_path: Path) -> dict[str, str]:
@@ -865,6 +869,37 @@ def remote_action_workflow(deployment: str | None, role: str, action: str) -> in
         print_header("Готово")
         print(f"Deployment env: {env_path}")
         print(f"Локальное состояние: {state_json_path(deployment_name)}")
+    return 0
+
+
+def client_check_workflow(deployment: str | None, role: str) -> int:
+    ensure_directories()
+    deployment_name = select_existing_deployment(deployment)
+    env_path, env = load_existing_deployment_env(deployment_name)
+    state = load_state(deployment_name)
+    print_header("Проверка клиентских маршрутов")
+    print(f"deployment: {deployment_name}")
+    failed = False
+    for selected_role in requested_roles(role):
+        target = build_target(selected_role, env, state)
+        route = local_route_to_server(target)
+        public_ip = target.public_ip or target.ssh_host or "-"
+        if route is None:
+            print(f"{target.label}: локальная route-проверка недоступна или IP не найден ({public_ip})")
+            continue
+        verdict = "BAD: self-tunnel" if route_uses_self_tunnel(route, client_tun_name=env.get("CLIENT_TUN_NAME", "")) else "OK"
+        print(
+            f"{target.label}: {verdict}; "
+            f"ip={route.target_ip}; iface={route.interface_alias or '-'}; "
+            f"source={route.source_address or '-'}; next-hop={route.next_hop or '-'}"
+        )
+        failed = failed or verdict.startswith("BAD")
+    if failed:
+        print("Проблема: IP сервера уходит через VPN-интерфейс. В TUN/full VPN используй route-safe JSON или добавь bypass/direct rule для IP обоих серверов.")
+        print(f"Deployment env: {env_path}")
+        return 1
+    print("Клиентские маршруты до серверов не выглядят как self-tunnel.")
+    print(f"Deployment env: {env_path}")
     return 0
 
 

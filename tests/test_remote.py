@@ -46,6 +46,9 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("wan_offload_tso", script)
         self.assertGreaterEqual(script.count("latest-handshakes"), 2)
         self.assertIn("reality_invalid_recent_count", script)
+        self.assertIn("nft_port_packets", script)
+        self.assertIn("nft_vless_drop_packets", script)
+        self.assertIn("head -n1 || true", script)
 
     def test_password_mode_forces_python_backend(self) -> None:
         target = RemoteTarget(role=ROLE_RU, auth_mode="password")
@@ -265,6 +268,10 @@ class RemoteTests(unittest.TestCase):
                     "deployment_name": "demo",
                     "sing_box": "active",
                     "nftables": "active",
+                    "nft_ssh_accept_packets": "10",
+                    "nft_ssh_drop_packets": "1",
+                    "nft_vless_accept_packets": "200",
+                    "nft_vless_drop_packets": "5",
                     "wireguard": "active",
                     "wg_transfer_rx": "1",
                     "wg_transfer_tx": "2",
@@ -303,6 +310,8 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("wan offloads gro/gso/tso: off/off/off", output)
         self.assertIn("tcp cc: bbr", output)
         self.assertIn("wireguard transfer rx/tx: 1/2", output)
+        self.assertIn("nft SSH accept/drop packets: 10/1", output)
+        self.assertIn("nft VLESS accept/drop packets: 200/5", output)
         self.assertIn("wireguard handshake age (s): 4", output)
         self.assertIn("observed IPv4: 198.51.100.20", output)
         self.assertIn("RU over wg IPv4: 198.51.100.20", output)
