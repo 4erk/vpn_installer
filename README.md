@@ -126,6 +126,15 @@ chmod +x ./vpn.sh
 
 Если команда пишет `BAD: self-tunnel`, отключи текущий VPN перед обслуживанием серверов или импортируй route-safe JSON из `out/<deployment>/client`.
 
+Если нужно быстро починить именно Windows TUN/full VPN маршрут, запусти PowerShell от администратора:
+
+```powershell
+.\out\1\client\windows-route-bypass.ps1
+.\vpn.cmd client-check --deployment 1
+```
+
+Скрипт добавляет только active `/32` routes до IP серверов через физический gateway Windows. После перезагрузки Windows такие routes исчезают.
+
 Если нужно локально добавить ещё домены или CIDR, которые должны идти через `российский сервер`, не редактируй клиент: создай рядом с `deployments/<name>.env` один или несколько файлов:
 
 - `deployments/<name>.ru-direct-domains.txt`

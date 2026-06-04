@@ -6,6 +6,17 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.3.1] - 2026-06-04
+
+### Added
+
+- генерируется `out/<deployment>/client/windows-route-bypass.ps1`: Windows helper для active `/32` routes до IP `российского` и `зарубежного` серверов через физический gateway, когда TUN/full VPN клиент заворачивает серверы в self-tunnel
+
+### Fixed
+
+- `vpn client-check` теперь сразу показывает путь к `windows-route-bypass.ps1`, если обнаруживает `BAD: self-tunnel`
+- итоговый экран и `NEXT-STEPS.txt` теперь дают практический следующий шаг для Windows self-tunnel, а не только предупреждение про direct/bypass
+
 ## [0.3.0] - 2026-06-04
 
 ### Added

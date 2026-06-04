@@ -711,6 +711,7 @@ def finalize_install_output(env: dict[str, str], deployment_name: str) -> None:
     print(f"JSON fallback для Hiddify: {paths['hiddify_json']}")
     print(f"Android JSON fallback для Hiddify: {paths['android_hiddify_json']}")
     print(f"Windows/v2rayN Xray JSON: {paths['windows_xray_json']}")
+    print(f"Windows route bypass helper: {paths['windows_route_bypass']}")
     print(f"Hiddify URI alias: {paths['hiddify_uri_compat']}")
     print(f"JSON backup для Linux: {paths['linux_json']}")
     print(f"Следующие шаги: {paths['next_steps']}")
@@ -721,7 +722,7 @@ def finalize_install_output(env: dict[str, str], deployment_name: str) -> None:
     print(f"3. Основной файл: {paths['vless_uri'].name}. На Android эталонные клиенты: v2rayNG или NekoBox.")
     print(f"4. Если нужен Hiddify на Android, используй локальный JSON {paths['android_hiddify_json'].name}.")
     print(f"5. Файл {paths['hiddify_uri_compat'].name} оставлен как совместимый alias того же VLESS URI.")
-    print("6. Если включён TUN/full VPN, IP российского и зарубежного серверов должны идти direct.")
+    print(f"6. Если включён TUN/full VPN и client-check показывает self-tunnel, запусти PowerShell от администратора: .\\{paths['windows_route_bypass'].name}")
     print(f"7. Для проверки серверов потом запусти: vpn status --deployment {deployment_name}")
 
 
@@ -896,6 +897,8 @@ def client_check_workflow(deployment: str | None, role: str) -> int:
         failed = failed or verdict.startswith("BAD")
     if failed:
         print("Проблема: IP сервера уходит через VPN-интерфейс. В TUN/full VPN используй route-safe JSON или добавь bypass/direct rule для IP обоих серверов.")
+        paths = client_artifact_paths(env)
+        print(f"Windows helper: {paths['windows_route_bypass']}")
         print(f"Deployment env: {env_path}")
         return 1
     print("Клиентские маршруты до серверов не выглядят как self-tunnel.")

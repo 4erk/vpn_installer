@@ -171,6 +171,7 @@ class RenderTests(unittest.TestCase):
         self.assertIn("vless-uri.txt", text)
         self.assertIn("hiddify-cross-platform.json", text)
         self.assertIn("hiddify-android.json", text)
+        self.assertIn("windows-route-bypass.ps1", text)
         self.assertIn("совместимый alias", text)
 
     def test_render_client_profiles_writes_user_artifacts(self) -> None:
@@ -184,6 +185,7 @@ class RenderTests(unittest.TestCase):
                 self.assertTrue((client_dir / "hiddify-cross-platform.json").is_file())
                 self.assertTrue((client_dir / "hiddify-android.json").is_file())
                 self.assertTrue((client_dir / "hiddify-uri.txt").is_file())
+                self.assertTrue((client_dir / "windows-route-bypass.ps1").is_file())
                 self.assertTrue((client_dir.parent / "NEXT-STEPS.txt").is_file())
 
     def test_cloud_init_artifacts_embed_renderer_and_pre_rendered_role_files(self) -> None:
@@ -263,7 +265,17 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(paths["android_hiddify_json"].name, "hiddify-android.json")
         self.assertEqual(paths["linux_json"].name, "linux-sing-box.json")
         self.assertEqual(paths["windows_xray_json"].name, "windows-xray.json")
+        self.assertEqual(paths["windows_route_bypass"].name, "windows-route-bypass.ps1")
         self.assertEqual(paths["next_steps"].name, "NEXT-STEPS.txt")
+
+    def test_render_windows_route_bypass_script_contains_server_ips_and_active_store(self) -> None:
+        env = self.make_env()
+        script = render.render_windows_route_bypass_script(env)
+        self.assertIn(env["RU_PUBLIC_IP"], script)
+        self.assertIn(env["FOREIGN_PUBLIC_IP"], script)
+        self.assertIn("PolicyStore ActiveStore", script)
+        self.assertIn("Get-PhysicalGatewayRoute", script)
+        self.assertIn("TunnelInterfacePattern", script)
 
     def test_render_client_profiles_keeps_hiddify_uri_alias_equal_to_primary_uri(self) -> None:
         env = self.make_env()
