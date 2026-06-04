@@ -39,7 +39,8 @@ from .prompts import (
     select_role_for_menu,
 )
 from .remote import ensure_remote_privilege, fetch_remote_deployment_env, print_preflight, remote_preflight, scp_upload, ssh_stream
-from .render import client_artifact_paths, deployment_out_dir, render_all_artifacts, render_client_profiles, render_config_artifacts, render_next_steps
+from .client_artifacts import client_artifact_paths, render_client_profiles
+from .render import deployment_out_dir, render_all_artifacts, render_config_artifacts
 from .state import load_state, state_json_path, state_legacy_path, write_state
 
 

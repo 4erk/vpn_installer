@@ -10,6 +10,14 @@ import urllib.parse
 from pathlib import Path
 from typing import Any
 
+from . import client_artifacts as _client_artifacts
+from .client_artifacts import (
+    client_route_excludes,
+    render_client_profile,
+    render_vless_uri,
+    render_windows_route_bypass_script,
+    render_xray_client_profile,
+)
 from .common import INSTALL_SCRIPT_PATH, OUT_DIR, ROOT_DIR, ensure_file_parent, print_header, warn, write_text
 from .config import apply_ru_direct_overlays, download_asset, parse_env_text, render_env_text, require_env, split_asset_sources
 from .models import DEFAULT_ASSET_TIMEOUT, REQUIRED_ENV_VARS, ROLE_FOREIGN, ROLE_RU
@@ -473,189 +481,6 @@ def render_sync_timer() -> str:
             "",
         ]
     )
-
-
-def client_route_excludes(env: dict[str, str]) -> list[str]:
-    route_excludes: list[str] = []
-    for auto_exclude in (env.get("RU_PUBLIC_IP", "").strip(), env.get("FOREIGN_PUBLIC_IP", "").strip()):
-        if auto_exclude:
-            cidr = auto_exclude if "/" in auto_exclude else f"{auto_exclude}/32"
-            if cidr not in route_excludes:
-                route_excludes.append(cidr)
-    extra_excludes = [entry.strip() for entry in (env.get("CLIENT_ROUTE_EXCLUDE_V4", "") + "," + env.get("CLIENT_ROUTE_EXCLUDE_V6", "")).split(",") if entry.strip()]
-    for entry in extra_excludes:
-        if entry not in route_excludes:
-            route_excludes.append(entry)
-    return route_excludes
-
-
-def render_client_profile(env: dict[str, str], auto_redirect: bool, *, android_safe: bool = False) -> str:
-    tun_addresses = [env["CLIENT_TUN_ADDRESS_V4"]]
-    if not android_safe:
-        tun_addresses.append(env["CLIENT_TUN_ADDRESS_V6"])
-    route_excludes = client_route_excludes(env)
-    payload: dict[str, Any] = {
-        "log": {"level": "info", "timestamp": True},
-        "dns": {
-            "strategy": "ipv4_only",
-            "servers": [
-                {"type": "https", "tag": "dns-remote", "server": env["GLOBAL_DOH_SERVER"], "server_port": 443, "path": env["GLOBAL_DOH_PATH"], "detour": "ru-gateway", "tls": {"enabled": True, "server_name": env["GLOBAL_DOH_SERVER_NAME"]}},
-            ],
-            "rules": [{"query_type": ["AAAA"], "action": "reject"}],
-            "final": "dns-remote",
-            "independent_cache": True,
-        },
-        "inbounds": [{"type": "tun", "tag": "tun-in", "interface_name": env["CLIENT_TUN_NAME"], "address": tun_addresses, "auto_route": True, "strict_route": True, "auto_redirect": auto_redirect}],
-        "outbounds": [
-            {"type": "vless", "tag": "ru-gateway", "server": env["RU_PUBLIC_IP"], "server_port": env_int(env, "RU_LISTEN_PORT"), "uuid": env["CLIENT_UUID"], "flow": env["CLIENT_FLOW"], "packet_encoding": "xudp", "tls": {"enabled": True, "server_name": env["RU_REALITY_SERVER_NAME"], "utls": {"enabled": True, "fingerprint": env["UTLS_FINGERPRINT"]}, "reality": {"enabled": True, "public_key": env["RU_REALITY_PUBLIC_KEY"], "short_id": env["RU_REALITY_SHORT_ID"]}}},
-            {"type": "direct", "tag": "direct"},
-            {"type": "block", "tag": "block"},
-        ],
-        "route": {
-            "auto_detect_interface": True,
-            "default_domain_resolver": {"server": "dns-remote", "strategy": "ipv4_only"},
-            "rules": [{"ip_version": 6, "action": "route", "outbound": "block"}, {"protocol": "dns", "action": "hijack-dns"}, {"ip_is_private": True, "action": "route", "outbound": "direct"}, {"domain_suffix": ["local"], "action": "route", "outbound": "direct"}],
-            "final": "ru-gateway",
-        },
-    }
-    if android_safe:
-        payload["route"]["override_android_vpn"] = True
-    if route_excludes:
-        payload["inbounds"][0]["route_exclude_address"] = route_excludes
-    return render_json(payload)
-
-
-def render_xray_client_profile(env: dict[str, str]) -> str:
-    route_rules: list[dict[str, Any]] = []
-    route_excludes = client_route_excludes(env)
-    if route_excludes:
-        route_rules.append({"type": "field", "ip": route_excludes, "outboundTag": "direct"})
-    payload = {
-        "log": {"loglevel": "warning"},
-        "inbounds": [
-            {
-                "tag": "socks",
-                "listen": "127.0.0.1",
-                "port": 10808,
-                "protocol": "socks",
-                "settings": {"udp": True},
-                "sniffing": {"enabled": True, "destOverride": ["http", "tls"]},
-            },
-            {
-                "tag": "http",
-                "listen": "127.0.0.1",
-                "port": 10809,
-                "protocol": "http",
-            },
-        ],
-        "outbounds": [
-            {
-                "tag": "proxy",
-                "protocol": "vless",
-                "settings": {
-                    "vnext": [
-                        {
-                            "address": env["RU_PUBLIC_IP"],
-                            "port": env_int(env, "RU_LISTEN_PORT"),
-                            "users": [{"id": env["CLIENT_UUID"], "encryption": "none", "flow": env["CLIENT_FLOW"]}],
-                        }
-                    ]
-                },
-                "streamSettings": {
-                    "network": "tcp",
-                    "security": "reality",
-                    "realitySettings": {
-                        "serverName": env["RU_REALITY_SERVER_NAME"],
-                        "fingerprint": env["UTLS_FINGERPRINT"],
-                        "publicKey": env["RU_REALITY_PUBLIC_KEY"],
-                        "shortId": env["RU_REALITY_SHORT_ID"],
-                        "spiderX": "/",
-                    },
-                },
-            },
-            {"tag": "direct", "protocol": "freedom"},
-            {"tag": "block", "protocol": "blackhole"},
-        ],
-        "routing": {"domainStrategy": "IPIfNonMatch", "rules": route_rules},
-    }
-    return render_json(payload)
-
-
-def render_windows_route_bypass_script(env: dict[str, str]) -> str:
-    server_ips = [ip.split("/", 1)[0] for ip in client_route_excludes(env) if ip]
-    server_ip_literal = "@(" + ", ".join(f'"{ip}"' for ip in server_ips) + ")"
-    return textwrap.dedent(
-        f"""\
-        # Generated by vpn_installer. Run in elevated PowerShell when a TUN/full VPN client routes server IPs through itself.
-        param(
-          [switch]$Remove
-        )
-
-        $ErrorActionPreference = "Stop"
-        $ServerIps = {server_ip_literal}
-        $TunnelInterfacePattern = "(?i)(singbox|hiddify|wintun|v2ray|nekobox|clash|tun|vpn)"
-
-        function Test-Admin {{
-          $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-          $principal = [Security.Principal.WindowsPrincipal]::new($identity)
-          return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-        }}
-
-        function Get-PhysicalGatewayRoute {{
-          $route = Get-NetRoute -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue |
-            Where-Object {{ $_.NextHop -and $_.NextHop -ne "0.0.0.0" -and $_.InterfaceAlias -notmatch $TunnelInterfacePattern }} |
-            Sort-Object RouteMetric, InterfaceMetric |
-            Select-Object -First 1
-          if ($route) {{ return $route }}
-
-          $gateway = Get-NetIPConfiguration -ErrorAction SilentlyContinue |
-            Where-Object {{ $_.IPv4DefaultGateway -and $_.InterfaceAlias -notmatch $TunnelInterfacePattern }} |
-            Select-Object -First 1
-          if (-not $gateway) {{ return $null }}
-
-          [pscustomobject]@{{
-            InterfaceIndex = $gateway.InterfaceIndex
-            InterfaceAlias = $gateway.InterfaceAlias
-            NextHop = $gateway.IPv4DefaultGateway.NextHop
-          }}
-        }}
-
-        if (-not (Test-Admin)) {{
-          throw "Run this script from elevated PowerShell."
-        }}
-
-        foreach ($ip in $ServerIps) {{
-          $prefix = "$ip/32"
-          if ($Remove) {{
-            Get-NetRoute -DestinationPrefix $prefix -ErrorAction SilentlyContinue |
-              Where-Object {{ $_.RouteMetric -eq 1 }} |
-              Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue
-            Write-Host "Removed bypass route $prefix"
-            continue
-          }}
-
-          $gatewayRoute = Get-PhysicalGatewayRoute
-          if (-not $gatewayRoute) {{
-            throw "Physical default gateway was not found. Disable the VPN client and run client-check again."
-          }}
-
-          Get-NetRoute -DestinationPrefix $prefix -ErrorAction SilentlyContinue |
-            Where-Object {{ $_.InterfaceIndex -ne $gatewayRoute.InterfaceIndex -or $_.NextHop -ne $gatewayRoute.NextHop }} |
-            Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue
-
-          if (-not (Get-NetRoute -DestinationPrefix $prefix -InterfaceIndex $gatewayRoute.InterfaceIndex -NextHop $gatewayRoute.NextHop -ErrorAction SilentlyContinue)) {{
-            New-NetRoute -DestinationPrefix $prefix -InterfaceIndex $gatewayRoute.InterfaceIndex -NextHop $gatewayRoute.NextHop -RouteMetric 1 -PolicyStore ActiveStore | Out-Null
-          }}
-          Write-Host "Bypass route $prefix via $($gatewayRoute.InterfaceAlias) $($gatewayRoute.NextHop)"
-        }}
-
-        Write-Host "Done. Re-run: .\\vpn.cmd client-check --deployment {env['DEPLOY_NAME']}"
-        """
-    )
-
-
-def render_vless_uri(env: dict[str, str]) -> str:
-    return f"vless://{env['CLIENT_UUID']}@{env['RU_PUBLIC_IP']}:{env['RU_LISTEN_PORT']}?encryption=none&security=reality&sni={env['RU_REALITY_SERVER_NAME']}&pbk={env['RU_REALITY_PUBLIC_KEY']}&sid={env['RU_REALITY_SHORT_ID']}&fp={env['UTLS_FINGERPRINT']}&type=tcp&flow={env['CLIENT_FLOW']}#{env['DEPLOY_NAME']}-ru-gateway\n"
 
 
 def render_sshd_hardening(env: dict[str, str]) -> str:
@@ -1323,6 +1148,18 @@ def deployment_out_dir(env: dict[str, str]) -> Path:
     return OUT_DIR / env["DEPLOY_NAME"]
 
 
+def client_artifact_paths(env: dict[str, str]) -> dict[str, Path]:
+    return _client_artifacts.client_artifact_paths(env, out_dir=OUT_DIR)
+
+
+def render_next_steps(env: dict[str, str]) -> str:
+    return _client_artifacts.render_next_steps(env, out_dir=OUT_DIR)
+
+
+def render_client_profiles(env: dict[str, str]) -> Path:
+    return _client_artifacts.render_client_profiles(env, out_dir=OUT_DIR)
+
+
 def preview_dir_for_role(preview_root: Path, role: str) -> Path:
     return preview_root / ("ru" if role == ROLE_RU else "foreign")
 
@@ -1376,63 +1213,6 @@ def copy_python_package(target_root: Path) -> Path:
     return destination
 
 
-def client_artifact_paths(env: dict[str, str]) -> dict[str, Path]:
-    client_dir = deployment_out_dir(env) / "client"
-    return {
-        "client_dir": client_dir,
-        "vless_uri": client_dir / "vless-uri.txt",
-        "hiddify_uri_compat": client_dir / "hiddify-uri.txt",
-        "hiddify_json": client_dir / "hiddify-cross-platform.json",
-        "android_hiddify_json": client_dir / "hiddify-android.json",
-        "linux_json": client_dir / "linux-sing-box.json",
-        "windows_xray_json": client_dir / "windows-xray.json",
-        "windows_route_bypass": client_dir / "windows-route-bypass.ps1",
-        "next_steps": deployment_out_dir(env) / "NEXT-STEPS.txt",
-    }
-
-
-STALE_CLIENT_ARTIFACT_NAMES = (
-    "hiddify-subscription-url.txt",
-    "hiddify-import-url.txt",
-    "hiddify-android-subscription-url.txt",
-)
-
-
-def prepare_client_artifact_dir(client_dir: Path) -> None:
-    client_dir.mkdir(parents=True, exist_ok=True)
-    for name in STALE_CLIENT_ARTIFACT_NAMES:
-        stale_path = client_dir / name
-        if stale_path.exists():
-            stale_path.unlink()
-
-
-def render_next_steps(env: dict[str, str]) -> str:
-    paths = client_artifact_paths(env)
-    return "\n".join(
-        [
-            f"Deployment: {env['DEPLOY_NAME']}",
-            "",
-            "Что уже готово:",
-            f"- Основной VLESS URI: {paths['vless_uri']}",
-            f"- JSON fallback для Hiddify: {paths['hiddify_json']}",
-            f"- Android JSON fallback для Hiddify: {paths['android_hiddify_json']}",
-            f"- Windows/v2rayN Xray JSON: {paths['windows_xray_json']}",
-            f"- Windows route bypass helper: {paths['windows_route_bypass']}",
-            f"- Совместимый Hiddify URI alias: {paths['hiddify_uri_compat']}",
-            f"- JSON backup для Linux sing-box: {paths['linux_json']}",
-            "",
-            "Что делать дальше:",
-            "1. На любой платформе сначала попробуй прямой VLESS URI в совместимом клиенте.",
-            f"2. На Windows/v2rayN используй {paths['windows_xray_json'].name} с Xray core.",
-            f"3. Основной нейтральный файл: {paths['vless_uri'].name}. На Android предпочтительны v2rayNG или NekoBox.",
-            f"4. Если нужен Hiddify на Android, используй локальный JSON {paths['android_hiddify_json'].name}. Этот путь считается совместимым, но не эталонным.",
-            f"5. Файл {paths['hiddify_uri_compat'].name} оставлен как совместимый alias того же VLESS URI для старых сценариев.",
-            f"6. Если включён TUN/full VPN и client-check показывает self-tunnel, запусти PowerShell от администратора: .\\{paths['windows_route_bypass'].name}",
-            f"7. Для проверки серверов потом запусти: vpn status --deployment {env['DEPLOY_NAME']}",
-        ]
-    ) + "\n"
-
-
 def render_preview_files(env: dict[str, str], preview_dir: Path) -> None:
     reset_generated_dir(preview_dir_for_role(preview_dir, ROLE_RU))
     reset_generated_dir(preview_dir_for_role(preview_dir, ROLE_FOREIGN))
@@ -1453,22 +1233,6 @@ def render_config_artifacts(env_path: Path, env: dict[str, str], *, fetch_assets
     write_text(server_dir / "foreign.env", render_env_text(env))
     render_preview_files(env, preview_dir)
     return out_dir
-
-
-def render_client_profiles(env: dict[str, str]) -> Path:
-    require_env(env, REQUIRED_ENV_VARS)
-    paths = client_artifact_paths(env)
-    prepare_client_artifact_dir(paths["client_dir"])
-    write_text(paths["hiddify_json"], render_client_profile(env, auto_redirect=False))
-    write_text(paths["android_hiddify_json"], render_client_profile(env, auto_redirect=False, android_safe=True))
-    write_text(paths["linux_json"], render_client_profile(env, auto_redirect=True))
-    write_text(paths["windows_xray_json"], render_xray_client_profile(env))
-    write_text(paths["windows_route_bypass"], render_windows_route_bypass_script(env))
-    uri_payload = render_vless_uri(env)
-    write_text(paths["vless_uri"], uri_payload)
-    write_text(paths["hiddify_uri_compat"], uri_payload)
-    write_text(paths["next_steps"], render_next_steps(env))
-    return paths["client_dir"]
 
 
 def emit_cloud_init_assets(assets_dir: Path) -> str:
