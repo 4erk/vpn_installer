@@ -146,7 +146,6 @@ def render_ru_singbox(env: dict[str, str]) -> str:
     dns_rules.append({"rule_set": ["ru-geosite"], "action": "route", "server": "dns-ru-direct", "strategy": "ipv4_only"})
 
     route_rules: list[dict[str, Any]] = [
-        {"ip_version": 6, "action": "route", "outbound": "blocked"},
         {"inbound": ["vless-in"], "action": "resolve", "strategy": "ipv4_only"},
         {"inbound": ["vless-in"], "action": "sniff"},
     ]
@@ -161,6 +160,7 @@ def render_ru_singbox(env: dict[str, str]) -> str:
             {"ip_is_private": True, "action": "route", "outbound": "direct-ru"},
             {"rule_set": ["ru-geosite"], "action": "route", "outbound": "direct-ru"},
             {"rule_set": ["ru-geoip"], "action": "route", "outbound": "direct-ru"},
+            {"ip_version": 6, "action": "route", "outbound": "to-foreign"},
         ]
     )
 
@@ -214,26 +214,34 @@ def render_foreign_singbox() -> str:
 
 
 def render_ru_wg(env: dict[str, str]) -> str:
+    foreign_v6_host = wg_host_address(env["WG_FOREIGN_ADDRESS_V6"])
     return "\n".join(
         [
             "[Interface]",
-            f"Address = {env['WG_RU_ADDRESS']}",
+            f"Address = {env['WG_RU_ADDRESS']}, {env['WG_RU_ADDRESS_V6']}",
             f"PrivateKey = {env['WG_RU_PRIVATE_KEY']}",
             f"MTU = {env['WG_MTU']}",
             f"FwMark = {env['WG_TUNNEL_FWMARK']}",
             "Table = off",
             f"PostUp = ip -4 route replace {wg_host_address(env['WG_FOREIGN_ADDRESS'])}/32 dev {env['WG_INTERFACE']}",
+            f"PostUp = ip -6 route replace {foreign_v6_host}/128 dev {env['WG_INTERFACE']}",
             f"PostUp = ip -4 route replace default dev {env['WG_INTERFACE']} table {env['WG_ROUTE_TABLE']}",
+            f"PostUp = ip -6 route replace default dev {env['WG_INTERFACE']} table {env['WG_ROUTE_TABLE']}",
             f"PostUp = ip -4 rule del fwmark {env['APP_ROUTE_MARK']} table {env['WG_ROUTE_TABLE']} priority 10000 2>/dev/null || true",
             f"PostUp = ip -4 rule add fwmark {env['APP_ROUTE_MARK']} table {env['WG_ROUTE_TABLE']} priority 10000",
+            f"PostUp = ip -6 rule del fwmark {env['APP_ROUTE_MARK']} table {env['WG_ROUTE_TABLE']} priority 10000 2>/dev/null || true",
+            f"PostUp = ip -6 rule add fwmark {env['APP_ROUTE_MARK']} table {env['WG_ROUTE_TABLE']} priority 10000",
+            f"PreDown = ip -6 rule del fwmark {env['APP_ROUTE_MARK']} table {env['WG_ROUTE_TABLE']} priority 10000 2>/dev/null || true",
             f"PreDown = ip -4 rule del fwmark {env['APP_ROUTE_MARK']} table {env['WG_ROUTE_TABLE']} priority 10000 2>/dev/null || true",
+            f"PreDown = ip -6 route del default dev {env['WG_INTERFACE']} table {env['WG_ROUTE_TABLE']} 2>/dev/null || true",
             f"PreDown = ip -4 route del default dev {env['WG_INTERFACE']} table {env['WG_ROUTE_TABLE']} 2>/dev/null || true",
+            f"PreDown = ip -6 route del {foreign_v6_host}/128 dev {env['WG_INTERFACE']} 2>/dev/null || true",
             f"PreDown = ip -4 route del {wg_host_address(env['WG_FOREIGN_ADDRESS'])}/32 dev {env['WG_INTERFACE']} 2>/dev/null || true",
             "",
             "[Peer]",
             f"PublicKey = {env['WG_FOREIGN_PUBLIC_KEY']}",
             f"PresharedKey = {env['WG_PRESHARED_KEY']}",
-            "AllowedIPs = 0.0.0.0/0",
+            "AllowedIPs = 0.0.0.0/0, ::/0",
             f"Endpoint = {env['FOREIGN_PUBLIC_IP']}:{env['WG_PORT']}",
             f"PersistentKeepalive = {env['WG_KEEPALIVE']}",
             "",
@@ -245,7 +253,7 @@ def render_foreign_wg(env: dict[str, str]) -> str:
     return "\n".join(
         [
             "[Interface]",
-            f"Address = {env['WG_FOREIGN_ADDRESS']}",
+            f"Address = {env['WG_FOREIGN_ADDRESS']}, {env['WG_FOREIGN_ADDRESS_V6']}",
             f"ListenPort = {env['WG_PORT']}",
             f"PrivateKey = {env['WG_FOREIGN_PRIVATE_KEY']}",
             f"MTU = {env['WG_MTU']}",
@@ -253,7 +261,7 @@ def render_foreign_wg(env: dict[str, str]) -> str:
             "[Peer]",
             f"PublicKey = {env['WG_RU_PUBLIC_KEY']}",
             f"PresharedKey = {env['WG_PRESHARED_KEY']}",
-            f"AllowedIPs = {wg_host_address(env['WG_RU_ADDRESS'])}/32",
+            f"AllowedIPs = {wg_host_address(env['WG_RU_ADDRESS'])}/32, {wg_host_address(env['WG_RU_ADDRESS_V6'])}/128",
             "",
         ]
     )
@@ -316,6 +324,13 @@ def render_foreign_nftables(env: dict[str, str], wan_iface: str) -> str:
             "  chain postrouting {",
             "    type nat hook postrouting priority srcnat;",
             f'    ip saddr {wg_host_address(env["WG_RU_ADDRESS"])} oifname "{wan_iface}" masquerade',
+            "  }",
+            "}",
+            "",
+            "table ip6 nat {",
+            "  chain postrouting {",
+            "    type nat hook postrouting priority srcnat;",
+            f'    ip6 saddr {env["WG_IPV6_PREFIX"]} oifname "{wan_iface}" masquerade',
             "  }",
             "}",
             "",
@@ -509,8 +524,16 @@ def render_health_script(env: dict[str, str], role: str) -> str:
     role_specific_wg_probe = (
         "\n".join(
             [
-                'route_to_foreign_wg_ok() {',
+                'route_to_foreign_wg_ipv4_ok() {',
                 '  ip -4 route get "${WG_FOREIGN_ADDRESS_HOST}" 2>/dev/null | grep -Eq "(^| )dev ${WG_INTERFACE}( |$)"',
+                '}',
+                "",
+                'route_to_foreign_wg_ipv6_ok() {',
+                f'  ip -6 route get 2606:4700:4700::1111 mark {env["APP_ROUTE_MARK"]} 2>/dev/null | grep -Eq "(^| )dev ${{WG_INTERFACE}}( |$)"',
+                '}',
+                "",
+                'route_to_foreign_wg_ok() {',
+                '  route_to_foreign_wg_ipv4_ok && route_to_foreign_wg_ipv6_ok',
                 '}',
                 "",
                 'probe_wireguard_path() {',
@@ -559,6 +582,7 @@ def render_health_script(env: dict[str, str], role: str) -> str:
         WG_INTERFACE="{env['WG_INTERFACE']}"
         WG_RU_ADDRESS_HOST="{wg_host_address(env['WG_RU_ADDRESS'])}"
         WG_FOREIGN_ADDRESS_HOST="{wg_host_address(env['WG_FOREIGN_ADDRESS'])}"
+        WG_FOREIGN_ADDRESS_V6_HOST="{wg_host_address(env['WG_FOREIGN_ADDRESS_V6'])}"
         WAN_INTERFACE="{env.get('WAN_INTERFACE', '')}"
         RU_PUBLIC_IP="{env['RU_PUBLIC_IP']}"
         FOREIGN_PUBLIC_IP="{env['FOREIGN_PUBLIC_IP']}"
@@ -967,6 +991,13 @@ EOF
               ;;
             repair-ru-wireguard-route)
               ip -4 route replace "${{WG_FOREIGN_ADDRESS_HOST}}/32" dev "${{WG_INTERFACE}}"
+              ip -6 route replace "${{WG_FOREIGN_ADDRESS_V6_HOST}}/128" dev "${{WG_INTERFACE}}"
+              ip -4 route replace default dev "${{WG_INTERFACE}}" table "{env['WG_ROUTE_TABLE']}"
+              ip -6 route replace default dev "${{WG_INTERFACE}}" table "{env['WG_ROUTE_TABLE']}"
+              ip -4 rule del fwmark "{env['APP_ROUTE_MARK']}" table "{env['WG_ROUTE_TABLE']}" priority 10000 >/dev/null 2>&1 || true
+              ip -4 rule add fwmark "{env['APP_ROUTE_MARK']}" table "{env['WG_ROUTE_TABLE']}" priority 10000
+              ip -6 rule del fwmark "{env['APP_ROUTE_MARK']}" table "{env['WG_ROUTE_TABLE']}" priority 10000 >/dev/null 2>&1 || true
+              ip -6 rule add fwmark "{env['APP_ROUTE_MARK']}" table "{env['WG_ROUTE_TABLE']}" priority 10000
               ;;
             restart-foreign-nftables)
               systemctl restart --no-block nftables vpn-stack-sync.service

@@ -149,6 +149,15 @@ class RenderTests(unittest.TestCase):
         self.assertNotIn("detour", servers["dns-ru-direct"])
         self.assertEqual(servers["dns-global"]["detour"], "to-foreign")
 
+    def test_ru_server_routes_ipv6_literals_to_foreign_instead_of_blocking(self) -> None:
+        env = self.make_env()
+        payload = json.loads(render.render_ru_singbox(env))
+        route_rules = payload["route"]["rules"]
+        ipv6_rules = [rule for rule in route_rules if rule.get("ip_version") == 6]
+        self.assertEqual(ipv6_rules, [{"ip_version": 6, "action": "route", "outbound": "to-foreign"}])
+        self.assertFalse(any(rule.get("ip_version") == 6 and rule.get("outbound") in {"block", "blocked"} for rule in route_rules))
+        self.assertEqual(payload["route"]["final"], "to-foreign")
+
     def test_ru_server_config_forces_selected_domains_and_suffixes_direct(self) -> None:
         env = self.make_env()
         payload = json.loads(render.render_ru_singbox(env))
@@ -374,6 +383,9 @@ class RenderTests(unittest.TestCase):
         ru_script = render.render_health_script(env, render.ROLE_RU)
         self.assertIn("probe_wireguard_path()", ru_script)
         self.assertIn('WG_FOREIGN_ADDRESS_HOST="10.74.0.2"', ru_script)
+        self.assertIn('WG_FOREIGN_ADDRESS_V6_HOST="fd74:7670:6e73::2"', ru_script)
+        self.assertIn("route_to_foreign_wg_ipv6_ok()", ru_script)
+        self.assertIn('ip -6 route get 2606:4700:4700::1111 mark 48', ru_script)
         self.assertIn('route_to_foreign_wg_ok && probe_http_ipv4 "${WG_INTERFACE}"', ru_script)
         self.assertIn('reasons+=("ru_wg_peer_route_missing")', ru_script)
         self.assertIn('probe_http_ipv4 "${WG_INTERFACE}"', ru_script)
@@ -391,19 +403,43 @@ class RenderTests(unittest.TestCase):
         env = self.make_env()
         config = render.render_ru_wg(env)
         foreign_wg_host = render.wg_host_address(env["WG_FOREIGN_ADDRESS"])
+        foreign_wg_v6_host = render.wg_host_address(env["WG_FOREIGN_ADDRESS_V6"])
+        self.assertIn(f"Address = {env['WG_RU_ADDRESS']}, {env['WG_RU_ADDRESS_V6']}", config)
         self.assertIn(f"PostUp = ip -4 route replace {foreign_wg_host}/32 dev {env['WG_INTERFACE']}", config)
+        self.assertIn(f"PostUp = ip -6 route replace {foreign_wg_v6_host}/128 dev {env['WG_INTERFACE']}", config)
         self.assertIn(f"PostUp = ip -4 route replace default dev {env['WG_INTERFACE']} table {env['WG_ROUTE_TABLE']}", config)
+        self.assertIn(f"PostUp = ip -6 route replace default dev {env['WG_INTERFACE']} table {env['WG_ROUTE_TABLE']}", config)
         self.assertIn(
             f"PostUp = ip -4 rule del fwmark {env['APP_ROUTE_MARK']} table {env['WG_ROUTE_TABLE']} priority 10000 2>/dev/null || true",
+            config,
+        )
+        self.assertIn(
+            f"PostUp = ip -6 rule del fwmark {env['APP_ROUTE_MARK']} table {env['WG_ROUTE_TABLE']} priority 10000 2>/dev/null || true",
             config,
         )
         self.assertIn(
             f"PreDown = ip -4 rule del fwmark {env['APP_ROUTE_MARK']} table {env['WG_ROUTE_TABLE']} priority 10000 2>/dev/null || true",
             config,
         )
+        self.assertIn(
+            f"PreDown = ip -6 rule del fwmark {env['APP_ROUTE_MARK']} table {env['WG_ROUTE_TABLE']} priority 10000 2>/dev/null || true",
+            config,
+        )
         self.assertIn(f"PreDown = ip -4 route del default dev {env['WG_INTERFACE']} table {env['WG_ROUTE_TABLE']} 2>/dev/null || true", config)
+        self.assertIn(f"PreDown = ip -6 route del default dev {env['WG_INTERFACE']} table {env['WG_ROUTE_TABLE']} 2>/dev/null || true", config)
         self.assertIn(f"PreDown = ip -4 route del {foreign_wg_host}/32 dev {env['WG_INTERFACE']} 2>/dev/null || true", config)
+        self.assertIn(f"PreDown = ip -6 route del {foreign_wg_v6_host}/128 dev {env['WG_INTERFACE']} 2>/dev/null || true", config)
+        self.assertIn("AllowedIPs = 0.0.0.0/0, ::/0", config)
         self.assertNotIn("PostUp = ip -4 route add default", config)
+
+    def test_foreign_wireguard_accepts_ru_ipv4_and_ipv6_peer_addresses(self) -> None:
+        env = self.make_env()
+        config = render.render_foreign_wg(env)
+        self.assertIn(f"Address = {env['WG_FOREIGN_ADDRESS']}, {env['WG_FOREIGN_ADDRESS_V6']}", config)
+        self.assertIn(
+            f"AllowedIPs = {render.wg_host_address(env['WG_RU_ADDRESS'])}/32, {render.wg_host_address(env['WG_RU_ADDRESS_V6'])}/128",
+            config,
+        )
 
     def test_render_health_script_hardens_ru_runtime(self) -> None:
         env = self.make_env()
@@ -416,6 +452,8 @@ class RenderTests(unittest.TestCase):
         self.assertIn('SELF_HEAL_CONFIRMATIONS="2"', script)
         self.assertIn('systemctl restart --no-block "wg-quick@${WG_INTERFACE}"', script)
         self.assertNotIn("systemctl restart --no-block sing-box", script)
+        self.assertIn('ip -6 route replace "${WG_FOREIGN_ADDRESS_V6_HOST}/128" dev "${WG_INTERFACE}"', script)
+        self.assertIn('ip -6 rule add fwmark "48" table "51820" priority 10000', script)
         self.assertIn('probe_http_ipv4 "${WG_INTERFACE}"', script)
         self.assertIn('probe_ping_loss_pct_fast "${FOREIGN_PUBLIC_IP}"', script)
         self.assertIn("ru_foreign_ping_loss_fast", script)
@@ -508,6 +546,8 @@ class RenderTests(unittest.TestCase):
         self.assertIn(f"limit rate {env['SSH_INPUT_RATE']} burst {env['SSH_INPUT_BURST']} packets", rules)
         self.assertIn(f"tcp dport {env['SSH_PORT']} counter drop", rules)
         self.assertIn(f"udp dport {env['WG_PORT']} accept", rules)
+        self.assertIn("table ip6 nat", rules)
+        self.assertIn(f'ip6 saddr {env["WG_IPV6_PREFIX"]} oifname "eth0" masquerade', rules)
 
     def test_write_role_rendered_files_and_package_bundle(self) -> None:
         env = self.make_env()

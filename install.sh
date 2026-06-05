@@ -134,6 +134,9 @@ APP_ROUTE_MARK="${APP_ROUTE_MARK:-48}"
 WG_TUNNEL_FWMARK="${WG_TUNNEL_FWMARK:-51820}"
 WG_RU_ADDRESS="${WG_RU_ADDRESS:-10.74.0.1/32}"
 WG_FOREIGN_ADDRESS="${WG_FOREIGN_ADDRESS:-10.74.0.2/32}"
+WG_RU_ADDRESS_V6="${WG_RU_ADDRESS_V6:-fd74:7670:6e73::1/128}"
+WG_FOREIGN_ADDRESS_V6="${WG_FOREIGN_ADDRESS_V6:-fd74:7670:6e73::2/128}"
+WG_IPV6_PREFIX="${WG_IPV6_PREFIX:-fd74:7670:6e73::/64}"
 
 RU_DIRECT_DNS_SERVER="${RU_DIRECT_DNS_SERVER:-77.88.8.8}"
 RU_DIRECT_DNS_PORT="${RU_DIRECT_DNS_PORT:-53}"
@@ -196,6 +199,8 @@ INSTALL_MUTATION_STARTED=0
 
 WG_RU_ADDRESS_HOST="${WG_RU_ADDRESS%%/*}"
 WG_FOREIGN_ADDRESS_HOST="${WG_FOREIGN_ADDRESS%%/*}"
+WG_RU_ADDRESS_V6_HOST="${WG_RU_ADDRESS_V6%%/*}"
+WG_FOREIGN_ADDRESS_V6_HOST="${WG_FOREIGN_ADDRESS_V6%%/*}"
 
 require_var() {
   local name="$1"
@@ -217,6 +222,9 @@ require_common_env() {
   require_var RU_REALITY_SHORT_ID
   require_var WG_RU_ADDRESS
   require_var WG_FOREIGN_ADDRESS
+  require_var WG_RU_ADDRESS_V6
+  require_var WG_FOREIGN_ADDRESS_V6
+  require_var WG_IPV6_PREFIX
   require_var WG_RU_PRIVATE_KEY
   require_var WG_RU_PUBLIC_KEY
   require_var WG_FOREIGN_PRIVATE_KEY
@@ -490,7 +498,9 @@ cleanup_wireguard_policy_routes() {
   fi
 
   ip -4 rule del fwmark "${APP_ROUTE_MARK}" table "${WG_ROUTE_TABLE}" priority 10000 >/dev/null 2>&1 || true
+  ip -6 rule del fwmark "${APP_ROUTE_MARK}" table "${WG_ROUTE_TABLE}" priority 10000 >/dev/null 2>&1 || true
   ip -4 route del default dev "${WG_INTERFACE}" table "${WG_ROUTE_TABLE}" >/dev/null 2>&1 || true
+  ip -6 route del default dev "${WG_INTERFACE}" table "${WG_ROUTE_TABLE}" >/dev/null 2>&1 || true
 }
 
 cleanup_stale_wireguard_interface() {
