@@ -161,18 +161,21 @@ def run(runner: AuditRunner) -> None:
         runner.skip("quick-singbox-runtime-ru", f"{docker_skip_reason}, runtime smoke для RU sing-box пропущен")
 
     if dev_mode and docker_available:
+        runner.record("quick-xray-reality-interop", lambda: test_xray_reality_interop(runner, out_dir))
         runner.record("quick-cloud-init-schema", lambda: test_cloud_init_schema(runner, out_dir))
         runner.record("quick-cloud-init-render-only", lambda: test_cloud_init_render_only(runner, out_dir))
         runner.record("quick-bundle-render-only", lambda: test_bundle_render_only(runner, out_dir))
         runner.record("quick-linux-launcher-no-python", lambda: test_linux_launcher_no_python(runner))
         runner.record("quick-linux-launcher-python", lambda: test_linux_launcher_with_python(runner))
     elif dev_mode:
+        runner.skip("quick-xray-reality-interop", f"{docker_skip_reason}, Xray Reality interop check пропущен")
         runner.skip("quick-cloud-init-schema", f"{docker_skip_reason}, cloud-init schema check пропущен")
         runner.skip("quick-cloud-init-render-only", f"{docker_skip_reason}, cloud-init render-only check пропущен")
         runner.skip("quick-bundle-render-only", f"{docker_skip_reason}, bundle render-only check пропущен")
         runner.skip("quick-linux-launcher-no-python", f"{docker_skip_reason}, Linux launcher test пропущен")
         runner.skip("quick-linux-launcher-python", f"{docker_skip_reason}, Linux launcher test пропущен")
     else:
+        runner.skip("quick-xray-reality-interop", "dev-only: Xray Reality interop выполняется только в полном аудите")
         runner.skip("quick-cloud-init-schema", "dev-only: cloud-init schema выполняется только в полном аудите")
         runner.skip("quick-cloud-init-render-only", "dev-only: cloud-init render-only выполняется только в полном аудите")
         runner.skip("quick-bundle-render-only", "dev-only: bundle render-only выполняется только в полном аудите")
@@ -393,6 +396,86 @@ def test_ru_singbox_runtime_smoke(runner: AuditRunner, out_dir: Path) -> dict[st
             expected_codes={124},
         )
     return {"config": str(config_path), "result": "runtime-smoke-ok"}
+
+
+def test_xray_reality_interop(runner: AuditRunner, out_dir: Path) -> dict[str, str]:
+    network = f"audit-xray-interop-{runner.run_id}"
+    singbox = f"audit-singbox-interop-{runner.run_id}"
+    web = f"audit-web-interop-{runner.run_id}"
+    xray = f"audit-xray-interop-{runner.run_id}"
+    work_dir = runner.work_dir / "xray-reality-interop"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    server_config_path = work_dir / "sing-box.json"
+    client_config_path = work_dir / "xray-client.json"
+    server_config = json.loads((out_dir / "preview" / "ru" / "sing-box.json").read_text(encoding="utf-8"))
+    server_config["inbounds"][0]["listen"] = "0.0.0.0"
+    client_config = json.loads((out_dir / "client" / "windows-xray.json").read_text(encoding="utf-8"))
+    client_config["inbounds"][0]["listen"] = "0.0.0.0"
+    client_config["inbounds"][0]["port"] = 10808
+    client_config["outbounds"][0]["settings"]["vnext"][0]["address"] = "singbox-server"
+    client_config["outbounds"][0]["settings"]["vnext"][0]["port"] = server_config["inbounds"][0]["listen_port"]
+    write_bytes(server_config_path, json.dumps(server_config, ensure_ascii=False, indent=2).encode("utf-8") + b"\n")
+    write_bytes(client_config_path, json.dumps(client_config, ensure_ascii=False, indent=2).encode("utf-8") + b"\n")
+    with runner.docker_network(network, "172.31.240.0/24", "172.31.240.1"):
+        try:
+            with runner.docker_container(singbox, AUDIT_IMAGE, network=network, ip="172.31.240.10", extra_args=["--network-alias", "singbox-server"]):
+                with runner.docker_container(web, AUDIT_IMAGE, network=network, ip="172.31.240.30"):
+                    runner.docker_exec(web, "mkdir -p /srv/interop && printf 'xray reality interop ok\\n' >/srv/interop/index.html && python3 -m http.server 8080 --bind 0.0.0.0 --directory /srv/interop >/tmp/web.log 2>&1 &")
+                    runner.docker_exec(singbox, "mkdir -p /work /var/lib/vpn-stack/rules")
+                    for asset in ("geosite-ru.srs", "geoip-ru.srs"):
+                        runner.docker_copy(singbox, out_dir / "assets" / asset, f"/var/lib/vpn-stack/rules/{asset}")
+                    runner.docker_copy(singbox, server_config_path, "/work/sing-box.json")
+                    runner.docker_exec(singbox, "sing-box check -c /work/sing-box.json")
+                    runner.docker_exec(singbox, "sing-box run -c /work/sing-box.json >/tmp/sing-box.log 2>&1 & sleep 1")
+                    runner.docker(
+                        "run-xray-reality-interop",
+                        [
+                            "run",
+                            "-d",
+                            "--name",
+                            xray,
+                            "--label",
+                            "vpn-installer.audit=1",
+                            "--network",
+                            network,
+                            "--ip",
+                            "172.31.240.20",
+                            "-v",
+                            f"{client_config_path}:/etc/xray/config.json:ro",
+                            "ghcr.io/xtls/xray-core:latest",
+                            "run",
+                            "-config",
+                            "/etc/xray/config.json",
+                        ],
+                    )
+                    try:
+                        completed = runner.docker(
+                            "curl-xray-reality-interop",
+                            [
+                                "run",
+                                "--rm",
+                                "--network",
+                                network,
+                                "curlimages/curl:latest",
+                                "-4",
+                                "-fsS",
+                                "--max-time",
+                                "20",
+                                "-x",
+                                f"socks5h://{xray}:10808",
+                                "http://172.31.240.30:8080/",
+                            ],
+                        )
+                    except Exception:
+                        runner.docker("logs-singbox-reality-interop", ["logs", singbox], expected_codes={0, 1})
+                        runner.docker("logs-xray-reality-interop", ["logs", xray], expected_codes={0, 1})
+                        raise
+                    if "xray reality interop ok" not in completed.stdout:
+                        raise AuditFailure("Xray Reality interop не вернул ожидаемый HTTP payload")
+        finally:
+            if not runner.keep_docker:
+                runner._docker_cleanup(f"rm-{xray}", ["rm", "-f", xray])
+    return {"server_config": str(server_config_path), "client_config": str(client_config_path)}
 
 
 def test_cloud_init_schema(runner: AuditRunner, out_dir: Path) -> dict[str, str]:

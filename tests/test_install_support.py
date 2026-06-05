@@ -32,6 +32,21 @@ class InstallSupportTests(unittest.TestCase):
             self.assertTrue((output_dir / "vpn-stack-health.service").is_file())
             self.assertFalse((output_dir / "vpn-stack-subscription.service").exists())
 
+    def test_render_role_migrates_legacy_ru_port_before_render(self) -> None:
+        env = self.make_env()
+        env["RU_LISTEN_PORT"] = "443"
+        env["RU_REALITY_MAX_TIME_DIFFERENCE"] = "24h"
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            env_path = tmp_path / "demo.env"
+            output_dir = tmp_path / "out"
+            env_path.write_text(render_env_text(env), encoding="utf-8")
+            rc = install_support_main(["render-role", "--role", "ru-gateway", "--env-file", str(env_path), "--output-dir", str(output_dir)])
+            self.assertEqual(rc, 0)
+            payload = json.loads((output_dir / "sing-box.json").read_text(encoding="utf-8"))
+        self.assertEqual(payload["inbounds"][0]["listen_port"], 8443)
+        self.assertNotIn("max_time_difference", payload["inbounds"][0]["tls"]["reality"])
+
     def test_render_role_applies_wan_override(self) -> None:
         env = self.make_env()
         env["WAN_INTERFACE"] = ""

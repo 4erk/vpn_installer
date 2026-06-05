@@ -39,6 +39,7 @@ class RenderTests(unittest.TestCase):
         uri = render.render_vless_uri(env)
         self.assertTrue(uri.startswith("vless://"))
         self.assertTrue(uri.startswith(f"vless://{env['CLIENT_UUID']}@"))
+        self.assertIn(f"@{env['RU_PUBLIC_IP']}:8443?", uri)
         self.assertIn("?encryption=none&", uri)
         self.assertIn("&sni=www.bing.com&", uri)
         self.assertIn("&fp=chrome&", uri)
@@ -115,11 +116,19 @@ class RenderTests(unittest.TestCase):
         users = payload["inbounds"][0]["users"]
         self.assertEqual(users, [{"name": "demo-client", "uuid": env["CLIENT_UUID"], "flow": env["CLIENT_FLOW"]}])
 
-    def test_ru_server_reality_uses_wide_time_tolerance_for_mobile_clients(self) -> None:
+    def test_ru_server_reality_does_not_force_time_tolerance_by_default(self) -> None:
         env = self.make_env()
         payload = json.loads(render.render_ru_singbox(env))
         reality = payload["inbounds"][0]["tls"]["reality"]
-        self.assertEqual(reality["max_time_difference"], "24h")
+        self.assertEqual(payload["inbounds"][0]["listen_port"], 8443)
+        self.assertNotIn("max_time_difference", reality)
+
+    def test_ru_server_reality_can_render_explicit_time_tolerance(self) -> None:
+        env = self.make_env()
+        env["RU_REALITY_MAX_TIME_DIFFERENCE"] = "30s"
+        payload = json.loads(render.render_ru_singbox(env))
+        reality = payload["inbounds"][0]["tls"]["reality"]
+        self.assertEqual(reality["max_time_difference"], "30s")
 
     def test_ru_server_dns_servers_keep_global_detour_but_not_direct_detour(self) -> None:
         env = self.make_env()
@@ -572,7 +581,7 @@ class RenderTests(unittest.TestCase):
         dns_rules = payload["dns"]["rules"]
         route_rules = payload["route"]["rules"]
         servers = {server["tag"]: server for server in payload["dns"]["servers"]}
-        self.assertEqual(payload["inbounds"][0]["tls"]["reality"]["max_time_difference"], "24h")
+        self.assertNotIn("max_time_difference", payload["inbounds"][0]["tls"]["reality"])
         direct_domain_rule = next(rule for rule in route_rules if rule.get("outbound") == "direct-ru" and "domain" in rule)
         self.assertIn("api.ok.ru", direct_domain_rule["domain"])
         self.assertIn("checkip.amazonaws.com", direct_domain_rule["domain"])

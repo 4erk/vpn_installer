@@ -44,6 +44,9 @@ class PackageTests(unittest.TestCase):
         self.assertIn('HEALTH_SELF_HEAL_MAX_ACTIONS_PER_HOUR="${HEALTH_SELF_HEAL_MAX_ACTIONS_PER_HOUR:-2}"', install_script)
         self.assertIn('HEALTH_SELF_HEAL_CONFIRMATIONS="${HEALTH_SELF_HEAL_CONFIRMATIONS:-2}"', install_script)
         self.assertIn('HEALTH_TARGET_PROBE_URLS="${HEALTH_TARGET_PROBE_URLS:-https://chatgpt.com/ https://discord.com/ https://github.com/ https://www.google.com/generate_204}"', install_script)
+        self.assertIn('RU_LISTEN_PORT="${RU_LISTEN_PORT:-8443}"', install_script)
+        self.assertIn('if [[ "${RU_LISTEN_PORT}" == "443" ]]; then', install_script)
+        self.assertIn('seen_ru_listen_port="0"', install_script)
         self.assertIn('APT_LOCK_TIMEOUT_SECONDS="${APT_LOCK_TIMEOUT_SECONDS:-900}"', install_script)
         self.assertIn('apt-get -o DPkg::Lock::Timeout="${APT_LOCK_TIMEOUT_SECONDS}" "$@"', install_script)
         self.assertIn("restore_install_state_on_error()", install_script)
@@ -87,7 +90,7 @@ class PackageTests(unittest.TestCase):
 
     def test_package_exposes_version_via_getattr(self) -> None:
         package = importlib.import_module("vpn_installer")
-        self.assertEqual(package.__version__, "0.3.4")
+        self.assertEqual(package.__version__, "0.3.5")
         with self.assertRaises(AttributeError):
             package.__getattr__("nope")
 

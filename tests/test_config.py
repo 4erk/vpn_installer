@@ -82,13 +82,25 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(env["RU_REALITY_SERVER_NAME"], "www.bing.com")
         self.assertEqual(env["RU_REALITY_HANDSHAKE_SERVER"], "www.bing.com")
 
+    def test_default_ru_listen_port_avoids_degraded_public_443_path(self) -> None:
+        env = config.generate_default_env("sample")
+        self.assertEqual(env["RU_LISTEN_PORT"], "8443")
+
+    def test_merge_env_with_defaults_migrates_legacy_ru_listen_port_443(self) -> None:
+        env = config.merge_env_with_defaults({"RU_LISTEN_PORT": "443"}, "sample")
+        self.assertEqual(env["RU_LISTEN_PORT"], "8443")
+
     def test_merge_env_with_defaults_removes_deprecated_compat_uuid(self) -> None:
         env = config.merge_env_with_defaults({"CLIENT_COMPAT_UUID": "11111111-1111-1111-1111-111111111111"}, "sample")
         self.assertNotIn("CLIENT_COMPAT_UUID", env)
 
-    def test_default_reality_time_tolerance_is_wide_for_mobile_clients(self) -> None:
+    def test_default_reality_time_tolerance_is_not_forced(self) -> None:
         env = config.generate_default_env("sample")
-        self.assertEqual(env["RU_REALITY_MAX_TIME_DIFFERENCE"], "24h")
+        self.assertEqual(env["RU_REALITY_MAX_TIME_DIFFERENCE"], "")
+
+    def test_merge_env_with_defaults_removes_legacy_wide_reality_time_tolerance(self) -> None:
+        env = config.merge_env_with_defaults({"RU_REALITY_MAX_TIME_DIFFERENCE": "24h"}, "sample")
+        self.assertEqual(env["RU_REALITY_MAX_TIME_DIFFERENCE"], "")
 
     def test_default_subscription_settings_are_not_generated_anymore(self) -> None:
         env = config.generate_default_env("sample")
@@ -175,7 +187,7 @@ class ConfigTests(unittest.TestCase):
         view = config.critical_env_view(env)
         self.assertEqual(view["DEPLOY_NAME"], "demo")
         self.assertIn("CLIENT_UUID", view)
-        self.assertIn("RU_REALITY_MAX_TIME_DIFFERENCE", view)
+        self.assertIn("RU_LISTEN_PORT", view)
         self.assertIn("RU_REALITY_PUBLIC_KEY", view)
         self.assertIn("WG_RU_PRIVATE_KEY", view)
         self.assertIn("RU_FORCE_DIRECT_DOMAIN", view)
@@ -184,7 +196,8 @@ class ConfigTests(unittest.TestCase):
         env = config.generate_example_env()
         self.assertEqual(env["DEPLOY_NAME"], "my-stack")
         self.assertEqual(env["RU_PUBLIC_IP"], "203.0.113.10")
-        self.assertEqual(env["RU_REALITY_MAX_TIME_DIFFERENCE"], "24h")
+        self.assertEqual(env["RU_LISTEN_PORT"], "8443")
+        self.assertEqual(env["RU_REALITY_MAX_TIME_DIFFERENCE"], "")
 
     def test_split_asset_sources_supports_spaces_and_pipe(self) -> None:
         self.assertEqual(
@@ -233,7 +246,6 @@ class ConfigTests(unittest.TestCase):
                 "RU_REALITY_PRIVATE_KEY": "a",
                 "RU_REALITY_PUBLIC_KEY": "a",
                 "RU_REALITY_SHORT_ID": "a",
-                "RU_REALITY_MAX_TIME_DIFFERENCE": "24h",
                 "WG_RU_ADDRESS": "a",
                 "WG_FOREIGN_ADDRESS": "a",
                 "WG_RU_PRIVATE_KEY": "a",

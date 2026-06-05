@@ -126,7 +126,7 @@ class AuditModuleTests(unittest.TestCase):
         self.assertIn("address=/ya.ru/", audit_lab.build_lab_dnsmasq())
         self.assertIn("server=ru-web", audit_lab.build_lab_web_server("ru-web"))
         env = {
-            "RU_LISTEN_PORT": "443",
+            "RU_LISTEN_PORT": "8443",
             "CLIENT_UUID": "00000000-0000-0000-0000-000000000000",
             "WG_INTERFACE": "wg0",
             "RU_PUBLIC_IP": "203.0.113.10",

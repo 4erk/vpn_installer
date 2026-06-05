@@ -117,9 +117,16 @@ SSH_PER_SOURCE_MAX_STARTUPS="${SSH_PER_SOURCE_MAX_STARTUPS:-2}"
 SSH_PER_SOURCE_NETBLOCK_SIZE="${SSH_PER_SOURCE_NETBLOCK_SIZE:-24:64}"
 
 CLIENT_FLOW="${CLIENT_FLOW:-xtls-rprx-vision}"
-RU_LISTEN_PORT="${RU_LISTEN_PORT:-443}"
+RU_LISTEN_PORT="${RU_LISTEN_PORT:-8443}"
 RU_REALITY_HANDSHAKE_PORT="${RU_REALITY_HANDSHAKE_PORT:-443}"
+RU_REALITY_MAX_TIME_DIFFERENCE="${RU_REALITY_MAX_TIME_DIFFERENCE:-}"
 UTLS_FINGERPRINT="${UTLS_FINGERPRINT:-chrome}"
+if [[ "${RU_LISTEN_PORT}" == "443" ]]; then
+  RU_LISTEN_PORT="8443"
+fi
+if [[ "${RU_REALITY_MAX_TIME_DIFFERENCE}" == "24h" ]]; then
+  RU_REALITY_MAX_TIME_DIFFERENCE=""
+fi
 
 WG_INTERFACE="${WG_INTERFACE:-wg0}"
 WG_PORT="${WG_PORT:-51820}"
@@ -602,7 +609,32 @@ remove_managed_files() {
 record_install_metadata() {
   mkdir -p "${VPNSTACK_ROOT}"
   if [[ -n "${ENV_FILE:-}" ]]; then
-    write_file "${VPNSTACK_DEPLOYMENT_FILE}" <"${ENV_FILE}"
+    {
+      local seen_ru_listen_port="0"
+      local seen_reality_time="0"
+      local line=""
+      while IFS= read -r line || [[ -n "${line}" ]]; do
+        case "${line}" in
+          RU_LISTEN_PORT=*)
+            printf 'RU_LISTEN_PORT="%s"\n' "${RU_LISTEN_PORT}"
+            seen_ru_listen_port="1"
+            ;;
+          RU_REALITY_MAX_TIME_DIFFERENCE=*)
+            printf 'RU_REALITY_MAX_TIME_DIFFERENCE="%s"\n' "${RU_REALITY_MAX_TIME_DIFFERENCE}"
+            seen_reality_time="1"
+            ;;
+          *)
+            printf '%s\n' "${line}"
+            ;;
+        esac
+      done <"${ENV_FILE}"
+      if [[ "${seen_ru_listen_port}" != "1" ]]; then
+        printf 'RU_LISTEN_PORT="%s"\n' "${RU_LISTEN_PORT}"
+      fi
+      if [[ "${seen_reality_time}" != "1" && -n "${RU_REALITY_MAX_TIME_DIFFERENCE}" ]]; then
+        printf 'RU_REALITY_MAX_TIME_DIFFERENCE="%s"\n' "${RU_REALITY_MAX_TIME_DIFFERENCE}"
+      fi
+    } | write_file "${VPNSTACK_DEPLOYMENT_FILE}"
     chmod 0600 "${VPNSTACK_DEPLOYMENT_FILE}"
   fi
   printf '%s\n' "${ROLE}" >"${VPNSTACK_ROLE_FILE}"

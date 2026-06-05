@@ -84,6 +84,7 @@ class AuditQuickTests(unittest.TestCase):
             quick.run(fake_runner)
         self.assertIn("quick-unittest", fake_runner.records)
         self.assertIn("quick-coverage", fake_runner.records)
+        self.assertIn("quick-xray-reality-interop", fake_runner.records)
         self.assertIn("ensure-audit-image", fake_runner.records)
 
     def test_docker_readiness_treats_missing_daemon_as_unavailable(self) -> None:

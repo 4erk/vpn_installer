@@ -128,6 +128,15 @@ def render_ru_singbox(env: dict[str, str]) -> str:
     direct_domains = env_list(env, "RU_FORCE_DIRECT_DOMAIN")
     direct_domain_suffixes = env_list(env, "RU_FORCE_DIRECT_DOMAIN_SUFFIX")
     direct_ip_cidrs = env_list(env, "RU_FORCE_DIRECT_IP_CIDR")
+    reality_settings: dict[str, Any] = {
+        "enabled": True,
+        "handshake": {"server": env["RU_REALITY_HANDSHAKE_SERVER"], "server_port": env_int(env, "RU_REALITY_HANDSHAKE_PORT")},
+        "private_key": env["RU_REALITY_PRIVATE_KEY"],
+        "short_id": [env["RU_REALITY_SHORT_ID"]],
+    }
+    reality_max_time_difference = env.get("RU_REALITY_MAX_TIME_DIFFERENCE", "").strip()
+    if reality_max_time_difference:
+        reality_settings["max_time_difference"] = reality_max_time_difference
 
     dns_rules: list[dict[str, Any]] = [{"query_type": ["AAAA"], "action": "reject"}]
     if direct_domains:
@@ -177,13 +186,7 @@ def render_ru_singbox(env: dict[str, str]) -> str:
                 "tls": {
                     "enabled": True,
                     "server_name": env["RU_REALITY_SERVER_NAME"],
-                    "reality": {
-                        "enabled": True,
-                        "handshake": {"server": env["RU_REALITY_HANDSHAKE_SERVER"], "server_port": env_int(env, "RU_REALITY_HANDSHAKE_PORT")},
-                        "private_key": env["RU_REALITY_PRIVATE_KEY"],
-                        "short_id": [env["RU_REALITY_SHORT_ID"]],
-                        "max_time_difference": env["RU_REALITY_MAX_TIME_DIFFERENCE"],
-                    },
+                    "reality": reality_settings,
                 },
             }
         ],

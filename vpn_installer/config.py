@@ -40,7 +40,7 @@ DEPRECATED_ENV_KEYS = {
 REMOTE_ENV_CRITICAL_KEYS = {
     "DEPLOY_NAME",
     "CLIENT_UUID",
-    "RU_REALITY_MAX_TIME_DIFFERENCE",
+    "RU_LISTEN_PORT",
     "RU_REALITY_PUBLIC_KEY",
     "RU_REALITY_SHORT_ID",
     "WAN_INTERFACE",
@@ -183,14 +183,14 @@ def generate_default_env(deploy_name: str) -> dict[str, str]:
         "DISABLE_NIC_OFFLOADS": "1",
         "CLIENT_UUID": str(uuid.uuid4()),
         "CLIENT_FLOW": "xtls-rprx-vision",
-        "RU_LISTEN_PORT": "443",
+        "RU_LISTEN_PORT": "8443",
         "RU_REALITY_SERVER_NAME": "www.bing.com",
         "RU_REALITY_HANDSHAKE_SERVER": "www.bing.com",
         "RU_REALITY_HANDSHAKE_PORT": "443",
         "RU_REALITY_PRIVATE_KEY": base64_url_nopad(reality_private),
         "RU_REALITY_PUBLIC_KEY": base64_url_nopad(reality_public),
         "RU_REALITY_SHORT_ID": "0123456789abcdef",
-        "RU_REALITY_MAX_TIME_DIFFERENCE": "24h",
+        "RU_REALITY_MAX_TIME_DIFFERENCE": "",
         "UTLS_FINGERPRINT": "chrome",
         "WG_INTERFACE": "wg0",
         "WG_PORT": "51820",
@@ -312,10 +312,14 @@ def merge_env_with_defaults(existing: dict[str, str], deploy_name: str) -> dict[
             merged[key] = _merge_source_defaults(existing[key], defaults[key])
     if merged.get("UTLS_FINGERPRINT") == "randomized":
         merged["UTLS_FINGERPRINT"] = defaults["UTLS_FINGERPRINT"]
+    if merged.get("RU_LISTEN_PORT") == "443":
+        merged["RU_LISTEN_PORT"] = defaults["RU_LISTEN_PORT"]
     if merged.get("RU_REALITY_SERVER_NAME") == "www.cloudflare.com":
         merged["RU_REALITY_SERVER_NAME"] = defaults["RU_REALITY_SERVER_NAME"]
     if merged.get("RU_REALITY_HANDSHAKE_SERVER") == "www.cloudflare.com":
         merged["RU_REALITY_HANDSHAKE_SERVER"] = defaults["RU_REALITY_HANDSHAKE_SERVER"]
+    if merged.get("RU_REALITY_MAX_TIME_DIFFERENCE") == "24h":
+        merged["RU_REALITY_MAX_TIME_DIFFERENCE"] = defaults["RU_REALITY_MAX_TIME_DIFFERENCE"]
     merged["DEPLOY_NAME"] = deploy_name
     return merged
 
