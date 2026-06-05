@@ -139,6 +139,19 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(payload["inbounds"][0]["listen_port"], 443)
         self.assertEqual(reality["max_time_difference"], "24h")
 
+    def test_ru_server_reality_accepts_primary_and_empty_short_id_by_default(self) -> None:
+        env = self.make_env()
+        payload = json.loads(render.render_ru_singbox(env))
+        reality = payload["inbounds"][0]["tls"]["reality"]
+        self.assertEqual(reality["short_id"], [env["RU_REALITY_SHORT_ID"], ""])
+
+    def test_ru_server_reality_can_disable_empty_short_id_compat(self) -> None:
+        env = self.make_env()
+        env["RU_REALITY_ACCEPT_EMPTY_SHORT_ID"] = "0"
+        payload = json.loads(render.render_ru_singbox(env))
+        reality = payload["inbounds"][0]["tls"]["reality"]
+        self.assertEqual(reality["short_id"], [env["RU_REALITY_SHORT_ID"]])
+
     def test_ru_server_reality_can_render_explicit_time_tolerance(self) -> None:
         env = self.make_env()
         env["RU_REALITY_MAX_TIME_DIFFERENCE"] = "30s"

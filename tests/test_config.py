@@ -105,6 +105,10 @@ class ConfigTests(unittest.TestCase):
         env = config.generate_default_env("sample")
         self.assertEqual(env["RU_REALITY_MAX_TIME_DIFFERENCE"], "24h")
 
+    def test_default_reality_accepts_empty_short_id_for_mobile_compat(self) -> None:
+        env = config.generate_default_env("sample")
+        self.assertEqual(env["RU_REALITY_ACCEPT_EMPTY_SHORT_ID"], "1")
+
     def test_merge_env_with_defaults_restores_empty_reality_time_tolerance_to_default(self) -> None:
         env = config.merge_env_with_defaults({"RU_REALITY_MAX_TIME_DIFFERENCE": ""}, "sample")
         self.assertEqual(env["RU_REALITY_MAX_TIME_DIFFERENCE"], "24h")

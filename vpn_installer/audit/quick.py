@@ -390,11 +390,14 @@ def test_ru_singbox_runtime_smoke(runner: AuditRunner, out_dir: Path) -> dict[st
     work_dir.mkdir(parents=True, exist_ok=True)
     server_mux_path = work_dir / "ru-sing-box-mux-server.json"
     client_mux_path = work_dir / "ru-sing-box-mux-client.json"
+    client_mux_no_sid_path = work_dir / "ru-sing-box-mux-client-no-sid.json"
 
     server_mux_config = json.loads(config_path.read_text(encoding="utf-8"))
     inbound = server_mux_config["inbounds"][0]
     if inbound.get("multiplex") != {"enabled": True}:
         raise AuditFailure("RU sing-box inbound не включает multiplex.enabled=true")
+    if "" not in inbound["tls"]["reality"].get("short_id", []):
+        raise AuditFailure("RU sing-box inbound не принимает пустой REALITY short_id")
     inbound["listen"] = "127.0.0.1"
     inbound["listen_port"] = 14443
     server_mux_config["log"] = {"level": "info", "timestamp": True}
@@ -418,8 +421,12 @@ def test_ru_singbox_runtime_smoke(runner: AuditRunner, out_dir: Path) -> dict[st
         "outbounds": [client_outbound, {"type": "direct", "tag": "direct"}],
         "route": {"final": client_outbound["tag"]},
     }
+    client_mux_no_sid_config = json.loads(json.dumps(client_mux_config))
+    client_mux_no_sid_config["inbounds"][0]["listen_port"] = 20883
+    client_mux_no_sid_config["outbounds"][0]["tls"]["reality"].pop("short_id", None)
     write_bytes(server_mux_path, json.dumps(server_mux_config, ensure_ascii=False, indent=2).encode("utf-8") + b"\n")
     write_bytes(client_mux_path, json.dumps(client_mux_config, ensure_ascii=False, indent=2).encode("utf-8") + b"\n")
+    write_bytes(client_mux_no_sid_path, json.dumps(client_mux_no_sid_config, ensure_ascii=False, indent=2).encode("utf-8") + b"\n")
 
     with runner.docker_container(container, AUDIT_IMAGE):
         runner.docker_exec(container, "mkdir -p /work /var/lib/vpn-stack/rules")
@@ -433,8 +440,10 @@ def test_ru_singbox_runtime_smoke(runner: AuditRunner, out_dir: Path) -> dict[st
         )
         runner.docker_copy(container, server_mux_path, "/work/ru-sing-box-mux-server.json")
         runner.docker_copy(container, client_mux_path, "/work/ru-sing-box-mux-client.json")
+        runner.docker_copy(container, client_mux_no_sid_path, "/work/ru-sing-box-mux-client-no-sid.json")
         runner.docker_exec(container, "sing-box check -c /work/ru-sing-box-mux-server.json")
         runner.docker_exec(container, "sing-box check -c /work/ru-sing-box-mux-client.json")
+        runner.docker_exec(container, "sing-box check -c /work/ru-sing-box-mux-client-no-sid.json")
         runner.docker_exec(container, "mkdir -p /srv/ru-mux && printf 'ru mux ok\\n' >/srv/ru-mux/index.html")
         runner.docker_exec(container, "python3 -m http.server 18080 --bind 127.0.0.1 --directory /srv/ru-mux >/tmp/ru-mux-web.log 2>&1 &")
         runner.docker_exec(container, "sing-box run -c /work/ru-sing-box-mux-server.json >/tmp/ru-mux-server.log 2>&1 & sleep 1")
@@ -449,6 +458,17 @@ def test_ru_singbox_runtime_smoke(runner: AuditRunner, out_dir: Path) -> dict[st
             raise
         if "ru mux ok" not in completed.stdout:
             raise AuditFailure("RU sing-box mux runtime smoke не вернул ожидаемый HTTP payload")
+        runner.docker_exec(container, "sing-box run -c /work/ru-sing-box-mux-client-no-sid.json >/tmp/ru-mux-client-no-sid.log 2>&1 & sleep 1")
+        try:
+            no_sid_completed = runner.docker_exec(
+                container,
+                "curl --silent --show-error --fail --max-time 10 --socks5-hostname 127.0.0.1:20883 http://127.0.0.1:18080/",
+            )
+        except Exception:
+            runner.docker_exec(container, "cat /tmp/ru-mux-server.log /tmp/ru-mux-client-no-sid.log", expected_codes={0, 1})
+            raise
+        if "ru mux ok" not in no_sid_completed.stdout:
+            raise AuditFailure("RU sing-box no-sid runtime smoke не вернул ожидаемый HTTP payload")
     return {"config": str(config_path), "mux_config": str(server_mux_path), "result": "runtime-smoke-ok"}
 
 

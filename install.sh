@@ -119,6 +119,7 @@ SSH_PER_SOURCE_NETBLOCK_SIZE="${SSH_PER_SOURCE_NETBLOCK_SIZE:-24:64}"
 CLIENT_FLOW="${CLIENT_FLOW:-xtls-rprx-vision}"
 RU_LISTEN_PORT="${RU_LISTEN_PORT:-443}"
 RU_REALITY_HANDSHAKE_PORT="${RU_REALITY_HANDSHAKE_PORT:-443}"
+RU_REALITY_ACCEPT_EMPTY_SHORT_ID="${RU_REALITY_ACCEPT_EMPTY_SHORT_ID:-1}"
 RU_REALITY_MAX_TIME_DIFFERENCE="${RU_REALITY_MAX_TIME_DIFFERENCE:-24h}"
 UTLS_FINGERPRINT="${UTLS_FINGERPRINT:-chrome}"
 if [[ "${RU_LISTEN_PORT}" == "8443" ]]; then
@@ -618,6 +619,7 @@ record_install_metadata() {
   if [[ -n "${ENV_FILE:-}" ]]; then
     {
       local seen_ru_listen_port="0"
+      local seen_reality_empty_short_id="0"
       local seen_reality_time="0"
       local line=""
       while IFS= read -r line || [[ -n "${line}" ]]; do
@@ -633,6 +635,10 @@ record_install_metadata() {
             printf 'RU_REALITY_MAX_TIME_DIFFERENCE="%s"\n' "${RU_REALITY_MAX_TIME_DIFFERENCE}"
             seen_reality_time="1"
             ;;
+          RU_REALITY_ACCEPT_EMPTY_SHORT_ID=*)
+            printf 'RU_REALITY_ACCEPT_EMPTY_SHORT_ID="%s"\n' "${RU_REALITY_ACCEPT_EMPTY_SHORT_ID}"
+            seen_reality_empty_short_id="1"
+            ;;
           *)
             printf '%s\n' "${line}"
             ;;
@@ -640,6 +646,9 @@ record_install_metadata() {
       done <"${ENV_FILE}"
       if [[ "${seen_ru_listen_port}" != "1" ]]; then
         printf 'RU_LISTEN_PORT="%s"\n' "${RU_LISTEN_PORT}"
+      fi
+      if [[ "${seen_reality_empty_short_id}" != "1" ]]; then
+        printf 'RU_REALITY_ACCEPT_EMPTY_SHORT_ID="%s"\n' "${RU_REALITY_ACCEPT_EMPTY_SHORT_ID}"
       fi
       if [[ "${seen_reality_time}" != "1" && -n "${RU_REALITY_MAX_TIME_DIFFERENCE}" ]]; then
         printf 'RU_REALITY_MAX_TIME_DIFFERENCE="%s"\n' "${RU_REALITY_MAX_TIME_DIFFERENCE}"

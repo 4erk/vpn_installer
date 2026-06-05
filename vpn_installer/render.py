@@ -128,11 +128,14 @@ def render_ru_singbox(env: dict[str, str]) -> str:
     direct_domains = env_list(env, "RU_FORCE_DIRECT_DOMAIN")
     direct_domain_suffixes = env_list(env, "RU_FORCE_DIRECT_DOMAIN_SUFFIX")
     direct_ip_cidrs = env_list(env, "RU_FORCE_DIRECT_IP_CIDR")
+    reality_short_ids = [env["RU_REALITY_SHORT_ID"]]
+    if env.get("RU_REALITY_ACCEPT_EMPTY_SHORT_ID", "1").strip().lower() not in {"0", "false", "no", "off"}:
+        reality_short_ids.append("")
     reality_settings: dict[str, Any] = {
         "enabled": True,
         "handshake": {"server": env["RU_REALITY_HANDSHAKE_SERVER"], "server_port": env_int(env, "RU_REALITY_HANDSHAKE_PORT")},
         "private_key": env["RU_REALITY_PRIVATE_KEY"],
-        "short_id": [env["RU_REALITY_SHORT_ID"]],
+        "short_id": list(dict.fromkeys(reality_short_ids)),
     }
     reality_max_time_difference = env.get("RU_REALITY_MAX_TIME_DIFFERENCE", "").strip()
     if reality_max_time_difference:
