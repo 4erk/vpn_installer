@@ -183,6 +183,7 @@ def render_ru_singbox(env: dict[str, str]) -> str:
                 "listen": "::",
                 "listen_port": env_int(env, "RU_LISTEN_PORT"),
                 "users": [{"name": f"{env['DEPLOY_NAME']}-client", "uuid": env["CLIENT_UUID"], "flow": env["CLIENT_FLOW"]}],
+                "multiplex": {"enabled": True},
                 "tls": {
                     "enabled": True,
                     "server_name": env["RU_REALITY_SERVER_NAME"],

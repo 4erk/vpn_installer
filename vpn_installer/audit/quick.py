@@ -386,6 +386,41 @@ def test_singbox_check(runner: AuditRunner, out_dir: Path) -> dict[str, str]:
 def test_ru_singbox_runtime_smoke(runner: AuditRunner, out_dir: Path) -> dict[str, str]:
     container = f"audit-singbox-runtime-ru-{runner.run_id}"
     config_path = out_dir / "preview" / "ru" / "sing-box.json"
+    work_dir = runner.work_dir / "ru-runtime-smoke"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    server_mux_path = work_dir / "ru-sing-box-mux-server.json"
+    client_mux_path = work_dir / "ru-sing-box-mux-client.json"
+
+    server_mux_config = json.loads(config_path.read_text(encoding="utf-8"))
+    inbound = server_mux_config["inbounds"][0]
+    if inbound.get("multiplex") != {"enabled": True}:
+        raise AuditFailure("RU sing-box inbound не включает multiplex.enabled=true")
+    inbound["listen"] = "127.0.0.1"
+    inbound["listen_port"] = 14443
+    server_mux_config["log"] = {"level": "info", "timestamp": True}
+    for dns_server in server_mux_config.get("dns", {}).get("servers", []):
+        dns_server.pop("detour", None)
+    server_mux_config["route"]["final"] = "direct-ru"
+    server_mux_config["outbounds"] = [
+        {"type": "direct", "tag": "direct-ru"},
+        {"type": "direct", "tag": "to-foreign"},
+        {"type": "block", "tag": "blocked"},
+    ]
+
+    client_profile = json.loads((out_dir / "client" / "linux-sing-box.json").read_text(encoding="utf-8"))
+    client_outbound = next(outbound for outbound in client_profile["outbounds"] if outbound.get("type") == "vless")
+    client_outbound["server"] = "127.0.0.1"
+    client_outbound["server_port"] = 14443
+    client_outbound["multiplex"] = {"enabled": True, "protocol": "smux", "max_connections": 1, "min_streams": 4}
+    client_mux_config = {
+        "log": {"level": "info", "timestamp": True},
+        "inbounds": [{"type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": 20882}],
+        "outbounds": [client_outbound, {"type": "direct", "tag": "direct"}],
+        "route": {"final": client_outbound["tag"]},
+    }
+    write_bytes(server_mux_path, json.dumps(server_mux_config, ensure_ascii=False, indent=2).encode("utf-8") + b"\n")
+    write_bytes(client_mux_path, json.dumps(client_mux_config, ensure_ascii=False, indent=2).encode("utf-8") + b"\n")
+
     with runner.docker_container(container, AUDIT_IMAGE):
         runner.docker_exec(container, "mkdir -p /work /var/lib/vpn-stack/rules")
         for asset in ("geosite-ru.srs", "geoip-ru.srs"):
@@ -396,7 +431,25 @@ def test_ru_singbox_runtime_smoke(runner: AuditRunner, out_dir: Path) -> dict[st
             "timeout 3s sing-box run -c /work/ru-sing-box.json >/tmp/ru-singbox.log 2>&1",
             expected_codes={124},
         )
-    return {"config": str(config_path), "result": "runtime-smoke-ok"}
+        runner.docker_copy(container, server_mux_path, "/work/ru-sing-box-mux-server.json")
+        runner.docker_copy(container, client_mux_path, "/work/ru-sing-box-mux-client.json")
+        runner.docker_exec(container, "sing-box check -c /work/ru-sing-box-mux-server.json")
+        runner.docker_exec(container, "sing-box check -c /work/ru-sing-box-mux-client.json")
+        runner.docker_exec(container, "mkdir -p /srv/ru-mux && printf 'ru mux ok\\n' >/srv/ru-mux/index.html")
+        runner.docker_exec(container, "python3 -m http.server 18080 --bind 127.0.0.1 --directory /srv/ru-mux >/tmp/ru-mux-web.log 2>&1 &")
+        runner.docker_exec(container, "sing-box run -c /work/ru-sing-box-mux-server.json >/tmp/ru-mux-server.log 2>&1 & sleep 1")
+        runner.docker_exec(container, "sing-box run -c /work/ru-sing-box-mux-client.json >/tmp/ru-mux-client.log 2>&1 & sleep 1")
+        try:
+            completed = runner.docker_exec(
+                container,
+                "curl --silent --show-error --fail --max-time 10 --socks5-hostname 127.0.0.1:20882 http://127.0.0.1:18080/",
+            )
+        except Exception:
+            runner.docker_exec(container, "cat /tmp/ru-mux-server.log /tmp/ru-mux-client.log", expected_codes={0, 1})
+            raise
+        if "ru mux ok" not in completed.stdout:
+            raise AuditFailure("RU sing-box mux runtime smoke не вернул ожидаемый HTTP payload")
+    return {"config": str(config_path), "mux_config": str(server_mux_path), "result": "runtime-smoke-ok"}
 
 
 def test_xray_reality_interop(runner: AuditRunner, out_dir: Path) -> dict[str, str]:

@@ -27,6 +27,7 @@ class InstallSupportTests(unittest.TestCase):
             self.assertEqual(rc, 0)
             payload = json.loads((output_dir / "sing-box.json").read_text(encoding="utf-8"))
             self.assertEqual(payload["route"]["final"], "to-foreign")
+            self.assertEqual(payload["inbounds"][0]["multiplex"], {"enabled": True})
             self.assertTrue((output_dir / "sync-state.sh").is_file())
             self.assertTrue((output_dir / "vpn-stack-sync.service").is_file())
             self.assertTrue((output_dir / "vpn-stack-health.service").is_file())

@@ -97,13 +97,19 @@ class AuditRunnerTests(unittest.TestCase):
 
     def test_ensure_audit_image_uses_existing_image_or_builds(self) -> None:
         runner = self.make_runner()
-        with patch("vpn_installer.audit.runner.subprocess.run", return_value=completed(0)), patch.object(runner, "docker") as docker:
+        with patch("vpn_installer.audit.runner.subprocess.run", side_effect=[completed(0), completed(0, stdout=f"{audit_runner.AUDIT_SINGBOX_REQUIRED_VERSION}\n")]), patch.object(runner, "docker") as docker:
             runner.ensure_audit_image()
         docker.assert_not_called()
         self.assertTrue(runner.base_image_ready)
 
         runner = self.make_runner()
         with patch("vpn_installer.audit.runner.subprocess.run", return_value=completed(1)), patch.object(runner, "docker") as docker:
+            runner.ensure_audit_image()
+        docker.assert_called_once()
+        self.assertTrue(runner.base_image_ready)
+
+        runner = self.make_runner()
+        with patch("vpn_installer.audit.runner.subprocess.run", side_effect=[completed(0), completed(0, stdout="1.13.7\n")]), patch.object(runner, "docker") as docker:
             runner.ensure_audit_image()
         docker.assert_called_once()
         self.assertTrue(runner.base_image_ready)

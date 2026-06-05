@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from vpn_installer.audit.runner import AUDIT_IMAGE, AUDIT_SINGBOX_REQUIRED_VERSION
 from vpn_installer.config import render_example_env_text
 
 
@@ -68,6 +69,8 @@ class PackageTests(unittest.TestCase):
         self.assertIn('ethtool -K "${iface}" tso off', install_script)
         self.assertIn("iputils-ping", install_script)
         self.assertIn('SINGBOX_REQUIRED_VERSION="1.13.12"', install_script)
+        self.assertEqual(AUDIT_SINGBOX_REQUIRED_VERSION, "1.13.12")
+        self.assertIn(AUDIT_SINGBOX_REQUIRED_VERSION, AUDIT_IMAGE)
         self.assertIn('bash -s -- --version "${SINGBOX_REQUIRED_VERSION}"', install_script)
         self.assertIn('current_singbox_version', install_script)
         self.assertIn('apply_runtime_interface_tuning "${RUNTIME_QDISC_INTERFACE}"', install_script)
@@ -92,7 +95,7 @@ class PackageTests(unittest.TestCase):
 
     def test_package_exposes_version_via_getattr(self) -> None:
         package = importlib.import_module("vpn_installer")
-        self.assertEqual(package.__version__, "0.3.10")
+        self.assertEqual(package.__version__, "0.3.11")
         with self.assertRaises(AttributeError):
             package.__getattr__("nope")
 

@@ -20,7 +20,8 @@ from ..common import INSTALL_SCRIPT_PATH, OUT_DIR, ROOT_DIR, RUNTIME_SITE_PACKAG
 from ..config import generate_default_env, load_env_file, render_env_text
 
 AUDIT_ROOT = OUT_DIR / "audit"
-AUDIT_IMAGE = "vpn-installer-audit-base:1"
+AUDIT_SINGBOX_REQUIRED_VERSION = "1.13.12"
+AUDIT_IMAGE = f"vpn-installer-audit-base:sing-box-{AUDIT_SINGBOX_REQUIRED_VERSION}"
 VPN_PS1 = ROOT_DIR / "vpn.ps1"
 VPN_SH = ROOT_DIR / "vpn.sh"
 REPO_FILES_FOR_BOOTSTRAP = [
@@ -306,11 +307,19 @@ class AuditRunner:
             return
         inspect = subprocess.run(["docker", "image", "inspect", AUDIT_IMAGE], capture_output=True, text=True, check=False)
         if inspect.returncode == 0:
-            self.base_image_ready = True
-            return
+            version = subprocess.run(
+                ["docker", "run", "--rm", AUDIT_IMAGE, "bash", "-lc", "sing-box version | awk 'NR == 1 {print $3}'"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if version.returncode == 0 and version.stdout.strip() == AUDIT_SINGBOX_REQUIRED_VERSION:
+                self.base_image_ready = True
+                return
+            self.note(f"AUDIT_IMAGE {AUDIT_IMAGE} содержит sing-box {version.stdout.strip() or 'unknown'}, пересобираю.")
         build_dir = ensure_dir(self.work_dir / "audit-image")
         dockerfile = textwrap.dedent(
-            """\
+            f"""\
             FROM ubuntu:24.04
             ENV DEBIAN_FRONTEND=noninteractive
             RUN apt-get update && apt-get install -y \
@@ -329,7 +338,7 @@ class AuditRunner:
                 tar \
                 wireguard-tools \
                 && rm -rf /var/lib/apt/lists/*
-            RUN bash -lc 'curl -fsSL https://sing-box.sagernet.org/installation/tools/install.sh | bash && sing-box version >/tmp/singbox-version.txt'
+            RUN bash -lc 'curl -fsSL https://sing-box.sagernet.org/installation/tools/install.sh | bash -s -- --version {AUDIT_SINGBOX_REQUIRED_VERSION} && sing-box version >/tmp/singbox-version.txt'
             CMD ["sleep", "infinity"]
             """
         )
@@ -439,6 +448,8 @@ class AuditRunner:
         ip: str | None = None,
         extra_args: list[str] | None = None,
     ):
+        if image == AUDIT_IMAGE:
+            self.ensure_audit_image()
         args = ["create", "--name", name, "--label", "vpn-installer.audit=1"]
         if privileged:
             args.append("--privileged")

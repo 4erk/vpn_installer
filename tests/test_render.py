@@ -117,6 +117,11 @@ class RenderTests(unittest.TestCase):
         users = payload["inbounds"][0]["users"]
         self.assertEqual(users, [{"name": "demo-client", "uuid": env["CLIENT_UUID"], "flow": env["CLIENT_FLOW"]}])
 
+    def test_ru_server_config_enables_inbound_multiplex(self) -> None:
+        env = self.make_env()
+        payload = json.loads(render.render_ru_singbox(env))
+        self.assertEqual(payload["inbounds"][0]["multiplex"], {"enabled": True})
+
     def test_ru_server_config_renders_only_443_inbound(self) -> None:
         env = self.make_env()
         payload = json.loads(render.render_ru_singbox(env))
