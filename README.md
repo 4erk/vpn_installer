@@ -87,7 +87,6 @@ chmod +x ./vpn.sh
 После успешной установки появятся:
 
 - `out/<deployment>/client/vless-uri.txt`
-- `out/<deployment>/client/vless-uri-compatible.txt`
 - `out/<deployment>/client/hiddify-cross-platform.json`
 - `out/<deployment>/client/hiddify-android.json`
 - `out/<deployment>/client/hiddify-uri.txt`
@@ -98,7 +97,6 @@ chmod +x ./vpn.sh
 
 - основной `VLESS URI` копируется в буфер обмена
 - основной нейтральный файл: `vless-uri.txt`
-- совместимый fallback для мобильных и сторонних клиентов: `vless-uri-compatible.txt`
 - на Android эталонный путь: вставить `vless-uri.txt` в `v2rayNG` или `NekoBox`
 - `hiddify-cross-platform.json` — fallback, если нужен локальный файл
 - `hiddify-android.json` — Android-safe fallback
@@ -108,12 +106,11 @@ chmod +x ./vpn.sh
 
 1. На любой платформе сначала попробуй `vless-uri.txt`
 2. На Android предпочтительны `v2rayNG` или `NekoBox`
-3. Если мобильный или сторонний клиент показывает подключение, но трафик не идёт, либо в логах сервера видно `invalid Reality`, импортируй `vless-uri-compatible.txt`
-4. На Windows/v2rayN в режиме TUN/full VPN используй `windows-xray.json`, потому что там явно исключены IP обоих серверов
-5. Если используешь `Hiddify` на Windows/Linux, добавляй локальный `hiddify-cross-platform.json`
-6. Если используешь `Hiddify` на Android, сначала пробуй локальный `hiddify-android.json`
-7. Если нужен максимально нейтральный путь, используй `vless-uri.txt`, а не клиент-специфичные форматы
-8. `hiddify-uri.txt` оставлен как совместимый alias того же `VLESS URI`
+3. На Windows/v2rayN в режиме TUN/full VPN используй `windows-xray.json`, потому что там явно исключены IP обоих серверов
+4. Если используешь `Hiddify` на Windows/Linux, добавляй локальный `hiddify-cross-platform.json`
+5. Если используешь `Hiddify` на Android, сначала пробуй локальный `hiddify-android.json`
+6. Если нужен максимально нейтральный путь, используй `vless-uri.txt`, а не клиент-специфичные форматы
+7. `hiddify-uri.txt` оставлен как совместимый alias того же `VLESS URI`
 
 Основной путь теперь — сырой `VLESS URI`. Внешняя подписка с сервера больше не считается штатным путём; локальные JSON для `Hiddify` остаются только как вторичный совместимый вариант.
 

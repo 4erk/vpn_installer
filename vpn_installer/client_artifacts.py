@@ -242,17 +242,12 @@ def render_vless_uri(env: dict[str, str]) -> str:
     return f"vless://{env['CLIENT_UUID']}@{env['RU_PUBLIC_IP']}:{env['RU_LISTEN_PORT']}?encryption=none&security=reality&sni={env['RU_REALITY_SERVER_NAME']}&pbk={env['RU_REALITY_PUBLIC_KEY']}&sid={env['RU_REALITY_SHORT_ID']}&fp={env['UTLS_FINGERPRINT']}&type=tcp&flow={env['CLIENT_FLOW']}#{env['DEPLOY_NAME']}-ru-gateway\n"
 
 
-def render_compat_vless_uri(env: dict[str, str]) -> str:
-    return f"vless://{env['CLIENT_COMPAT_UUID']}@{env['RU_PUBLIC_IP']}:{env['RU_LISTEN_PORT']}?encryption=none&security=reality&sni={env['RU_REALITY_SERVER_NAME']}&pbk={env['RU_REALITY_PUBLIC_KEY']}&sid={env['RU_REALITY_SHORT_ID']}&fp={env['UTLS_FINGERPRINT']}&type=tcp#{env['DEPLOY_NAME']}-ru-gateway-compatible\n"
-
-
 def client_artifact_paths(env: dict[str, str], *, out_dir: Path | None = None) -> dict[str, Path]:
     deployment_dir = deployment_out_dir(env, out_dir=out_dir)
     client_dir = deployment_dir / "client"
     return {
         "client_dir": client_dir,
         "vless_uri": client_dir / "vless-uri.txt",
-        "vless_compat_uri": client_dir / "vless-uri-compatible.txt",
         "hiddify_uri_compat": client_dir / "hiddify-uri.txt",
         "hiddify_json": client_dir / "hiddify-cross-platform.json",
         "android_hiddify_json": client_dir / "hiddify-android.json",
@@ -264,6 +259,7 @@ def client_artifact_paths(env: dict[str, str], *, out_dir: Path | None = None) -
 
 
 STALE_CLIENT_ARTIFACT_NAMES = (
+    "vless-uri-compatible.txt",
     "hiddify-subscription-url.txt",
     "hiddify-import-url.txt",
     "hiddify-android-subscription-url.txt",
@@ -286,7 +282,6 @@ def render_next_steps(env: dict[str, str], *, out_dir: Path | None = None) -> st
             "",
             "Что уже готово:",
             f"- Основной VLESS URI: {paths['vless_uri']}",
-            f"- Совместимый VLESS URI без Vision flow: {paths['vless_compat_uri']}",
             f"- JSON fallback для Hiddify: {paths['hiddify_json']}",
             f"- Android JSON fallback для Hiddify: {paths['android_hiddify_json']}",
             f"- Windows/v2rayN Xray JSON: {paths['windows_xray_json']}",
@@ -297,12 +292,11 @@ def render_next_steps(env: dict[str, str], *, out_dir: Path | None = None) -> st
             "Что делать дальше:",
             "1. На любой платформе сначала попробуй прямой VLESS URI в совместимом клиенте.",
             f"2. На Windows/v2rayN используй {paths['windows_xray_json'].name} с Xray core.",
-            f"3. Если мобильный или сторонний клиент даёт invalid Reality / не подключается, импортируй {paths['vless_compat_uri'].name}.",
-            f"4. Основной нейтральный файл: {paths['vless_uri'].name}. На Android предпочтительны v2rayNG или NekoBox.",
-            f"5. Если нужен Hiddify на Android, используй локальный JSON {paths['android_hiddify_json'].name}. Этот путь считается совместимым, но не эталонным.",
-            f"6. Файл {paths['hiddify_uri_compat'].name} оставлен как совместимый alias того же VLESS URI для старых сценариев.",
-            f"7. Если включён TUN/full VPN и client-check показывает self-tunnel, запусти PowerShell от администратора: .\\{paths['windows_route_bypass'].name}",
-            f"8. Для проверки серверов потом запусти: vpn status --deployment {env['DEPLOY_NAME']}",
+            f"3. Основной нейтральный файл: {paths['vless_uri'].name}. На Android предпочтительны v2rayNG или NekoBox.",
+            f"4. Если нужен Hiddify на Android, используй локальный JSON {paths['android_hiddify_json'].name}. Этот путь считается совместимым, но не эталонным.",
+            f"5. Файл {paths['hiddify_uri_compat'].name} оставлен как совместимый alias того же VLESS URI для старых сценариев.",
+            f"6. Если включён TUN/full VPN и client-check показывает self-tunnel, запусти PowerShell от администратора: .\\{paths['windows_route_bypass'].name}",
+            f"7. Для проверки серверов потом запусти: vpn status --deployment {env['DEPLOY_NAME']}",
         ]
     ) + "\n"
 
@@ -319,6 +313,5 @@ def render_client_profiles(env: dict[str, str], *, out_dir: Path | None = None) 
     uri_payload = render_vless_uri(env)
     write_text(paths["vless_uri"], uri_payload)
     write_text(paths["hiddify_uri_compat"], uri_payload)
-    write_text(paths["vless_compat_uri"], render_compat_vless_uri(env))
     write_text(paths["next_steps"], render_next_steps(env, out_dir=out_dir))
     return paths["client_dir"]

@@ -303,15 +303,12 @@ def test_validate_json(out_dir: Path) -> dict[str, str]:
 
 def test_user_artifacts(out_dir: Path) -> dict[str, str]:
     vless_uri_path = out_dir / "client" / "vless-uri.txt"
-    vless_compat_uri_path = out_dir / "client" / "vless-uri-compatible.txt"
     hiddify_uri_alias_path = out_dir / "client" / "hiddify-uri.txt"
     hiddify_json_path = out_dir / "client" / "hiddify-cross-platform.json"
     android_hiddify_json_path = out_dir / "client" / "hiddify-android.json"
     next_steps = out_dir / "NEXT-STEPS.txt"
     if not vless_uri_path.is_file():
         raise AuditFailure(f"Не найден основной VLESS URI файл: {vless_uri_path}")
-    if not vless_compat_uri_path.is_file():
-        raise AuditFailure(f"Не найден совместимый VLESS URI файл: {vless_compat_uri_path}")
     if not hiddify_uri_alias_path.is_file():
         raise AuditFailure(f"Не найден Hiddify URI alias файл: {hiddify_uri_alias_path}")
     if not hiddify_json_path.is_file():
@@ -323,20 +320,14 @@ def test_user_artifacts(out_dir: Path) -> dict[str, str]:
     vless_uri_payload = vless_uri_path.read_text(encoding="utf-8")
     if not vless_uri_payload.startswith("vless://"):
         raise AuditFailure("Основной VLESS URI не похож на VLESS URI")
-    vless_compat_uri_payload = vless_compat_uri_path.read_text(encoding="utf-8")
-    if not vless_compat_uri_payload.startswith("vless://"):
-        raise AuditFailure("Совместимый VLESS URI не похож на VLESS URI")
-    if "flow=" in vless_compat_uri_payload:
-        raise AuditFailure("Совместимый VLESS URI не должен содержать flow")
     hiddify_uri_alias_payload = hiddify_uri_alias_path.read_text(encoding="utf-8")
     if hiddify_uri_alias_payload != vless_uri_payload:
         raise AuditFailure("Совместимый Hiddify URI alias расходится с основным VLESS URI")
     next_steps_text = next_steps.read_text(encoding="utf-8")
-    if "VLESS URI" not in next_steps_text or "vpn status" not in next_steps_text or "v2rayNG" not in next_steps_text or "hiddify-cross-platform.json" not in next_steps_text or "vless-uri-compatible.txt" not in next_steps_text:
+    if "VLESS URI" not in next_steps_text or "vpn status" not in next_steps_text or "v2rayNG" not in next_steps_text or "hiddify-cross-platform.json" not in next_steps_text:
         raise AuditFailure("NEXT-STEPS.txt не содержит ожидаемых URI-first инструкций")
     return {
         "vless_uri": str(vless_uri_path),
-        "vless_compat_uri": str(vless_compat_uri_path),
         "hiddify_uri_alias": str(hiddify_uri_alias_path),
         "hiddify_json": str(hiddify_json_path),
         "android_hiddify_json": str(android_hiddify_json_path),

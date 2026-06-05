@@ -709,7 +709,6 @@ def finalize_install_output(env: dict[str, str], deployment_name: str) -> None:
     print_header("Готово")
     print(f"Deployment: {deployment_name}")
     print(f"Основной VLESS URI: {paths['vless_uri']}")
-    print(f"Совместимый VLESS URI без Vision flow: {paths['vless_compat_uri']}")
     print(f"JSON fallback для Hiddify: {paths['hiddify_json']}")
     print(f"Android JSON fallback для Hiddify: {paths['android_hiddify_json']}")
     print(f"Windows/v2rayN Xray JSON: {paths['windows_xray_json']}")
@@ -721,12 +720,11 @@ def finalize_install_output(env: dict[str, str], deployment_name: str) -> None:
     print("Что делать дальше:")
     print("1. На любой платформе сначала используй прямой VLESS URI.")
     print(f"2. На Windows/v2rayN используй {paths['windows_xray_json'].name} с Xray core.")
-    print(f"3. Если мобильный или сторонний клиент даёт invalid Reality / не подключается, импортируй {paths['vless_compat_uri'].name}.")
-    print(f"4. Основной файл: {paths['vless_uri'].name}. На Android эталонные клиенты: v2rayNG или NekoBox.")
-    print(f"5. Если нужен Hiddify на Android, используй локальный JSON {paths['android_hiddify_json'].name}.")
-    print(f"6. Файл {paths['hiddify_uri_compat'].name} оставлен как совместимый alias того же VLESS URI.")
-    print(f"7. Если включён TUN/full VPN и client-check показывает self-tunnel, запусти PowerShell от администратора: .\\{paths['windows_route_bypass'].name}")
-    print(f"8. Для проверки серверов потом запусти: vpn status --deployment {deployment_name}")
+    print(f"3. Основной файл: {paths['vless_uri'].name}. На Android эталонные клиенты: v2rayNG или NekoBox.")
+    print(f"4. Если нужен Hiddify на Android, используй локальный JSON {paths['android_hiddify_json'].name}.")
+    print(f"5. Файл {paths['hiddify_uri_compat'].name} оставлен как совместимый alias того же VLESS URI.")
+    print(f"6. Если включён TUN/full VPN и client-check показывает self-tunnel, запусти PowerShell от администратора: .\\{paths['windows_route_bypass'].name}")
+    print(f"7. Для проверки серверов потом запусти: vpn status --deployment {deployment_name}")
 
 
 def load_env_for_render(env_path: Path) -> dict[str, str]:

@@ -6,6 +6,14 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.3.4] - 2026-06-05
+
+### Fixed
+
+- убран неудачный fallback `vless-uri-compatible.txt` и второй VLESS user: продукт снова отдаёт один канонический `VLESS URI`, чтобы не плодить разные профили для одного подключения
+- в RU `sing-box` Reality inbound теперь явно задаётся `max_time_difference=24h`, чтобы сервер не отбрасывал Android/v2rayNG handshake как `REALITY: processed invalid connection` из-за расхождения времени клиента
+- устаревший `CLIENT_COMPAT_UUID` удаляется при merge env и не попадает в новые локальные/серверные deployment env
+
 ## [0.3.3] - 2026-06-05
 
 ### Added
