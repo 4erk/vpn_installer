@@ -34,7 +34,7 @@ class InstallSupportTests(unittest.TestCase):
 
     def test_render_role_migrates_legacy_ru_port_before_render(self) -> None:
         env = self.make_env()
-        env["RU_LISTEN_PORT"] = "443"
+        env["RU_LISTEN_PORT"] = "8443"
         env["RU_REALITY_MAX_TIME_DIFFERENCE"] = "24h"
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -44,7 +44,7 @@ class InstallSupportTests(unittest.TestCase):
             rc = install_support_main(["render-role", "--role", "ru-gateway", "--env-file", str(env_path), "--output-dir", str(output_dir)])
             self.assertEqual(rc, 0)
             payload = json.loads((output_dir / "sing-box.json").read_text(encoding="utf-8"))
-        self.assertEqual(payload["inbounds"][0]["listen_port"], 8443)
+        self.assertEqual([inbound["listen_port"] for inbound in payload["inbounds"]], [443, 8443])
         self.assertNotIn("max_time_difference", payload["inbounds"][0]["tls"]["reality"])
 
     def test_render_role_applies_wan_override(self) -> None:

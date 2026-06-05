@@ -124,10 +124,23 @@ def wg_host_address(cidr: str) -> str:
     return cidr.split("/", 1)[0]
 
 
+def ru_vless_listen_ports(env: dict[str, str]) -> list[int]:
+    ports: list[int] = []
+    for raw_port in [env.get("RU_LISTEN_PORT", "")] + env_list(env, "RU_COMPAT_LISTEN_PORTS"):
+        if not raw_port:
+            continue
+        port = int(raw_port)
+        if port not in ports:
+            ports.append(port)
+    return ports
+
+
 def render_ru_singbox(env: dict[str, str]) -> str:
     direct_domains = env_list(env, "RU_FORCE_DIRECT_DOMAIN")
     direct_domain_suffixes = env_list(env, "RU_FORCE_DIRECT_DOMAIN_SUFFIX")
     direct_ip_cidrs = env_list(env, "RU_FORCE_DIRECT_IP_CIDR")
+    listen_ports = ru_vless_listen_ports(env)
+    inbound_tags = [f"vless-in-{port}" for port in listen_ports]
     reality_settings: dict[str, Any] = {
         "enabled": True,
         "handshake": {"server": env["RU_REALITY_HANDSHAKE_SERVER"], "server_port": env_int(env, "RU_REALITY_HANDSHAKE_PORT")},
@@ -147,8 +160,8 @@ def render_ru_singbox(env: dict[str, str]) -> str:
 
     route_rules: list[dict[str, Any]] = [
         {"ip_version": 6, "action": "route", "outbound": "blocked"},
-        {"inbound": ["vless-in"], "action": "resolve", "strategy": "ipv4_only"},
-        {"inbound": ["vless-in"], "action": "sniff"},
+        {"inbound": inbound_tags, "action": "resolve", "strategy": "ipv4_only"},
+        {"inbound": inbound_tags, "action": "sniff"},
     ]
     if direct_domains:
         route_rules.append({"domain": direct_domains, "action": "route", "outbound": "direct-ru"})
@@ -179,9 +192,9 @@ def render_ru_singbox(env: dict[str, str]) -> str:
         "inbounds": [
             {
                 "type": "vless",
-                "tag": "vless-in",
+                "tag": f"vless-in-{port}",
                 "listen": "::",
-                "listen_port": env_int(env, "RU_LISTEN_PORT"),
+                "listen_port": port,
                 "users": [{"name": f"{env['DEPLOY_NAME']}-client", "uuid": env["CLIENT_UUID"], "flow": env["CLIENT_FLOW"]}],
                 "tls": {
                     "enabled": True,
@@ -189,6 +202,7 @@ def render_ru_singbox(env: dict[str, str]) -> str:
                     "reality": reality_settings,
                 },
             }
+            for port in listen_ports
         ],
         "outbounds": [
             {"type": "direct", "tag": "direct-ru"},
@@ -340,7 +354,8 @@ def render_ru_firewall_nftables(env: dict[str, str]) -> str:
         "    ct state established,related accept",
     ]
     lines.extend(render_rate_limited_tcp_accept("ssh_guard", env["SSH_PORT"], env["SSH_INPUT_RATE"], env["SSH_INPUT_BURST"]))
-    lines.append(f"    tcp dport {env['RU_LISTEN_PORT']} counter accept")
+    for port in ru_vless_listen_ports(env):
+        lines.append(f"    tcp dport {port} counter accept")
     lines.extend(["  }", "}", ""])
     return "\n".join(lines)
 

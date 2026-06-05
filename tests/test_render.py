@@ -39,7 +39,7 @@ class RenderTests(unittest.TestCase):
         uri = render.render_vless_uri(env)
         self.assertTrue(uri.startswith("vless://"))
         self.assertTrue(uri.startswith(f"vless://{env['CLIENT_UUID']}@"))
-        self.assertIn(f"@{env['RU_PUBLIC_IP']}:8443?", uri)
+        self.assertIn(f"@{env['RU_PUBLIC_IP']}:443?", uri)
         self.assertIn("?encryption=none&", uri)
         self.assertIn("&sni=www.bing.com&", uri)
         self.assertIn("&fp=chrome&", uri)
@@ -116,11 +116,21 @@ class RenderTests(unittest.TestCase):
         users = payload["inbounds"][0]["users"]
         self.assertEqual(users, [{"name": "demo-client", "uuid": env["CLIENT_UUID"], "flow": env["CLIENT_FLOW"]}])
 
+    def test_ru_server_config_renders_443_primary_and_8443_compat_inbounds(self) -> None:
+        env = self.make_env()
+        payload = json.loads(render.render_ru_singbox(env))
+        listen_ports = [inbound["listen_port"] for inbound in payload["inbounds"]]
+        self.assertEqual(listen_ports, [443, 8443])
+        self.assertEqual([inbound["tag"] for inbound in payload["inbounds"]], ["vless-in-443", "vless-in-8443"])
+        inbound_rules = [rule for rule in payload["route"]["rules"] if rule.get("inbound")]
+        self.assertEqual(inbound_rules[0]["inbound"], ["vless-in-443", "vless-in-8443"])
+        self.assertEqual(inbound_rules[1]["inbound"], ["vless-in-443", "vless-in-8443"])
+
     def test_ru_server_reality_does_not_force_time_tolerance_by_default(self) -> None:
         env = self.make_env()
         payload = json.loads(render.render_ru_singbox(env))
         reality = payload["inbounds"][0]["tls"]["reality"]
-        self.assertEqual(payload["inbounds"][0]["listen_port"], 8443)
+        self.assertEqual(payload["inbounds"][0]["listen_port"], 443)
         self.assertNotIn("max_time_difference", reality)
 
     def test_ru_server_reality_can_render_explicit_time_tolerance(self) -> None:
@@ -484,6 +494,7 @@ class RenderTests(unittest.TestCase):
         self.assertIn(f"limit rate {env['SSH_INPUT_RATE']} burst {env['SSH_INPUT_BURST']} packets", rules)
         self.assertIn(f"tcp dport {env['SSH_PORT']} counter drop", rules)
         self.assertIn(f"tcp dport {env['RU_LISTEN_PORT']} counter accept", rules)
+        self.assertIn("tcp dport 8443 counter accept", rules)
         self.assertNotIn("vless_guard", rules)
         self.assertNotIn(f"tcp dport {env['RU_LISTEN_PORT']} counter drop", rules)
         self.assertNotIn("subscription_guard", rules)
