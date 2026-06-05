@@ -452,16 +452,16 @@ class RenderTests(unittest.TestCase):
         self.assertIn("MaxStartups 5:30:20", config)
         self.assertIn("PerSourceMaxStartups 2", config)
 
-    def test_render_ru_nftables_rate_limits_public_ports(self) -> None:
+    def test_render_ru_nftables_rate_limits_ssh_but_not_vless_reality(self) -> None:
         env = self.make_env()
         rules = render.render_ru_firewall_nftables(env)
         self.assertIn("ct state invalid drop", rules)
         self.assertIn(f"tcp dport {env['SSH_PORT']} ct state new meter ssh_guard", rules)
         self.assertIn(f"limit rate {env['SSH_INPUT_RATE']} burst {env['SSH_INPUT_BURST']} packets", rules)
         self.assertIn(f"tcp dport {env['SSH_PORT']} counter drop", rules)
-        self.assertIn(f"tcp dport {env['RU_LISTEN_PORT']} ct state new meter vless_guard", rules)
-        self.assertIn(f"limit rate {env['RU_HTTPS_INPUT_RATE']} burst {env['RU_HTTPS_INPUT_BURST']} packets", rules)
-        self.assertIn(f"tcp dport {env['RU_LISTEN_PORT']} counter drop", rules)
+        self.assertIn(f"tcp dport {env['RU_LISTEN_PORT']} counter accept", rules)
+        self.assertNotIn("vless_guard", rules)
+        self.assertNotIn(f"tcp dport {env['RU_LISTEN_PORT']} counter drop", rules)
         self.assertNotIn("subscription_guard", rules)
 
     def test_render_foreign_nftables_rate_limits_ssh(self) -> None:

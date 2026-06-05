@@ -87,7 +87,7 @@ class PackageTests(unittest.TestCase):
 
     def test_package_exposes_version_via_getattr(self) -> None:
         package = importlib.import_module("vpn_installer")
-        self.assertEqual(package.__version__, "0.3.1")
+        self.assertEqual(package.__version__, "0.3.2")
         with self.assertRaises(AttributeError):
             package.__getattr__("nope")
 

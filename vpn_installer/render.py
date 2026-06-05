@@ -336,7 +336,7 @@ def render_ru_firewall_nftables(env: dict[str, str]) -> str:
         "    ct state established,related accept",
     ]
     lines.extend(render_rate_limited_tcp_accept("ssh_guard", env["SSH_PORT"], env["SSH_INPUT_RATE"], env["SSH_INPUT_BURST"]))
-    lines.extend(render_rate_limited_tcp_accept("vless_guard", env["RU_LISTEN_PORT"], env["RU_HTTPS_INPUT_RATE"], env["RU_HTTPS_INPUT_BURST"]))
+    lines.append(f"    tcp dport {env['RU_LISTEN_PORT']} counter accept")
     lines.extend(["  }", "}", ""])
     return "\n".join(lines)
 

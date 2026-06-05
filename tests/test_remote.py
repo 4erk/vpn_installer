@@ -48,6 +48,7 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("reality_invalid_recent_count", script)
         self.assertIn("nft_port_packets", script)
         self.assertIn("nft_vless_drop_packets", script)
+        self.assertIn('nft_vless_drop_packets="0"', script)
         self.assertIn("head -n1 || true", script)
 
     def test_password_mode_forces_python_backend(self) -> None:

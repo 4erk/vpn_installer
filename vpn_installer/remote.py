@@ -436,6 +436,9 @@ nft_ssh_accept_packets="$(nft_port_packets "${{ssh_port}}" "accept")"
 nft_ssh_drop_packets="$(nft_port_packets "${{ssh_port}}" "drop")"
 nft_vless_accept_packets="$(nft_port_packets "${{ru_listen_port}}" "accept")"
 nft_vless_drop_packets="$(nft_port_packets "${{ru_listen_port}}" "drop")"
+if [[ -n "${{nft_vless_accept_packets}}" && -z "${{nft_vless_drop_packets}}" ]]; then
+  nft_vless_drop_packets="0"
+fi
 
 if command -v wg >/dev/null 2>&1; then
   transfer_row="$(wg show {wg_interface} transfer 2>/dev/null | awk 'NR==1')"
