@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .clipboard import copy_to_clipboard
+from .client_drift import find_client_drift
 from .common import DEPLOYMENTS_DIR, OUT_DIR, RUNTIME_DIR, INSTALL_SCRIPT_PATH, ensure_directories, fail, print_header, sanitize_name, warn, write_text
 from .config import (
     apply_ru_direct_overlays,
@@ -882,6 +883,7 @@ def client_check_workflow(deployment: str | None, role: str) -> int:
     print_header("Проверка клиентских маршрутов")
     print(f"deployment: {deployment_name}")
     failed = False
+    route_failed = False
     for selected_role in requested_roles(role):
         target = build_target(selected_role, env, state)
         route = local_route_to_server(target)
@@ -895,10 +897,24 @@ def client_check_workflow(deployment: str | None, role: str) -> int:
             f"ip={route.target_ip}; iface={route.interface_alias or '-'}; "
             f"source={route.source_address or '-'}; next-hop={route.next_hop or '-'}"
         )
-        failed = failed or verdict.startswith("BAD")
+        if verdict.startswith("BAD"):
+            route_failed = True
+            failed = True
+    print_header("Проверка локальных клиентских профилей")
+    drift_findings = find_client_drift(env)
+    if drift_findings:
+        for finding in drift_findings:
+            print(f"STALE: {finding.path}: {finding.issue}")
+        print("Проблема: локальный клиентский профиль не совпадает с текущим deployment. Удали старый профиль в клиенте и импортируй заново свежий vless-uri.txt или JSON из out/<deployment>/client.")
+        failed = True
+    else:
+        print("Явно устаревшие локальные профили не найдены.")
     if failed:
-        print("Проблема: IP сервера уходит через VPN-интерфейс. В TUN/full VPN используй route-safe JSON или добавь bypass/direct rule для IP обоих серверов.")
+        if route_failed:
+            print("Проблема: IP сервера уходит через VPN-интерфейс. В TUN/full VPN используй route-safe JSON или добавь bypass/direct rule для IP обоих серверов.")
         paths = client_artifact_paths(env)
+        print(f"Свежий VLESS URI: {paths['vless_uri']}")
+        print(f"Свежий Hiddify JSON: {paths['hiddify_json']}")
         print(f"Windows helper: {paths['windows_route_bypass']}")
         print(f"Deployment env: {env_path}")
         return 1

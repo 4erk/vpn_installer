@@ -174,8 +174,17 @@ class WorkflowTests(unittest.TestCase):
         env = generate_default_env("demo")
         env["RU_PUBLIC_IP"] = "203.0.113.10"
         state = {ROLE_RU: {"public_ip": "203.0.113.10", "ssh_host": "203.0.113.10", "ssh_port": "22", "ssh_user": "root", "auth_mode": "password"}}
-        with patch("vpn_installer.workflows.ensure_directories"), patch("vpn_installer.workflows.select_existing_deployment", return_value="demo"), patch("vpn_installer.workflows.load_existing_deployment_env", return_value=(Path("deployments/demo.env"), env)), patch("vpn_installer.workflows.load_state", return_value=state), patch("vpn_installer.workflows.local_route_to_server", return_value=LocalRoute(target_ip="203.0.113.10", interface_alias="singbox_tun")):
+        with patch("vpn_installer.workflows.ensure_directories"), patch("vpn_installer.workflows.select_existing_deployment", return_value="demo"), patch("vpn_installer.workflows.load_existing_deployment_env", return_value=(Path("deployments/demo.env"), env)), patch("vpn_installer.workflows.load_state", return_value=state), patch("vpn_installer.workflows.local_route_to_server", return_value=LocalRoute(target_ip="203.0.113.10", interface_alias="singbox_tun")), patch("vpn_installer.workflows.find_client_drift", return_value=[]):
             self.assertEqual(workflows.client_check_workflow("demo", ROLE_RU), 1)
+
+    def test_client_check_workflow_reports_stale_client_profile(self) -> None:
+        env = generate_default_env("demo")
+        env["RU_PUBLIC_IP"] = "203.0.113.10"
+        state = {ROLE_RU: {"public_ip": "203.0.113.10", "ssh_host": "203.0.113.10", "ssh_port": "22", "ssh_user": "root", "auth_mode": "password"}}
+        finding = __import__("vpn_installer.client_drift", fromlist=["ClientDriftFinding"]).ClientDriftFinding(Path("hiddify.json"), "устаревший порт клиента: 443, ожидается 8443")
+        with patch("vpn_installer.workflows.ensure_directories"), patch("vpn_installer.workflows.select_existing_deployment", return_value="demo"), patch("vpn_installer.workflows.load_existing_deployment_env", return_value=(Path("deployments/demo.env"), env)), patch("vpn_installer.workflows.load_state", return_value=state), patch("vpn_installer.workflows.local_route_to_server", return_value=LocalRoute(target_ip="203.0.113.10", interface_alias="Беспроводная сеть")), patch("vpn_installer.workflows.find_client_drift", return_value=[finding]), patch("sys.stdout", new_callable=__import__("io").StringIO) as stream:
+            self.assertEqual(workflows.client_check_workflow("demo", ROLE_RU), 1)
+        self.assertIn("STALE: hiddify.json", stream.getvalue())
 
     def test_load_remote_authoritative_env_syncs_local_file_and_client_artifacts(self) -> None:
         local_env = generate_default_env("demo")

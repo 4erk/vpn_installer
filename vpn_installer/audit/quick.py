@@ -106,6 +106,7 @@ def run(runner: AuditRunner) -> None:
                 "-m",
                 "py_compile",
                 str(ROOT_DIR / "vpn_installer" / "__main__.py"),
+                str(ROOT_DIR / "vpn_installer" / "client_drift.py"),
                 str(ROOT_DIR / "vpn_installer" / "launcher.py"),
                 str(ROOT_DIR / "vpn_installer" / "cli.py"),
                 str(ROOT_DIR / "vpn_installer" / "install_support.py"),
