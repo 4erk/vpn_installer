@@ -71,6 +71,13 @@ class ConfigTests(unittest.TestCase):
         env = config.merge_env_with_defaults({"UTLS_FINGERPRINT": "randomized"}, "sample")
         self.assertEqual(env["UTLS_FINGERPRINT"], "chrome")
 
+    def test_merge_env_with_defaults_derives_stable_compat_uuid_for_legacy_env(self) -> None:
+        existing = {"CLIENT_UUID": "00000000-0000-0000-0000-000000000000"}
+        first = config.merge_env_with_defaults(existing, "sample")
+        second = config.merge_env_with_defaults(existing, "sample")
+        self.assertEqual(first["CLIENT_COMPAT_UUID"], second["CLIENT_COMPAT_UUID"])
+        self.assertNotEqual(first["CLIENT_COMPAT_UUID"], existing["CLIENT_UUID"])
+
     def test_merge_env_with_defaults_migrates_legacy_cloudflare_reality_sni(self) -> None:
         env = config.merge_env_with_defaults(
             {
@@ -167,6 +174,7 @@ class ConfigTests(unittest.TestCase):
         view = config.critical_env_view(env)
         self.assertEqual(view["DEPLOY_NAME"], "demo")
         self.assertIn("CLIENT_UUID", view)
+        self.assertIn("CLIENT_COMPAT_UUID", view)
         self.assertIn("RU_REALITY_PUBLIC_KEY", view)
         self.assertIn("WG_RU_PRIVATE_KEY", view)
         self.assertIn("RU_FORCE_DIRECT_DOMAIN", view)
@@ -175,6 +183,7 @@ class ConfigTests(unittest.TestCase):
         env = config.generate_example_env()
         self.assertEqual(env["DEPLOY_NAME"], "my-stack")
         self.assertEqual(env["RU_PUBLIC_IP"], "203.0.113.10")
+        self.assertEqual(env["CLIENT_COMPAT_UUID"], "11111111-1111-1111-1111-111111111111")
 
     def test_split_asset_sources_supports_spaces_and_pipe(self) -> None:
         self.assertEqual(
@@ -218,6 +227,7 @@ class ConfigTests(unittest.TestCase):
                 "RU_PUBLIC_IP": "203.0.113.10",
                 "FOREIGN_PUBLIC_IP": "198.51.100.20",
                 "CLIENT_UUID": "x",
+                "CLIENT_COMPAT_UUID": "y",
                 "RU_REALITY_SERVER_NAME": "a",
                 "RU_REALITY_HANDSHAKE_SERVER": "a",
                 "RU_REALITY_PRIVATE_KEY": "a",

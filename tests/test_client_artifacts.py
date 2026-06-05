@@ -22,6 +22,7 @@ class ClientArtifactTests(unittest.TestCase):
 
         self.assertEqual(paths["client_dir"], Path(tmp) / "demo" / "client")
         self.assertEqual(paths["vless_uri"].name, "vless-uri.txt")
+        self.assertEqual(paths["vless_compat_uri"].name, "vless-uri-compatible.txt")
         self.assertEqual(paths["next_steps"], Path(tmp) / "demo" / "NEXT-STEPS.txt")
 
     def test_render_client_profiles_honors_explicit_out_dir(self) -> None:
@@ -31,6 +32,7 @@ class ClientArtifactTests(unittest.TestCase):
 
             self.assertEqual(client_dir, Path(tmp) / "demo" / "client")
             self.assertTrue((client_dir / "vless-uri.txt").is_file())
+            self.assertTrue((client_dir / "vless-uri-compatible.txt").is_file())
             self.assertTrue((client_dir / "hiddify-cross-platform.json").is_file())
             self.assertTrue((Path(tmp) / "demo" / "NEXT-STEPS.txt").is_file())
 

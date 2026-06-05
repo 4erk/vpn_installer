@@ -38,9 +38,22 @@ class RenderTests(unittest.TestCase):
         env = self.make_env()
         uri = render.render_vless_uri(env)
         self.assertTrue(uri.startswith("vless://"))
+        self.assertTrue(uri.startswith(f"vless://{env['CLIENT_UUID']}@"))
         self.assertIn("?encryption=none&", uri)
         self.assertIn("&sni=www.bing.com&", uri)
         self.assertIn("&fp=chrome&", uri)
+        self.assertIn(f"&flow={env['CLIENT_FLOW']}", uri)
+
+    def test_render_compat_vless_uri_omits_flow_and_uses_compat_uuid(self) -> None:
+        env = self.make_env()
+        uri = render.render_compat_vless_uri(env)
+        self.assertTrue(uri.startswith(f"vless://{env['CLIENT_COMPAT_UUID']}@"))
+        self.assertIn("?encryption=none&", uri)
+        self.assertIn("&security=reality&", uri)
+        self.assertIn("&sni=www.bing.com&", uri)
+        self.assertIn("&fp=chrome&", uri)
+        self.assertNotIn("flow=", uri)
+        self.assertTrue(uri.strip().endswith("-ru-gateway-compatible"))
 
     def test_render_xray_client_profile_uses_reality_vless(self) -> None:
         env = self.make_env()
@@ -107,6 +120,15 @@ class RenderTests(unittest.TestCase):
         payload = json.loads(render.render_ru_singbox(env))
         self.assertEqual(payload["route"]["default_domain_resolver"]["server"], "dns-ru-direct")
 
+    def test_ru_server_config_accepts_primary_and_compat_vless_users(self) -> None:
+        env = self.make_env()
+        payload = json.loads(render.render_ru_singbox(env))
+        users = payload["inbounds"][0]["users"]
+        primary = next(user for user in users if user["uuid"] == env["CLIENT_UUID"])
+        compat = next(user for user in users if user["uuid"] == env["CLIENT_COMPAT_UUID"])
+        self.assertEqual(primary["flow"], env["CLIENT_FLOW"])
+        self.assertNotIn("flow", compat)
+
     def test_ru_server_dns_servers_keep_global_detour_but_not_direct_detour(self) -> None:
         env = self.make_env()
         payload = json.loads(render.render_ru_singbox(env))
@@ -169,6 +191,8 @@ class RenderTests(unittest.TestCase):
         self.assertIn("Xray core", text)
         self.assertIn("vpn status", text)
         self.assertIn("vless-uri.txt", text)
+        self.assertIn("vless-uri-compatible.txt", text)
+        self.assertIn("invalid Reality", text)
         self.assertIn("hiddify-cross-platform.json", text)
         self.assertIn("hiddify-android.json", text)
         self.assertIn("windows-route-bypass.ps1", text)
@@ -181,6 +205,7 @@ class RenderTests(unittest.TestCase):
                 render.render_client_profiles(env)
                 client_dir = Path(tmp) / "demo" / "client"
                 self.assertTrue((client_dir / "vless-uri.txt").is_file())
+                self.assertTrue((client_dir / "vless-uri-compatible.txt").is_file())
                 self.assertTrue((client_dir / "windows-xray.json").is_file())
                 self.assertTrue((client_dir / "hiddify-cross-platform.json").is_file())
                 self.assertTrue((client_dir / "hiddify-android.json").is_file())
@@ -260,6 +285,7 @@ class RenderTests(unittest.TestCase):
         env = self.make_env()
         paths = render.client_artifact_paths(env)
         self.assertEqual(paths["vless_uri"].name, "vless-uri.txt")
+        self.assertEqual(paths["vless_compat_uri"].name, "vless-uri-compatible.txt")
         self.assertEqual(paths["hiddify_uri_compat"].name, "hiddify-uri.txt")
         self.assertEqual(paths["hiddify_json"].name, "hiddify-cross-platform.json")
         self.assertEqual(paths["android_hiddify_json"].name, "hiddify-android.json")

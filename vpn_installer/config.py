@@ -36,6 +36,7 @@ MERGED_SOURCE_DEFAULT_KEYS = {
 REMOTE_ENV_CRITICAL_KEYS = {
     "DEPLOY_NAME",
     "CLIENT_UUID",
+    "CLIENT_COMPAT_UUID",
     "RU_REALITY_PUBLIC_KEY",
     "RU_REALITY_SHORT_ID",
     "WAN_INTERFACE",
@@ -177,6 +178,7 @@ def generate_default_env(deploy_name: str) -> dict[str, str]:
         "WAN_INTERFACE": "",
         "DISABLE_NIC_OFFLOADS": "1",
         "CLIENT_UUID": str(uuid.uuid4()),
+        "CLIENT_COMPAT_UUID": str(uuid.uuid4()),
         "CLIENT_FLOW": "xtls-rprx-vision",
         "RU_LISTEN_PORT": "443",
         "RU_REALITY_SERVER_NAME": "www.bing.com",
@@ -296,6 +298,10 @@ def merge_env_with_defaults(existing: dict[str, str], deploy_name: str) -> dict[
     for key, value in existing.items():
         if value or key in ALLOW_EMPTY_OVERRIDE:
             merged[key] = value
+    if not existing.get("CLIENT_COMPAT_UUID") and existing.get("CLIENT_UUID"):
+        merged["CLIENT_COMPAT_UUID"] = str(
+            uuid.uuid5(uuid.NAMESPACE_URL, f"vpn-installer:{deploy_name}:client-compat:{existing['CLIENT_UUID']}")
+        )
     for key in MERGED_CSV_DEFAULT_KEYS:
         if existing.get(key):
             merged[key] = _merge_csv_defaults(existing[key], defaults[key])
@@ -345,6 +351,7 @@ def generate_example_env() -> dict[str, str]:
             "RU_PUBLIC_IP": "203.0.113.10",
             "FOREIGN_PUBLIC_IP": "198.51.100.20",
             "CLIENT_UUID": "00000000-0000-0000-0000-000000000000",
+            "CLIENT_COMPAT_UUID": "11111111-1111-1111-1111-111111111111",
             "RU_REALITY_PRIVATE_KEY": "",
             "RU_REALITY_PUBLIC_KEY": "",
             "WG_RU_PRIVATE_KEY": "",

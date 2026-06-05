@@ -110,6 +110,7 @@
 Основные клиентские файлы:
 
 - `out/<name>/client/vless-uri.txt`
+- `out/<name>/client/vless-uri-compatible.txt`
 - `out/<name>/client/windows-xray.json`
 - `out/<name>/client/hiddify-cross-platform.json`
 - `out/<name>/client/hiddify-android.json`
@@ -119,6 +120,7 @@
 Пользовательский контракт:
 
 - основной публичный артефакт — `vless-uri.txt`
+- `vless-uri-compatible.txt` — fallback без `xtls-rprx-vision` flow для мобильных и сторонних клиентов, которые ломают Reality/Vision при импорте URI
 - на Android эталонные клиенты: `v2rayNG` и `NekoBox`
 - `Hiddify`-артефакты остаются совместимым вторичным путём, а не основным контрактом
 - для `Hiddify` на Windows/Linux основной локальный путь — `hiddify-cross-platform.json`

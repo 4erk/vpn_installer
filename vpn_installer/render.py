@@ -13,6 +13,7 @@ from typing import Any
 from . import client_artifacts as _client_artifacts
 from .client_artifacts import (
     client_route_excludes,
+    render_compat_vless_uri,
     render_client_profile,
     render_vless_uri,
     render_windows_route_bypass_script,
@@ -173,7 +174,10 @@ def render_ru_singbox(env: dict[str, str]) -> str:
                 "tag": "vless-in",
                 "listen": "::",
                 "listen_port": env_int(env, "RU_LISTEN_PORT"),
-                "users": [{"name": f"{env['DEPLOY_NAME']}-client", "uuid": env["CLIENT_UUID"], "flow": env["CLIENT_FLOW"]}],
+                "users": [
+                    {"name": f"{env['DEPLOY_NAME']}-client", "uuid": env["CLIENT_UUID"], "flow": env["CLIENT_FLOW"]},
+                    {"name": f"{env['DEPLOY_NAME']}-compat", "uuid": env["CLIENT_COMPAT_UUID"]},
+                ],
                 "tls": {
                     "enabled": True,
                     "server_name": env["RU_REALITY_SERVER_NAME"],

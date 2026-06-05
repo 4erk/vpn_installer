@@ -80,6 +80,7 @@ class WorkflowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             paths = {
                 "vless_uri": Path(tmp) / "vless-uri.txt",
+                "vless_compat_uri": Path(tmp) / "vless-uri-compatible.txt",
                 "hiddify_uri_compat": Path(tmp) / "hiddify-uri.txt",
                 "hiddify_json": Path(tmp) / "h.json",
                 "android_hiddify_json": Path(tmp) / "h-android.json",
@@ -89,6 +90,7 @@ class WorkflowTests(unittest.TestCase):
                 "next_steps": Path(tmp) / "NEXT-STEPS.txt",
             }
             paths["vless_uri"].write_text("vless://demo\n", encoding="utf-8")
+            paths["vless_compat_uri"].write_text("vless://compat\n", encoding="utf-8")
             paths["hiddify_uri_compat"].write_text("vless://demo\n", encoding="utf-8")
             paths["hiddify_json"].write_text('{"route":{"final":"ru-gateway"}}', encoding="utf-8")
             with patch("vpn_installer.workflows.client_artifact_paths", return_value=paths):
