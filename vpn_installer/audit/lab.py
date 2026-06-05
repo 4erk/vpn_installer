@@ -127,7 +127,6 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
         {
             "RU_PUBLIC_IP": LAB_IPS["ru"],
             "FOREIGN_PUBLIC_IP": LAB_IPS["foreign"],
-            "RU_LISTEN_PORT": "8443",
             "WAN_INTERFACE": "eth1",
             "WG_INTERFACE": "wg0",
         },

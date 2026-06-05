@@ -85,24 +85,29 @@ class ConfigTests(unittest.TestCase):
     def test_default_ru_listen_port_stays_public_443(self) -> None:
         env = config.generate_default_env("sample")
         self.assertEqual(env["RU_LISTEN_PORT"], "443")
-        self.assertEqual(env["RU_COMPAT_LISTEN_PORTS"], "8443")
 
     def test_merge_env_with_defaults_migrates_temporary_ru_listen_port_8443_back_to_443(self) -> None:
         env = config.merge_env_with_defaults({"RU_LISTEN_PORT": "8443"}, "sample")
         self.assertEqual(env["RU_LISTEN_PORT"], "443")
-        self.assertEqual(env["RU_COMPAT_LISTEN_PORTS"], "8443")
 
-    def test_merge_env_with_defaults_removes_deprecated_compat_uuid(self) -> None:
-        env = config.merge_env_with_defaults({"CLIENT_COMPAT_UUID": "11111111-1111-1111-1111-111111111111"}, "sample")
+    def test_merge_env_with_defaults_removes_deprecated_compat_values(self) -> None:
+        env = config.merge_env_with_defaults(
+            {
+                "CLIENT_COMPAT_UUID": "11111111-1111-1111-1111-111111111111",
+                "RU_COMPAT_LISTEN_PORTS": "8443",
+            },
+            "sample",
+        )
         self.assertNotIn("CLIENT_COMPAT_UUID", env)
+        self.assertNotIn("RU_COMPAT_LISTEN_PORTS", env)
 
-    def test_default_reality_time_tolerance_is_not_forced(self) -> None:
+    def test_default_reality_time_tolerance_is_explicit(self) -> None:
         env = config.generate_default_env("sample")
-        self.assertEqual(env["RU_REALITY_MAX_TIME_DIFFERENCE"], "")
+        self.assertEqual(env["RU_REALITY_MAX_TIME_DIFFERENCE"], "24h")
 
-    def test_merge_env_with_defaults_removes_legacy_wide_reality_time_tolerance(self) -> None:
-        env = config.merge_env_with_defaults({"RU_REALITY_MAX_TIME_DIFFERENCE": "24h"}, "sample")
-        self.assertEqual(env["RU_REALITY_MAX_TIME_DIFFERENCE"], "")
+    def test_merge_env_with_defaults_restores_empty_reality_time_tolerance_to_default(self) -> None:
+        env = config.merge_env_with_defaults({"RU_REALITY_MAX_TIME_DIFFERENCE": ""}, "sample")
+        self.assertEqual(env["RU_REALITY_MAX_TIME_DIFFERENCE"], "24h")
 
     def test_default_subscription_settings_are_not_generated_anymore(self) -> None:
         env = config.generate_default_env("sample")
@@ -190,7 +195,6 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(view["DEPLOY_NAME"], "demo")
         self.assertIn("CLIENT_UUID", view)
         self.assertIn("RU_LISTEN_PORT", view)
-        self.assertIn("RU_COMPAT_LISTEN_PORTS", view)
         self.assertIn("RU_REALITY_PUBLIC_KEY", view)
         self.assertIn("WG_RU_PRIVATE_KEY", view)
         self.assertIn("RU_FORCE_DIRECT_DOMAIN", view)
@@ -200,8 +204,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(env["DEPLOY_NAME"], "my-stack")
         self.assertEqual(env["RU_PUBLIC_IP"], "203.0.113.10")
         self.assertEqual(env["RU_LISTEN_PORT"], "443")
-        self.assertEqual(env["RU_COMPAT_LISTEN_PORTS"], "8443")
-        self.assertEqual(env["RU_REALITY_MAX_TIME_DIFFERENCE"], "")
+        self.assertEqual(env["RU_REALITY_MAX_TIME_DIFFERENCE"], "24h")
 
     def test_split_asset_sources_supports_spaces_and_pipe(self) -> None:
         self.assertEqual(

@@ -44,8 +44,8 @@ class InstallSupportTests(unittest.TestCase):
             rc = install_support_main(["render-role", "--role", "ru-gateway", "--env-file", str(env_path), "--output-dir", str(output_dir)])
             self.assertEqual(rc, 0)
             payload = json.loads((output_dir / "sing-box.json").read_text(encoding="utf-8"))
-        self.assertEqual([inbound["listen_port"] for inbound in payload["inbounds"]], [443, 8443])
-        self.assertNotIn("max_time_difference", payload["inbounds"][0]["tls"]["reality"])
+        self.assertEqual([inbound["listen_port"] for inbound in payload["inbounds"]], [443])
+        self.assertEqual(payload["inbounds"][0]["tls"]["reality"]["max_time_difference"], "24h")
 
     def test_render_role_applies_wan_override(self) -> None:
         env = self.make_env()

@@ -116,22 +116,22 @@ class RenderTests(unittest.TestCase):
         users = payload["inbounds"][0]["users"]
         self.assertEqual(users, [{"name": "demo-client", "uuid": env["CLIENT_UUID"], "flow": env["CLIENT_FLOW"]}])
 
-    def test_ru_server_config_renders_443_primary_and_8443_compat_inbounds(self) -> None:
+    def test_ru_server_config_renders_only_443_inbound(self) -> None:
         env = self.make_env()
         payload = json.loads(render.render_ru_singbox(env))
         listen_ports = [inbound["listen_port"] for inbound in payload["inbounds"]]
-        self.assertEqual(listen_ports, [443, 8443])
-        self.assertEqual([inbound["tag"] for inbound in payload["inbounds"]], ["vless-in-443", "vless-in-8443"])
+        self.assertEqual(listen_ports, [443])
+        self.assertEqual([inbound["tag"] for inbound in payload["inbounds"]], ["vless-in"])
         inbound_rules = [rule for rule in payload["route"]["rules"] if rule.get("inbound")]
-        self.assertEqual(inbound_rules[0]["inbound"], ["vless-in-443", "vless-in-8443"])
-        self.assertEqual(inbound_rules[1]["inbound"], ["vless-in-443", "vless-in-8443"])
+        self.assertEqual(inbound_rules[0]["inbound"], ["vless-in"])
+        self.assertEqual(inbound_rules[1]["inbound"], ["vless-in"])
 
-    def test_ru_server_reality_does_not_force_time_tolerance_by_default(self) -> None:
+    def test_ru_server_reality_sets_explicit_time_tolerance_by_default(self) -> None:
         env = self.make_env()
         payload = json.loads(render.render_ru_singbox(env))
         reality = payload["inbounds"][0]["tls"]["reality"]
         self.assertEqual(payload["inbounds"][0]["listen_port"], 443)
-        self.assertNotIn("max_time_difference", reality)
+        self.assertEqual(reality["max_time_difference"], "24h")
 
     def test_ru_server_reality_can_render_explicit_time_tolerance(self) -> None:
         env = self.make_env()
@@ -494,7 +494,7 @@ class RenderTests(unittest.TestCase):
         self.assertIn(f"limit rate {env['SSH_INPUT_RATE']} burst {env['SSH_INPUT_BURST']} packets", rules)
         self.assertIn(f"tcp dport {env['SSH_PORT']} counter drop", rules)
         self.assertIn(f"tcp dport {env['RU_LISTEN_PORT']} counter accept", rules)
-        self.assertIn("tcp dport 8443 counter accept", rules)
+        self.assertNotIn("tcp dport 8443 counter accept", rules)
         self.assertNotIn("vless_guard", rules)
         self.assertNotIn(f"tcp dport {env['RU_LISTEN_PORT']} counter drop", rules)
         self.assertNotIn("subscription_guard", rules)
@@ -592,7 +592,7 @@ class RenderTests(unittest.TestCase):
         dns_rules = payload["dns"]["rules"]
         route_rules = payload["route"]["rules"]
         servers = {server["tag"]: server for server in payload["dns"]["servers"]}
-        self.assertNotIn("max_time_difference", payload["inbounds"][0]["tls"]["reality"])
+        self.assertEqual(payload["inbounds"][0]["tls"]["reality"]["max_time_difference"], "24h")
         direct_domain_rule = next(rule for rule in route_rules if rule.get("outbound") == "direct-ru" and "domain" in rule)
         self.assertIn("api.ok.ru", direct_domain_rule["domain"])
         self.assertIn("checkip.amazonaws.com", direct_domain_rule["domain"])

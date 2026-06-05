@@ -118,15 +118,11 @@ SSH_PER_SOURCE_NETBLOCK_SIZE="${SSH_PER_SOURCE_NETBLOCK_SIZE:-24:64}"
 
 CLIENT_FLOW="${CLIENT_FLOW:-xtls-rprx-vision}"
 RU_LISTEN_PORT="${RU_LISTEN_PORT:-443}"
-RU_COMPAT_LISTEN_PORTS="${RU_COMPAT_LISTEN_PORTS:-8443}"
 RU_REALITY_HANDSHAKE_PORT="${RU_REALITY_HANDSHAKE_PORT:-443}"
-RU_REALITY_MAX_TIME_DIFFERENCE="${RU_REALITY_MAX_TIME_DIFFERENCE:-}"
+RU_REALITY_MAX_TIME_DIFFERENCE="${RU_REALITY_MAX_TIME_DIFFERENCE:-24h}"
 UTLS_FINGERPRINT="${UTLS_FINGERPRINT:-chrome}"
 if [[ "${RU_LISTEN_PORT}" == "8443" ]]; then
   RU_LISTEN_PORT="443"
-fi
-if [[ "${RU_REALITY_MAX_TIME_DIFFERENCE}" == "24h" ]]; then
-  RU_REALITY_MAX_TIME_DIFFERENCE=""
 fi
 
 WG_INTERFACE="${WG_INTERFACE:-wg0}"
@@ -612,7 +608,6 @@ record_install_metadata() {
   if [[ -n "${ENV_FILE:-}" ]]; then
     {
       local seen_ru_listen_port="0"
-      local seen_ru_compat_ports="0"
       local seen_reality_time="0"
       local line=""
       while IFS= read -r line || [[ -n "${line}" ]]; do
@@ -622,8 +617,7 @@ record_install_metadata() {
             seen_ru_listen_port="1"
             ;;
           RU_COMPAT_LISTEN_PORTS=*)
-            printf 'RU_COMPAT_LISTEN_PORTS="%s"\n' "${RU_COMPAT_LISTEN_PORTS}"
-            seen_ru_compat_ports="1"
+            :
             ;;
           RU_REALITY_MAX_TIME_DIFFERENCE=*)
             printf 'RU_REALITY_MAX_TIME_DIFFERENCE="%s"\n' "${RU_REALITY_MAX_TIME_DIFFERENCE}"
@@ -636,9 +630,6 @@ record_install_metadata() {
       done <"${ENV_FILE}"
       if [[ "${seen_ru_listen_port}" != "1" ]]; then
         printf 'RU_LISTEN_PORT="%s"\n' "${RU_LISTEN_PORT}"
-      fi
-      if [[ "${seen_ru_compat_ports}" != "1" && -n "${RU_COMPAT_LISTEN_PORTS}" ]]; then
-        printf 'RU_COMPAT_LISTEN_PORTS="%s"\n' "${RU_COMPAT_LISTEN_PORTS}"
       fi
       if [[ "${seen_reality_time}" != "1" && -n "${RU_REALITY_MAX_TIME_DIFFERENCE}" ]]; then
         printf 'RU_REALITY_MAX_TIME_DIFFERENCE="%s"\n' "${RU_REALITY_MAX_TIME_DIFFERENCE}"
