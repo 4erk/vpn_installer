@@ -161,9 +161,9 @@ def render_ru_singbox(env: dict[str, str]) -> str:
     route_rules.extend(
         [
             {"ip_is_private": True, "action": "route", "outbound": "direct-ru"},
+            {"ip_version": 6, "action": "route", "outbound": "to-foreign"},
             {"rule_set": ["ru-geosite"], "action": "route", "outbound": "direct-ru"},
             {"rule_set": ["ru-geoip"], "action": "route", "outbound": "direct-ru"},
-            {"ip_version": 6, "action": "route", "outbound": "to-foreign"},
         ]
     )
 

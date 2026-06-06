@@ -176,6 +176,20 @@ class RenderTests(unittest.TestCase):
         self.assertFalse(any(rule.get("ip_version") == 6 and rule.get("outbound") in {"block", "blocked"} for rule in route_rules))
         self.assertEqual(payload["route"]["final"], "to-foreign")
 
+    def test_ru_server_routes_non_explicit_ipv6_before_ru_geoip(self) -> None:
+        env = self.make_env()
+        env["RU_FORCE_DIRECT_IP_CIDR"] = "2001:db8::/32"
+        payload = json.loads(render.render_ru_singbox(env))
+        route_rules = payload["route"]["rules"]
+        ipv6_index = next(index for index, rule in enumerate(route_rules) if rule.get("ip_version") == 6)
+        ru_geoip_index = next(index for index, rule in enumerate(route_rules) if rule.get("rule_set") == ["ru-geoip"])
+        explicit_cidr_index = next(index for index, rule in enumerate(route_rules) if "ip_cidr" in rule)
+        private_index = next(index for index, rule in enumerate(route_rules) if rule.get("ip_is_private") is True)
+
+        self.assertLess(explicit_cidr_index, ipv6_index)
+        self.assertLess(private_index, ipv6_index)
+        self.assertLess(ipv6_index, ru_geoip_index)
+
     def test_ru_server_config_forces_selected_domains_and_suffixes_direct(self) -> None:
         env = self.make_env()
         payload = json.loads(render.render_ru_singbox(env))
