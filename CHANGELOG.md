@@ -6,6 +6,19 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.4.0] - 2026-06-11
+
+### Added
+
+- добавлена команда `vpn diagnose path`, которая собирает path/qdisc/WireGuard/MTR/curl/health диагностику в `out/diagnostics`
+- добавлен bounded `--iperf` режим для проверки TCP/UDP между серверами через `wg0` с временным firewall-правилом и обязательной очисткой
+
+### Changed
+
+- default runtime network profile переведён на `RUNTIME_QDISC=fq` с fallback на `fq_codel`, чтобы лучше использовать pacing при `bbr`
+- default `WG_MTU` снижен с `1380` до `1360`; legacy env со старым default автоматически мигрирует при следующем merge/reinstall
+- установщик теперь ставит `mtr-tiny` и `iperf3`, чтобы диагностика пути была доступна после обычного `reinstall`
+
 ## [0.3.14] - 2026-06-11
 
 ### Fixed

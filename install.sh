@@ -128,7 +128,7 @@ fi
 
 WG_INTERFACE="${WG_INTERFACE:-wg0}"
 WG_PORT="${WG_PORT:-51820}"
-WG_MTU="${WG_MTU:-1380}"
+WG_MTU="${WG_MTU:-1360}"
 WG_KEEPALIVE="${WG_KEEPALIVE:-25}"
 WG_ROUTE_TABLE="${WG_ROUTE_TABLE:-51820}"
 APP_ROUTE_MARK="${APP_ROUTE_MARK:-48}"
@@ -138,6 +138,7 @@ WG_FOREIGN_ADDRESS="${WG_FOREIGN_ADDRESS:-10.74.0.2/32}"
 WG_RU_ADDRESS_V6="${WG_RU_ADDRESS_V6:-fd74:7670:6e73::1/128}"
 WG_FOREIGN_ADDRESS_V6="${WG_FOREIGN_ADDRESS_V6:-fd74:7670:6e73::2/128}"
 WG_IPV6_PREFIX="${WG_IPV6_PREFIX:-fd74:7670:6e73::/64}"
+RUNTIME_QDISC="${RUNTIME_QDISC:-fq}"
 
 RU_DIRECT_DNS_SERVER="${RU_DIRECT_DNS_SERVER:-77.88.8.8}"
 RU_DIRECT_DNS_PORT="${RU_DIRECT_DNS_PORT:-53}"
@@ -857,7 +858,24 @@ apply_runtime_qdisc() {
   if ! command -v tc >/dev/null 2>&1; then
     return 0
   fi
-  tc qdisc replace dev "${iface}" root fq_codel >/dev/null 2>&1 || true
+  case "${RUNTIME_QDISC:-fq}" in
+    fq)
+      tc qdisc replace dev "${iface}" root fq >/dev/null 2>&1 ||
+        tc qdisc replace dev "${iface}" root fq_codel >/dev/null 2>&1 ||
+        true
+      ;;
+    fq_codel)
+      tc qdisc replace dev "${iface}" root fq_codel >/dev/null 2>&1 || true
+      ;;
+    none|off|disabled)
+      return 0
+      ;;
+    *)
+      tc qdisc replace dev "${iface}" root fq >/dev/null 2>&1 ||
+        tc qdisc replace dev "${iface}" root fq_codel >/dev/null 2>&1 ||
+        true
+      ;;
+  esac
 }
 
 disable_interface_offloads() {
@@ -1060,7 +1078,9 @@ run_apt_get install -y \
   curl \
   ethtool \
   gnupg \
+  iperf3 \
   iputils-ping \
+  mtr-tiny \
   nftables \
   python3 \
   unattended-upgrades \
@@ -1104,7 +1124,7 @@ copy_role_artifacts "${ROLE_ARTIFACTS_DIR}"
 
 if [[ "$ROLE" == "ru-gateway" ]]; then
   cat >"${SYSCTL_PATH}" <<EOF
-net.core.default_qdisc=fq_codel
+net.core.default_qdisc=fq
 net.core.somaxconn=4096
 net.core.netdev_max_backlog=8192
 net.core.netdev_budget=600
@@ -1123,7 +1143,7 @@ net.ipv4.conf.all.src_valid_mark=1
 EOF
 else
   cat >"${SYSCTL_PATH}" <<EOF
-net.core.default_qdisc=fq_codel
+net.core.default_qdisc=fq
 net.core.somaxconn=4096
 net.core.netdev_max_backlog=8192
 net.core.netdev_budget=600

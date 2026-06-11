@@ -167,6 +167,14 @@ class RenderTests(unittest.TestCase):
         self.assertNotIn("detour", servers["dns-ru-direct"])
         self.assertEqual(servers["dns-global"]["detour"], "to-foreign")
 
+    def test_health_script_applies_configured_runtime_qdisc_with_fallback(self) -> None:
+        env = self.make_env()
+        env["RUNTIME_QDISC"] = "fq"
+        script = render.render_health_script(env, "ru-gateway")
+        self.assertIn('RUNTIME_QDISC="fq"', script)
+        self.assertIn('tc qdisc replace dev "${iface}" root fq', script)
+        self.assertIn('tc qdisc replace dev "${iface}" root fq_codel', script)
+
     def test_ru_server_routes_ipv6_literals_to_foreign_instead_of_blocking(self) -> None:
         env = self.make_env()
         payload = json.loads(render.render_ru_singbox(env))

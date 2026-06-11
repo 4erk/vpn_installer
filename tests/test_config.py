@@ -87,6 +87,16 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(env["SSH_INPUT_RATE"], "6/minute")
         self.assertEqual(env["SSH_INPUT_BURST"], "3")
 
+    def test_default_runtime_network_tuning_uses_fq_and_lower_wireguard_mtu(self) -> None:
+        env = config.generate_default_env("sample")
+        self.assertEqual(env["RUNTIME_QDISC"], "fq")
+        self.assertEqual(env["WG_MTU"], "1360")
+
+    def test_merge_env_with_defaults_migrates_legacy_wireguard_mtu(self) -> None:
+        env = config.merge_env_with_defaults({"WG_MTU": "1380", "RUNTIME_QDISC": ""}, "sample")
+        self.assertEqual(env["WG_MTU"], "1360")
+        self.assertEqual(env["RUNTIME_QDISC"], "fq")
+
     def test_default_ru_listen_port_stays_public_443(self) -> None:
         env = config.generate_default_env("sample")
         self.assertEqual(env["RU_LISTEN_PORT"], "443")

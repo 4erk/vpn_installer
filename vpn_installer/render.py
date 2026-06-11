@@ -595,6 +595,7 @@ def render_health_script(env: dict[str, str], role: str) -> str:
         HEALTH_THROUGHPUT_URLS="{env['HEALTH_THROUGHPUT_URLS']}"
         HEALTH_UPLOAD_URL="{env['HEALTH_UPLOAD_URL']}"
         HEALTH_UPLOAD_BYTES="{env['HEALTH_UPLOAD_BYTES']}"
+        RUNTIME_QDISC="{env.get('RUNTIME_QDISC', 'fq')}"
         DEEP_PROBE_INTERVAL_MINUTES="{env['HEALTH_DEEP_PROBE_INTERVAL_MINUTES']}"
         MIN_FOREIGN_DIRECT_DOWNLOAD_BPS="{env['HEALTH_MIN_FOREIGN_DIRECT_DOWNLOAD_BPS']}"
         MIN_RU_WG_DOWNLOAD_BPS="{env['HEALTH_MIN_RU_WG_DOWNLOAD_BPS']}"
@@ -644,7 +645,24 @@ def render_health_script(env: dict[str, str], role: str) -> str:
           local iface="$1"
           [[ -n "${{iface}}" ]] || return 0
           command -v tc >/dev/null 2>&1 || return 0
-          tc qdisc replace dev "${{iface}}" root fq_codel >/dev/null 2>&1 || true
+          case "${{RUNTIME_QDISC:-fq}}" in
+            fq)
+              tc qdisc replace dev "${{iface}}" root fq >/dev/null 2>&1 ||
+                tc qdisc replace dev "${{iface}}" root fq_codel >/dev/null 2>&1 ||
+                true
+              ;;
+            fq_codel)
+              tc qdisc replace dev "${{iface}}" root fq_codel >/dev/null 2>&1 || true
+              ;;
+            none|off|disabled)
+              return 0
+              ;;
+            *)
+              tc qdisc replace dev "${{iface}}" root fq >/dev/null 2>&1 ||
+                tc qdisc replace dev "${{iface}}" root fq_codel >/dev/null 2>&1 ||
+                true
+              ;;
+          esac
         }}
 
         disable_offloads() {{

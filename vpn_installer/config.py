@@ -47,6 +47,8 @@ REMOTE_ENV_CRITICAL_KEYS = {
     "RU_REALITY_ACCEPT_EMPTY_SHORT_ID",
     "WAN_INTERFACE",
     "DISABLE_NIC_OFFLOADS",
+    "RUNTIME_QDISC",
+    "WG_MTU",
     "HEALTH_THROUGHPUT_URLS",
     "HEALTH_UPLOAD_URL",
     "HEALTH_UPLOAD_BYTES",
@@ -183,6 +185,7 @@ def generate_default_env(deploy_name: str) -> dict[str, str]:
         "RU_HTTPS_INPUT_BURST": "60",
         "WAN_INTERFACE": "",
         "DISABLE_NIC_OFFLOADS": "1",
+        "RUNTIME_QDISC": "fq",
         "CLIENT_UUID": str(uuid.uuid4()),
         "CLIENT_FLOW": "xtls-rprx-vision",
         "RU_LISTEN_PORT": "443",
@@ -197,7 +200,7 @@ def generate_default_env(deploy_name: str) -> dict[str, str]:
         "UTLS_FINGERPRINT": "chrome",
         "WG_INTERFACE": "wg0",
         "WG_PORT": "51820",
-        "WG_MTU": "1380",
+        "WG_MTU": "1360",
         "WG_KEEPALIVE": "25",
         "WG_ROUTE_TABLE": "51820",
         "APP_ROUTE_MARK": "48",
@@ -328,6 +331,10 @@ def merge_env_with_defaults(existing: dict[str, str], deploy_name: str) -> dict[
         merged["SSH_INPUT_RATE"] = defaults["SSH_INPUT_RATE"]
     if merged.get("SSH_INPUT_BURST") == "6":
         merged["SSH_INPUT_BURST"] = defaults["SSH_INPUT_BURST"]
+    if merged.get("WG_MTU") == "1380":
+        merged["WG_MTU"] = defaults["WG_MTU"]
+    if merged.get("RUNTIME_QDISC", "") == "":
+        merged["RUNTIME_QDISC"] = defaults["RUNTIME_QDISC"]
     merged["DEPLOY_NAME"] = deploy_name
     return merged
 

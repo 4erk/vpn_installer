@@ -4,6 +4,7 @@ import argparse
 import sys
 
 from .android import DEFAULT_HIDDIFY_PACKAGE, android_diagnose
+from .diagnose import diagnose_path_workflow
 from .models import AppError, ROLE_FOREIGN, ROLE_RU, UserCancelled
 from .workflows import cleanup_local_workflow, client_check_workflow, install_workflow, menu_workflow, remote_action_workflow, status_workflow
 
@@ -56,6 +57,14 @@ def build_parser() -> argparse.ArgumentParser:
     android.add_argument("--package", default=DEFAULT_HIDDIFY_PACKAGE, help="Android package name Hiddify.")
     android.add_argument("--logcat-lines", type=int, default=400, help="Сколько последних строк logcat собирать.")
     android.set_defaults(func=lambda args: android_diagnose(serial=args.serial, package_name=args.package, logcat_lines=args.logcat_lines))
+
+    diagnose = subparsers.add_parser("diagnose", help="Снять диагностику сети и серверного dataplane.")
+    diagnose_subparsers = diagnose.add_subparsers(dest="diagnose_command", required=True)
+    path = diagnose_subparsers.add_parser("path", help="Собрать path/qdisc/WireGuard/MTR диагностику.")
+    path.add_argument("--deployment", help="Имя deployment.")
+    path.add_argument("--role", choices=["all", ROLE_RU, ROLE_FOREIGN], default="all", help="Какую роль проверять.")
+    path.add_argument("--iperf", action="store_true", help="Временно открыть wg0-only iperf smoke и удалить правила после теста.")
+    path.set_defaults(func=lambda args: diagnose_path_workflow(args.deployment, args.role, iperf=args.iperf))
 
     return parser
 

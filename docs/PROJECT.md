@@ -177,6 +177,14 @@
   - target probes по `HEALTH_TARGET_PROBE_URLS`: `reachable`, `blocked` или `broken`
   - итоговый `health verdict`
 
+### diagnose path
+
+- собирает подробный сетевой отчёт в `out/diagnostics/<timestamp>-<deployment>`
+- читает live-состояние серверов: `ip -s link`, `tc -s qdisc`, `sysctl`, `wg show`, `health-state`, последние health-логи
+- запускает короткие `ping`, `mtr` и `curl` проверки для gateway, peer, `wg0` и внешнего интернета
+- при флаге `--iperf` временно открывает `5201/tcp+udp` только на `wg0` зарубежного сервера, прогоняет bounded `iperf3` между серверами и удаляет правила после теста
+- не меняет продуктовые конфиги и не оставляет публичных диагностических портов
+
 ### remove / purge
 
 - требуют server-side metadata стека

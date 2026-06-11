@@ -55,7 +55,8 @@ class PackageTests(unittest.TestCase):
         self.assertIn('apt-get -o DPkg::Lock::Timeout="${APT_LOCK_TIMEOUT_SECONDS}" "$@"', install_script)
         self.assertIn("restore_install_state_on_error()", install_script)
         self.assertIn("Install failed after applying changes started; restoring previous files and services.", install_script)
-        self.assertIn('net.core.default_qdisc=fq_codel', install_script)
+        self.assertIn('RUNTIME_QDISC="${RUNTIME_QDISC:-fq}"', install_script)
+        self.assertIn('net.core.default_qdisc=fq', install_script)
         self.assertIn('net.core.somaxconn=4096', install_script)
         self.assertIn('net.core.netdev_max_backlog=8192', install_script)
         self.assertIn('net.core.rmem_max=8388608', install_script)
@@ -65,6 +66,8 @@ class PackageTests(unittest.TestCase):
         self.assertIn('net.ipv4.tcp_mtu_probing=1', install_script)
         self.assertIn('net.ipv4.tcp_max_syn_backlog=2048', install_script)
         self.assertIn("ethtool", install_script)
+        self.assertIn("iperf3", install_script)
+        self.assertIn("mtr-tiny", install_script)
         self.assertIn('ethtool -K "${iface}" gro off', install_script)
         self.assertIn('ethtool -K "${iface}" gso off', install_script)
         self.assertIn('ethtool -K "${iface}" tso off', install_script)
@@ -76,6 +79,7 @@ class PackageTests(unittest.TestCase):
         self.assertIn('current_singbox_version', install_script)
         self.assertIn('apply_runtime_interface_tuning "${RUNTIME_QDISC_INTERFACE}"', install_script)
         self.assertIn('apply_runtime_qdisc "${WG_INTERFACE}"', install_script)
+        self.assertIn('tc qdisc replace dev "${iface}" root fq', install_script)
         self.assertIn("stop_legacy_xray_port_conflicts()", install_script)
         self.assertIn('systemctl disable --now xray-vpnstack.service xray.service', install_script)
         self.assertIn("stop_legacy_xray_port_conflicts\n  systemctl enable sing-box", install_script)
@@ -96,7 +100,7 @@ class PackageTests(unittest.TestCase):
 
     def test_package_exposes_version_via_getattr(self) -> None:
         package = importlib.import_module("vpn_installer")
-        self.assertEqual(package.__version__, "0.3.14")
+        self.assertEqual(package.__version__, "0.4.0")
         with self.assertRaises(AttributeError):
             package.__getattr__("nope")
 
