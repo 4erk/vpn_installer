@@ -177,8 +177,8 @@ def generate_default_env(deploy_name: str) -> dict[str, str]:
         "SSH_MAX_STARTUPS": "5:30:20",
         "SSH_PER_SOURCE_MAX_STARTUPS": "2",
         "SSH_PER_SOURCE_NETBLOCK_SIZE": "24:64",
-        "SSH_INPUT_RATE": "12/minute",
-        "SSH_INPUT_BURST": "6",
+        "SSH_INPUT_RATE": "6/minute",
+        "SSH_INPUT_BURST": "3",
         "RU_HTTPS_INPUT_RATE": "120/minute",
         "RU_HTTPS_INPUT_BURST": "60",
         "WAN_INTERFACE": "",
@@ -324,6 +324,10 @@ def merge_env_with_defaults(existing: dict[str, str], deploy_name: str) -> dict[
         merged["RU_REALITY_SERVER_NAME"] = defaults["RU_REALITY_SERVER_NAME"]
     if merged.get("RU_REALITY_HANDSHAKE_SERVER") == "www.cloudflare.com":
         merged["RU_REALITY_HANDSHAKE_SERVER"] = defaults["RU_REALITY_HANDSHAKE_SERVER"]
+    if merged.get("SSH_INPUT_RATE") == "12/minute":
+        merged["SSH_INPUT_RATE"] = defaults["SSH_INPUT_RATE"]
+    if merged.get("SSH_INPUT_BURST") == "6":
+        merged["SSH_INPUT_BURST"] = defaults["SSH_INPUT_BURST"]
     merged["DEPLOY_NAME"] = deploy_name
     return merged
 

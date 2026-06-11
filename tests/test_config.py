@@ -82,6 +82,11 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(env["RU_REALITY_SERVER_NAME"], "www.bing.com")
         self.assertEqual(env["RU_REALITY_HANDSHAKE_SERVER"], "www.bing.com")
 
+    def test_merge_env_with_defaults_migrates_legacy_ssh_rate_limit(self) -> None:
+        env = config.merge_env_with_defaults({"SSH_INPUT_RATE": "12/minute", "SSH_INPUT_BURST": "6"}, "sample")
+        self.assertEqual(env["SSH_INPUT_RATE"], "6/minute")
+        self.assertEqual(env["SSH_INPUT_BURST"], "3")
+
     def test_default_ru_listen_port_stays_public_443(self) -> None:
         env = config.generate_default_env("sample")
         self.assertEqual(env["RU_LISTEN_PORT"], "443")

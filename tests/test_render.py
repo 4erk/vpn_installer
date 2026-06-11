@@ -507,7 +507,7 @@ class RenderTests(unittest.TestCase):
         self.assertIn('ip -4 route replace "${WG_FOREIGN_ADDRESS_HOST}/32" dev "${WG_INTERFACE}"', script)
         self.assertIn('log "runtime degraded without hard failure: ${soft_reasons[*]}"', script)
         self.assertIn('log "runtime hard failure: ${hard_reasons[*]}"', script)
-        self.assertIn('maybe_self_heal "soft" "${soft_reasons[@]}"', script)
+        self.assertNotIn('maybe_self_heal "soft" "${soft_reasons[@]}"', script)
         self.assertIn('maybe_self_heal "hard" "${hard_reasons[@]}"', script)
 
     def test_render_health_script_hardens_foreign_runtime(self) -> None:

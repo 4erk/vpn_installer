@@ -1131,7 +1131,6 @@ EOF
         fi
         if [[ "${{#hard_reasons[@]}}" -eq 0 ]]; then
           log "runtime degraded without hard failure: ${{soft_reasons[*]}}"
-          maybe_self_heal "soft" "${{soft_reasons[@]}}"
           exit 0
         fi
 
