@@ -98,12 +98,13 @@ class WorkflowTests(unittest.TestCase):
 
     def test_verify_target_interactively_cancel_raises_user_cancelled(self) -> None:
         target = RemoteTarget(role=ROLE_RU, public_ip="203.0.113.10", ssh_host="203.0.113.10", ssh_port=22, ssh_user="root")
-        with patch("vpn_installer.workflows.prompt_server_connection", return_value=target):
+        with patch("vpn_installer.workflows.prompt_server_connection", return_value=target), patch("vpn_installer.workflows.assert_server_route_not_self_tunneled"):
             with patch("vpn_installer.workflows.remote_preflight", side_effect=AppError("boom")):
                 with patch("vpn_installer.workflows.prompt_choice", return_value="cancel"):
                     with self.assertRaises(UserCancelled):
                         workflows.verify_target_interactively(
                             target,
+                            env=generate_default_env("demo"),
                             wg_interface="wg0",
                             require_privilege=False,
                             validate_os=False,
@@ -113,9 +114,10 @@ class WorkflowTests(unittest.TestCase):
     def test_verify_target_interactively_retries_and_then_succeeds(self) -> None:
         target = RemoteTarget(role=ROLE_RU, public_ip="203.0.113.10", ssh_host="203.0.113.10", ssh_port=22, ssh_user="root", auth_mode="password")
         preflights = [AppError("boom"), {"os_id": "ubuntu", "os_version": "24.04", "default_iface": "eth0"}]
-        with patch("vpn_installer.workflows.prompt_server_connection", return_value=target), patch("vpn_installer.workflows.remote_preflight", side_effect=preflights), patch("vpn_installer.workflows.prompt_choice", return_value="retry"), patch("vpn_installer.workflows.print_preflight"), patch("vpn_installer.workflows.time", create=True):
+        with patch("vpn_installer.workflows.prompt_server_connection", return_value=target), patch("vpn_installer.workflows.assert_server_route_not_self_tunneled"), patch("vpn_installer.workflows.remote_preflight", side_effect=preflights), patch("vpn_installer.workflows.prompt_choice", return_value="retry"), patch("vpn_installer.workflows.print_preflight"), patch("vpn_installer.workflows.time", create=True):
             updated, preflight = workflows.verify_target_interactively(
                 target,
+                env=generate_default_env("demo"),
                 wg_interface="wg0",
                 require_privilege=False,
                 validate_os=True,
@@ -127,15 +129,31 @@ class WorkflowTests(unittest.TestCase):
 
     def test_verify_target_interactively_checks_remote_privilege(self) -> None:
         target = RemoteTarget(role=ROLE_RU, public_ip="203.0.113.10", ssh_host="203.0.113.10", ssh_port=22, ssh_user="root")
-        with patch("vpn_installer.workflows.prompt_server_connection", return_value=target), patch("vpn_installer.workflows.remote_preflight", return_value={"os_id": "ubuntu", "os_version": "24.04"}), patch("vpn_installer.workflows.print_preflight"), patch("vpn_installer.workflows.ensure_remote_privilege") as mocked:
+        with patch("vpn_installer.workflows.prompt_server_connection", return_value=target), patch("vpn_installer.workflows.assert_server_route_not_self_tunneled"), patch("vpn_installer.workflows.remote_preflight", return_value={"os_id": "ubuntu", "os_version": "24.04"}), patch("vpn_installer.workflows.print_preflight"), patch("vpn_installer.workflows.ensure_remote_privilege") as mocked:
             workflows.verify_target_interactively(
                 target,
+                env=generate_default_env("demo"),
                 wg_interface="wg0",
                 require_privilege=True,
                 validate_os=True,
                 confirm_existing_connection=False,
             )
         mocked.assert_called_once()
+
+    def test_verify_target_interactively_blocks_unsaved_self_tunneled_route_before_ssh(self) -> None:
+        env = generate_default_env("demo")
+        target = RemoteTarget(role=ROLE_RU, public_ip="203.0.113.10", ssh_host="203.0.113.10", ssh_port=22, ssh_user="root")
+        with patch("vpn_installer.workflows.prompt_server_connection", return_value=target), patch("vpn_installer.workflows.assert_server_route_not_self_tunneled", side_effect=AppError("идёт через VPN-интерфейс")), patch("vpn_installer.workflows.remote_preflight") as preflight, patch("vpn_installer.workflows.prompt_choice", return_value="cancel"):
+            with self.assertRaises(UserCancelled):
+                workflows.verify_target_interactively(
+                    target,
+                    env=env,
+                    wg_interface="wg0",
+                    require_privilege=False,
+                    validate_os=False,
+                    confirm_existing_connection=False,
+                )
+        preflight.assert_not_called()
 
     def test_prepare_remote_session_persists_only_selected_roles(self) -> None:
         ru = RemoteTarget(role=ROLE_RU, public_ip="203.0.113.10", ssh_host="203.0.113.10")
@@ -319,6 +337,31 @@ class WorkflowTests(unittest.TestCase):
             },
         )
         self.assertEqual(gateway_loss_degraded["health_verdict"], "foreign_gateway_ping_loss_degraded")
+
+        target_degraded = workflows.deployment_health_snapshot(
+            env,
+            {
+                ROLE_RU: {
+                    "wg_observed_ipv4": "198.51.100.20",
+                    "wg_latest_handshake_age_s": "20",
+                    "deep_ru_wg_download_min_bps": "900000",
+                    "deep_ru_wg_upload_bps": "1200000",
+                    "target_probe_wg": "chatgpt.com:blocked:403:0:172.64.155.209:0.09;github.com:reachable:200:0:20.233.83.145:0.2",
+                },
+                ROLE_FOREIGN: {
+                    "observed_ipv4": "198.51.100.20",
+                    "wg_latest_handshake_age_s": "15",
+                    "deep_foreign_direct_download_min_bps": "900000",
+                    "deep_foreign_direct_upload_bps": "1400000",
+                    "deep_foreign_gateway_ping_loss_pct": "0",
+                    "deep_foreign_ru_ping_loss_pct": "0",
+                    "deep_foreign_internet_ping_loss_pct": "0",
+                    "target_probe_direct": "chatgpt.com:blocked:403:0:172.64.155.209:0.09;github.com:reachable:200:0:20.233.83.145:0.2",
+                },
+            },
+        )
+        self.assertEqual(target_degraded["health_verdict"], "ru_wg_target_degraded")
+        self.assertIn("chatgpt.com:blocked:403", target_degraded["target_probe_issues"])
 
     def test_cleanup_remote_workdir_warns_on_error(self) -> None:
         with patch("vpn_installer.workflows.ssh_stream", side_effect=AppError("fail")), patch("vpn_installer.workflows.warn") as warn_mock:

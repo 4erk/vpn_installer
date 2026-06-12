@@ -195,6 +195,22 @@ def preflight_int_any(preflight: dict[str, str], keys: list[str], default: int =
     return default
 
 
+def target_probe_issues(raw_probe: str) -> list[str]:
+    issues: list[str] = []
+    for item in raw_probe.split(";"):
+        item = item.strip()
+        if not item:
+            continue
+        label, separator, rest = item.partition(":")
+        if not separator:
+            continue
+        verdict, _separator, rest = rest.partition(":")
+        code = rest.split(":", 1)[0] if rest else "-"
+        if verdict in {"blocked", "broken"} or verdict.startswith("http_"):
+            issues.append(f"{label}:{verdict}:{code or '-'}")
+    return issues
+
+
 def deployment_health_snapshot(env: dict[str, str], preflights: dict[str, dict[str, str]]) -> dict[str, str]:
     foreign = preflights.get(ROLE_FOREIGN, {})
     ru = preflights.get(ROLE_RU, {})
@@ -210,6 +226,10 @@ def deployment_health_snapshot(env: dict[str, str], preflights: dict[str, dict[s
     foreign_gateway_ping_loss_pct = preflight_int_any(foreign, ["deep_foreign_gateway_ping_loss_pct"])
     foreign_ru_ping_loss_pct = preflight_int_any(foreign, ["deep_foreign_ru_ping_loss_pct"])
     foreign_internet_ping_loss_pct = preflight_int_any(foreign, ["deep_foreign_internet_ping_loss_pct"])
+    foreign_target_probe = foreign.get("target_probe_direct", "").strip()
+    ru_wg_target_probe = ru.get("target_probe_wg", "").strip()
+    foreign_target_issues = target_probe_issues(foreign_target_probe)
+    ru_wg_target_issues = target_probe_issues(ru_wg_target_probe)
     min_foreign_download_bps = env_int(env, "HEALTH_MIN_FOREIGN_DIRECT_DOWNLOAD_BPS", 500000)
     min_ru_wg_download_bps = env_int(env, "HEALTH_MIN_RU_WG_DOWNLOAD_BPS", 500000)
     min_foreign_upload_bps = env_int(env, "HEALTH_MIN_FOREIGN_DIRECT_UPLOAD_BPS", 1000000)
@@ -231,6 +251,10 @@ def deployment_health_snapshot(env: dict[str, str], preflights: dict[str, dict[s
         verdict = "foreign_ru_ping_loss_degraded"
     elif foreign_internet_ping_loss_pct >= 0 and foreign_internet_ping_loss_pct > max_foreign_internet_ping_loss_pct:
         verdict = "foreign_internet_ping_loss_degraded"
+    elif ru_wg_target_issues:
+        verdict = "ru_wg_target_degraded"
+    elif foreign_target_issues:
+        verdict = "foreign_target_degraded"
     elif foreign_download_bps >= 0 and foreign_download_bps < min_foreign_download_bps:
         verdict = "foreign_direct_download_degraded"
     elif ru_wg_download_bps >= 0 and ru_wg_download_bps < min_ru_wg_download_bps:
@@ -259,6 +283,9 @@ def deployment_health_snapshot(env: dict[str, str], preflights: dict[str, dict[s
         "foreign_internet_ping_loss_pct": str(foreign_internet_ping_loss_pct),
         "max_foreign_ru_ping_loss_pct": str(max_foreign_ru_ping_loss_pct),
         "max_foreign_internet_ping_loss_pct": str(max_foreign_internet_ping_loss_pct),
+        "target_probe_direct": foreign_target_probe or "-",
+        "target_probe_ru_wg": ru_wg_target_probe or "-",
+        "target_probe_issues": ",".join(ru_wg_target_issues or foreign_target_issues) or "-",
     }
 
 
@@ -298,6 +325,10 @@ def print_deployment_health(health: dict[str, str]) -> None:
         f"{health.get('max_foreign_ru_ping_loss_pct', '-')}/"
         f"{health.get('max_foreign_internet_ping_loss_pct', '-')})"
     )
+    if health.get("target_probe_issues", "-") != "-":
+        print(f"target probe issues: {health.get('target_probe_issues', '-')}")
+        print(f"target probes direct: {health.get('target_probe_direct', '-')}")
+        print(f"target probes RU over wg: {health.get('target_probe_ru_wg', '-')}")
     print(f"health verdict: {health['health_verdict']}")
 
 
@@ -315,6 +346,8 @@ def is_soft_health_verdict(verdict: str) -> bool:
         "ru_wg_download_degraded",
         "foreign_direct_upload_degraded",
         "ru_wg_upload_degraded",
+        "foreign_target_degraded",
+        "ru_wg_target_degraded",
     }
 
 
@@ -350,7 +383,8 @@ def health_failure_message(health: dict[str, str]) -> str:
         f"foreign_ru_ping_loss_pct={health.get('foreign_ru_ping_loss_pct', '-')}, "
         f"foreign_internet_ping_loss_pct={health.get('foreign_internet_ping_loss_pct', '-')}, "
         f"max_foreign_ru_ping_loss_pct={health.get('max_foreign_ru_ping_loss_pct', '-')}, "
-        f"max_foreign_internet_ping_loss_pct={health.get('max_foreign_internet_ping_loss_pct', '-')}"
+        f"max_foreign_internet_ping_loss_pct={health.get('max_foreign_internet_ping_loss_pct', '-')}, "
+        f"target_probe_issues={health.get('target_probe_issues', '-')}"
     )
 
 
@@ -474,6 +508,7 @@ def print_step(step: int, total: int, message: str) -> None:
 def verify_target_interactively(
     target: RemoteTarget,
     *,
+    env: dict[str, str],
     wg_interface: str,
     require_privilege: bool,
     validate_os: bool,
@@ -484,6 +519,7 @@ def verify_target_interactively(
         target = prompt_server_connection(target, force_prompt=force_prompt, confirm_existing=confirm_existing_connection)
         print(f"Проверяю подключение к {target.label}: {target.ssh_user}@{target.ssh_host}:{target.ssh_port}")
         try:
+            assert_server_route_not_self_tunneled(target, env)
             preflight = remote_preflight(target, wg_interface)
             print_preflight(target, preflight)
             if validate_os:
@@ -544,6 +580,7 @@ def prepare_remote_session(
             assert_server_route_not_self_tunneled(target, env)
         target, preflight = verify_target_interactively(
             target,
+            env=env,
             wg_interface=wg_interface,
             require_privilege=require_privilege,
             validate_os=validate_os,

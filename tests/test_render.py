@@ -500,6 +500,8 @@ class RenderTests(unittest.TestCase):
         self.assertIn('HEALTH_THROUGHPUT_URLS="https://cachefly.cachefly.net/1mb.test https://proof.ovh.net/files/1Mb.dat"', script)
         self.assertIn('HEALTH_STATE_PATH="/var/lib/vpn-stack/health-state.env"', script)
         self.assertIn("run_deep_probe()", script)
+        self.assertIn('last_verdict="$(state_value DEEP_PROBE_VERDICT)"', script)
+        self.assertIn('[[ -n "${last_verdict}" && "${last_verdict}" != "ok" ]]', script)
         self.assertIn('DEEP_RU_WG_DOWNLOAD_MIN_BPS=', script)
         self.assertIn('probe_upload_bps "${WG_INTERFACE}"', script)
         self.assertIn('ethtool -K "${iface}" gro off', script)

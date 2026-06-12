@@ -839,6 +839,11 @@ def render_health_script(env: dict[str, str], role: str) -> str:
 
         should_run_deep_probe() {{
           local last_epoch="" now="" interval_s=""
+          local last_verdict=""
+          last_verdict="$(state_value DEEP_PROBE_VERDICT)"
+          if [[ -n "${{last_verdict}}" && "${{last_verdict}}" != "ok" ]]; then
+            return 0
+          fi
           last_epoch="$(state_value DEEP_PROBE_AT_EPOCH)"
           if [[ ! "${{last_epoch}}" =~ ^[0-9]+$ ]]; then
             return 0
