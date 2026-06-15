@@ -55,7 +55,7 @@ for command in curl ping mtr iperf3 tc ethtool nft wg ss; do
 done
 
 section services
-for unit in ssh.service ssh.socket nftables "wg-quick@{wg_interface}" sing-box vpn-stack-sync.timer vpn-stack-health.timer vpn-stack-health.service; do
+for unit in ssh.service ssh.socket nftables "wg-quick@{wg_interface}" sing-box vpn-stack-sync.timer vpn-stack-health.timer vpn-stack-health.service vpn-stack-guard.timer vpn-stack-guard.service; do
   printf '%s ' "${{unit}}"
   systemctl is-active "${{unit}}" 2>/dev/null || true
 done
@@ -85,6 +85,12 @@ wg show {wg_interface} 2>/dev/null || true
 
 section health_state
 cat /var/lib/vpn-stack/health-state.env 2>/dev/null || true
+
+section guard_state
+cat /var/lib/vpn-stack/guard-state.env 2>/dev/null || true
+
+section abuse_set
+nft list set inet vpnstack abuse_ipv4 2>/dev/null || true
 
 ping_loss() {{
   local host="$1"
@@ -143,6 +149,9 @@ fi
 
 section recent_health_logs
 journalctl -u vpn-stack-health.service --since '-6 hours' --no-pager 2>/dev/null | tail -n 120 || true
+
+section recent_guard_logs
+journalctl -u vpn-stack-guard.service --since '-6 hours' --no-pager 2>/dev/null | tail -n 120 || true
 """
 
 

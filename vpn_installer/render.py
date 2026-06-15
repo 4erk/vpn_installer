@@ -295,12 +295,18 @@ def render_foreign_nftables(env: dict[str, str], wan_iface: str) -> str:
         "    auto-merge",
         "  }",
         "",
+        "  set abuse_ipv4 {",
+        "    type ipv4_addr",
+        "    flags timeout",
+        "  }",
+        "",
         "  chain input {",
         "    type filter hook input priority 0;",
         "    policy drop;",
         "",
         '    iifname "lo" accept',
         "    ct state invalid drop",
+        '    ip saddr @abuse_ipv4 counter drop comment "vpnstack-abuse-block"',
         "    ip6 nexthdr icmpv6 accept",
         "    ip protocol icmp accept",
         "    ct state established,related accept",
@@ -348,12 +354,18 @@ def render_ru_firewall_nftables(env: dict[str, str]) -> str:
         "flush ruleset",
         "",
         "table inet vpnstack {",
+        "  set abuse_ipv4 {",
+        "    type ipv4_addr",
+        "    flags timeout",
+        "  }",
+        "",
         "  chain input {",
         "    type filter hook input priority 0;",
         "    policy drop;",
         "",
         '    iifname "lo" accept',
         "    ct state invalid drop",
+        '    ip saddr @abuse_ipv4 counter drop comment "vpnstack-abuse-block"',
         "    ip6 nexthdr icmpv6 accept",
         "    ip protocol icmp accept",
         "    ct state established,related accept",
@@ -1205,6 +1217,155 @@ def render_health_timer(env: dict[str, str]) -> str:
     )
 
 
+def render_guard_script(env: dict[str, str], role: str) -> str:
+    return textwrap.dedent(
+        f"""
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        ROLE="{role}"
+        GUARD_ENABLED="{env['GUARD_ENABLED']}"
+        LOOKBACK_MINUTES="{env['GUARD_LOOKBACK_MINUTES']}"
+        BLOCK_TIMEOUT="{env['GUARD_BLOCK_TIMEOUT']}"
+        SSH_FAILURE_THRESHOLD="{env['GUARD_SSH_FAILURE_THRESHOLD']}"
+        REALITY_INVALID_THRESHOLD="{env['GUARD_REALITY_INVALID_THRESHOLD']}"
+        STATE_PATH="/var/lib/vpn-stack/guard-state.env"
+
+        log() {{
+          echo "vpn-stack-guard[$ROLE]: $*" >&2
+        }}
+
+        is_ipv4() {{
+          local ip="$1"
+          local a b c d octet
+          [[ "$ip" =~ ^([0-9]{{1,3}}\\.){{3}}[0-9]{{1,3}}$ ]] || return 1
+          IFS=. read -r a b c d <<<"$ip"
+          for octet in "$a" "$b" "$c" "$d"; do
+            [[ "$octet" =~ ^[0-9]+$ ]] || return 1
+            (( octet >= 0 && octet <= 255 )) || return 1
+          done
+        }}
+
+        ensure_abuse_set() {{
+          command -v nft >/dev/null 2>&1 || return 1
+          nft list table inet vpnstack >/dev/null 2>&1 || return 1
+          nft list set inet vpnstack abuse_ipv4 >/dev/null 2>&1 && return 0
+          nft add set inet vpnstack abuse_ipv4 '{{ type ipv4_addr; flags timeout; }}' >/dev/null 2>&1
+        }}
+
+        add_block() {{
+          local ip="$1"
+          local reason="$2"
+          is_ipv4 "$ip" || return 0
+          nft add element inet vpnstack abuse_ipv4 "{{ $ip timeout $BLOCK_TIMEOUT }}" >/dev/null 2>&1 || true
+          log "temporary block $ip ($reason, timeout=$BLOCK_TIMEOUT)"
+        }}
+
+        extract_ipv4() {{
+          grep -Eo '([0-9]{{1,3}}\\.){{3}}[0-9]{{1,3}}' || true
+        }}
+
+        ssh_noise_ips() {{
+          journalctl -u ssh.service -u ssh.socket --since "-${{LOOKBACK_MINUTES}} minutes" --no-pager 2>/dev/null \\
+            | grep -E 'Failed password|Invalid user|maximum authentication attempts|Timeout before authentication|kex_exchange_identification|banner exchange' \\
+            | extract_ipv4
+        }}
+
+        reality_noise_ips() {{
+          journalctl -u sing-box.service --since "-${{LOOKBACK_MINUTES}} minutes" --no-pager 2>/dev/null \\
+            | grep -F 'REALITY: processed invalid connection' \\
+            | extract_ipv4
+        }}
+
+        block_repeated_ips() {{
+          local threshold="$1"
+          local reason="$2"
+          local tmp
+          local blocked=0
+          tmp="$(mktemp)"
+          cat >"$tmp"
+          while read -r count ip; do
+            [[ -n "${{ip:-}}" ]] || continue
+            if (( count >= threshold )); then
+              add_block "$ip" "$reason:$count"
+              blocked=$((blocked + 1))
+            fi
+          done < <(sort "$tmp" | uniq -c)
+          rm -f "$tmp"
+          printf '%s' "$blocked"
+        }}
+
+        write_state() {{
+          local ssh_blocked="$1"
+          local reality_blocked="$2"
+          mkdir -p "$(dirname "$STATE_PATH")"
+          cat >"$STATE_PATH" <<EOF
+        GUARD_LAST_RUN_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+        GUARD_ROLE="$ROLE"
+        GUARD_ENABLED="$GUARD_ENABLED"
+        GUARD_LOOKBACK_MINUTES="$LOOKBACK_MINUTES"
+        GUARD_BLOCK_TIMEOUT="$BLOCK_TIMEOUT"
+        GUARD_SSH_BLOCKED_COUNT="$ssh_blocked"
+        GUARD_REALITY_BLOCKED_COUNT="$reality_blocked"
+        EOF
+        }}
+
+        if [[ "$GUARD_ENABLED" != "1" ]]; then
+          write_state 0 0
+          exit 0
+        fi
+
+        if ! ensure_abuse_set; then
+          log "nftables set inet vpnstack abuse_ipv4 is unavailable, skipping"
+          write_state 0 0
+          exit 0
+        fi
+
+        ssh_blocked="$(ssh_noise_ips | block_repeated_ips "$SSH_FAILURE_THRESHOLD" ssh)"
+        reality_blocked="0"
+        if [[ "$ROLE" == "ru-gateway" ]]; then
+          reality_blocked="$(reality_noise_ips | block_repeated_ips "$REALITY_INVALID_THRESHOLD" reality)"
+        fi
+        write_state "$ssh_blocked" "$reality_blocked"
+        """
+    ).strip() + "\n"
+
+
+def render_guard_service() -> str:
+    return "\n".join(
+        [
+            "[Unit]",
+            "Description=Update vpn-stack abuse guard",
+            "After=nftables.service",
+            "Wants=nftables.service",
+            "",
+            "[Service]",
+            "Type=oneshot",
+            "ExecStart=/usr/local/lib/vpn-stack/guard.sh",
+            "",
+        ]
+    )
+
+
+def render_guard_timer(env: dict[str, str]) -> str:
+    return "\n".join(
+        [
+            "[Unit]",
+            "Description=Run vpn-stack abuse guard",
+            "",
+            "[Timer]",
+            "OnBootSec=2min",
+            f"OnUnitActiveSec={env['GUARD_INTERVAL_MINUTES']}min",
+            "AccuracySec=30s",
+            "Unit=vpn-stack-guard.service",
+            "",
+            "[Install]",
+            "WantedBy=timers.target",
+            "",
+        ]
+    )
+
+
 def deployment_out_dir(env: dict[str, str]) -> Path:
     return OUT_DIR / env["DEPLOY_NAME"]
 
@@ -1240,10 +1401,13 @@ def rendered_files_for_role(env: dict[str, str], role: str) -> dict[str, str]:
             "sshd-vpn-stack.conf": render_sshd_hardening(env),
             "sync-state.sh": render_sync_script(env),
             "health-check.sh": render_health_script(env, ROLE_RU),
+            "guard.sh": render_guard_script(env, ROLE_RU),
             "vpn-stack-sync.service": render_sync_service(ROLE_RU),
             "vpn-stack-sync.timer": render_sync_timer(),
             "vpn-stack-health.service": render_health_service(),
             "vpn-stack-health.timer": render_health_timer(env),
+            "vpn-stack-guard.service": render_guard_service(),
+            "vpn-stack-guard.timer": render_guard_timer(env),
         }
     wan_iface = env.get("WAN_INTERFACE", "").strip() or "eth0"
     return {
@@ -1253,10 +1417,13 @@ def rendered_files_for_role(env: dict[str, str], role: str) -> dict[str, str]:
         "sshd-vpn-stack.conf": render_sshd_hardening(env),
         "sync-state.sh": render_sync_script(env),
         "health-check.sh": render_health_script(env, ROLE_FOREIGN),
+        "guard.sh": render_guard_script(env, ROLE_FOREIGN),
         "vpn-stack-sync.service": render_sync_service(ROLE_FOREIGN),
         "vpn-stack-sync.timer": render_sync_timer(),
         "vpn-stack-health.service": render_health_service(),
         "vpn-stack-health.timer": render_health_timer(env),
+        "vpn-stack-guard.service": render_guard_service(),
+        "vpn-stack-guard.timer": render_guard_timer(env),
     }
 
 

@@ -115,6 +115,12 @@ SSH_MAX_AUTH_TRIES="${SSH_MAX_AUTH_TRIES:-3}"
 SSH_MAX_STARTUPS="${SSH_MAX_STARTUPS:-5:30:20}"
 SSH_PER_SOURCE_MAX_STARTUPS="${SSH_PER_SOURCE_MAX_STARTUPS:-2}"
 SSH_PER_SOURCE_NETBLOCK_SIZE="${SSH_PER_SOURCE_NETBLOCK_SIZE:-24:64}"
+GUARD_ENABLED="${GUARD_ENABLED:-1}"
+GUARD_INTERVAL_MINUTES="${GUARD_INTERVAL_MINUTES:-5}"
+GUARD_LOOKBACK_MINUTES="${GUARD_LOOKBACK_MINUTES:-30}"
+GUARD_BLOCK_TIMEOUT="${GUARD_BLOCK_TIMEOUT:-6h}"
+GUARD_SSH_FAILURE_THRESHOLD="${GUARD_SSH_FAILURE_THRESHOLD:-6}"
+GUARD_REALITY_INVALID_THRESHOLD="${GUARD_REALITY_INVALID_THRESHOLD:-8}"
 
 CLIENT_FLOW="${CLIENT_FLOW:-xtls-rprx-vision}"
 RU_LISTEN_PORT="${RU_LISTEN_PORT:-443}"
@@ -183,10 +189,13 @@ NFTABLES_PATH="/etc/nftables.conf"
 SSHD_CONFIG_PATH="/etc/ssh/sshd_config.d/90-vpn-stack.conf"
 RULE_SYNC_SCRIPT="/usr/local/lib/vpn-stack/sync-state.sh"
 HEALTH_SCRIPT_PATH="/usr/local/lib/vpn-stack/health-check.sh"
+GUARD_SCRIPT_PATH="/usr/local/lib/vpn-stack/guard.sh"
 SYNC_SERVICE_PATH="/etc/systemd/system/vpn-stack-sync.service"
 SYNC_TIMER_PATH="/etc/systemd/system/vpn-stack-sync.timer"
 HEALTH_SERVICE_PATH="/etc/systemd/system/vpn-stack-health.service"
 HEALTH_TIMER_PATH="/etc/systemd/system/vpn-stack-health.timer"
+GUARD_SERVICE_PATH="/etc/systemd/system/vpn-stack-guard.service"
+GUARD_TIMER_PATH="/etc/systemd/system/vpn-stack-guard.timer"
 SUBSCRIPTION_SERVICE_PATH="/etc/systemd/system/vpn-stack-subscription.service"
 SYSCTL_PATH="/etc/sysctl.d/90-vpn-stack.conf"
 SUBSCRIPTION_ROOT="/var/lib/vpn-stack/subscription"
@@ -325,6 +334,8 @@ SYNC_TIMER_ENABLED=$(service_enabled_flag vpn-stack-sync.timer)
 SYNC_TIMER_ACTIVE=$(service_active_flag vpn-stack-sync.timer)
 HEALTH_TIMER_ENABLED=$(service_enabled_flag vpn-stack-health.timer)
 HEALTH_TIMER_ACTIVE=$(service_active_flag vpn-stack-health.timer)
+GUARD_TIMER_ENABLED=$(service_enabled_flag vpn-stack-guard.timer)
+GUARD_TIMER_ACTIVE=$(service_active_flag vpn-stack-guard.timer)
 SSH_SERVICE_ENABLED=$(service_enabled_flag ssh.service)
 SSH_SERVICE_ACTIVE=$(service_active_flag ssh.service)
 SSH_SOCKET_ENABLED=$(service_enabled_flag ssh.socket)
@@ -340,10 +351,13 @@ managed_paths() {
     "${SSHD_CONFIG_PATH}" \
     "${RULE_SYNC_SCRIPT}" \
     "${HEALTH_SCRIPT_PATH}" \
+    "${GUARD_SCRIPT_PATH}" \
     "${SYNC_SERVICE_PATH}" \
     "${SYNC_TIMER_PATH}" \
     "${HEALTH_SERVICE_PATH}" \
     "${HEALTH_TIMER_PATH}" \
+    "${GUARD_SERVICE_PATH}" \
+    "${GUARD_TIMER_PATH}" \
     "${SUBSCRIPTION_SERVICE_PATH}" \
     "${SUBSCRIPTION_ROOT}" \
     "${SYSCTL_PATH}" \
@@ -445,6 +459,7 @@ restore_service_state() {
   apply_service_restore_flags "wg-quick@${WG_INTERFACE}" "${WIREGUARD_ENABLED:-0}" "${WIREGUARD_ACTIVE:-0}"
   apply_service_restore_flags vpn-stack-sync.timer "${SYNC_TIMER_ENABLED:-0}" "${SYNC_TIMER_ACTIVE:-0}"
   apply_service_restore_flags vpn-stack-health.timer "${HEALTH_TIMER_ENABLED:-0}" "${HEALTH_TIMER_ACTIVE:-0}"
+  apply_service_restore_flags vpn-stack-guard.timer "${GUARD_TIMER_ENABLED:-0}" "${GUARD_TIMER_ACTIVE:-0}"
   apply_service_restore_flags sing-box "${SINGBOX_ENABLED:-0}" "${SINGBOX_ACTIVE:-0}"
   apply_service_restore_flags ssh.service "${SSH_SERVICE_ENABLED:-0}" "${SSH_SERVICE_ACTIVE:-0}"
   apply_service_restore_flags ssh.socket "${SSH_SOCKET_ENABLED:-0}" "${SSH_SOCKET_ACTIVE:-0}"
@@ -490,6 +505,8 @@ stop_managed_services() {
   systemctl stop vpn-stack-sync.timer >/dev/null 2>&1 || true
   systemctl stop vpn-stack-health.service >/dev/null 2>&1 || true
   systemctl stop vpn-stack-health.timer >/dev/null 2>&1 || true
+  systemctl stop vpn-stack-guard.service >/dev/null 2>&1 || true
+  systemctl stop vpn-stack-guard.timer >/dev/null 2>&1 || true
   systemctl stop vpn-stack-subscription.service >/dev/null 2>&1 || true
   systemctl stop nftables >/dev/null 2>&1 || true
 }
@@ -593,6 +610,7 @@ disable_managed_services() {
   systemctl disable "wg-quick@${WG_INTERFACE}" >/dev/null 2>&1 || true
   systemctl disable vpn-stack-sync.timer >/dev/null 2>&1 || true
   systemctl disable vpn-stack-health.timer >/dev/null 2>&1 || true
+  systemctl disable vpn-stack-guard.timer >/dev/null 2>&1 || true
   systemctl disable vpn-stack-subscription.service >/dev/null 2>&1 || true
   systemctl disable nftables >/dev/null 2>&1 || true
 }
@@ -605,10 +623,13 @@ remove_managed_files() {
     "${SSHD_CONFIG_PATH}" \
     "${RULE_SYNC_SCRIPT}" \
     "${HEALTH_SCRIPT_PATH}" \
+    "${GUARD_SCRIPT_PATH}" \
     "${SYNC_SERVICE_PATH}" \
     "${SYNC_TIMER_PATH}" \
     "${HEALTH_SERVICE_PATH}" \
     "${HEALTH_TIMER_PATH}" \
+    "${GUARD_SERVICE_PATH}" \
+    "${GUARD_TIMER_PATH}" \
     "${SUBSCRIPTION_SERVICE_PATH}" \
     "${SYSCTL_PATH}"
   rm -rf "${SUBSCRIPTION_ROOT}"
@@ -710,6 +731,10 @@ print_status() {
   local wan_offload_tso="-"
   local wg_transfer="-/-"
   local wg_handshake="-"
+  local guard_state_path="/var/lib/vpn-stack/guard-state.env"
+  local guard_last_run="-"
+  local guard_ssh_blocked="-"
+  local guard_reality_blocked="-"
   if is_currently_installed; then
     installed="1"
   fi
@@ -755,6 +780,11 @@ print_status() {
       wg_handshake="$(awk '{print $2}' <<<"${handshake_row}")"
     fi
   fi
+  if [[ -r "${guard_state_path}" ]]; then
+    guard_last_run="$(grep -E '^GUARD_LAST_RUN_AT=' "${guard_state_path}" | head -n1 | cut -d= -f2- | sed 's/^"//; s/"$//')"
+    guard_ssh_blocked="$(grep -E '^GUARD_SSH_BLOCKED_COUNT=' "${guard_state_path}" | head -n1 | cut -d= -f2- | sed 's/^"//; s/"$//')"
+    guard_reality_blocked="$(grep -E '^GUARD_REALITY_BLOCKED_COUNT=' "${guard_state_path}" | head -n1 | cut -d= -f2- | sed 's/^"//; s/"$//')"
+  fi
 
   echo "role=${ROLE}"
   echo "installed=${installed}"
@@ -780,6 +810,11 @@ print_status() {
   echo "nftables_active=$(service_active_flag nftables)"
   echo "wireguard_active=$(service_active_flag "wg-quick@${WG_INTERFACE}")"
   echo "sync_timer_active=$(service_active_flag vpn-stack-sync.timer)"
+  echo "health_timer_active=$(service_active_flag vpn-stack-health.timer)"
+  echo "guard_timer_active=$(service_active_flag vpn-stack-guard.timer)"
+  echo "guard_last_run=${guard_last_run}"
+  echo "guard_ssh_blocked_count=${guard_ssh_blocked}"
+  echo "guard_reality_blocked_count=${guard_reality_blocked}"
   echo "sing_box_active=$(service_active_flag sing-box)"
 }
 
@@ -941,14 +976,17 @@ copy_role_artifacts() {
   copy_if_present "${source_dir}/sshd-vpn-stack.conf" "${SSHD_CONFIG_PATH}" || { echo "Missing sshd-vpn-stack.conf in ${source_dir}" >&2; exit 1; }
   copy_if_present "${source_dir}/sync-state.sh" "${RULE_SYNC_SCRIPT}" || { echo "Missing sync-state.sh in ${source_dir}" >&2; exit 1; }
   copy_if_present "${source_dir}/health-check.sh" "${HEALTH_SCRIPT_PATH}" || { echo "Missing health-check.sh in ${source_dir}" >&2; exit 1; }
+  copy_if_present "${source_dir}/guard.sh" "${GUARD_SCRIPT_PATH}" || { echo "Missing guard.sh in ${source_dir}" >&2; exit 1; }
   copy_if_present "${source_dir}/vpn-stack-sync.service" "${SYNC_SERVICE_PATH}" || { echo "Missing vpn-stack-sync.service in ${source_dir}" >&2; exit 1; }
   copy_if_present "${source_dir}/vpn-stack-sync.timer" "${SYNC_TIMER_PATH}" || { echo "Missing vpn-stack-sync.timer in ${source_dir}" >&2; exit 1; }
   copy_if_present "${source_dir}/vpn-stack-health.service" "${HEALTH_SERVICE_PATH}" || { echo "Missing vpn-stack-health.service in ${source_dir}" >&2; exit 1; }
   copy_if_present "${source_dir}/vpn-stack-health.timer" "${HEALTH_TIMER_PATH}" || { echo "Missing vpn-stack-health.timer in ${source_dir}" >&2; exit 1; }
+  copy_if_present "${source_dir}/vpn-stack-guard.service" "${GUARD_SERVICE_PATH}" || { echo "Missing vpn-stack-guard.service in ${source_dir}" >&2; exit 1; }
+  copy_if_present "${source_dir}/vpn-stack-guard.timer" "${GUARD_TIMER_PATH}" || { echo "Missing vpn-stack-guard.timer in ${source_dir}" >&2; exit 1; }
   rm -f "${SUBSCRIPTION_SERVICE_PATH}"
   rm -rf "${SUBSCRIPTION_ROOT}"
   chmod 0644 "${SSHD_CONFIG_PATH}"
-  chmod 0755 "${RULE_SYNC_SCRIPT}" "${HEALTH_SCRIPT_PATH}"
+  chmod 0755 "${RULE_SYNC_SCRIPT}" "${HEALTH_SCRIPT_PATH}" "${GUARD_SCRIPT_PATH}"
 }
 
 write_preview_files() {
@@ -1192,6 +1230,9 @@ if ! systemctl start vpn-stack-sync.service; then
 fi
 systemctl enable vpn-stack-health.timer
 systemctl restart vpn-stack-health.timer
+systemctl enable vpn-stack-guard.timer
+systemctl restart vpn-stack-guard.timer
+systemctl start vpn-stack-guard.service || true
 
 if [[ "$ROLE" == "ru-gateway" ]]; then
   stop_legacy_xray_port_conflicts

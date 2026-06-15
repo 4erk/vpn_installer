@@ -248,6 +248,13 @@ state_value() {{
   fi
 }}
 
+guard_state_value() {{
+  local key="$1"
+  if [[ -r /var/lib/vpn-stack/guard-state.env ]]; then
+    awk -F= -v key="${{key}}" '$1 == key {{ sub(/^[^=]*=/, ""); gsub(/^"/, ""); gsub(/"$/, ""); print; exit }}' /var/lib/vpn-stack/guard-state.env
+  fi
+}}
+
 nft_port_packets() {{
   local port="$1"
   local verdict="$2"
@@ -416,6 +423,9 @@ self_heal_last_action_result="$(state_value SELF_HEAL_LAST_ACTION_RESULT)"
 self_heal_last_action_epoch="$(state_value SELF_HEAL_LAST_ACTION_EPOCH)"
 reality_invalid_recent_count="0"
 reality_invalid_recent_sources=""
+guard_last_run="$(guard_state_value GUARD_LAST_RUN_AT)"
+guard_ssh_blocked_count="$(guard_state_value GUARD_SSH_BLOCKED_COUNT)"
+guard_reality_blocked_count="$(guard_state_value GUARD_REALITY_BLOCKED_COUNT)"
 
 if [[ -n "${{default_iface}}" ]]; then
   default_qdisc="$(tc qdisc show dev "${{default_iface}}" 2>/dev/null | awk 'NR==1 {{print $2; exit}}')"
@@ -559,6 +569,9 @@ printf 'self_heal_last_action_result=%s\\n' "${{self_heal_last_action_result}}"
 printf 'self_heal_last_action_epoch=%s\\n' "${{self_heal_last_action_epoch}}"
 printf 'reality_invalid_recent_count=%s\\n' "${{reality_invalid_recent_count}}"
 printf 'reality_invalid_recent_sources=%s\\n' "${{reality_invalid_recent_sources}}"
+printf 'guard_last_run=%s\\n' "${{guard_last_run}}"
+printf 'guard_ssh_blocked_count=%s\\n' "${{guard_ssh_blocked_count}}"
+printf 'guard_reality_blocked_count=%s\\n' "${{guard_reality_blocked_count}}"
 printf 'installed=%s\\n' "${{installed}}"
 printf 'deployment_name=%s\\n' "${{deployment_name}}"
 printf 'role=%s\\n' "${{role}}"
@@ -568,6 +581,7 @@ printf 'nftables=%s\\n' "$(service_state nftables)"
 printf 'wireguard=%s\\n' "$(service_state wg-quick@{wg_interface})"
 printf 'sync_timer=%s\\n' "$(service_state vpn-stack-sync.timer)"
 printf 'health_timer=%s\\n' "$(service_state vpn-stack-health.timer)"
+printf 'guard_timer=%s\\n' "$(service_state vpn-stack-guard.timer)"
 printf 'ssh_service=%s\\n' "$(service_state ssh.service)"
 printf 'ssh_socket=%s\\n' "$(service_state ssh.socket)"
 """.strip()
@@ -645,8 +659,14 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
     if preflight.get("reality_invalid_recent_count") not in {"", None, "0"}:
         print(f"recent invalid Reality handshakes: {preflight.get('reality_invalid_recent_count', '-')}")
         print(f"invalid Reality sources: {preflight.get('reality_invalid_recent_sources', '-')}")
+    if preflight.get("guard_last_run"):
+        print(f"guard timer: {preflight.get('guard_timer', '-')}")
+        print(f"guard last run: {preflight.get('guard_last_run', '-')}")
+        print(f"guard blocked SSH/REALITY sources: {preflight.get('guard_ssh_blocked_count', '-')}/{preflight.get('guard_reality_blocked_count', '-')}")
     print(f"sync timer: {preflight.get('sync_timer', '-')}")
     print(f"health timer: {preflight.get('health_timer', '-')}")
+    if not preflight.get("guard_last_run"):
+        print(f"guard timer: {preflight.get('guard_timer', '-')}")
     print(f"ssh service: {preflight.get('ssh_service', '-')}")
     print(f"ssh socket: {preflight.get('ssh_socket', '-')}")
 

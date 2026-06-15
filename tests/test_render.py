@@ -414,9 +414,12 @@ class RenderTests(unittest.TestCase):
         self.assertIn(f"{env['WG_INTERFACE']}.conf", files)
         self.assertIn("sshd-vpn-stack.conf", files)
         self.assertIn("health-check.sh", files)
+        self.assertIn("guard.sh", files)
         self.assertIn("vpn-stack-sync.service", files)
         self.assertIn("vpn-stack-health.service", files)
         self.assertIn("vpn-stack-health.timer", files)
+        self.assertIn("vpn-stack-guard.service", files)
+        self.assertIn("vpn-stack-guard.timer", files)
 
     def test_health_script_probes_wireguard_path_before_stale_handshake_verdict(self) -> None:
         env = self.make_env()
@@ -559,6 +562,39 @@ class RenderTests(unittest.TestCase):
                     msg=f"{role} health script syntax error:\nstdout:\n{completed.stdout}\nstderr:\n{completed.stderr}",
                 )
 
+    @unittest.skipUnless(preferred_bash(), "bash is required for guard script syntax test")
+    def test_render_guard_script_is_bash_valid_for_both_roles(self) -> None:
+        env = self.make_env()
+        bash = preferred_bash() or "bash"
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            for role in (render.ROLE_RU, render.ROLE_FOREIGN):
+                script_path = tmp_path / f"{role}-guard.sh"
+                script_path.write_text(render.render_guard_script(env, role), encoding="utf-8")
+                completed = subprocess.run(
+                    [bash, "-n", str(script_path)],
+                    capture_output=True,
+                    text=True,
+                    env={**os.environ, "LC_ALL": "C.UTF-8"},
+                    check=False,
+                )
+                self.assertEqual(
+                    completed.returncode,
+                    0,
+                    msg=f"{role} guard script syntax error:\nstdout:\n{completed.stdout}\nstderr:\n{completed.stderr}",
+                )
+
+    def test_render_guard_script_blocks_repeated_ssh_and_ru_reality_noise(self) -> None:
+        env = self.make_env()
+        ru_script = render.render_guard_script(env, render.ROLE_RU)
+        foreign_script = render.render_guard_script(env, render.ROLE_FOREIGN)
+        self.assertIn('nft add element inet vpnstack abuse_ipv4 "{ $ip timeout $BLOCK_TIMEOUT }"', ru_script)
+        self.assertIn('SSH_FAILURE_THRESHOLD="6"', ru_script)
+        self.assertIn('REALITY_INVALID_THRESHOLD="8"', ru_script)
+        self.assertIn("REALITY: processed invalid connection", ru_script)
+        self.assertIn('if [[ "$ROLE" == "ru-gateway" ]]; then', ru_script)
+        self.assertIn('ROLE="foreign-exit"', foreign_script)
+
     def test_render_sshd_hardening_uses_expected_limits(self) -> None:
         env = self.make_env()
         config = render.render_sshd_hardening(env)
@@ -571,6 +607,9 @@ class RenderTests(unittest.TestCase):
         env = self.make_env()
         rules = render.render_ru_firewall_nftables(env)
         self.assertIn("ct state invalid drop", rules)
+        self.assertIn("set abuse_ipv4", rules)
+        self.assertIn("flags timeout", rules)
+        self.assertIn('ip saddr @abuse_ipv4 counter drop comment "vpnstack-abuse-block"', rules)
         self.assertIn(f"tcp dport {env['SSH_PORT']} ct state new meter ssh_guard", rules)
         self.assertIn(f"limit rate {env['SSH_INPUT_RATE']} burst {env['SSH_INPUT_BURST']} packets", rules)
         self.assertIn(f"tcp dport {env['SSH_PORT']} counter drop", rules)
@@ -584,6 +623,8 @@ class RenderTests(unittest.TestCase):
         env = self.make_env()
         rules = render.render_foreign_nftables(env, "eth0")
         self.assertIn("ct state invalid drop", rules)
+        self.assertIn("set abuse_ipv4", rules)
+        self.assertIn('ip saddr @abuse_ipv4 counter drop comment "vpnstack-abuse-block"', rules)
         self.assertIn(f"tcp dport {env['SSH_PORT']} ct state new meter ssh_guard", rules)
         self.assertIn(f"limit rate {env['SSH_INPUT_RATE']} burst {env['SSH_INPUT_BURST']} packets", rules)
         self.assertIn(f"tcp dport {env['SSH_PORT']} counter drop", rules)

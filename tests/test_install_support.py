@@ -29,8 +29,10 @@ class InstallSupportTests(unittest.TestCase):
             self.assertEqual(payload["route"]["final"], "to-foreign")
             self.assertEqual(payload["inbounds"][0]["multiplex"], {"enabled": True})
             self.assertTrue((output_dir / "sync-state.sh").is_file())
+            self.assertTrue((output_dir / "guard.sh").is_file())
             self.assertTrue((output_dir / "vpn-stack-sync.service").is_file())
             self.assertTrue((output_dir / "vpn-stack-health.service").is_file())
+            self.assertTrue((output_dir / "vpn-stack-guard.service").is_file())
             self.assertFalse((output_dir / "vpn-stack-subscription.service").exists())
 
     def test_render_role_migrates_legacy_ru_port_before_render(self) -> None:
