@@ -6,6 +6,19 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.4.3] - 2026-06-17
+
+### Fixed
+
+- `vpn-stack-health` больше не считает `wg_handshake_stale` hard-failure, если сам WireGuard path живой: это убирает ложные рестарты `wg0` на кратком timer/jitter около старой границы 120 секунд
+- effective handshake grace теперь вычисляется динамически: максимум из явного значения, минимального порога и `WG_KEEPALIVE * HEALTH_HANDSHAKE_GRACE_MULTIPLIER`
+- старые deployment env с `HEALTH_HANDSHAKE_GRACE_SECONDS=120` и `HEALTH_DEEP_PROBE_INTERVAL_MINUTES=30` мигрируют на более устойчивый runtime profile при следующем render/reinstall
+
+### Added
+
+- health-state теперь сохраняет runtime profile: возраст handshake, effective grace, факт живого `wg0` path, fast ping-loss и stale-handshake-with-live-path marker
+- `status` / preflight выводят runtime profile, чтобы отличать настоящую поломку dataplane от безопасного handshake jitter
+
 ## [0.4.2] - 2026-06-15
 
 ### Added

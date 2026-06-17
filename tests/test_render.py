@@ -433,7 +433,7 @@ class RenderTests(unittest.TestCase):
         self.assertIn('reasons+=("ru_wg_peer_route_missing")', ru_script)
         self.assertIn('probe_http_ipv4 "${WG_INTERFACE}"', ru_script)
         self.assertIn('reasons+=("ru_wg_egress")', ru_script)
-        self.assertLess(ru_script.index("if ! probe_wireguard_path; then"), ru_script.index('age="$(wg_handshake_age)"'))
+        self.assertLess(ru_script.index("if probe_wireguard_path; then"), ru_script.index('age="$(wg_handshake_age)"'))
 
     def test_foreign_health_script_checks_wg_peer_not_only_direct_egress(self) -> None:
         env = self.make_env()
@@ -493,6 +493,11 @@ class RenderTests(unittest.TestCase):
         self.assertIn('SELF_HEAL_COOLDOWN_MINUTES="15"', script)
         self.assertIn('SELF_HEAL_MAX_ACTIONS_PER_HOUR="2"', script)
         self.assertIn('SELF_HEAL_CONFIRMATIONS="2"', script)
+        self.assertIn('WG_KEEPALIVE="25"', script)
+        self.assertIn('HANDSHAKE_EFFECTIVE_GRACE="$((WG_KEEPALIVE * HANDSHAKE_GRACE_MULTIPLIER))"', script)
+        self.assertIn('PROFILE_HANDSHAKE_AGE_S', script)
+        self.assertIn('PROFILE_HANDSHAKE_GRACE_S', script)
+        self.assertIn('PROFILE_WG_PATH_OK', script)
         self.assertIn('systemctl restart --no-block "wg-quick@${WG_INTERFACE}"', script)
         self.assertNotIn("systemctl restart --no-block sing-box", script)
         self.assertIn('ip -6 route replace "${WG_FOREIGN_ADDRESS_V6_HOST}/128" dev "${WG_INTERFACE}"', script)
@@ -520,6 +525,7 @@ class RenderTests(unittest.TestCase):
         self.assertIn('ip -4 route replace "${WG_FOREIGN_ADDRESS_HOST}/32" dev "${WG_INTERFACE}"', script)
         self.assertIn('log "runtime degraded without hard failure: ${soft_reasons[*]}"', script)
         self.assertIn('log "runtime hard failure: ${hard_reasons[*]}"', script)
+        self.assertIn('log "handshake age ${age}s exceeds dynamic grace ${HANDSHAKE_EFFECTIVE_GRACE}s, but WireGuard path is alive"', script)
         self.assertNotIn('maybe_self_heal "soft" "${soft_reasons[@]}"', script)
         self.assertIn('maybe_self_heal "hard" "${hard_reasons[@]}"', script)
 
@@ -529,6 +535,8 @@ class RenderTests(unittest.TestCase):
         self.assertIn('ROLE="foreign-exit"', script)
         self.assertIn('WAN_INTERFACE="eth1"', script)
         self.assertIn('SELF_HEAL_ENABLED="1"', script)
+        self.assertIn('HANDSHAKE_MIN_GRACE="180"', script)
+        self.assertIn('HANDSHAKE_GRACE_MULTIPLIER="8"', script)
         self.assertIn('systemctl restart --no-block "wg-quick@${WG_INTERFACE}"', script)
         self.assertIn('systemctl restart --no-block nftables vpn-stack-sync.service', script)
         self.assertIn('probe_ping_loss_pct "${RU_PUBLIC_IP}"', script)

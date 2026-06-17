@@ -124,6 +124,19 @@ class ConfigTests(unittest.TestCase):
         env = config.generate_default_env("sample")
         self.assertEqual(env["RU_REALITY_ACCEPT_EMPTY_SHORT_ID"], "1")
 
+    def test_merge_env_with_defaults_migrates_old_health_profile(self) -> None:
+        env = config.merge_env_with_defaults(
+            {
+                "HEALTH_HANDSHAKE_GRACE_SECONDS": "120",
+                "HEALTH_DEEP_PROBE_INTERVAL_MINUTES": "30",
+            },
+            "sample",
+        )
+        self.assertEqual(env["HEALTH_HANDSHAKE_GRACE_SECONDS"], "180")
+        self.assertEqual(env["HEALTH_HANDSHAKE_MIN_GRACE_SECONDS"], "180")
+        self.assertEqual(env["HEALTH_HANDSHAKE_GRACE_MULTIPLIER"], "8")
+        self.assertEqual(env["HEALTH_DEEP_PROBE_INTERVAL_MINUTES"], "15")
+
     def test_merge_env_with_defaults_restores_empty_reality_time_tolerance_to_default(self) -> None:
         env = config.merge_env_with_defaults({"RU_REALITY_MAX_TIME_DIFFERENCE": ""}, "sample")
         self.assertEqual(env["RU_REALITY_MAX_TIME_DIFFERENCE"], "24h")

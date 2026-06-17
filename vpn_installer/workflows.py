@@ -162,11 +162,11 @@ def handshake_age_seconds(preflight: dict[str, str]) -> int:
 
 
 def handshake_grace_seconds(env: dict[str, str]) -> int:
-    try:
-        keepalive = int(env.get("WG_KEEPALIVE", "25"))
-    except ValueError:
-        keepalive = 25
-    return max(120, keepalive * 4)
+    keepalive = env_int(env, "WG_KEEPALIVE", 25)
+    configured_grace = env_int(env, "HEALTH_HANDSHAKE_GRACE_SECONDS", 180)
+    min_grace = env_int(env, "HEALTH_HANDSHAKE_MIN_GRACE_SECONDS", 180)
+    multiplier = env_int(env, "HEALTH_HANDSHAKE_GRACE_MULTIPLIER", 8)
+    return max(configured_grace, min_grace, keepalive * multiplier)
 
 
 def env_int(env: dict[str, str], key: str, default: int) -> int:

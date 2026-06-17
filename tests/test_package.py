@@ -44,7 +44,10 @@ class PackageTests(unittest.TestCase):
         self.assertIn('GUARD_INTERVAL_MINUTES="${GUARD_INTERVAL_MINUTES:-5}"', install_script)
         self.assertIn('GUARD_SSH_FAILURE_THRESHOLD="${GUARD_SSH_FAILURE_THRESHOLD:-6}"', install_script)
         self.assertIn('HEALTH_THROUGHPUT_URLS="${HEALTH_THROUGHPUT_URLS:-https://cachefly.cachefly.net/1mb.test https://proof.ovh.net/files/1Mb.dat}"', install_script)
-        self.assertIn('HEALTH_DEEP_PROBE_INTERVAL_MINUTES="${HEALTH_DEEP_PROBE_INTERVAL_MINUTES:-30}"', install_script)
+        self.assertIn('HEALTH_DEEP_PROBE_INTERVAL_MINUTES="${HEALTH_DEEP_PROBE_INTERVAL_MINUTES:-15}"', install_script)
+        self.assertIn('HEALTH_HANDSHAKE_GRACE_SECONDS="${HEALTH_HANDSHAKE_GRACE_SECONDS:-180}"', install_script)
+        self.assertIn('HEALTH_HANDSHAKE_MIN_GRACE_SECONDS="${HEALTH_HANDSHAKE_MIN_GRACE_SECONDS:-180}"', install_script)
+        self.assertIn('HEALTH_HANDSHAKE_GRACE_MULTIPLIER="${HEALTH_HANDSHAKE_GRACE_MULTIPLIER:-8}"', install_script)
         self.assertIn('HEALTH_SELF_HEAL="${HEALTH_SELF_HEAL:-1}"', install_script)
         self.assertIn('HEALTH_SELF_HEAL_COOLDOWN_MINUTES="${HEALTH_SELF_HEAL_COOLDOWN_MINUTES:-15}"', install_script)
         self.assertIn('HEALTH_SELF_HEAL_MAX_ACTIONS_PER_HOUR="${HEALTH_SELF_HEAL_MAX_ACTIONS_PER_HOUR:-2}"', install_script)
@@ -105,7 +108,7 @@ class PackageTests(unittest.TestCase):
 
     def test_package_exposes_version_via_getattr(self) -> None:
         package = importlib.import_module("vpn_installer")
-        self.assertEqual(package.__version__, "0.4.2")
+        self.assertEqual(package.__version__, "0.4.3")
         with self.assertRaises(AttributeError):
             package.__getattr__("nope")
 

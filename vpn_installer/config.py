@@ -65,6 +65,9 @@ REMOTE_ENV_CRITICAL_KEYS = {
     "HEALTH_MIN_RU_WG_UPLOAD_BPS",
     "HEALTH_MAX_FOREIGN_RU_PING_LOSS_PCT",
     "HEALTH_MAX_FOREIGN_INTERNET_PING_LOSS_PCT",
+    "HEALTH_HANDSHAKE_GRACE_SECONDS",
+    "HEALTH_HANDSHAKE_MIN_GRACE_SECONDS",
+    "HEALTH_HANDSHAKE_GRACE_MULTIPLIER",
     "HEALTH_SELF_HEAL",
     "HEALTH_SELF_HEAL_COOLDOWN_MINUTES",
     "HEALTH_SELF_HEAL_MAX_ACTIONS_PER_HOUR",
@@ -245,14 +248,16 @@ def generate_default_env(deploy_name: str) -> dict[str, str]:
         "HEALTH_THROUGHPUT_URLS": "https://cachefly.cachefly.net/1mb.test https://proof.ovh.net/files/1Mb.dat",
         "HEALTH_UPLOAD_URL": "https://speed.cloudflare.com/__up",
         "HEALTH_UPLOAD_BYTES": "1048576",
-        "HEALTH_DEEP_PROBE_INTERVAL_MINUTES": "30",
+        "HEALTH_DEEP_PROBE_INTERVAL_MINUTES": "15",
         "HEALTH_MIN_FOREIGN_DIRECT_DOWNLOAD_BPS": "300000",
         "HEALTH_MIN_RU_WG_DOWNLOAD_BPS": "300000",
         "HEALTH_MIN_FOREIGN_DIRECT_UPLOAD_BPS": "1000000",
         "HEALTH_MIN_RU_WG_UPLOAD_BPS": "1000000",
         "HEALTH_MAX_FOREIGN_RU_PING_LOSS_PCT": "5",
         "HEALTH_MAX_FOREIGN_INTERNET_PING_LOSS_PCT": "5",
-        "HEALTH_HANDSHAKE_GRACE_SECONDS": "120",
+        "HEALTH_HANDSHAKE_GRACE_SECONDS": "180",
+        "HEALTH_HANDSHAKE_MIN_GRACE_SECONDS": "180",
+        "HEALTH_HANDSHAKE_GRACE_MULTIPLIER": "8",
         "HEALTH_CHECK_INTERVAL_MINUTES": "2",
         "HEALTH_SELF_HEAL": "1",
         "HEALTH_SELF_HEAL_COOLDOWN_MINUTES": "15",
@@ -347,6 +352,10 @@ def merge_env_with_defaults(existing: dict[str, str], deploy_name: str) -> dict[
         merged["WG_MTU"] = defaults["WG_MTU"]
     if merged.get("RUNTIME_QDISC", "") == "":
         merged["RUNTIME_QDISC"] = defaults["RUNTIME_QDISC"]
+    if merged.get("HEALTH_HANDSHAKE_GRACE_SECONDS") == "120":
+        merged["HEALTH_HANDSHAKE_GRACE_SECONDS"] = defaults["HEALTH_HANDSHAKE_GRACE_SECONDS"]
+    if merged.get("HEALTH_DEEP_PROBE_INTERVAL_MINUTES") == "30":
+        merged["HEALTH_DEEP_PROBE_INTERVAL_MINUTES"] = defaults["HEALTH_DEEP_PROBE_INTERVAL_MINUTES"]
     merged["DEPLOY_NAME"] = deploy_name
     return merged
 

@@ -295,6 +295,12 @@ class RemoteTests(unittest.TestCase):
                     "deep_ru_wg_download_min_bps": "120000",
                     "deep_ru_wg_upload_bps": "800000",
                     "fast_ru_foreign_ping_loss_pct": "25",
+                    "profile_updated_at": "2026-06-17T19:00:00+00:00",
+                    "profile_handshake_age_s": "130",
+                    "profile_handshake_grace_s": "200",
+                    "profile_wg_path_ok": "1",
+                    "profile_fast_ping_loss_pct": "25",
+                    "profile_stale_handshake_live_path_s": "130",
                     "self_heal_last_reason": "soft:wireguard_path",
                     "self_heal_consecutive": "2",
                     "self_heal_last_action": "restart-wireguard",
@@ -325,6 +331,10 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("RU over wg upload B/s: 800000", output)
         self.assertIn("foreign ping loss to gateway (%): 15", output)
         self.assertIn("fast RU->foreign ping loss (%): 25", output)
+        self.assertIn("runtime profile at: 2026-06-17T19:00:00+00:00", output)
+        self.assertIn("profile handshake age/grace (s): 130/200", output)
+        self.assertIn("profile wg path ok: 1", output)
+        self.assertIn("profile stale handshake with live path (s): 130", output)
         self.assertIn("self-heal last action: restart-wireguard/scheduled", output)
         self.assertIn("recent invalid Reality handshakes: 7", output)
         self.assertIn("invalid Reality sources: 178.66.129.100=7", output)

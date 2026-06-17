@@ -421,6 +421,12 @@ self_heal_last_action="$(state_value SELF_HEAL_LAST_ACTION)"
 self_heal_last_action_reason="$(state_value SELF_HEAL_LAST_ACTION_REASON)"
 self_heal_last_action_result="$(state_value SELF_HEAL_LAST_ACTION_RESULT)"
 self_heal_last_action_epoch="$(state_value SELF_HEAL_LAST_ACTION_EPOCH)"
+profile_updated_at="$(state_value PROFILE_UPDATED_AT)"
+profile_handshake_age_s="$(state_value PROFILE_HANDSHAKE_AGE_S)"
+profile_handshake_grace_s="$(state_value PROFILE_HANDSHAKE_GRACE_S)"
+profile_wg_path_ok="$(state_value PROFILE_WG_PATH_OK)"
+profile_fast_ping_loss_pct="$(state_value PROFILE_FAST_PING_LOSS_PCT)"
+profile_stale_handshake_live_path_s="$(state_value PROFILE_STALE_HANDSHAKE_WITH_LIVE_PATH_S)"
 reality_invalid_recent_count="0"
 reality_invalid_recent_sources=""
 guard_last_run="$(guard_state_value GUARD_LAST_RUN_AT)"
@@ -567,6 +573,12 @@ printf 'self_heal_last_action=%s\\n' "${{self_heal_last_action}}"
 printf 'self_heal_last_action_reason=%s\\n' "${{self_heal_last_action_reason}}"
 printf 'self_heal_last_action_result=%s\\n' "${{self_heal_last_action_result}}"
 printf 'self_heal_last_action_epoch=%s\\n' "${{self_heal_last_action_epoch}}"
+printf 'profile_updated_at=%s\\n' "${{profile_updated_at}}"
+printf 'profile_handshake_age_s=%s\\n' "${{profile_handshake_age_s}}"
+printf 'profile_handshake_grace_s=%s\\n' "${{profile_handshake_grace_s}}"
+printf 'profile_wg_path_ok=%s\\n' "${{profile_wg_path_ok}}"
+printf 'profile_fast_ping_loss_pct=%s\\n' "${{profile_fast_ping_loss_pct}}"
+printf 'profile_stale_handshake_live_path_s=%s\\n' "${{profile_stale_handshake_live_path_s}}"
 printf 'reality_invalid_recent_count=%s\\n' "${{reality_invalid_recent_count}}"
 printf 'reality_invalid_recent_sources=%s\\n' "${{reality_invalid_recent_sources}}"
 printf 'guard_last_run=%s\\n' "${{guard_last_run}}"
@@ -647,6 +659,13 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
     if preflight.get("fast_foreign_ru_ping_loss_pct") or preflight.get("fast_ru_foreign_ping_loss_pct"):
         print(f"fast foreign->RU ping loss (%): {preflight.get('fast_foreign_ru_ping_loss_pct', '-')}")
         print(f"fast RU->foreign ping loss (%): {preflight.get('fast_ru_foreign_ping_loss_pct', '-')}")
+    if preflight.get("profile_updated_at"):
+        print(f"runtime profile at: {preflight.get('profile_updated_at', '-')}")
+        print(f"profile handshake age/grace (s): {preflight.get('profile_handshake_age_s', '-')}/{preflight.get('profile_handshake_grace_s', '-')}")
+        print(f"profile wg path ok: {preflight.get('profile_wg_path_ok', '-')}")
+        print(f"profile fast ping loss (%): {preflight.get('profile_fast_ping_loss_pct', '-')}")
+        if preflight.get("profile_stale_handshake_live_path_s"):
+            print(f"profile stale handshake with live path (s): {preflight.get('profile_stale_handshake_live_path_s', '-')}")
     if preflight.get("self_heal_last_action") or preflight.get("self_heal_last_reason"):
         print(f"self-heal last reason: {preflight.get('self_heal_last_reason', '-')}")
         print(f"self-heal consecutive: {preflight.get('self_heal_consecutive', '-')}")

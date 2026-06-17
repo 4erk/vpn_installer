@@ -596,6 +596,7 @@ def render_health_script(env: dict[str, str], role: str) -> str:
 
         ROLE="{role}"
         WG_INTERFACE="{env['WG_INTERFACE']}"
+        WG_KEEPALIVE="{env['WG_KEEPALIVE']}"
         WG_RU_ADDRESS_HOST="{wg_host_address(env['WG_RU_ADDRESS'])}"
         WG_FOREIGN_ADDRESS_HOST="{wg_host_address(env['WG_FOREIGN_ADDRESS'])}"
         WG_FOREIGN_ADDRESS_V6_HOST="{wg_host_address(env['WG_FOREIGN_ADDRESS_V6'])}"
@@ -616,6 +617,8 @@ def render_health_script(env: dict[str, str], role: str) -> str:
         MAX_FOREIGN_RU_PING_LOSS_PCT="{env['HEALTH_MAX_FOREIGN_RU_PING_LOSS_PCT']}"
         MAX_FOREIGN_INTERNET_PING_LOSS_PCT="{env['HEALTH_MAX_FOREIGN_INTERNET_PING_LOSS_PCT']}"
         HANDSHAKE_GRACE="{env['HEALTH_HANDSHAKE_GRACE_SECONDS']}"
+        HANDSHAKE_MIN_GRACE="{env['HEALTH_HANDSHAKE_MIN_GRACE_SECONDS']}"
+        HANDSHAKE_GRACE_MULTIPLIER="{env['HEALTH_HANDSHAKE_GRACE_MULTIPLIER']}"
         DISABLE_NIC_OFFLOADS="{env.get('DISABLE_NIC_OFFLOADS', '1')}"
         SELF_HEAL_ENABLED="{env.get('HEALTH_SELF_HEAL', '1')}"
         SELF_HEAL_COOLDOWN_MINUTES="{env.get('HEALTH_SELF_HEAL_COOLDOWN_MINUTES', '15')}"
@@ -644,10 +647,21 @@ def render_health_script(env: dict[str, str], role: str) -> str:
         MIN_RU_WG_UPLOAD_BPS="$(number_or_default "${{MIN_RU_WG_UPLOAD_BPS}}" 1000000)"
         MAX_FOREIGN_RU_PING_LOSS_PCT="$(number_or_default "${{MAX_FOREIGN_RU_PING_LOSS_PCT}}" 5)"
         MAX_FOREIGN_INTERNET_PING_LOSS_PCT="$(number_or_default "${{MAX_FOREIGN_INTERNET_PING_LOSS_PCT}}" 5)"
+        HANDSHAKE_GRACE="$(number_or_default "${{HANDSHAKE_GRACE}}" 180)"
+        HANDSHAKE_MIN_GRACE="$(number_or_default "${{HANDSHAKE_MIN_GRACE}}" 180)"
+        HANDSHAKE_GRACE_MULTIPLIER="$(number_or_default "${{HANDSHAKE_GRACE_MULTIPLIER}}" 8)"
+        WG_KEEPALIVE="$(number_or_default "${{WG_KEEPALIVE}}" 25)"
         HEALTH_UPLOAD_BYTES="$(number_or_default "${{HEALTH_UPLOAD_BYTES}}" 1048576)"
         SELF_HEAL_COOLDOWN_MINUTES="$(number_or_default "${{SELF_HEAL_COOLDOWN_MINUTES}}" 15)"
         SELF_HEAL_MAX_ACTIONS_PER_HOUR="$(number_or_default "${{SELF_HEAL_MAX_ACTIONS_PER_HOUR}}" 2)"
         SELF_HEAL_CONFIRMATIONS="$(number_or_default "${{SELF_HEAL_CONFIRMATIONS}}" 2)"
+        HANDSHAKE_EFFECTIVE_GRACE="$((WG_KEEPALIVE * HANDSHAKE_GRACE_MULTIPLIER))"
+        if [[ "${{HANDSHAKE_EFFECTIVE_GRACE}}" -lt "${{HANDSHAKE_MIN_GRACE}}" ]]; then
+          HANDSHAKE_EFFECTIVE_GRACE="${{HANDSHAKE_MIN_GRACE}}"
+        fi
+        if [[ "${{HANDSHAKE_EFFECTIVE_GRACE}}" -lt "${{HANDSHAKE_GRACE}}" ]]; then
+          HANDSHAKE_EFFECTIVE_GRACE="${{HANDSHAKE_GRACE}}"
+        fi
 
         detect_default_iface() {{
           ip route show default 2>/dev/null | awk '/default/ {{print $5; exit}}'
@@ -1117,15 +1131,29 @@ EOF
         collect_hard_reasons() {{
           local reasons=()
           local age=""
+          local wireguard_path_ok="0"
           if ! ssh_banner_ok; then
             reasons+=("ssh_banner")
           fi
-          if ! probe_wireguard_path; then
+          if probe_wireguard_path; then
+            wireguard_path_ok="1"
+          else
             append_wireguard_path_reason
           fi
           age="$(wg_handshake_age)"
-          if [[ "${{age}}" =~ ^[0-9]+$ && "${{age}}" -gt "${{HANDSHAKE_GRACE}}" ]]; then
-            reasons+=("wg_handshake_stale=${{age}}")
+          set_state_value PROFILE_UPDATED_AT "$(date -Is)"
+          set_state_value PROFILE_HANDSHAKE_AGE_S "${{age}}"
+          set_state_value PROFILE_HANDSHAKE_GRACE_S "${{HANDSHAKE_EFFECTIVE_GRACE}}"
+          set_state_value PROFILE_WG_PATH_OK "${{wireguard_path_ok}}"
+          if [[ "${{age}}" =~ ^[0-9]+$ && "${{age}}" -gt "${{HANDSHAKE_EFFECTIVE_GRACE}}" ]]; then
+            if [[ "${{wireguard_path_ok}}" == "1" ]]; then
+              set_state_value PROFILE_STALE_HANDSHAKE_WITH_LIVE_PATH_S "${{age}}"
+              log "handshake age ${{age}}s exceeds dynamic grace ${{HANDSHAKE_EFFECTIVE_GRACE}}s, but WireGuard path is alive"
+            else
+              reasons+=("wg_handshake_stale=${{age}}")
+            fi
+          else
+            set_state_value PROFILE_STALE_HANDSHAKE_WITH_LIVE_PATH_S ""
           fi
         {textwrap.indent(role_specific_direct_probe, '  ')}
           if [[ "${{#reasons[@]}}" -gt 0 ]]; then
@@ -1139,12 +1167,14 @@ EOF
           if [[ "${{ROLE}}" == "foreign-exit" ]]; then
             fast_loss="$(probe_ping_loss_pct_fast "${{RU_PUBLIC_IP}}")"
             set_state_value FAST_FOREIGN_RU_PING_LOSS_PCT "${{fast_loss}}"
+            set_state_value PROFILE_FAST_PING_LOSS_PCT "${{fast_loss}}"
             if [[ "${{fast_loss}}" =~ ^[0-9]+$ && "${{fast_loss}}" -gt "${{MAX_FOREIGN_RU_PING_LOSS_PCT}}" ]]; then
               printf '%s\\n' "foreign_ru_ping_loss_fast=${{fast_loss}}"
             fi
           else
             fast_loss="$(probe_ping_loss_pct_fast "${{FOREIGN_PUBLIC_IP}}")"
             set_state_value FAST_RU_FOREIGN_PING_LOSS_PCT "${{fast_loss}}"
+            set_state_value PROFILE_FAST_PING_LOSS_PCT "${{fast_loss}}"
             if [[ "${{fast_loss}}" =~ ^[0-9]+$ && "${{fast_loss}}" -gt "${{MAX_FOREIGN_RU_PING_LOSS_PCT}}" ]]; then
               printf '%s\\n' "ru_foreign_ping_loss_fast=${{fast_loss}}"
             fi

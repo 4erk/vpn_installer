@@ -276,6 +276,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(healthy["health_verdict"], "ok")
         self.assertEqual(healthy["ru_wg_download_bps"], "800000")
         self.assertEqual(healthy["foreign_direct_upload_bps"], "1400000")
+        self.assertEqual(healthy["handshake_grace_s"], "200")
 
         mismatch = workflows.deployment_health_snapshot(
             env,
@@ -294,6 +295,18 @@ class WorkflowTests(unittest.TestCase):
             },
         )
         self.assertEqual(stale_with_verified_egress["health_verdict"], "ok")
+
+        dynamic_grace_env = generate_default_env("demo")
+        dynamic_grace_env["WG_KEEPALIVE"] = "40"
+        dynamic_grace = workflows.deployment_health_snapshot(
+            dynamic_grace_env,
+            {
+                ROLE_RU: {"wg_observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "300"},
+                ROLE_FOREIGN: {"observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "300"},
+            },
+        )
+        self.assertEqual(dynamic_grace["health_verdict"], "ok")
+        self.assertEqual(dynamic_grace["handshake_grace_s"], "320")
 
         degraded = workflows.deployment_health_snapshot(
             env,
