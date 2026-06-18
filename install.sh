@@ -547,18 +547,42 @@ restart_wireguard_service() {
   systemctl start "wg-quick@${WG_INTERFACE}"
 }
 
-stop_legacy_xray_port_conflicts() {
+cleanup_failed_rc_local() {
+  if ! systemctl --quiet is-failed rc-local.service 2>/dev/null; then
+    return 0
+  fi
+  if [[ ! -f /etc/rc.local || -x /etc/rc.local ]]; then
+    systemctl reset-failed rc-local.service >/dev/null 2>&1 || true
+    return 0
+  fi
+  if head -n 1 /etc/rc.local 2>/dev/null | grep -q '^#!'; then
+    echo "Fixing failed rc-local.service caused by non-executable /etc/rc.local." >&2
+    chmod 0755 /etc/rc.local >/dev/null 2>&1 || true
+  fi
+  systemctl reset-failed rc-local.service >/dev/null 2>&1 || true
+}
+
+disable_legacy_proxy_services() {
+  local legacy_units=(xray-vpnstack.service xray.service v2ray.service)
+  local found="0"
+  local unit
+  for unit in "${legacy_units[@]}"; do
+    if systemctl list-unit-files "${unit}" --no-legend 2>/dev/null | grep -q . || systemctl status "${unit}" >/dev/null 2>&1; then
+      found="1"
+    fi
+  done
+
+  if [[ "${found}" == "1" ]]; then
+    echo "Disabling legacy Xray/V2Ray services; vpn-stack owns this host." >&2
+    for unit in "${legacy_units[@]}"; do
+      systemctl disable --now "${unit}" >/dev/null 2>&1 || true
+      systemctl reset-failed "${unit}" >/dev/null 2>&1 || true
+    done
+  fi
+
   if [[ "$ROLE" != "ru-gateway" ]] || ! command -v ss >/dev/null 2>&1; then
     return 0
   fi
-
-  if ! ss -H -ltnp "sport = :${RU_LISTEN_PORT}" 2>/dev/null | grep -q 'xray'; then
-    return 0
-  fi
-
-  echo "Stopping legacy Xray services that occupy TCP ${RU_LISTEN_PORT}." >&2
-  systemctl disable --now xray-vpnstack.service xray.service >/dev/null 2>&1 || true
-  sleep 1
   if ss -H -ltnp "sport = :${RU_LISTEN_PORT}" 2>/dev/null | grep -q 'xray'; then
     pkill -TERM -x xray >/dev/null 2>&1 || true
     sleep 2
@@ -1215,6 +1239,8 @@ if [[ -n "${WG_INTERFACE:-}" ]]; then
   apply_runtime_qdisc "${WG_INTERFACE}"
 fi
 systemctl daemon-reload
+cleanup_failed_rc_local
+disable_legacy_proxy_services
 configure_ssh_daemon_mode
 systemctl enable nftables
 systemctl restart nftables
@@ -1232,12 +1258,12 @@ if ! systemctl start vpn-stack-sync.service; then
 fi
 systemctl enable vpn-stack-health.timer
 systemctl restart vpn-stack-health.timer
+systemctl reset-failed vpn-stack-health.service >/dev/null 2>&1 || true
 systemctl enable vpn-stack-guard.timer
 systemctl restart vpn-stack-guard.timer
 systemctl start vpn-stack-guard.service || true
 
 if [[ "$ROLE" == "ru-gateway" ]]; then
-  stop_legacy_xray_port_conflicts
   systemctl enable sing-box
   systemctl restart sing-box
 fi

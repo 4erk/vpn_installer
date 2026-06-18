@@ -525,6 +525,7 @@ class RenderTests(unittest.TestCase):
         self.assertIn('ip -4 route replace "${WG_FOREIGN_ADDRESS_HOST}/32" dev "${WG_INTERFACE}"', script)
         self.assertIn('log "runtime degraded without hard failure: ${soft_reasons[*]}"', script)
         self.assertIn('log "runtime hard failure: ${hard_reasons[*]}"', script)
+        self.assertIn("runtime hard failure recorded; keeping systemd unit successful", script)
         self.assertIn('log "handshake age ${age}s exceeds dynamic grace ${HANDSHAKE_EFFECTIVE_GRACE}s, but WireGuard path is alive"', script)
         self.assertNotIn('maybe_self_heal "soft" "${soft_reasons[@]}"', script)
         self.assertIn('maybe_self_heal "hard" "${hard_reasons[@]}"', script)

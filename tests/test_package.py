@@ -34,6 +34,7 @@ class PackageTests(unittest.TestCase):
         self.assertIn('systemctl restart vpn-stack-sync.timer', install_script)
         self.assertIn('systemctl enable vpn-stack-health.timer', install_script)
         self.assertIn('systemctl restart vpn-stack-health.timer', install_script)
+        self.assertIn('systemctl reset-failed vpn-stack-health.service >/dev/null 2>&1 || true', install_script)
         self.assertIn('systemctl enable vpn-stack-guard.timer', install_script)
         self.assertIn('systemctl restart vpn-stack-guard.timer', install_script)
         self.assertIn('systemctl disable --now ssh.socket', install_script)
@@ -88,9 +89,11 @@ class PackageTests(unittest.TestCase):
         self.assertIn('apply_runtime_interface_tuning "${RUNTIME_QDISC_INTERFACE}"', install_script)
         self.assertIn('apply_runtime_qdisc "${WG_INTERFACE}"', install_script)
         self.assertIn('tc qdisc replace dev "${iface}" root fq', install_script)
-        self.assertIn("stop_legacy_xray_port_conflicts()", install_script)
-        self.assertIn('systemctl disable --now xray-vpnstack.service xray.service', install_script)
-        self.assertIn("stop_legacy_xray_port_conflicts\n  systemctl enable sing-box", install_script)
+        self.assertIn("cleanup_failed_rc_local()", install_script)
+        self.assertIn("Fixing failed rc-local.service caused by non-executable /etc/rc.local.", install_script)
+        self.assertIn("disable_legacy_proxy_services()", install_script)
+        self.assertIn('systemctl disable --now "${unit}"', install_script)
+        self.assertIn("cleanup_failed_rc_local\ndisable_legacy_proxy_services\nconfigure_ssh_daemon_mode", install_script)
         self.assertIn("cleanup_stale_wireguard_interface()", install_script)
         self.assertIn('ip link delete dev "${WG_INTERFACE}"', install_script)
         self.assertIn("restart_wireguard_service()", install_script)
@@ -108,7 +111,7 @@ class PackageTests(unittest.TestCase):
 
     def test_package_exposes_version_via_getattr(self) -> None:
         package = importlib.import_module("vpn_installer")
-        self.assertEqual(package.__version__, "0.4.3")
+        self.assertEqual(package.__version__, "0.4.4")
         with self.assertRaises(AttributeError):
             package.__getattr__("nope")
 

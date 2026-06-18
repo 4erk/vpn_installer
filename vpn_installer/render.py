@@ -841,6 +841,15 @@ def render_health_script(env: dict[str, str], role: str) -> str:
           fi
         }}
 
+        below_soft_min() {{
+          local value="$1"
+          local minimum="$2"
+          if [[ ! "${{value}}" =~ ^[0-9]+$ || ! "${{minimum}}" =~ ^[0-9]+$ ]]; then
+            return 1
+          fi
+          [[ "${{value}}" -ge 0 ]] && (( value * 100 < minimum * 90 ))
+        }}
+
         probe_multi_download_summary() {{
           local bind_iface="$1"
           local min_speed="-1"
@@ -933,30 +942,21 @@ def render_health_script(env: dict[str, str], role: str) -> str:
             gateway_ping_loss="$(probe_ping_loss_pct "$(ip route show default 2>/dev/null | awk '/default/ {{print $3; exit}}')")"
             peer_ping_loss="$(probe_ping_loss_pct "${{RU_PUBLIC_IP}}")"
             internet_ping_loss="$(probe_ping_loss_pct "1.1.1.1")"
-            if [[ "${{direct_min}}" =~ ^[0-9]+$ && "${{direct_min}}" -ge 0 && "${{direct_min}}" -lt "${{MIN_FOREIGN_DIRECT_DOWNLOAD_BPS}}" ]]; then
+            if below_soft_min "${{direct_min}}" "${{MIN_FOREIGN_DIRECT_DOWNLOAD_BPS}}"; then
               reasons+=("foreign_direct_download=${{direct_min}}")
             fi
-            if [[ "${{direct_upload}}" =~ ^[0-9]+$ && "${{direct_upload}}" -ge 0 && "${{direct_upload}}" -lt "${{MIN_FOREIGN_DIRECT_UPLOAD_BPS}}" ]]; then
+            if below_soft_min "${{direct_upload}}" "${{MIN_FOREIGN_DIRECT_UPLOAD_BPS}}"; then
               reasons+=("foreign_direct_upload=${{direct_upload}}")
-            fi
-            if [[ "${{gateway_ping_loss}}" =~ ^[0-9]+$ && "${{gateway_ping_loss}}" -gt "${{MAX_FOREIGN_INTERNET_PING_LOSS_PCT}}" ]]; then
-              reasons+=("foreign_gateway_ping_loss=${{gateway_ping_loss}}")
-            fi
-            if [[ "${{peer_ping_loss}}" =~ ^[0-9]+$ && "${{peer_ping_loss}}" -gt "${{MAX_FOREIGN_RU_PING_LOSS_PCT}}" ]]; then
-              reasons+=("foreign_ru_ping_loss=${{peer_ping_loss}}")
-            fi
-            if [[ "${{internet_ping_loss}}" =~ ^[0-9]+$ && "${{internet_ping_loss}}" -gt "${{MAX_FOREIGN_INTERNET_PING_LOSS_PCT}}" ]]; then
-              reasons+=("foreign_internet_ping_loss=${{internet_ping_loss}}")
             fi
           else
             wg_summary="$(probe_multi_download_summary "${{WG_INTERFACE}}")"
             wg_min="${{wg_summary%%|*}}"
             wg_detail="${{wg_summary#*|}}"
             wg_upload="$(probe_upload_bps "${{WG_INTERFACE}}" "${{HEALTH_UPLOAD_URL}}" "${{HEALTH_UPLOAD_BYTES}}")"
-            if [[ "${{wg_min}}" =~ ^[0-9]+$ && "${{wg_min}}" -ge 0 && "${{wg_min}}" -lt "${{MIN_RU_WG_DOWNLOAD_BPS}}" ]]; then
+            if below_soft_min "${{wg_min}}" "${{MIN_RU_WG_DOWNLOAD_BPS}}"; then
               reasons+=("ru_wg_download=${{wg_min}}")
             fi
-            if [[ "${{wg_upload}}" =~ ^[0-9]+$ && "${{wg_upload}}" -ge 0 && "${{wg_upload}}" -lt "${{MIN_RU_WG_UPLOAD_BPS}}" ]]; then
+            if below_soft_min "${{wg_upload}}" "${{MIN_RU_WG_UPLOAD_BPS}}"; then
               reasons+=("ru_wg_upload=${{wg_upload}}")
             fi
           fi
@@ -1168,16 +1168,10 @@ EOF
             fast_loss="$(probe_ping_loss_pct_fast "${{RU_PUBLIC_IP}}")"
             set_state_value FAST_FOREIGN_RU_PING_LOSS_PCT "${{fast_loss}}"
             set_state_value PROFILE_FAST_PING_LOSS_PCT "${{fast_loss}}"
-            if [[ "${{fast_loss}}" =~ ^[0-9]+$ && "${{fast_loss}}" -gt "${{MAX_FOREIGN_RU_PING_LOSS_PCT}}" ]]; then
-              printf '%s\\n' "foreign_ru_ping_loss_fast=${{fast_loss}}"
-            fi
           else
             fast_loss="$(probe_ping_loss_pct_fast "${{FOREIGN_PUBLIC_IP}}")"
             set_state_value FAST_RU_FOREIGN_PING_LOSS_PCT "${{fast_loss}}"
             set_state_value PROFILE_FAST_PING_LOSS_PCT "${{fast_loss}}"
-            if [[ "${{fast_loss}}" =~ ^[0-9]+$ && "${{fast_loss}}" -gt "${{MAX_FOREIGN_RU_PING_LOSS_PCT}}" ]]; then
-              printf '%s\\n' "ru_foreign_ping_loss_fast=${{fast_loss}}"
-            fi
           fi
           if should_run_deep_probe; then
             mapfile -t deep_reasons < <(run_deep_probe)
@@ -1204,7 +1198,8 @@ EOF
           log "latest deep degradation snapshot: ${{soft_reasons[*]}}"
         fi
         maybe_self_heal "hard" "${{hard_reasons[@]}}"
-        exit 1
+        log "runtime hard failure recorded; keeping systemd unit successful to avoid stale failed-state during reinstall"
+        exit 0
         """
     ).strip() + "\n"
 

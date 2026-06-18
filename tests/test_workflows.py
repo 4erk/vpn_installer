@@ -317,7 +317,7 @@ class WorkflowTests(unittest.TestCase):
         )
         self.assertEqual(degraded["health_verdict"], "ru_wg_download_degraded")
 
-        loss_degraded = workflows.deployment_health_snapshot(
+        loss_profile_only = workflows.deployment_health_snapshot(
             env,
             {
                 ROLE_RU: {"wg_observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "20", "deep_ru_wg_download_min_bps": "900000"},
@@ -332,9 +332,10 @@ class WorkflowTests(unittest.TestCase):
                 },
             },
         )
-        self.assertEqual(loss_degraded["health_verdict"], "foreign_ru_ping_loss_degraded")
+        self.assertEqual(loss_profile_only["health_verdict"], "ok")
+        self.assertEqual(loss_profile_only["foreign_ru_ping_loss_pct"], "12")
 
-        gateway_loss_degraded = workflows.deployment_health_snapshot(
+        gateway_loss_profile_only = workflows.deployment_health_snapshot(
             env,
             {
                 ROLE_RU: {"wg_observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "20", "deep_ru_wg_download_min_bps": "900000"},
@@ -349,9 +350,10 @@ class WorkflowTests(unittest.TestCase):
                 },
             },
         )
-        self.assertEqual(gateway_loss_degraded["health_verdict"], "foreign_gateway_ping_loss_degraded")
+        self.assertEqual(gateway_loss_profile_only["health_verdict"], "ok")
+        self.assertEqual(gateway_loss_profile_only["foreign_gateway_ping_loss_pct"], "12")
 
-        target_degraded = workflows.deployment_health_snapshot(
+        partial_target_issue = workflows.deployment_health_snapshot(
             env,
             {
                 ROLE_RU: {
@@ -373,8 +375,42 @@ class WorkflowTests(unittest.TestCase):
                 },
             },
         )
+        self.assertEqual(partial_target_issue["health_verdict"], "ok")
+        self.assertIn("chatgpt.com:blocked:403", partial_target_issue["target_probe_issues"])
+
+        target_degraded = workflows.deployment_health_snapshot(
+            env,
+            {
+                ROLE_RU: {
+                    "wg_observed_ipv4": "198.51.100.20",
+                    "wg_latest_handshake_age_s": "20",
+                    "deep_ru_wg_download_min_bps": "900000",
+                    "deep_ru_wg_upload_bps": "1200000",
+                    "target_probe_wg": "chatgpt.com:blocked:403:0:172.64.155.209:0.09;github.com:broken:000:1:-:2.0",
+                },
+                ROLE_FOREIGN: {
+                    "observed_ipv4": "198.51.100.20",
+                    "wg_latest_handshake_age_s": "15",
+                    "deep_foreign_direct_download_min_bps": "900000",
+                    "deep_foreign_direct_upload_bps": "1400000",
+                    "deep_foreign_gateway_ping_loss_pct": "0",
+                    "deep_foreign_ru_ping_loss_pct": "0",
+                    "deep_foreign_internet_ping_loss_pct": "0",
+                    "target_probe_direct": "chatgpt.com:blocked:403:0:172.64.155.209:0.09;github.com:broken:000:1:-:2.0",
+                },
+            },
+        )
         self.assertEqual(target_degraded["health_verdict"], "ru_wg_target_degraded")
         self.assertIn("chatgpt.com:blocked:403", target_degraded["target_probe_issues"])
+
+        threshold_jitter = workflows.deployment_health_snapshot(
+            env,
+            {
+                ROLE_RU: {"wg_observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "20", "deep_ru_wg_download_min_bps": "492000", "deep_ru_wg_upload_bps": "1200000"},
+                ROLE_FOREIGN: {"observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "15", "deep_foreign_direct_download_min_bps": "900000", "deep_foreign_direct_upload_bps": "1400000"},
+            },
+        )
+        self.assertEqual(threshold_jitter["health_verdict"], "ok")
 
     def test_cleanup_remote_workdir_warns_on_error(self) -> None:
         with patch("vpn_installer.workflows.ssh_stream", side_effect=AppError("fail")), patch("vpn_installer.workflows.warn") as warn_mock:

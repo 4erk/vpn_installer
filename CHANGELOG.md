@@ -6,6 +6,16 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.4.4] - 2026-06-18
+
+### Fixed
+
+- SSH backend больше не выделяет pseudo-TTY для любого stdin: `bash -s` диагностика и служебные remote-команды больше не превращаются в интерактивную сессию с prompt/echo и не зависают на чтении канала
+- `paramiko_exec` получил общий command timeout и теперь возвращает понятную `AppError` с частичным remote output вместо бесконечного ожидания зависшей команды
+- install/reinstall исправляет failed `rc-local.service`, если он сломан из-за non-executable `/etc/rc.local`, и сбрасывает failed-state после исправления
+- install/reinstall отключает legacy Xray/V2Ray services на управляемом хосте, чтобы старые прокси-сервисы не оставались активными рядом с `vpn-stack`
+- `vpn-stack-health.service` больше не оставляет ложный failed-state во время штатного reinstall, когда второй сервер ещё не поднят; hard failure логируется и передаётся self-heal без загрязнения `systemctl --failed`
+
 ## [0.4.3] - 2026-06-17
 
 ### Fixed

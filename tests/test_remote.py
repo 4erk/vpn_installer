@@ -172,6 +172,29 @@ class RemoteTests(unittest.TestCase):
         with patch("vpn_installer.remote.paramiko_connect", return_value=client), patch("vpn_installer.remote.time.sleep"):
             code, out, err = paramiko_exec(target, "echo test", input_text="secret\n")
         self.assertEqual((code, out, err), (5, "out", "err"))
+        client.exec_command.assert_called_once_with("echo test", get_pty=False)
+        client.close.assert_called_once()
+
+    def test_paramiko_exec_times_out_stuck_channel(self) -> None:
+        channel = Mock()
+        channel.recv_ready.return_value = False
+        channel.recv_stderr_ready.return_value = False
+        channel.exit_status_ready.return_value = False
+        stdin = Mock()
+        stdout = Mock(channel=channel)
+        stderr = Mock(channel=channel)
+        client = Mock()
+        client.exec_command.return_value = (stdin, stdout, stderr)
+        target = RemoteTarget(role=ROLE_RU)
+        with (
+            patch("vpn_installer.remote.paramiko_connect", return_value=client),
+            patch("vpn_installer.remote.time.monotonic", side_effect=[0.0, 2.0]),
+            patch("vpn_installer.remote.time.sleep"),
+        ):
+            with self.assertRaises(AppError) as ctx:
+                paramiko_exec(target, "journalctl -f", command_timeout=1)
+        self.assertIn("не завершилась за 1 сек", str(ctx.exception))
+        channel.close.assert_called_once()
         client.close.assert_called_once()
 
     def test_paramiko_upload_wraps_error(self) -> None:
@@ -213,6 +236,13 @@ class RemoteTests(unittest.TestCase):
             ssh_stream(target, "echo ok", as_root=False)
         self.assertIn("out", stdout.getvalue())
         self.assertIn("err", stderr.getvalue())
+
+    def test_ssh_stream_uses_pty_only_for_sudo_password_input(self) -> None:
+        target = RemoteTarget(role=ROLE_RU, auth_mode="password", ssh_password="secret", ssh_user="ubuntu", sudo_mode="password", sudo_password="sudo-secret")
+        with patch("vpn_installer.remote.paramiko_exec", return_value=(0, "", "")) as mocked:
+            ssh_stream(target, "echo ok", as_root=True)
+        self.assertTrue(mocked.call_args.kwargs["get_pty"])
+        self.assertEqual(mocked.call_args.kwargs["input_text"], "sudo-secret\n")
 
     def test_scp_upload_uses_system_scp(self) -> None:
         target = RemoteTarget(role=ROLE_RU, ssh_host="203.0.113.10", ssh_user="root", auth_mode="key")

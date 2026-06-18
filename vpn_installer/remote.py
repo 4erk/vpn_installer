@@ -14,6 +14,7 @@ from .runtime_deps import ensure_python_package
 SSH_CONNECT_TIMEOUT = 20
 SSH_BANNER_TIMEOUT = 20
 SSH_AUTH_TIMEOUT = 45
+SSH_COMMAND_TIMEOUT = 1800
 SSH_PASSWORD_AUTH_RETRIES = 3
 SSH_PASSWORD_AUTH_RETRY_DELAY = 1.0
 _PARAMIKO_LOGGER_CONFIGURED = False
@@ -126,10 +127,17 @@ def paramiko_connect(target: RemoteTarget):
     raise AppError(f"SSH connection failed для {target.ssh_user}@{target.ssh_host}:{target.ssh_port}: {last_exc}")
 
 
-def paramiko_exec(target: RemoteTarget, remote_command: str, *, input_text: str | None = None) -> tuple[int, str, str]:
+def paramiko_exec(
+    target: RemoteTarget,
+    remote_command: str,
+    *,
+    input_text: str | None = None,
+    command_timeout: int = SSH_COMMAND_TIMEOUT,
+    get_pty: bool = False,
+) -> tuple[int, str, str]:
     client = paramiko_connect(target)
     try:
-        stdin, stdout, stderr = client.exec_command(remote_command, get_pty=bool(input_text))
+        stdin, stdout, stderr = client.exec_command(remote_command, get_pty=get_pty)
         if input_text:
             stdin.write(input_text)
             stdin.flush()
@@ -140,6 +148,7 @@ def paramiko_exec(target: RemoteTarget, remote_command: str, *, input_text: str 
         channel = stdout.channel
         out_chunks: list[bytes] = []
         err_chunks: list[bytes] = []
+        started_at = time.monotonic()
         while True:
             if channel.recv_ready():
                 out_chunks.append(channel.recv(4096))
@@ -147,6 +156,20 @@ def paramiko_exec(target: RemoteTarget, remote_command: str, *, input_text: str 
                 err_chunks.append(channel.recv_stderr(4096))
             if channel.exit_status_ready() and not channel.recv_ready() and not channel.recv_stderr_ready():
                 break
+            if command_timeout > 0 and time.monotonic() - started_at > command_timeout:
+                try:
+                    channel.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                partial_stdout = b"".join(out_chunks).decode("utf-8", errors="replace")
+                partial_stderr = b"".join(err_chunks).decode("utf-8", errors="replace")
+                detail = partial_stderr.strip() or partial_stdout.strip()
+                if detail:
+                    detail = f"\nPartial remote output:\n{detail[-4000:]}"
+                raise AppError(
+                    f"Удалённая команда не завершилась за {command_timeout} сек. на {target.label}."
+                    f"{detail}"
+                )
             time.sleep(0.05)
         exit_status = channel.recv_exit_status()
         return exit_status, b"".join(out_chunks).decode("utf-8", errors="replace"), b"".join(err_chunks).decode("utf-8", errors="replace")
@@ -171,7 +194,7 @@ def paramiko_upload(target: RemoteTarget, local_path: Path, remote_path: str) ->
 def ssh_capture(target: RemoteTarget, command_body: str, *, as_root: bool = False) -> str:
     remote_command, input_text = build_remote_command(command_body, target, as_root)
     if use_python_ssh_backend(target):
-        exit_status, stdout, stderr = paramiko_exec(target, remote_command, input_text=input_text)
+        exit_status, stdout, stderr = paramiko_exec(target, remote_command, input_text=input_text, get_pty=bool(input_text))
         if exit_status != 0:
             detail = (stderr or stdout).strip()
             raise AppError(f"Удалённая команда завершилась с ошибкой на {target.label}.\n{detail or exit_status}")
@@ -183,7 +206,7 @@ def ssh_capture(target: RemoteTarget, command_body: str, *, as_root: bool = Fals
 def ssh_stream(target: RemoteTarget, command_body: str, *, as_root: bool = False) -> None:
     remote_command, input_text = build_remote_command(command_body, target, as_root)
     if use_python_ssh_backend(target):
-        exit_status, stdout, stderr = paramiko_exec(target, remote_command, input_text=input_text)
+        exit_status, stdout, stderr = paramiko_exec(target, remote_command, input_text=input_text, get_pty=bool(input_text))
         if stdout.strip():
             print(stdout.rstrip())
         if stderr.strip():

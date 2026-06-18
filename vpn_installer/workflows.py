@@ -211,6 +211,31 @@ def target_probe_issues(raw_probe: str) -> list[str]:
     return issues
 
 
+def target_probe_has_reachable(raw_probe: str) -> bool:
+    for item in raw_probe.split(";"):
+        item = item.strip()
+        if not item:
+            continue
+        _label, separator, rest = item.partition(":")
+        if not separator:
+            continue
+        verdict, _separator, _rest = rest.partition(":")
+        if verdict == "reachable":
+            return True
+    return False
+
+
+def target_probe_is_degraded(raw_probe: str) -> bool:
+    return bool(target_probe_issues(raw_probe)) and not target_probe_has_reachable(raw_probe)
+
+
+def below_soft_min(value: int, minimum: int, *, tolerance_percent: int = 10) -> bool:
+    if value < 0:
+        return False
+    effective_minimum = minimum * (100 - tolerance_percent)
+    return value * 100 < effective_minimum
+
+
 def deployment_health_snapshot(env: dict[str, str], preflights: dict[str, dict[str, str]]) -> dict[str, str]:
     foreign = preflights.get(ROLE_FOREIGN, {})
     ru = preflights.get(ROLE_RU, {})
@@ -230,6 +255,8 @@ def deployment_health_snapshot(env: dict[str, str], preflights: dict[str, dict[s
     ru_wg_target_probe = ru.get("target_probe_wg", "").strip()
     foreign_target_issues = target_probe_issues(foreign_target_probe)
     ru_wg_target_issues = target_probe_issues(ru_wg_target_probe)
+    foreign_target_degraded = target_probe_is_degraded(foreign_target_probe)
+    ru_wg_target_degraded = target_probe_is_degraded(ru_wg_target_probe)
     min_foreign_download_bps = env_int(env, "HEALTH_MIN_FOREIGN_DIRECT_DOWNLOAD_BPS", 500000)
     min_ru_wg_download_bps = env_int(env, "HEALTH_MIN_RU_WG_DOWNLOAD_BPS", 500000)
     min_foreign_upload_bps = env_int(env, "HEALTH_MIN_FOREIGN_DIRECT_UPLOAD_BPS", 1000000)
@@ -245,23 +272,17 @@ def deployment_health_snapshot(env: dict[str, str], preflights: dict[str, dict[s
         verdict = "foreign_ru_ip_mismatch"
     elif (ru_handshake_age < 0 or foreign_handshake_age < 0 or ru_handshake_age > max_age or foreign_handshake_age > max_age) and not (foreign_ip and ru_wg_ip == foreign_ip):
         verdict = "wg_handshake_stale"
-    elif foreign_gateway_ping_loss_pct >= 0 and foreign_gateway_ping_loss_pct > max_foreign_internet_ping_loss_pct:
-        verdict = "foreign_gateway_ping_loss_degraded"
-    elif foreign_ru_ping_loss_pct >= 0 and foreign_ru_ping_loss_pct > max_foreign_ru_ping_loss_pct:
-        verdict = "foreign_ru_ping_loss_degraded"
-    elif foreign_internet_ping_loss_pct >= 0 and foreign_internet_ping_loss_pct > max_foreign_internet_ping_loss_pct:
-        verdict = "foreign_internet_ping_loss_degraded"
-    elif ru_wg_target_issues:
+    elif ru_wg_target_degraded:
         verdict = "ru_wg_target_degraded"
-    elif foreign_target_issues:
+    elif foreign_target_degraded:
         verdict = "foreign_target_degraded"
-    elif foreign_download_bps >= 0 and foreign_download_bps < min_foreign_download_bps:
+    elif below_soft_min(foreign_download_bps, min_foreign_download_bps):
         verdict = "foreign_direct_download_degraded"
-    elif ru_wg_download_bps >= 0 and ru_wg_download_bps < min_ru_wg_download_bps:
+    elif below_soft_min(ru_wg_download_bps, min_ru_wg_download_bps):
         verdict = "ru_wg_download_degraded"
-    elif foreign_upload_bps >= 0 and foreign_upload_bps < min_foreign_upload_bps:
+    elif below_soft_min(foreign_upload_bps, min_foreign_upload_bps):
         verdict = "foreign_direct_upload_degraded"
-    elif ru_wg_upload_bps >= 0 and ru_wg_upload_bps < min_ru_wg_upload_bps:
+    elif below_soft_min(ru_wg_upload_bps, min_ru_wg_upload_bps):
         verdict = "ru_wg_upload_degraded"
     return {
         "health_verdict": verdict,
