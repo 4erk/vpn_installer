@@ -165,7 +165,7 @@ def render_ru_singbox(env: dict[str, str]) -> str:
     ipv6_outbound = "to-foreign" if ipv6_policy in {"to-foreign", "foreign", "proxy"} else "blocked"
     route_rules.extend(
         [
-            {"ip_is_private": True, "action": "route", "outbound": "direct-ru"},
+            {"ip_is_private": True, "action": "route", "outbound": "blocked"},
             {"ip_version": 6, "action": "route", "outbound": ipv6_outbound},
             {"rule_set": ["ru-geosite"], "action": "route", "outbound": "direct-ru"},
             {"rule_set": ["ru-geoip"], "action": "route", "outbound": "direct-ru"},
@@ -1259,6 +1259,7 @@ def render_guard_script(env: dict[str, str], role: str) -> str:
         BLOCK_TIMEOUT="{env['GUARD_BLOCK_TIMEOUT']}"
         SSH_FAILURE_THRESHOLD="{env['GUARD_SSH_FAILURE_THRESHOLD']}"
         REALITY_INVALID_THRESHOLD="{env['GUARD_REALITY_INVALID_THRESHOLD']}"
+        REALITY_BLOCK_ENABLED="{env['GUARD_REALITY_BLOCK_ENABLED']}"
         STATE_PATH="/var/lib/vpn-stack/guard-state.env"
 
         log() {{
@@ -1307,6 +1308,22 @@ def render_guard_script(env: dict[str, str], role: str) -> str:
             | extract_ipv4
         }}
 
+        count_repeated_ips() {{
+          local threshold="$1"
+          local tmp
+          local matched=0
+          tmp="$(mktemp)"
+          cat >"$tmp"
+          while read -r count ip; do
+            [[ -n "${{ip:-}}" ]] || continue
+            if (( count >= threshold )); then
+              matched=$((matched + 1))
+            fi
+          done < <(sort "$tmp" | uniq -c)
+          rm -f "$tmp"
+          printf '%s' "$matched"
+        }}
+
         block_repeated_ips() {{
           local threshold="$1"
           local reason="$2"
@@ -1335,6 +1352,7 @@ def render_guard_script(env: dict[str, str], role: str) -> str:
         GUARD_ENABLED="$GUARD_ENABLED"
         GUARD_LOOKBACK_MINUTES="$LOOKBACK_MINUTES"
         GUARD_BLOCK_TIMEOUT="$BLOCK_TIMEOUT"
+        GUARD_REALITY_BLOCK_ENABLED="$REALITY_BLOCK_ENABLED"
         GUARD_SSH_BLOCKED_COUNT="$ssh_blocked"
         GUARD_REALITY_BLOCKED_COUNT="$reality_blocked"
         EOF
@@ -1354,7 +1372,11 @@ def render_guard_script(env: dict[str, str], role: str) -> str:
         ssh_blocked="$(ssh_noise_ips | block_repeated_ips "$SSH_FAILURE_THRESHOLD" ssh)"
         reality_blocked="0"
         if [[ "$ROLE" == "ru-gateway" ]]; then
-          reality_blocked="$(reality_noise_ips | block_repeated_ips "$REALITY_INVALID_THRESHOLD" reality)"
+          if [[ "$REALITY_BLOCK_ENABLED" == "1" ]]; then
+            reality_blocked="$(reality_noise_ips | block_repeated_ips "$REALITY_INVALID_THRESHOLD" reality)"
+          else
+            reality_blocked="$(reality_noise_ips | count_repeated_ips "$REALITY_INVALID_THRESHOLD")"
+          fi
         fi
         write_state "$ssh_blocked" "$reality_blocked"
         """

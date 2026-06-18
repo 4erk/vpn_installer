@@ -53,6 +53,7 @@ REMOTE_ENV_CRITICAL_KEYS = {
     "GUARD_BLOCK_TIMEOUT",
     "GUARD_SSH_FAILURE_THRESHOLD",
     "GUARD_REALITY_INVALID_THRESHOLD",
+    "GUARD_REALITY_BLOCK_ENABLED",
     "WAN_INTERFACE",
     "DISABLE_NIC_OFFLOADS",
     "RUNTIME_QDISC",
@@ -202,6 +203,7 @@ def generate_default_env(deploy_name: str) -> dict[str, str]:
         "GUARD_BLOCK_TIMEOUT": "6h",
         "GUARD_SSH_FAILURE_THRESHOLD": "6",
         "GUARD_REALITY_INVALID_THRESHOLD": "8",
+        "GUARD_REALITY_BLOCK_ENABLED": "0",
         "WAN_INTERFACE": "",
         "DISABLE_NIC_OFFLOADS": "1",
         "RUNTIME_QDISC": "fq",
@@ -243,7 +245,7 @@ def generate_default_env(deploy_name: str) -> dict[str, str]:
         "RU_FORCE_DIRECT_DOMAIN_SUFFIX": ".gstatic.com,.gosuslugi.ru,.ipify.org,.ipinfo.io,.ident.me,.tnedi.me,.icanhazip.com",
         "RU_FORCE_DIRECT_IP_CIDR": "",
         "RU_BLOCK_IP_CIDR": "",
-        "RU_IPV6_POLICY": "to-foreign",
+        "RU_IPV6_POLICY": "block",
         "RULESET_DIR": "/var/lib/vpn-stack/rules",
         "RU_GEOSITE_URL": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ru.srs https://cdn.jsdelivr.net/gh/SagerNet/sing-geosite@rule-set/geosite-category-ru.srs https://github.com/SagerNet/sing-geosite/raw/rule-set/geosite-category-ru.srs",
         "RU_GEOIP_URL": "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-ru.srs https://cdn.jsdelivr.net/gh/SagerNet/sing-geoip@rule-set/geoip-ru.srs https://github.com/SagerNet/sing-geoip/raw/rule-set/geoip-ru.srs",
@@ -364,7 +366,7 @@ def merge_env_with_defaults(existing: dict[str, str], deploy_name: str) -> dict[
         merged["HEALTH_DEEP_PROBE_INTERVAL_MINUTES"] = defaults["HEALTH_DEEP_PROBE_INTERVAL_MINUTES"]
     if merged.get("RU_BLOCK_IP_CIDR") == "91.108.56.0/22":
         merged["RU_BLOCK_IP_CIDR"] = defaults["RU_BLOCK_IP_CIDR"]
-    if merged.get("RU_IPV6_POLICY") == "block":
+    if merged.get("RU_IPV6_POLICY") == "to-foreign":
         merged["RU_IPV6_POLICY"] = defaults["RU_IPV6_POLICY"]
     merged["DEPLOY_NAME"] = deploy_name
     return merged

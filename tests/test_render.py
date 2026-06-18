@@ -175,21 +175,21 @@ class RenderTests(unittest.TestCase):
         self.assertIn('tc qdisc replace dev "${iface}" root fq', script)
         self.assertIn('tc qdisc replace dev "${iface}" root fq_codel', script)
 
-    def test_ru_server_routes_ipv6_literals_to_foreign_by_default(self) -> None:
+    def test_ru_server_blocks_ipv6_literals_by_default(self) -> None:
         env = self.make_env()
         payload = json.loads(render.render_ru_singbox(env))
         route_rules = payload["route"]["rules"]
         ipv6_rules = [rule for rule in route_rules if rule.get("ip_version") == 6]
-        self.assertEqual(ipv6_rules, [{"ip_version": 6, "action": "route", "outbound": "to-foreign"}])
+        self.assertEqual(ipv6_rules, [{"ip_version": 6, "action": "route", "outbound": "blocked"}])
         self.assertEqual(payload["route"]["final"], "to-foreign")
         self.assertFalse(any(rule.get("outbound") == "blocked" and "ip_cidr" in rule for rule in route_rules))
 
-    def test_ru_server_can_block_ipv6_literals_when_explicitly_enabled(self) -> None:
+    def test_ru_server_can_route_ipv6_literals_to_foreign_when_explicitly_enabled(self) -> None:
         env = self.make_env()
-        env["RU_IPV6_POLICY"] = "block"
+        env["RU_IPV6_POLICY"] = "to-foreign"
         payload = json.loads(render.render_ru_singbox(env))
         ipv6_rules = [rule for rule in payload["route"]["rules"] if rule.get("ip_version") == 6]
-        self.assertEqual(ipv6_rules, [{"ip_version": 6, "action": "route", "outbound": "blocked"}])
+        self.assertEqual(ipv6_rules, [{"ip_version": 6, "action": "route", "outbound": "to-foreign"}])
 
     def test_ru_server_routes_non_explicit_ipv6_before_ru_geoip(self) -> None:
         env = self.make_env()
@@ -199,11 +199,13 @@ class RenderTests(unittest.TestCase):
         ipv6_index = next(index for index, rule in enumerate(route_rules) if rule.get("ip_version") == 6)
         ru_geoip_index = next(index for index, rule in enumerate(route_rules) if rule.get("rule_set") == ["ru-geoip"])
         explicit_cidr_index = next(index for index, rule in enumerate(route_rules) if "ip_cidr" in rule)
-        private_index = next(index for index, rule in enumerate(route_rules) if rule.get("ip_is_private") is True)
+        private_rule = next(rule for rule in route_rules if rule.get("ip_is_private") is True)
+        private_index = route_rules.index(private_rule)
 
         self.assertLess(explicit_cidr_index, ipv6_index)
         self.assertLess(private_index, ipv6_index)
         self.assertLess(ipv6_index, ru_geoip_index)
+        self.assertEqual(private_rule["outbound"], "blocked")
 
     def test_ru_server_config_forces_selected_domains_and_suffixes_direct(self) -> None:
         env = self.make_env()
@@ -607,15 +609,18 @@ class RenderTests(unittest.TestCase):
                     msg=f"{role} guard script syntax error:\nstdout:\n{completed.stdout}\nstderr:\n{completed.stderr}",
                 )
 
-    def test_render_guard_script_blocks_repeated_ssh_and_ru_reality_noise(self) -> None:
+    def test_render_guard_script_observes_reality_noise_by_default(self) -> None:
         env = self.make_env()
         ru_script = render.render_guard_script(env, render.ROLE_RU)
         foreign_script = render.render_guard_script(env, render.ROLE_FOREIGN)
         self.assertIn('nft add element inet vpnstack abuse_ipv4 "{ $ip timeout $BLOCK_TIMEOUT }"', ru_script)
         self.assertIn('SSH_FAILURE_THRESHOLD="6"', ru_script)
         self.assertIn('REALITY_INVALID_THRESHOLD="8"', ru_script)
+        self.assertIn('REALITY_BLOCK_ENABLED="0"', ru_script)
         self.assertIn("REALITY: processed invalid connection", ru_script)
         self.assertIn('if [[ "$ROLE" == "ru-gateway" ]]; then', ru_script)
+        self.assertIn('if [[ "$REALITY_BLOCK_ENABLED" == "1" ]]; then', ru_script)
+        self.assertIn('count_repeated_ips "$REALITY_INVALID_THRESHOLD"', ru_script)
         self.assertIn('ROLE="foreign-exit"', foreign_script)
 
     def test_render_sshd_hardening_uses_expected_limits(self) -> None:

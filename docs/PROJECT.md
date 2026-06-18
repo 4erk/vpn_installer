@@ -132,7 +132,8 @@
 - `windows-route-bypass.ps1` добавляет active `/32` routes до IP серверов через физический Windows gateway; это операторский helper для обслуживания, а не часть server-side маршрутизации
 - optional `ru-direct` overlay-файлы мерджатся только в server-side routing и не переписывают основной `deployments/<name>.env`
 - `RU_BLOCK_IP_CIDR` — пустой по умолчанию server-side deny-list для аварийной диагностики; не добавляй туда service-owned CIDR без подтверждения, потому часть клиентов не обязана корректно fallback'иться после block
-- `RU_IPV6_POLICY=to-foreign` по умолчанию сохраняет универсальный туннельный путь для IPv6 literals; `block` допустим только как явная операторская диагностика, если нужно быстро отсечь конкретный IPv6-timeout класс
+- `RU_IPV6_POLICY=block` по умолчанию быстро отсекает IPv6 literals на российском сервере: текущий контур оптимизирован под стабильный IPv4 dataplane, а нестабильный IPv6 path создаёт долгие timeout'ы в `sing-box`
+- `GUARD_REALITY_BLOCK_ENABLED=0` по умолчанию оставляет Reality-invalid события в диагностике, но не блокирует клиентские IP; включай `1` только если точно подтверждён внешний сканер, потому нормальные клиенты тоже могут дать серию invalid/EOF при старых профилях или обрывах сети
 
 ## Lifecycle
 

@@ -409,6 +409,7 @@ def test_ru_singbox_runtime_smoke(runner: AuditRunner, out_dir: Path) -> dict[st
         {"type": "direct", "tag": "to-foreign"},
         {"type": "block", "tag": "blocked"},
     ]
+    server_mux_config["route"]["rules"].insert(0, {"ip_cidr": ["127.0.0.0/8"], "action": "route", "outbound": "direct-ru"})
 
     client_profile = json.loads((out_dir / "client" / "linux-sing-box.json").read_text(encoding="utf-8"))
     client_outbound = next(outbound for outbound in client_profile["outbounds"] if outbound.get("type") == "vless")
@@ -483,6 +484,7 @@ def test_xray_reality_interop(runner: AuditRunner, out_dir: Path) -> dict[str, s
     client_config_path = work_dir / "xray-client.json"
     server_config = json.loads((out_dir / "preview" / "ru" / "sing-box.json").read_text(encoding="utf-8"))
     server_config["inbounds"][0]["listen"] = "0.0.0.0"
+    server_config["route"]["rules"].insert(0, {"ip_cidr": ["172.31.240.30/32"], "action": "route", "outbound": "direct-ru"})
     client_config = json.loads((out_dir / "client" / "windows-xray.json").read_text(encoding="utf-8"))
     client_config["inbounds"][0]["listen"] = "0.0.0.0"
     client_config["inbounds"][0]["port"] = 10808
