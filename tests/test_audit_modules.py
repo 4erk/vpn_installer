@@ -88,13 +88,14 @@ class AuditModuleTests(unittest.TestCase):
                 preview / "foreign" / "sing-box.json",
                 client / "hiddify-cross-platform.json",
                 client / "linux-sing-box.json",
+                client / "android-v2rayng-xray.json",
             ]:
                 path.write_text("{}\n", encoding="utf-8")
             (client / "vless-uri.txt").write_text("vless://demo\n", encoding="utf-8")
             (client / "hiddify-cross-platform.json").write_text("{}\n", encoding="utf-8")
             (client / "hiddify-android.json").write_text("{}\n", encoding="utf-8")
             (client / "hiddify-uri.txt").write_text("vless://demo\n", encoding="utf-8")
-            (out_dir / "NEXT-STEPS.txt").write_text("VLESS URI\nv2rayNG\nhiddify-cross-platform.json\nvpn status\n", encoding="utf-8")
+            (out_dir / "NEXT-STEPS.txt").write_text("VLESS URI\nv2rayNG\nandroid-v2rayng-xray.json\nvpn status\n", encoding="utf-8")
             for name in ("ru-gateway.tar.gz", "foreign-exit.tar.gz"):
                 with tarfile.open(bundle / name, "w:gz") as archive:
                     keep = out_dir / f"{name}.txt"

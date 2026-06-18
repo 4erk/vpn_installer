@@ -110,6 +110,7 @@
 Основные клиентские файлы:
 
 - `out/<name>/client/vless-uri.txt`
+- `out/<name>/client/android-v2rayng-xray.json`
 - `out/<name>/client/windows-xray.json`
 - `out/<name>/client/hiddify-cross-platform.json`
 - `out/<name>/client/hiddify-android.json`
@@ -118,16 +119,18 @@
 
 Пользовательский контракт:
 
-- основной публичный артефакт — `vless-uri.txt`
-- на Android эталонные клиенты: `v2rayNG` и `NekoBox`
+- быстрый публичный артефакт — `vless-uri.txt`
+- основной стабильный Android/v2rayNG артефакт — `android-v2rayng-xray.json`
+- на Android эталонный путь: `v2rayNG` с полным Xray JSON; `NekoBox` можно использовать, если он принимает тот же transport/DNS-контракт
 - `Hiddify`-артефакты остаются совместимым вторичным путём, а не основным контрактом
 - для `Hiddify` на Windows/Linux основной локальный путь — `hiddify-cross-platform.json`
 - для `Hiddify` на Android — `hiddify-android.json`
 - server-hosted subscription path больше не считается штатной частью продукта
 - `hiddify-uri.txt` — совместимый alias того же `VLESS URI`
-- клиентские профили intentionally простые: без product-critical split-routing на клиенте; вся маршрутизация живёт на серверной стороне
+- клиентские профили intentionally не содержат product-critical split-routing; вся российская/зарубежная маршрутизация живёт на серверной стороне
+- полный Xray JSON включает inbound sniffing (`http`, `tls`, `quic`) и нужен для клиентов, которые иначе отправляют на сервер локально разрешённый IPv6 literal вместо домена
 - локальные JSON-профили исключают IP самих `российского` и `зарубежного` серверов из клиентского туннеля, чтобы `status/reinstall/remove` не упирались в SSH hairpin при уже активном VPN
-- сырой `VLESS URI` не умеет кодировать route-exclude; для TUN/full VPN клиент должен сам bypass'ить IP серверов или использовать generated JSON с такими правилами
+- сырой `VLESS URI` не умеет кодировать route-exclude и DNS/sniffing-политику; для TUN/full VPN клиент должен сам bypass'ить IP серверов или использовать generated JSON с такими правилами
 - `vpn client-check` проверяет локальный маршрут до серверов; если он показывает `BAD: self-tunnel`, удалённые действия намеренно блокируются до исправления маршрута или явного emergency override
 - `windows-route-bypass.ps1` добавляет active `/32` routes до IP серверов через физический Windows gateway; это операторский helper для обслуживания, а не часть server-side маршрутизации
 - optional `ru-direct` overlay-файлы мерджатся только в server-side routing и не переписывают основной `deployments/<name>.env`

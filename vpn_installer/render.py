@@ -151,13 +151,16 @@ def render_ru_singbox(env: dict[str, str]) -> str:
     dns_rules.append({"rule_set": ["ru-geosite"], "action": "route", "server": "dns-ru-direct", "strategy": "ipv4_only"})
 
     route_rules: list[dict[str, Any]] = [
-        {"inbound": ["vless-in"], "action": "resolve", "strategy": "ipv4_only"},
         {"inbound": ["vless-in"], "action": "sniff"},
     ]
     if direct_domains:
+        route_rules.append({"domain": direct_domains, "action": "resolve", "server": "dns-ru-direct", "strategy": "ipv4_only"})
         route_rules.append({"domain": direct_domains, "action": "route", "outbound": "direct-ru"})
     if direct_domain_suffixes:
+        route_rules.append({"domain_suffix": direct_domain_suffixes, "action": "resolve", "server": "dns-ru-direct", "strategy": "ipv4_only"})
         route_rules.append({"domain_suffix": direct_domain_suffixes, "action": "route", "outbound": "direct-ru"})
+    route_rules.append({"rule_set": ["ru-geosite"], "action": "resolve", "server": "dns-ru-direct", "strategy": "ipv4_only"})
+    route_rules.append({"rule_set": ["ru-geosite"], "action": "route", "outbound": "direct-ru"})
     if direct_ip_cidrs:
         route_rules.append({"ip_cidr": direct_ip_cidrs, "action": "route", "outbound": "direct-ru"})
     if block_ip_cidrs:
@@ -165,9 +168,9 @@ def render_ru_singbox(env: dict[str, str]) -> str:
     ipv6_outbound = "to-foreign" if ipv6_policy in {"to-foreign", "foreign", "proxy"} else "blocked"
     route_rules.extend(
         [
+            {"action": "resolve", "server": "dns-global", "strategy": "ipv4_only"},
             {"ip_is_private": True, "action": "route", "outbound": "blocked"},
             {"ip_version": 6, "action": "route", "outbound": ipv6_outbound},
-            {"rule_set": ["ru-geosite"], "action": "route", "outbound": "direct-ru"},
             {"rule_set": ["ru-geoip"], "action": "route", "outbound": "direct-ru"},
         ]
     )

@@ -87,6 +87,8 @@ chmod +x ./vpn.sh
 После успешной установки появятся:
 
 - `out/<deployment>/client/vless-uri.txt`
+- `out/<deployment>/client/android-v2rayng-xray.json`
+- `out/<deployment>/client/windows-xray.json`
 - `out/<deployment>/client/hiddify-cross-platform.json`
 - `out/<deployment>/client/hiddify-android.json`
 - `out/<deployment>/client/hiddify-uri.txt`
@@ -95,24 +97,27 @@ chmod +x ./vpn.sh
 
 Главный результат:
 
-- основной `VLESS URI` копируется в буфер обмена
-- основной нейтральный файл: `vless-uri.txt`
-- на Android эталонный путь: вставить `vless-uri.txt` в `v2rayNG` или `NekoBox`
+- быстрый `VLESS URI` копируется в буфер обмена
+- на Android основной стабильный путь: импортировать `android-v2rayng-xray.json` в `v2rayNG`
+- `vless-uri.txt` — простой URI fallback для клиентов, которые не ломаются на локальном IPv6 DNS
+- `windows-xray.json` — полный Xray-профиль для Windows/v2rayN
 - `hiddify-cross-platform.json` — fallback, если нужен локальный файл
 - `hiddify-android.json` — Android-safe fallback
 - `hiddify-uri.txt` — совместимый alias того же `VLESS URI` для старых сценариев
 
 ## Как подключить клиент
 
-1. На любой платформе сначала попробуй `vless-uri.txt`
-2. На Android предпочтительны `v2rayNG` или `NekoBox`
-3. На Windows/v2rayN в режиме TUN/full VPN используй `windows-xray.json`, потому что там явно исключены IP обоих серверов
+1. На Android/v2rayNG сначала импортируй `android-v2rayng-xray.json`
+2. На Windows/v2rayN в режиме TUN/full VPN используй `windows-xray.json`, потому что там включён sniffing и явно исключены IP обоих серверов
+3. Если клиент точно корректно отдаёт домены серверу, можно использовать простой `vless-uri.txt`
 4. Если используешь `Hiddify` на Windows/Linux, добавляй локальный `hiddify-cross-platform.json`
 5. Если используешь `Hiddify` на Android, сначала пробуй локальный `hiddify-android.json`
-6. Если нужен максимально нейтральный путь, используй `vless-uri.txt`, а не клиент-специфичные форматы
+6. Если нужен максимально нейтральный низкоуровневый путь, используй `vless-uri.txt`, но учитывай ограничение ниже
 7. `hiddify-uri.txt` оставлен как совместимый alias того же `VLESS URI`
 
-Основной путь теперь — сырой `VLESS URI`. Внешняя подписка с сервера больше не считается штатным путём; локальные JSON для `Hiddify` остаются только как вторичный совместимый вариант.
+Сырой `VLESS URI` не универсален: некоторые клиенты сначала локально резолвят сайт в IPv6 literal и отправляют на сервер уже IP-адрес вместо домена. В таком режиме сервер не может надёжно восстановить домен для всех сайтов, поэтому для Android/v2rayNG штатный путь — полный `android-v2rayng-xray.json` с включённым sniffing.
+
+Внешняя подписка с сервера больше не считается штатным путём; локальные JSON остаются управляемым вариантом.
 
 Сервер остаётся источником истины для split-маршрутизации: клиенту не нужно знать, что считать российским или зарубежным трафиком. Он просто даёт туннель до `российского сервера`, а сама логика маршрутов живёт на серверной стороне.
 

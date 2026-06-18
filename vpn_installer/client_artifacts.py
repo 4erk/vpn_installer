@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import textwrap
 from pathlib import Path
 from typing import Any
@@ -123,7 +124,7 @@ def render_xray_client_profile(env: dict[str, str]) -> str:
                 "port": 10808,
                 "protocol": "socks",
                 "settings": {"udp": True},
-                "sniffing": {"enabled": True, "destOverride": ["http", "tls"]},
+                "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"], "routeOnly": False},
             },
             {
                 "tag": "http",
@@ -253,6 +254,7 @@ def client_artifact_paths(env: dict[str, str], *, out_dir: Path | None = None) -
         "android_hiddify_json": client_dir / "hiddify-android.json",
         "linux_json": client_dir / "linux-sing-box.json",
         "windows_xray_json": client_dir / "windows-xray.json",
+        "android_xray_json": client_dir / "android-v2rayng-xray.json",
         "windows_route_bypass": client_dir / "windows-route-bypass.ps1",
         "next_steps": deployment_dir / "NEXT-STEPS.txt",
     }
@@ -265,13 +267,26 @@ STALE_CLIENT_ARTIFACT_NAMES = (
     "hiddify-android-subscription-url.txt",
 )
 
+GENERATED_CLIENT_FILE_NAMES = (
+    "vless-uri.txt",
+    "hiddify-uri.txt",
+    "hiddify-cross-platform.json",
+    "hiddify-android.json",
+    "linux-sing-box.json",
+    "windows-xray.json",
+    "android-v2rayng-xray.json",
+    "windows-route-bypass.ps1",
+)
+
 
 def prepare_client_artifact_dir(client_dir: Path) -> None:
     client_dir.mkdir(parents=True, exist_ok=True)
-    for name in STALE_CLIENT_ARTIFACT_NAMES:
-        stale_path = client_dir / name
-        if stale_path.exists():
-            stale_path.unlink()
+    for name in GENERATED_CLIENT_FILE_NAMES + STALE_CLIENT_ARTIFACT_NAMES:
+        path = client_dir / name
+        if path.is_dir():
+            shutil.rmtree(path)
+        elif path.exists():
+            path.unlink()
 
 
 def render_next_steps(env: dict[str, str], *, out_dir: Path | None = None) -> str:
@@ -281,7 +296,8 @@ def render_next_steps(env: dict[str, str], *, out_dir: Path | None = None) -> st
             f"Deployment: {env['DEPLOY_NAME']}",
             "",
             "Что уже готово:",
-            f"- Основной VLESS URI: {paths['vless_uri']}",
+            f"- Быстрый VLESS URI fallback: {paths['vless_uri']}",
+            f"- Стабильный Android/v2rayNG Xray JSON: {paths['android_xray_json']}",
             f"- JSON fallback для Hiddify: {paths['hiddify_json']}",
             f"- Android JSON fallback для Hiddify: {paths['android_hiddify_json']}",
             f"- Windows/v2rayN Xray JSON: {paths['windows_xray_json']}",
@@ -290,9 +306,9 @@ def render_next_steps(env: dict[str, str], *, out_dir: Path | None = None) -> st
             f"- JSON backup для Linux sing-box: {paths['linux_json']}",
             "",
             "Что делать дальше:",
-            "1. На любой платформе сначала попробуй прямой VLESS URI в совместимом клиенте.",
+            f"1. На Android/v2rayNG используй {paths['android_xray_json'].name}: полный Xray JSON включает sniffing и не зависит от локального IPv6 DNS клиента. NekoBox можно пробовать только если он импортирует тот же полный Xray JSON.",
             f"2. На Windows/v2rayN используй {paths['windows_xray_json'].name} с Xray core.",
-            f"3. Основной нейтральный файл: {paths['vless_uri'].name}. На Android предпочтительны v2rayNG или NekoBox.",
+            f"3. Прямой {paths['vless_uri'].name} оставлен как простой URI fallback. Он не универсален для клиентов, которые сами резолвят домены в IPv6 literal.",
             f"4. Если нужен Hiddify на Android, используй локальный JSON {paths['android_hiddify_json'].name}. Этот путь считается совместимым, но не эталонным.",
             f"5. Файл {paths['hiddify_uri_compat'].name} оставлен как совместимый alias того же VLESS URI для старых сценариев.",
             f"6. Если включён TUN/full VPN и client-check показывает self-tunnel, запусти PowerShell от администратора: .\\{paths['windows_route_bypass'].name}",
@@ -308,7 +324,9 @@ def render_client_profiles(env: dict[str, str], *, out_dir: Path | None = None) 
     write_text(paths["hiddify_json"], render_client_profile(env, auto_redirect=False))
     write_text(paths["android_hiddify_json"], render_client_profile(env, auto_redirect=False, android_safe=True))
     write_text(paths["linux_json"], render_client_profile(env, auto_redirect=True))
-    write_text(paths["windows_xray_json"], render_xray_client_profile(env))
+    xray_profile = render_xray_client_profile(env)
+    write_text(paths["windows_xray_json"], xray_profile)
+    write_text(paths["android_xray_json"], xray_profile)
     write_text(paths["windows_route_bypass"], render_windows_route_bypass_script(env))
     uri_payload = render_vless_uri(env)
     write_text(paths["vless_uri"], uri_payload)

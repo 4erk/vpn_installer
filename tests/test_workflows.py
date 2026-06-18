@@ -85,6 +85,7 @@ class WorkflowTests(unittest.TestCase):
                 "android_hiddify_json": Path(tmp) / "h-android.json",
                 "linux_json": Path(tmp) / "l.json",
                 "windows_xray_json": Path(tmp) / "xray.json",
+                "android_xray_json": Path(tmp) / "android-xray.json",
                 "windows_route_bypass": Path(tmp) / "windows-route-bypass.ps1",
                 "next_steps": Path(tmp) / "NEXT-STEPS.txt",
             }

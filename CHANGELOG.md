@@ -6,6 +6,18 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.5.0] - 2026-06-18
+
+### Changed
+
+- Для Android/v2rayNG добавлен отдельный управляемый артефакт `android-v2rayng-xray.json`. Он использует полный Xray JSON с inbound sniffing для `http`, `tls` и `quic`, поэтому клиент не отправляет на российский сервер локально разрешённый IPv6 literal вместо домена.
+- Финальный экран, `NEXT-STEPS.txt`, `README.md` и `docs/PROJECT.md` больше не обещают универсальность сырого `VLESS URI`: он остаётся быстрым fallback, но стабильный Android-путь теперь полный Xray JSON.
+
+### Fixed
+
+- Xray/v2rayN профиль теперь явно задаёт `routeOnly=false` и sniffing для `quic` наряду с `http/tls`, чтобы TLS/QUIC SNI мог заменить IP-literal destination на домен до отправки в VLESS/Reality.
+- Российский `sing-box` сначала делает `sniff` TLS/HTTP-домена, затем применяет доменные правила и только потом выполняет IPv4-only `resolve` перед IP-правилами. Это сохраняет корректный server-side routing для клиентов, которые отправляют домен, но не подменяет универсально произвольный IPv6 literal.
+
 ## [0.4.7] - 2026-06-18
 
 ### Fixed

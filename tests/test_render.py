@@ -50,6 +50,7 @@ class RenderTests(unittest.TestCase):
         env = self.make_env()
         payload = json.loads(render.render_xray_client_profile(env))
         self.assertEqual(payload["inbounds"][0]["protocol"], "socks")
+        self.assertEqual(payload["inbounds"][0]["sniffing"], {"enabled": True, "destOverride": ["http", "tls", "quic"], "routeOnly": False})
         outbound = payload["outbounds"][0]
         self.assertEqual(outbound["protocol"], "vless")
         self.assertEqual(outbound["settings"]["vnext"][0]["address"], env["RU_PUBLIC_IP"])
@@ -129,8 +130,7 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(listen_ports, [443])
         self.assertEqual([inbound["tag"] for inbound in payload["inbounds"]], ["vless-in"])
         inbound_rules = [rule for rule in payload["route"]["rules"] if rule.get("inbound")]
-        self.assertEqual(inbound_rules[0]["inbound"], ["vless-in"])
-        self.assertEqual(inbound_rules[1]["inbound"], ["vless-in"])
+        self.assertEqual(inbound_rules, [{"inbound": ["vless-in"], "action": "sniff"}])
 
     def test_ru_server_reality_sets_explicit_time_tolerance_by_default(self) -> None:
         env = self.make_env()
@@ -184,6 +184,40 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(payload["route"]["final"], "to-foreign")
         self.assertFalse(any(rule.get("outbound") == "blocked" and "ip_cidr" in rule for rule in route_rules))
 
+    def test_ru_server_sniffs_before_global_resolve_and_ip_rules(self) -> None:
+        env = self.make_env()
+        payload = json.loads(render.render_ru_singbox(env))
+        route_rules = payload["route"]["rules"]
+        sniff_index = next(index for index, rule in enumerate(route_rules) if rule.get("action") == "sniff")
+        global_resolve_index = next(index for index, rule in enumerate(route_rules) if rule.get("action") == "resolve" and rule.get("server") == "dns-global")
+        ipv6_index = next(index for index, rule in enumerate(route_rules) if rule.get("ip_version") == 6)
+        private_index = next(index for index, rule in enumerate(route_rules) if rule.get("ip_is_private") is True)
+
+        self.assertLess(sniff_index, global_resolve_index)
+        self.assertLess(global_resolve_index, ipv6_index)
+        self.assertLess(global_resolve_index, private_index)
+        self.assertEqual(route_rules[global_resolve_index]["strategy"], "ipv4_only")
+
+    def test_ru_server_resolves_forced_direct_domains_before_direct_route(self) -> None:
+        env = self.make_env()
+        payload = json.loads(render.render_ru_singbox(env))
+        route_rules = payload["route"]["rules"]
+        direct_domain_resolve_index = next(
+            index
+            for index, rule in enumerate(route_rules)
+            if rule.get("action") == "resolve" and rule.get("server") == "dns-ru-direct" and "domain" in rule
+        )
+        direct_domain_route_index = next(index for index, rule in enumerate(route_rules) if rule.get("outbound") == "direct-ru" and "domain" in rule)
+        ru_geosite_resolve_index = next(
+            index
+            for index, rule in enumerate(route_rules)
+            if rule.get("action") == "resolve" and rule.get("server") == "dns-ru-direct" and rule.get("rule_set") == ["ru-geosite"]
+        )
+        ru_geosite_route_index = next(index for index, rule in enumerate(route_rules) if rule.get("outbound") == "direct-ru" and rule.get("rule_set") == ["ru-geosite"])
+
+        self.assertLess(direct_domain_resolve_index, direct_domain_route_index)
+        self.assertLess(ru_geosite_resolve_index, ru_geosite_route_index)
+
     def test_ru_server_can_route_ipv6_literals_to_foreign_when_explicitly_enabled(self) -> None:
         env = self.make_env()
         env["RU_IPV6_POLICY"] = "to-foreign"
@@ -201,8 +235,10 @@ class RenderTests(unittest.TestCase):
         explicit_cidr_index = next(index for index, rule in enumerate(route_rules) if "ip_cidr" in rule)
         private_rule = next(rule for rule in route_rules if rule.get("ip_is_private") is True)
         private_index = route_rules.index(private_rule)
+        global_resolve_index = next(index for index, rule in enumerate(route_rules) if rule.get("action") == "resolve" and rule.get("server") == "dns-global")
 
         self.assertLess(explicit_cidr_index, ipv6_index)
+        self.assertLess(global_resolve_index, private_index)
         self.assertLess(private_index, ipv6_index)
         self.assertLess(ipv6_index, ru_geoip_index)
         self.assertEqual(private_rule["outbound"], "blocked")
@@ -261,6 +297,8 @@ class RenderTests(unittest.TestCase):
         env = self.make_env()
         text = render.render_next_steps(env)
         self.assertIn("VLESS URI", text)
+        self.assertIn("android-v2rayng-xray.json", text)
+        self.assertIn("IPv6 literal", text)
         self.assertIn("v2rayNG", text)
         self.assertIn("NekoBox", text)
         self.assertIn("Hiddify", text)
@@ -281,6 +319,7 @@ class RenderTests(unittest.TestCase):
                 client_dir = Path(tmp) / "demo" / "client"
                 self.assertTrue((client_dir / "vless-uri.txt").is_file())
                 self.assertTrue((client_dir / "windows-xray.json").is_file())
+                self.assertTrue((client_dir / "android-v2rayng-xray.json").is_file())
                 self.assertTrue((client_dir / "hiddify-cross-platform.json").is_file())
                 self.assertTrue((client_dir / "hiddify-android.json").is_file())
                 self.assertTrue((client_dir / "hiddify-uri.txt").is_file())
@@ -364,6 +403,7 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(paths["android_hiddify_json"].name, "hiddify-android.json")
         self.assertEqual(paths["linux_json"].name, "linux-sing-box.json")
         self.assertEqual(paths["windows_xray_json"].name, "windows-xray.json")
+        self.assertEqual(paths["android_xray_json"].name, "android-v2rayng-xray.json")
         self.assertEqual(paths["windows_route_bypass"].name, "windows-route-bypass.ps1")
         self.assertEqual(paths["next_steps"].name, "NEXT-STEPS.txt")
 
