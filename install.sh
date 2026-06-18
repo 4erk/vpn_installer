@@ -156,12 +156,12 @@ RU_FORCE_DIRECT_DOMAIN="${RU_FORCE_DIRECT_DOMAIN:-api.oneme.ru,mtalk.google.com,
 RU_FORCE_DIRECT_DOMAIN_SUFFIX="${RU_FORCE_DIRECT_DOMAIN_SUFFIX:-.gstatic.com,.gosuslugi.ru,.ipify.org,.ipinfo.io,.ident.me,.tnedi.me,.icanhazip.com}"
 RU_FORCE_DIRECT_IP_CIDR="${RU_FORCE_DIRECT_IP_CIDR:-}"
 RU_BLOCK_IP_CIDR="${RU_BLOCK_IP_CIDR:-}"
-RU_IPV6_POLICY="${RU_IPV6_POLICY:-block}"
+RU_IPV6_POLICY="${RU_IPV6_POLICY:-to-foreign}"
 if [[ "${RU_BLOCK_IP_CIDR}" == "91.108.56.0/22" ]]; then
   RU_BLOCK_IP_CIDR=""
 fi
-if [[ "${RU_IPV6_POLICY}" == "to-foreign" ]]; then
-  RU_IPV6_POLICY="block"
+if [[ "${RU_IPV6_POLICY}" == "block" ]]; then
+  RU_IPV6_POLICY="to-foreign"
 fi
 
 RULESET_DIR="${RULESET_DIR:-/var/lib/vpn-stack/rules}"

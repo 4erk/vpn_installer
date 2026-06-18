@@ -180,12 +180,12 @@ class RenderTests(unittest.TestCase):
         self.assertIn('tc qdisc replace dev "${iface}" root fq', script)
         self.assertIn('tc qdisc replace dev "${iface}" root fq_codel', script)
 
-    def test_ru_server_blocks_ipv6_literals_by_default(self) -> None:
+    def test_ru_server_routes_ipv6_literals_to_foreign_by_default(self) -> None:
         env = self.make_env()
         payload = json.loads(render.render_ru_singbox(env))
         route_rules = payload["route"]["rules"]
         ipv6_rules = [rule for rule in route_rules if rule.get("ip_version") == 6]
-        self.assertEqual(ipv6_rules, [{"ip_version": 6, "action": "route", "outbound": "blocked"}])
+        self.assertEqual(ipv6_rules, [{"ip_version": 6, "action": "route", "outbound": "to-foreign"}])
         self.assertEqual(payload["route"]["final"], "to-foreign")
         self.assertFalse(any(rule.get("outbound") == "blocked" and "ip_cidr" in rule for rule in route_rules))
 
@@ -229,6 +229,13 @@ class RenderTests(unittest.TestCase):
         payload = json.loads(render.render_ru_singbox(env))
         ipv6_rules = [rule for rule in payload["route"]["rules"] if rule.get("ip_version") == 6]
         self.assertEqual(ipv6_rules, [{"ip_version": 6, "action": "route", "outbound": "to-foreign"}])
+
+    def test_ru_server_can_block_ipv6_literals_when_explicitly_requested(self) -> None:
+        env = self.make_env()
+        env["RU_IPV6_POLICY"] = "block"
+        payload = json.loads(render.render_ru_singbox(env))
+        ipv6_rules = [rule for rule in payload["route"]["rules"] if rule.get("ip_version") == 6]
+        self.assertEqual(ipv6_rules, [{"ip_version": 6, "action": "route", "outbound": "blocked"}])
 
     def test_ru_server_routes_non_explicit_ipv6_before_ru_geoip(self) -> None:
         env = self.make_env()

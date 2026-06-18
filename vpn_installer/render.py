@@ -129,7 +129,7 @@ def render_ru_singbox(env: dict[str, str]) -> str:
     direct_domain_suffixes = env_list(env, "RU_FORCE_DIRECT_DOMAIN_SUFFIX")
     direct_ip_cidrs = env_list(env, "RU_FORCE_DIRECT_IP_CIDR")
     block_ip_cidrs = env_list(env, "RU_BLOCK_IP_CIDR")
-    ipv6_policy = env.get("RU_IPV6_POLICY", "block").strip().lower()
+    ipv6_policy = env.get("RU_IPV6_POLICY", "to-foreign").strip().lower()
     reality_short_ids = [env["RU_REALITY_SHORT_ID"]]
     if env.get("RU_REALITY_ACCEPT_EMPTY_SHORT_ID", "1").strip().lower() not in {"0", "false", "no", "off"}:
         reality_short_ids.append("")
