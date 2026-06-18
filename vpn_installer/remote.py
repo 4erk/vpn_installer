@@ -317,9 +317,9 @@ target_verdict() {{
   local exit_code="$2"
   if [[ "${{exit_code}}" != "0" || "${{code}}" == "000" || -z "${{code}}" ]]; then
     printf 'broken'
-  elif [[ "${{code}}" == "403" || "${{code}}" == "429" || "${{code}}" == "451" ]]; then
+  elif [[ "${{code}}" == "451" ]]; then
     printf 'blocked'
-  elif [[ "${{code}}" =~ ^[23] || "${{code}}" == "401" || "${{code}}" == "404" || "${{code}}" == "421" ]]; then
+  elif [[ "${{code}}" =~ ^[23] || "${{code}}" == "401" || "${{code}}" == "403" || "${{code}}" == "404" || "${{code}}" == "421" || "${{code}}" == "429" ]]; then
     printf 'reachable'
   else
     printf 'http_%s' "${{code}}"
@@ -329,7 +329,7 @@ target_verdict() {{
 probe_target_urls() {{
   local bind_iface="$1"
   local urls="$2"
-  local url="" label="" result="" code="" exit_code="" remote_ip="" time_total="" verdict="" joined=""
+  local url="" label="" result="" result_tail="" code="" exit_code="" remote_ip="" time_total="" verdict="" joined=""
   if ! command -v curl >/dev/null 2>&1 || [[ -z "${{urls}}" ]]; then
     return 0
   fi
@@ -337,9 +337,19 @@ probe_target_urls() {{
     label="${{url#*://}}"
     label="${{label%%/*}}"
     if [[ -n "${{bind_iface}}" ]]; then
-      result="$(curl -4kLsS --interface "${{bind_iface}}" --connect-timeout 8 --max-time 20 -o /dev/null -w '%{{http_code}}|%{{exitcode}}|%{{remote_ip}}|%{{time_total}}' "${{url}}" 2>/dev/null || printf '000|curl_failed||0')"
+      result="$(curl -4kIsS --interface "${{bind_iface}}" --connect-timeout 6 --max-time 10 -o /dev/null -w '%{{http_code}}|%{{exitcode}}|%{{remote_ip}}|%{{time_total}}' "${{url}}" 2>/dev/null || true)"
     else
-      result="$(curl -4kLsS --connect-timeout 8 --max-time 20 -o /dev/null -w '%{{http_code}}|%{{exitcode}}|%{{remote_ip}}|%{{time_total}}' "${{url}}" 2>/dev/null || printf '000|curl_failed||0')"
+      result="$(curl -4kIsS --connect-timeout 6 --max-time 10 -o /dev/null -w '%{{http_code}}|%{{exitcode}}|%{{remote_ip}}|%{{time_total}}' "${{url}}" 2>/dev/null || true)"
+    fi
+    code="${{result%%|*}}"
+    result_tail="${{result#*|}}"
+    exit_code="${{result_tail%%|*}}"
+    if [[ -z "${{result}}" || "${{code}}" == "000" || "${{exit_code}}" != "0" || "${{code}}" == "405" ]]; then
+      if [[ -n "${{bind_iface}}" ]]; then
+        result="$(curl -4kLsS --range 0-0 --interface "${{bind_iface}}" --connect-timeout 6 --max-time 10 -o /dev/null -w '%{{http_code}}|%{{exitcode}}|%{{remote_ip}}|%{{time_total}}' "${{url}}" 2>/dev/null || printf '000|curl_failed||0')"
+      else
+        result="$(curl -4kLsS --range 0-0 --connect-timeout 6 --max-time 10 -o /dev/null -w '%{{http_code}}|%{{exitcode}}|%{{remote_ip}}|%{{time_total}}' "${{url}}" 2>/dev/null || printf '000|curl_failed||0')"
+      fi
     fi
     code="${{result%%|*}}"
     result="${{result#*|}}"

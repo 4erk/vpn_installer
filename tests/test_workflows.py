@@ -361,7 +361,7 @@ class WorkflowTests(unittest.TestCase):
                     "wg_latest_handshake_age_s": "20",
                     "deep_ru_wg_download_min_bps": "900000",
                     "deep_ru_wg_upload_bps": "1200000",
-                    "target_probe_wg": "chatgpt.com:blocked:403:0:172.64.155.209:0.09;github.com:reachable:200:0:20.233.83.145:0.2",
+                    "target_probe_wg": "chatgpt.com:reachable:403:0:172.64.155.209:0.09;github.com:broken:000:1:-:2.0",
                 },
                 ROLE_FOREIGN: {
                     "observed_ipv4": "198.51.100.20",
@@ -371,12 +371,12 @@ class WorkflowTests(unittest.TestCase):
                     "deep_foreign_gateway_ping_loss_pct": "0",
                     "deep_foreign_ru_ping_loss_pct": "0",
                     "deep_foreign_internet_ping_loss_pct": "0",
-                    "target_probe_direct": "chatgpt.com:blocked:403:0:172.64.155.209:0.09;github.com:reachable:200:0:20.233.83.145:0.2",
+                    "target_probe_direct": "chatgpt.com:reachable:403:0:172.64.155.209:0.09;github.com:broken:000:1:-:2.0",
                 },
             },
         )
         self.assertEqual(partial_target_issue["health_verdict"], "ok")
-        self.assertIn("chatgpt.com:blocked:403", partial_target_issue["target_probe_issues"])
+        self.assertIn("github.com:broken:000", partial_target_issue["target_probe_issues"])
 
         target_degraded = workflows.deployment_health_snapshot(
             env,
@@ -386,7 +386,7 @@ class WorkflowTests(unittest.TestCase):
                     "wg_latest_handshake_age_s": "20",
                     "deep_ru_wg_download_min_bps": "900000",
                     "deep_ru_wg_upload_bps": "1200000",
-                    "target_probe_wg": "chatgpt.com:blocked:403:0:172.64.155.209:0.09;github.com:broken:000:1:-:2.0",
+                    "target_probe_wg": "chatgpt.com:blocked:451:0:172.64.155.209:0.09;github.com:broken:000:1:-:2.0",
                 },
                 ROLE_FOREIGN: {
                     "observed_ipv4": "198.51.100.20",
@@ -396,12 +396,12 @@ class WorkflowTests(unittest.TestCase):
                     "deep_foreign_gateway_ping_loss_pct": "0",
                     "deep_foreign_ru_ping_loss_pct": "0",
                     "deep_foreign_internet_ping_loss_pct": "0",
-                    "target_probe_direct": "chatgpt.com:blocked:403:0:172.64.155.209:0.09;github.com:broken:000:1:-:2.0",
+                    "target_probe_direct": "chatgpt.com:blocked:451:0:172.64.155.209:0.09;github.com:broken:000:1:-:2.0",
                 },
             },
         )
         self.assertEqual(target_degraded["health_verdict"], "ru_wg_target_degraded")
-        self.assertIn("chatgpt.com:blocked:403", target_degraded["target_probe_issues"])
+        self.assertIn("chatgpt.com:blocked:451", target_degraded["target_probe_issues"])
 
         threshold_jitter = workflows.deployment_health_snapshot(
             env,

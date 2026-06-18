@@ -131,8 +131,8 @@
 - `vpn client-check` проверяет локальный маршрут до серверов; если он показывает `BAD: self-tunnel`, удалённые действия намеренно блокируются до исправления маршрута или явного emergency override
 - `windows-route-bypass.ps1` добавляет active `/32` routes до IP серверов через физический Windows gateway; это операторский helper для обслуживания, а не часть server-side маршрутизации
 - optional `ru-direct` overlay-файлы мерджатся только в server-side routing и не переписывают основной `deployments/<name>.env`
-- `RU_BLOCK_IP_CIDR` — server-side fail-fast deny-list для адресов, которые иначе дают долгий TCP timeout и мешают клиентам перейти к рабочему endpoint; дефолт включает наблюдавшийся проблемный Telegram DC CIDR `91.108.56.0/22`
-- `RU_IPV6_POLICY=block` по умолчанию быстро отклоняет IPv6 literals на российском сервере, потому частичный IPv6 path через `зарубежный сервер` создавал таймауты; старое поведение можно вернуть через `RU_IPV6_POLICY=to-foreign`
+- `RU_BLOCK_IP_CIDR` — пустой по умолчанию server-side deny-list для аварийной диагностики; не добавляй туда service-owned CIDR без подтверждения, потому часть клиентов не обязана корректно fallback'иться после block
+- `RU_IPV6_POLICY=to-foreign` по умолчанию сохраняет универсальный туннельный путь для IPv6 literals; `block` допустим только как явная операторская диагностика, если нужно быстро отсечь конкретный IPv6-timeout класс
 
 ## Lifecycle
 

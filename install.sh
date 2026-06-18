@@ -154,8 +154,14 @@ GLOBAL_DOH_PATH="${GLOBAL_DOH_PATH:-/dns-query}"
 RU_FORCE_DIRECT_DOMAIN="${RU_FORCE_DIRECT_DOMAIN:-api.oneme.ru,mtalk.google.com,calls.okcdn.ru,gosuslugi.ru,api.ok.ru,ifconfig.me,ifconfig.co,checkip.amazonaws.com,ipapi.co,ipinfo.io,ident.me,tnedi.me,icanhazip.com,ip.mail.ru,ipv4-internet.yandex.net,ipv6-internet.yandex.net,2ip.ru}"
 RU_FORCE_DIRECT_DOMAIN_SUFFIX="${RU_FORCE_DIRECT_DOMAIN_SUFFIX:-.gstatic.com,.gosuslugi.ru,.ipify.org,.ipinfo.io,.ident.me,.tnedi.me,.icanhazip.com}"
 RU_FORCE_DIRECT_IP_CIDR="${RU_FORCE_DIRECT_IP_CIDR:-}"
-RU_BLOCK_IP_CIDR="${RU_BLOCK_IP_CIDR:-91.108.56.0/22}"
-RU_IPV6_POLICY="${RU_IPV6_POLICY:-block}"
+RU_BLOCK_IP_CIDR="${RU_BLOCK_IP_CIDR:-}"
+RU_IPV6_POLICY="${RU_IPV6_POLICY:-to-foreign}"
+if [[ "${RU_BLOCK_IP_CIDR}" == "91.108.56.0/22" ]]; then
+  RU_BLOCK_IP_CIDR=""
+fi
+if [[ "${RU_IPV6_POLICY}" == "block" ]]; then
+  RU_IPV6_POLICY="to-foreign"
+fi
 
 RULESET_DIR="${RULESET_DIR:-/var/lib/vpn-stack/rules}"
 RU_GEOSITE_URL="${RU_GEOSITE_URL:-https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ru.srs https://cdn.jsdelivr.net/gh/SagerNet/sing-geosite@rule-set/geosite-category-ru.srs https://github.com/SagerNet/sing-geosite/raw/rule-set/geosite-category-ru.srs}"

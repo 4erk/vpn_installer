@@ -157,8 +157,8 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("2ip.ru", env["RU_FORCE_DIRECT_DOMAIN"])
         self.assertIn(".ipify.org", env["RU_FORCE_DIRECT_DOMAIN_SUFFIX"])
         self.assertIn(".ipinfo.io", env["RU_FORCE_DIRECT_DOMAIN_SUFFIX"])
-        self.assertIn("91.108.56.0/22", env["RU_BLOCK_IP_CIDR"])
-        self.assertEqual(env["RU_IPV6_POLICY"], "block")
+        self.assertEqual(env["RU_BLOCK_IP_CIDR"], "")
+        self.assertEqual(env["RU_IPV6_POLICY"], "to-foreign")
         self.assertIn("https://telegram.org/", env["HEALTH_TARGET_PROBE_URLS"])
 
     def test_render_env_roundtrip(self) -> None:
@@ -187,13 +187,11 @@ class ConfigTests(unittest.TestCase):
             {
                 "RU_FORCE_DIRECT_DOMAIN": "api.oneme.ru,legacy.example",
                 "RU_FORCE_DIRECT_DOMAIN_SUFFIX": ".legacy.example,.ipify.org",
-                "RU_BLOCK_IP_CIDR": "203.0.113.0/24",
             },
             "sample",
         )
         domains = merged["RU_FORCE_DIRECT_DOMAIN"].split(",")
         suffixes = merged["RU_FORCE_DIRECT_DOMAIN_SUFFIX"].split(",")
-        block_cidrs = merged["RU_BLOCK_IP_CIDR"].split(",")
         self.assertIn("legacy.example", domains)
         self.assertIn("api.oneme.ru", domains)
         self.assertIn("2ip.ru", domains)
@@ -202,8 +200,17 @@ class ConfigTests(unittest.TestCase):
         self.assertIn(".legacy.example", suffixes)
         self.assertIn(".ipify.org", suffixes)
         self.assertEqual(suffixes.count(".ipify.org"), 1)
-        self.assertIn("203.0.113.0/24", block_cidrs)
-        self.assertIn("91.108.56.0/22", block_cidrs)
+
+    def test_merge_env_with_defaults_removes_dangerous_telegram_block_default(self) -> None:
+        merged = config.merge_env_with_defaults(
+            {
+                "RU_BLOCK_IP_CIDR": "91.108.56.0/22",
+                "RU_IPV6_POLICY": "block",
+            },
+            "sample",
+        )
+        self.assertEqual(merged["RU_BLOCK_IP_CIDR"], "")
+        self.assertEqual(merged["RU_IPV6_POLICY"], "to-foreign")
 
     def test_merge_env_with_defaults_appends_new_asset_sources(self) -> None:
         merged = config.merge_env_with_defaults({"RU_GEOSITE_URL": "https://legacy.example/geosite.srs"}, "sample")
