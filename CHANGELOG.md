@@ -6,6 +6,13 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.5.2] - 2026-06-18
+
+### Fixed
+
+- `vpn audit quick/all` теперь проверяет не только наличие `android-v2rayng-xray.json`, но и сам критичный контракт профиля: `dns.queryStrategy=UseIPv4`, первое routing-правило `::/0 -> block`, sniffing `http/tls/quic` с `routeOnly=false`.
+- Это закрепляет финальное решение по Android/v2rayNG: клиентский IPv6 гасится до входа в VLESS/Reality, а sniffing остаётся дополнительной страховкой для доменных TLS/QUIC соединений.
+
 ## [0.5.1] - 2026-06-18
 
 ### Fixed

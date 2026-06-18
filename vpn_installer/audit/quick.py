@@ -331,6 +331,15 @@ def test_user_artifacts(out_dir: Path) -> dict[str, str]:
     hiddify_uri_alias_payload = hiddify_uri_alias_path.read_text(encoding="utf-8")
     if hiddify_uri_alias_payload != vless_uri_payload:
         raise AuditFailure("Совместимый Hiddify URI alias расходится с VLESS URI fallback")
+    android_xray_payload = json.loads(android_xray_json_path.read_text(encoding="utf-8"))
+    if android_xray_payload.get("dns", {}).get("queryStrategy") != "UseIPv4":
+        raise AuditFailure("Android/v2rayNG Xray JSON не включает dns.queryStrategy=UseIPv4")
+    routing_rules = android_xray_payload.get("routing", {}).get("rules", [])
+    if not routing_rules or routing_rules[0] != {"type": "field", "ip": ["::/0"], "outboundTag": "block"}:
+        raise AuditFailure("Android/v2rayNG Xray JSON не блокирует клиентский IPv6 правилом ::/0 -> block первым правилом")
+    sniffing = android_xray_payload.get("inbounds", [{}])[0].get("sniffing", {})
+    if sniffing.get("enabled") is not True or sniffing.get("routeOnly") is not False or set(sniffing.get("destOverride", [])) != {"http", "tls", "quic"}:
+        raise AuditFailure("Android/v2rayNG Xray JSON не содержит ожидаемый sniffing http/tls/quic с routeOnly=false")
     next_steps_text = next_steps.read_text(encoding="utf-8")
     if "VLESS URI" not in next_steps_text or "vpn status" not in next_steps_text or "v2rayNG" not in next_steps_text or "android-v2rayng-xray.json" not in next_steps_text:
         raise AuditFailure("NEXT-STEPS.txt не содержит ожидаемых Android/v2rayNG инструкций")

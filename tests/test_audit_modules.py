@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tarfile
 import tempfile
 import unittest
@@ -88,9 +89,19 @@ class AuditModuleTests(unittest.TestCase):
                 preview / "foreign" / "sing-box.json",
                 client / "hiddify-cross-platform.json",
                 client / "linux-sing-box.json",
-                client / "android-v2rayng-xray.json",
             ]:
                 path.write_text("{}\n", encoding="utf-8")
+            (client / "android-v2rayng-xray.json").write_text(
+                json.dumps(
+                    {
+                        "dns": {"queryStrategy": "UseIPv4"},
+                        "inbounds": [{"sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"], "routeOnly": False}}],
+                        "routing": {"rules": [{"type": "field", "ip": ["::/0"], "outboundTag": "block"}]},
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
             (client / "vless-uri.txt").write_text("vless://demo\n", encoding="utf-8")
             (client / "hiddify-cross-platform.json").write_text("{}\n", encoding="utf-8")
             (client / "hiddify-android.json").write_text("{}\n", encoding="utf-8")
