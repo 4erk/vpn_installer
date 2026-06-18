@@ -24,6 +24,7 @@ MERGED_CSV_DEFAULT_KEYS = {
     "RU_FORCE_DIRECT_DOMAIN",
     "RU_FORCE_DIRECT_DOMAIN_SUFFIX",
     "RU_FORCE_DIRECT_IP_CIDR",
+    "RU_BLOCK_IP_CIDR",
 }
 
 MERGED_SOURCE_DEFAULT_KEYS = {
@@ -31,6 +32,7 @@ MERGED_SOURCE_DEFAULT_KEYS = {
     "RU_GEOIP_URL",
     "FOREIGN_RU_IPV4_LIST_URL",
     "FOREIGN_RU_IPV6_LIST_URL",
+    "HEALTH_TARGET_PROBE_URLS",
 }
 
 DEPRECATED_ENV_KEYS = {
@@ -76,6 +78,8 @@ REMOTE_ENV_CRITICAL_KEYS = {
     "RU_FORCE_DIRECT_DOMAIN",
     "RU_FORCE_DIRECT_DOMAIN_SUFFIX",
     "RU_FORCE_DIRECT_IP_CIDR",
+    "RU_BLOCK_IP_CIDR",
+    "RU_IPV6_POLICY",
     "RU_GEOSITE_URL",
     "RU_GEOIP_URL",
     "FOREIGN_BLOCK_RU",
@@ -238,6 +242,8 @@ def generate_default_env(deploy_name: str) -> dict[str, str]:
         "RU_FORCE_DIRECT_DOMAIN": "api.oneme.ru,mtalk.google.com,calls.okcdn.ru,gosuslugi.ru,api.ok.ru,ifconfig.me,ifconfig.co,checkip.amazonaws.com,ipapi.co,ipinfo.io,ident.me,tnedi.me,icanhazip.com,ip.mail.ru,ipv4-internet.yandex.net,ipv6-internet.yandex.net,2ip.ru",
         "RU_FORCE_DIRECT_DOMAIN_SUFFIX": ".gstatic.com,.gosuslugi.ru,.ipify.org,.ipinfo.io,.ident.me,.tnedi.me,.icanhazip.com",
         "RU_FORCE_DIRECT_IP_CIDR": "",
+        "RU_BLOCK_IP_CIDR": "91.108.56.0/22",
+        "RU_IPV6_POLICY": "block",
         "RULESET_DIR": "/var/lib/vpn-stack/rules",
         "RU_GEOSITE_URL": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ru.srs https://cdn.jsdelivr.net/gh/SagerNet/sing-geosite@rule-set/geosite-category-ru.srs https://github.com/SagerNet/sing-geosite/raw/rule-set/geosite-category-ru.srs",
         "RU_GEOIP_URL": "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-ru.srs https://cdn.jsdelivr.net/gh/SagerNet/sing-geoip@rule-set/geoip-ru.srs https://github.com/SagerNet/sing-geoip/raw/rule-set/geoip-ru.srs",
@@ -263,7 +269,7 @@ def generate_default_env(deploy_name: str) -> dict[str, str]:
         "HEALTH_SELF_HEAL_COOLDOWN_MINUTES": "15",
         "HEALTH_SELF_HEAL_MAX_ACTIONS_PER_HOUR": "2",
         "HEALTH_SELF_HEAL_CONFIRMATIONS": "2",
-        "HEALTH_TARGET_PROBE_URLS": "https://chatgpt.com/ https://discord.com/ https://github.com/ https://www.google.com/generate_204",
+        "HEALTH_TARGET_PROBE_URLS": "https://chatgpt.com/ https://discord.com/ https://github.com/ https://www.google.com/generate_204 https://telegram.org/ https://api.telegram.org/ https://t.me/",
         "CLIENT_TUN_NAME": "tun0",
         "CLIENT_TUN_ADDRESS_V4": "172.19.0.1/30",
         "CLIENT_TUN_ADDRESS_V6": "fdfe:dcba:9876::1/126",

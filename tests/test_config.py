@@ -157,6 +157,9 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("2ip.ru", env["RU_FORCE_DIRECT_DOMAIN"])
         self.assertIn(".ipify.org", env["RU_FORCE_DIRECT_DOMAIN_SUFFIX"])
         self.assertIn(".ipinfo.io", env["RU_FORCE_DIRECT_DOMAIN_SUFFIX"])
+        self.assertIn("91.108.56.0/22", env["RU_BLOCK_IP_CIDR"])
+        self.assertEqual(env["RU_IPV6_POLICY"], "block")
+        self.assertIn("https://telegram.org/", env["HEALTH_TARGET_PROBE_URLS"])
 
     def test_render_env_roundtrip(self) -> None:
         env = config.generate_default_env("sample")
@@ -184,11 +187,13 @@ class ConfigTests(unittest.TestCase):
             {
                 "RU_FORCE_DIRECT_DOMAIN": "api.oneme.ru,legacy.example",
                 "RU_FORCE_DIRECT_DOMAIN_SUFFIX": ".legacy.example,.ipify.org",
+                "RU_BLOCK_IP_CIDR": "203.0.113.0/24",
             },
             "sample",
         )
         domains = merged["RU_FORCE_DIRECT_DOMAIN"].split(",")
         suffixes = merged["RU_FORCE_DIRECT_DOMAIN_SUFFIX"].split(",")
+        block_cidrs = merged["RU_BLOCK_IP_CIDR"].split(",")
         self.assertIn("legacy.example", domains)
         self.assertIn("api.oneme.ru", domains)
         self.assertIn("2ip.ru", domains)
@@ -197,6 +202,8 @@ class ConfigTests(unittest.TestCase):
         self.assertIn(".legacy.example", suffixes)
         self.assertIn(".ipify.org", suffixes)
         self.assertEqual(suffixes.count(".ipify.org"), 1)
+        self.assertIn("203.0.113.0/24", block_cidrs)
+        self.assertIn("91.108.56.0/22", block_cidrs)
 
     def test_merge_env_with_defaults_appends_new_asset_sources(self) -> None:
         merged = config.merge_env_with_defaults({"RU_GEOSITE_URL": "https://legacy.example/geosite.srs"}, "sample")
@@ -204,6 +211,17 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(geosite_sources[0], "https://legacy.example/geosite.srs")
         self.assertTrue(any("raw.githubusercontent.com/SagerNet/sing-geosite" in source for source in geosite_sources))
         self.assertTrue(any("cdn.jsdelivr.net/gh/SagerNet/sing-geosite" in source for source in geosite_sources))
+
+    def test_merge_env_with_defaults_appends_new_health_target_probes(self) -> None:
+        merged = config.merge_env_with_defaults(
+            {"HEALTH_TARGET_PROBE_URLS": "https://chatgpt.com/ https://github.com/"},
+            "sample",
+        )
+        probe_sources = config.split_asset_sources(merged["HEALTH_TARGET_PROBE_URLS"])
+        self.assertEqual(probe_sources[0], "https://chatgpt.com/")
+        self.assertIn("https://github.com/", probe_sources)
+        self.assertIn("https://telegram.org/", probe_sources)
+        self.assertEqual(probe_sources.count("https://chatgpt.com/"), 1)
 
     def test_apply_ru_direct_overlays_merges_files_with_comments_and_deduplicates(self) -> None:
         env = config.generate_default_env("demo")

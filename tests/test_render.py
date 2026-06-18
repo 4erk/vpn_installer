@@ -175,14 +175,20 @@ class RenderTests(unittest.TestCase):
         self.assertIn('tc qdisc replace dev "${iface}" root fq', script)
         self.assertIn('tc qdisc replace dev "${iface}" root fq_codel', script)
 
-    def test_ru_server_routes_ipv6_literals_to_foreign_instead_of_blocking(self) -> None:
+    def test_ru_server_blocks_ipv6_literals_by_default_to_fail_fast(self) -> None:
         env = self.make_env()
         payload = json.loads(render.render_ru_singbox(env))
         route_rules = payload["route"]["rules"]
         ipv6_rules = [rule for rule in route_rules if rule.get("ip_version") == 6]
-        self.assertEqual(ipv6_rules, [{"ip_version": 6, "action": "route", "outbound": "to-foreign"}])
-        self.assertFalse(any(rule.get("ip_version") == 6 and rule.get("outbound") in {"block", "blocked"} for rule in route_rules))
+        self.assertEqual(ipv6_rules, [{"ip_version": 6, "action": "route", "outbound": "blocked"}])
         self.assertEqual(payload["route"]["final"], "to-foreign")
+
+    def test_ru_server_can_route_ipv6_literals_to_foreign_when_explicitly_enabled(self) -> None:
+        env = self.make_env()
+        env["RU_IPV6_POLICY"] = "to-foreign"
+        payload = json.loads(render.render_ru_singbox(env))
+        ipv6_rules = [rule for rule in payload["route"]["rules"] if rule.get("ip_version") == 6]
+        self.assertEqual(ipv6_rules, [{"ip_version": 6, "action": "route", "outbound": "to-foreign"}])
 
     def test_ru_server_routes_non_explicit_ipv6_before_ru_geoip(self) -> None:
         env = self.make_env()
@@ -233,6 +239,9 @@ class RenderTests(unittest.TestCase):
         self.assertIn(".icanhazip.com", direct_suffix_route_rule["domain_suffix"])
 
         self.assertFalse(any(rule.get("domain") == ["api.ok.ru"] and rule.get("outbound") == "block" for rule in route_rules))
+
+        block_cidr_route_rule = next(rule for rule in route_rules if rule.get("outbound") == "blocked" and "ip_cidr" in rule)
+        self.assertIn("91.108.56.0/22", block_cidr_route_rule["ip_cidr"])
 
     def test_ru_server_config_supports_forced_direct_ip_cidr(self) -> None:
         env = self.make_env()
