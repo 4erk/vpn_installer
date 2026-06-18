@@ -49,6 +49,7 @@ class RenderTests(unittest.TestCase):
     def test_render_xray_client_profile_uses_reality_vless(self) -> None:
         env = self.make_env()
         payload = json.loads(render.render_xray_client_profile(env))
+        self.assertEqual(payload["dns"], {"queryStrategy": "UseIPv4", "servers": ["1.1.1.1", "8.8.8.8"]})
         self.assertEqual(payload["inbounds"][0]["protocol"], "socks")
         self.assertEqual(payload["inbounds"][0]["sniffing"], {"enabled": True, "destOverride": ["http", "tls", "quic"], "routeOnly": False})
         outbound = payload["outbounds"][0]
@@ -62,6 +63,10 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(outbound["streamSettings"]["realitySettings"]["shortId"], env["RU_REALITY_SHORT_ID"])
         self.assertEqual(
             payload["routing"]["rules"][0],
+            {"type": "field", "ip": ["::/0"], "outboundTag": "block"},
+        )
+        self.assertEqual(
+            payload["routing"]["rules"][1],
             {"type": "field", "ip": [f"{env['RU_PUBLIC_IP']}/32", f"{env['FOREIGN_PUBLIC_IP']}/32"], "outboundTag": "direct"},
         )
 

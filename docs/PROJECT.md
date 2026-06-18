@@ -128,7 +128,7 @@
 - server-hosted subscription path больше не считается штатной частью продукта
 - `hiddify-uri.txt` — совместимый alias того же `VLESS URI`
 - клиентские профили intentionally не содержат product-critical split-routing; вся российская/зарубежная маршрутизация живёт на серверной стороне
-- полный Xray JSON включает inbound sniffing (`http`, `tls`, `quic`) и нужен для клиентов, которые иначе отправляют на сервер локально разрешённый IPv6 literal вместо домена
+- полный Xray JSON включает IPv4-only DNS, блокировку клиентского IPv6 `::/0` и inbound sniffing (`http`, `tls`, `quic`); это нужно для клиентов, которые иначе отправляют на сервер локально разрешённый IPv6 literal вместо домена
 - локальные JSON-профили исключают IP самих `российского` и `зарубежного` серверов из клиентского туннеля, чтобы `status/reinstall/remove` не упирались в SSH hairpin при уже активном VPN
 - сырой `VLESS URI` не умеет кодировать route-exclude и DNS/sniffing-политику; для TUN/full VPN клиент должен сам bypass'ить IP серверов или использовать generated JSON с такими правилами
 - `vpn client-check` проверяет локальный маршрут до серверов; если он показывает `BAD: self-tunnel`, удалённые действия намеренно блокируются до исправления маршрута или явного emergency override

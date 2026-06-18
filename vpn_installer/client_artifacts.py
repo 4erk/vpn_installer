@@ -111,12 +111,13 @@ def render_client_profile(env: dict[str, str], auto_redirect: bool, *, android_s
 
 
 def render_xray_client_profile(env: dict[str, str]) -> str:
-    route_rules: list[dict[str, Any]] = []
+    route_rules: list[dict[str, Any]] = [{"type": "field", "ip": ["::/0"], "outboundTag": "block"}]
     route_excludes = client_route_excludes(env)
     if route_excludes:
         route_rules.append({"type": "field", "ip": route_excludes, "outboundTag": "direct"})
     payload = {
         "log": {"loglevel": "warning"},
+        "dns": {"queryStrategy": "UseIPv4", "servers": ["1.1.1.1", "8.8.8.8"]},
         "inbounds": [
             {
                 "tag": "socks",
