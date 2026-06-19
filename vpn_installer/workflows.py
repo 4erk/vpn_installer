@@ -780,7 +780,7 @@ def finalize_install_output(env: dict[str, str], deployment_name: str) -> None:
     print("Что делать дальше:")
     print(f"1. На Android/v2rayNG используй {paths['android_xray_json'].name}: полный Xray JSON включает sniffing и не зависит от локального IPv6 DNS клиента. NekoBox можно пробовать только если он импортирует тот же полный Xray JSON.")
     print(f"2. На Windows/v2rayN используй {paths['windows_xray_json'].name} с Xray core.")
-    print(f"3. Прямой {paths['vless_uri'].name} оставлен как простой URI fallback; если клиент сам резолвит домены в IPv6 literal, сервер отправит такой трафик через зарубежный сервер, но доменные российские исключения могут не сработать.")
+    print(f"3. Прямой {paths['vless_uri'].name} оставлен как простой URI fallback; если клиент сам резолвит домены в IPv6 literal, сервер быстро закроет такую попытку, чтобы не висеть на нестабильном IPv6 path.")
     print(f"4. Если нужен Hiddify на Android, используй локальный JSON {paths['android_hiddify_json'].name}.")
     print(f"5. Файл {paths['hiddify_uri_compat'].name} оставлен как совместимый alias того же VLESS URI.")
     print(f"6. Если включён TUN/full VPN и client-check показывает self-tunnel, запусти PowerShell от администратора: .\\{paths['windows_route_bypass'].name}")

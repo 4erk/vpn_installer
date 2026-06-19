@@ -345,6 +345,10 @@ class RemoteTests(unittest.TestCase):
                     "self_heal_last_action_reason": "soft:wireguard_path",
                     "reality_invalid_recent_count": "7",
                     "reality_invalid_recent_sources": "178.66.129.100=7",
+                    "singbox_to_foreign_timeout_count": "11",
+                    "singbox_direct_ru_timeout_count": "2",
+                    "singbox_dns_timeout_count": "1",
+                    "singbox_recent_timeout_sample": "connection: open connection to [2001:db8::1]:443 using outbound/direct[to-foreign]: i/o timeout",
                     "sync_timer": "active",
                 },
             )
@@ -375,6 +379,10 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("self-heal last action: restart-wireguard/scheduled", output)
         self.assertIn("recent invalid Reality handshakes: 7", output)
         self.assertIn("invalid Reality sources: 178.66.129.100=7", output)
+        self.assertIn("sing-box to-foreign timeouts / 4h: 11", output)
+        self.assertIn("sing-box direct-ru timeouts / 4h: 2", output)
+        self.assertIn("sing-box DNS timeouts / 4h: 1", output)
+        self.assertIn("sing-box last timeout sample: connection: open connection to [2001:db8::1]:443", output)
 
     def test_ensure_remote_privilege_paths(self) -> None:
         target = RemoteTarget(role=ROLE_RU)

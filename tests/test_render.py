@@ -180,12 +180,12 @@ class RenderTests(unittest.TestCase):
         self.assertIn('tc qdisc replace dev "${iface}" root fq', script)
         self.assertIn('tc qdisc replace dev "${iface}" root fq_codel', script)
 
-    def test_ru_server_routes_ipv6_literals_to_foreign_by_default(self) -> None:
+    def test_ru_server_fast_fails_ipv6_literals_by_default(self) -> None:
         env = self.make_env()
         payload = json.loads(render.render_ru_singbox(env))
         route_rules = payload["route"]["rules"]
         ipv6_rules = [rule for rule in route_rules if rule.get("ip_version") == 6]
-        self.assertEqual(ipv6_rules, [{"ip_version": 6, "action": "route", "outbound": "to-foreign"}])
+        self.assertEqual(ipv6_rules, [{"ip_version": 6, "action": "reject"}])
         self.assertEqual(payload["route"]["final"], "to-foreign")
         self.assertFalse(any(rule.get("outbound") == "blocked" and "ip_cidr" in rule for rule in route_rules))
 
@@ -199,8 +199,9 @@ class RenderTests(unittest.TestCase):
         private_index = next(index for index, rule in enumerate(route_rules) if rule.get("ip_is_private") is True)
 
         self.assertLess(sniff_index, global_resolve_index)
-        self.assertLess(global_resolve_index, ipv6_index)
-        self.assertLess(global_resolve_index, private_index)
+        self.assertLess(sniff_index, ipv6_index)
+        self.assertLess(private_index, ipv6_index)
+        self.assertLess(ipv6_index, global_resolve_index)
         self.assertEqual(route_rules[global_resolve_index]["strategy"], "ipv4_only")
 
     def test_ru_server_resolves_forced_direct_domains_before_direct_route(self) -> None:
@@ -230,12 +231,12 @@ class RenderTests(unittest.TestCase):
         ipv6_rules = [rule for rule in payload["route"]["rules"] if rule.get("ip_version") == 6]
         self.assertEqual(ipv6_rules, [{"ip_version": 6, "action": "route", "outbound": "to-foreign"}])
 
-    def test_ru_server_can_block_ipv6_literals_when_explicitly_requested(self) -> None:
+    def test_ru_server_blocks_ipv6_literals_quickly_when_explicitly_requested(self) -> None:
         env = self.make_env()
         env["RU_IPV6_POLICY"] = "block"
         payload = json.loads(render.render_ru_singbox(env))
         ipv6_rules = [rule for rule in payload["route"]["rules"] if rule.get("ip_version") == 6]
-        self.assertEqual(ipv6_rules, [{"ip_version": 6, "action": "route", "outbound": "blocked"}])
+        self.assertEqual(ipv6_rules, [{"ip_version": 6, "action": "reject"}])
 
     def test_ru_server_routes_non_explicit_ipv6_before_ru_geoip(self) -> None:
         env = self.make_env()
@@ -250,9 +251,9 @@ class RenderTests(unittest.TestCase):
         global_resolve_index = next(index for index, rule in enumerate(route_rules) if rule.get("action") == "resolve" and rule.get("server") == "dns-global")
 
         self.assertLess(explicit_cidr_index, ipv6_index)
-        self.assertLess(global_resolve_index, private_index)
         self.assertLess(private_index, ipv6_index)
-        self.assertLess(ipv6_index, ru_geoip_index)
+        self.assertLess(ipv6_index, global_resolve_index)
+        self.assertLess(global_resolve_index, ru_geoip_index)
         self.assertEqual(private_rule["outbound"], "blocked")
 
     def test_ru_server_config_forces_selected_domains_and_suffixes_direct(self) -> None:

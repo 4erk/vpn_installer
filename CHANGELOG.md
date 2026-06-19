@@ -6,13 +6,21 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.5.4] - 2026-06-19
+
+### Fixed
+
+- `RU_IPV6_POLICY` переведён в явный стабильный режим `fast-fail`: клиентские IPv6 literal destinations больше не уходят в нестабильный IPv6 path зарубежного сервера и не дают частые 5-секундные подвисы сайтов.
+- Legacy env со значениями `RU_IPV6_POLICY=block` и `RU_IPV6_POLICY=to-foreign` при merge/reinstall мигрирует в `fast-fail`; `to-foreign` оставлен только как низкоуровневый render override для диагностики.
+- `status/preflight` теперь показывает счётчики недавних `sing-box` timeout'ов по `to-foreign`, `direct-ru` и DNS, плюс последний пример строки из журнала.
+
 ## [0.5.3] - 2026-06-18
 
 ### Fixed
 
 - `RU_IPV6_POLICY` снова по умолчанию `to-foreign`: живые логи российского сервера показали блокировку IPv6 destinations от клиентов, а проверочный запуск `sing-box` подтвердил, что IPv6 fallback через `wg0 -> зарубежный сервер` работает.
 - Убрана старая нормализация `to-foreign -> block`; legacy env с `RU_IPV6_POLICY=block` при merge/reinstall мигрирует обратно на рабочий fallback.
-- README и `docs/PROJECT.md` теперь явно разделяют клиентскую IPv4-only защиту и серверный IPv6 fallback: клиентский JSON остаётся предпочтительным, но сервер больше не ломает сайты, если клиент прислал IPv6 literal.
+- README и `docs/PROJECT.md` разделяли клиентскую IPv4-only защиту и серверный IPv6 fallback; это поведение признано нестабильным в `0.5.4`.
 
 ## [0.5.2] - 2026-06-18
 

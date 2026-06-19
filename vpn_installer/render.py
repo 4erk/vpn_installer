@@ -129,7 +129,7 @@ def render_ru_singbox(env: dict[str, str]) -> str:
     direct_domain_suffixes = env_list(env, "RU_FORCE_DIRECT_DOMAIN_SUFFIX")
     direct_ip_cidrs = env_list(env, "RU_FORCE_DIRECT_IP_CIDR")
     block_ip_cidrs = env_list(env, "RU_BLOCK_IP_CIDR")
-    ipv6_policy = env.get("RU_IPV6_POLICY", "to-foreign").strip().lower()
+    ipv6_policy = env.get("RU_IPV6_POLICY", "fast-fail").strip().lower()
     reality_short_ids = [env["RU_REALITY_SHORT_ID"]]
     if env.get("RU_REALITY_ACCEPT_EMPTY_SHORT_ID", "1").strip().lower() not in {"0", "false", "no", "off"}:
         reality_short_ids.append("")
@@ -165,12 +165,16 @@ def render_ru_singbox(env: dict[str, str]) -> str:
         route_rules.append({"ip_cidr": direct_ip_cidrs, "action": "route", "outbound": "direct-ru"})
     if block_ip_cidrs:
         route_rules.append({"ip_cidr": block_ip_cidrs, "action": "route", "outbound": "blocked"})
-    ipv6_outbound = "to-foreign" if ipv6_policy in {"to-foreign", "foreign", "proxy"} else "blocked"
+    ipv6_rule = (
+        {"ip_version": 6, "action": "route", "outbound": "to-foreign"}
+        if ipv6_policy in {"to-foreign", "foreign", "proxy"}
+        else {"ip_version": 6, "action": "reject"}
+    )
     route_rules.extend(
         [
-            {"action": "resolve", "server": "dns-global", "strategy": "ipv4_only"},
             {"ip_is_private": True, "action": "route", "outbound": "blocked"},
-            {"ip_version": 6, "action": "route", "outbound": ipv6_outbound},
+            ipv6_rule,
+            {"action": "resolve", "server": "dns-global", "strategy": "ipv4_only"},
             {"rule_set": ["ru-geoip"], "action": "route", "outbound": "direct-ru"},
         ]
     )

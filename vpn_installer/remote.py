@@ -465,6 +465,20 @@ reality_invalid_recent_sources=""
 guard_last_run="$(guard_state_value GUARD_LAST_RUN_AT)"
 guard_ssh_blocked_count="$(guard_state_value GUARD_SSH_BLOCKED_COUNT)"
 guard_reality_blocked_count="$(guard_state_value GUARD_REALITY_BLOCKED_COUNT)"
+singbox_to_foreign_timeout_count="0"
+singbox_direct_ru_timeout_count="0"
+singbox_dns_timeout_count="0"
+singbox_recent_timeout_sample=""
+
+if [[ "${{role}}" == "ru-gateway" ]] && command -v journalctl >/dev/null 2>&1; then
+  singbox_recent_timeouts="$(journalctl -u sing-box --since '4 hours ago' --no-pager 2>/dev/null | grep -E 'i/o timeout|lookup failed|context deadline exceeded' || true)"
+  if [[ -n "${{singbox_recent_timeouts}}" ]]; then
+    singbox_to_foreign_timeout_count="$(grep -c 'outbound/direct\\[to-foreign\\].*i/o timeout' <<<"${{singbox_recent_timeouts}}" || true)"
+    singbox_direct_ru_timeout_count="$(grep -c 'outbound/direct\\[direct-ru\\].*i/o timeout' <<<"${{singbox_recent_timeouts}}" || true)"
+    singbox_dns_timeout_count="$(grep -c 'dns: lookup failed' <<<"${{singbox_recent_timeouts}}" || true)"
+    singbox_recent_timeout_sample="$(tail -n1 <<<"${{singbox_recent_timeouts}}" | tr -d '\\r' | cut -c1-240)"
+  fi
+fi
 
 if [[ -n "${{default_iface}}" ]]; then
   default_qdisc="$(tc qdisc show dev "${{default_iface}}" 2>/dev/null | awk 'NR==1 {{print $2; exit}}')"
@@ -614,6 +628,10 @@ printf 'profile_fast_ping_loss_pct=%s\\n' "${{profile_fast_ping_loss_pct}}"
 printf 'profile_stale_handshake_live_path_s=%s\\n' "${{profile_stale_handshake_live_path_s}}"
 printf 'reality_invalid_recent_count=%s\\n' "${{reality_invalid_recent_count}}"
 printf 'reality_invalid_recent_sources=%s\\n' "${{reality_invalid_recent_sources}}"
+printf 'singbox_to_foreign_timeout_count=%s\\n' "${{singbox_to_foreign_timeout_count}}"
+printf 'singbox_direct_ru_timeout_count=%s\\n' "${{singbox_direct_ru_timeout_count}}"
+printf 'singbox_dns_timeout_count=%s\\n' "${{singbox_dns_timeout_count}}"
+printf 'singbox_recent_timeout_sample=%s\\n' "${{singbox_recent_timeout_sample}}"
 printf 'guard_last_run=%s\\n' "${{guard_last_run}}"
 printf 'guard_ssh_blocked_count=%s\\n' "${{guard_ssh_blocked_count}}"
 printf 'guard_reality_blocked_count=%s\\n' "${{guard_reality_blocked_count}}"
@@ -711,6 +729,11 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
     if preflight.get("reality_invalid_recent_count") not in {"", None, "0"}:
         print(f"recent invalid Reality handshakes: {preflight.get('reality_invalid_recent_count', '-')}")
         print(f"invalid Reality sources: {preflight.get('reality_invalid_recent_sources', '-')}")
+    if any(preflight.get(key) not in {"", None, "0"} for key in ("singbox_to_foreign_timeout_count", "singbox_direct_ru_timeout_count", "singbox_dns_timeout_count")):
+        print(f"sing-box to-foreign timeouts / 4h: {preflight.get('singbox_to_foreign_timeout_count', '0')}")
+        print(f"sing-box direct-ru timeouts / 4h: {preflight.get('singbox_direct_ru_timeout_count', '0')}")
+        print(f"sing-box DNS timeouts / 4h: {preflight.get('singbox_dns_timeout_count', '0')}")
+        print(f"sing-box last timeout sample: {preflight.get('singbox_recent_timeout_sample', '-')}")
     if preflight.get("guard_last_run"):
         print(f"guard timer: {preflight.get('guard_timer', '-')}")
         print(f"guard last run: {preflight.get('guard_last_run', '-')}")

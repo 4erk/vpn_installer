@@ -158,7 +158,7 @@ class ConfigTests(unittest.TestCase):
         self.assertIn(".ipify.org", env["RU_FORCE_DIRECT_DOMAIN_SUFFIX"])
         self.assertIn(".ipinfo.io", env["RU_FORCE_DIRECT_DOMAIN_SUFFIX"])
         self.assertEqual(env["RU_BLOCK_IP_CIDR"], "")
-        self.assertEqual(env["RU_IPV6_POLICY"], "to-foreign")
+        self.assertEqual(env["RU_IPV6_POLICY"], "fast-fail")
         self.assertEqual(env["GUARD_REALITY_BLOCK_ENABLED"], "0")
         self.assertIn("https://telegram.org/", env["HEALTH_TARGET_PROBE_URLS"])
 
@@ -203,7 +203,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(suffixes.count(".ipify.org"), 1)
 
     def test_merge_env_with_defaults_removes_legacy_network_defaults(self) -> None:
-        merged = config.merge_env_with_defaults(
+        block_merged = config.merge_env_with_defaults(
             {
                 "RU_BLOCK_IP_CIDR": "91.108.56.0/22",
                 "RU_IPV6_POLICY": "block",
@@ -211,9 +211,11 @@ class ConfigTests(unittest.TestCase):
             },
             "sample",
         )
-        self.assertEqual(merged["RU_BLOCK_IP_CIDR"], "")
-        self.assertEqual(merged["RU_IPV6_POLICY"], "to-foreign")
-        self.assertEqual(merged["GUARD_REALITY_BLOCK_ENABLED"], "1")
+        to_foreign_merged = config.merge_env_with_defaults({"RU_IPV6_POLICY": "to-foreign"}, "sample")
+        self.assertEqual(block_merged["RU_BLOCK_IP_CIDR"], "")
+        self.assertEqual(block_merged["RU_IPV6_POLICY"], "fast-fail")
+        self.assertEqual(block_merged["GUARD_REALITY_BLOCK_ENABLED"], "1")
+        self.assertEqual(to_foreign_merged["RU_IPV6_POLICY"], "fast-fail")
 
     def test_merge_env_with_defaults_appends_new_asset_sources(self) -> None:
         merged = config.merge_env_with_defaults({"RU_GEOSITE_URL": "https://legacy.example/geosite.srs"}, "sample")
