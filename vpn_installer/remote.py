@@ -810,6 +810,7 @@ printf 'deployment_name=%s\\n' "${{deployment_name}}"
 printf 'role=%s\\n' "${{role}}"
 printf 'installed_at=%s\\n' "${{installed_at}}"
 printf 'sing_box=%s\\n' "$(service_state sing-box)"
+printf 'xray=%s\\n' "$(service_state vpn-stack-xray.service)"
 printf 'nftables=%s\\n' "$(service_state nftables)"
 printf 'wireguard=%s\\n' "$(service_state wg-quick@{wg_interface})"
 printf 'sync_timer=%s\\n' "$(service_state vpn-stack-sync.timer)"
@@ -851,6 +852,7 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
     print(f"role: {preflight.get('role', '-')}")
     print(f"deployment: {preflight.get('deployment_name', '-')}")
     print(f"sing-box: {preflight.get('sing_box', '-')}")
+    print(f"xray: {preflight.get('xray', '-')}")
     print(f"nftables: {preflight.get('nftables', '-')}")
     if any(preflight.get(key) for key in ("nft_ssh_accept_packets", "nft_ssh_drop_packets", "nft_vless_accept_packets", "nft_vless_drop_packets")):
         print(f"nft SSH accept/drop packets: {preflight.get('nft_ssh_accept_packets', '-')}/{preflight.get('nft_ssh_drop_packets', '-')}")
@@ -950,7 +952,7 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
             print(f"sing-box recent direct-ru destinations: {preflight.get('singbox_recent_direct_ru_destinations')}")
         if preflight.get("singbox_recent_ipv6_literal_destinations"):
             print(f"sing-box recent IPv6 literal destinations: {preflight.get('singbox_recent_ipv6_literal_destinations')}")
-            print("diagnosis: client still sends IPv6 literal destinations; the server cannot recover a domain from a bare IPv6 address, so IPv4-only client DNS/profile is required for that path.")
+            print("diagnosis: sing-box router received bare IPv6 destinations; with Xray front this points to an old service path, a bypassed front, or non-SNI traffic.")
         if preflight.get("singbox_recent_inbound_destinations"):
             print(f"sing-box recent inbound destinations: {preflight.get('singbox_recent_inbound_destinations')}")
     if preflight.get("guard_last_run"):

@@ -294,6 +294,7 @@ def test_render_all(env_path: Path, env: dict[str, str], out_dir: Path) -> dict[
 def test_validate_json(out_dir: Path) -> dict[str, str]:
     json_paths = [
         out_dir / "preview" / "ru" / "sing-box.json",
+        out_dir / "preview" / "ru" / "xray.json",
         out_dir / "preview" / "foreign" / "sing-box.json",
         out_dir / "client" / "hiddify-cross-platform.json",
         out_dir / "client" / "linux-sing-box.json",
@@ -363,7 +364,9 @@ def test_validate_bundle(out_dir: Path) -> dict[str, str]:
             "assets/geosite-ru.srs",
             "assets/geoip-ru.srs",
             "rendered/sing-box.json",
+            "rendered/xray.json",
             "rendered/sync-state.sh",
+            "rendered/vpn-stack-xray.service",
             "vpn_installer/install_support.py",
         },
         "foreign-exit.tar.gz": {"install.sh", "deployment.env", "assets/ru-ipv4.zone", "assets/ru-ipv6.zone", "rendered/sing-box.json", "rendered/sync-state.sh", "vpn_installer/install_support.py"},
@@ -402,45 +405,23 @@ def test_ru_singbox_runtime_smoke(runner: AuditRunner, out_dir: Path) -> dict[st
     config_path = out_dir / "preview" / "ru" / "sing-box.json"
     work_dir = runner.work_dir / "ru-runtime-smoke"
     work_dir.mkdir(parents=True, exist_ok=True)
-    server_plain_path = work_dir / "ru-sing-box-plain-server.json"
-    client_plain_path = work_dir / "ru-sing-box-plain-client.json"
-    client_plain_no_sid_path = work_dir / "ru-sing-box-plain-client-no-sid.json"
+    router_plain_path = work_dir / "ru-sing-box-router.json"
 
-    server_plain_config = json.loads(config_path.read_text(encoding="utf-8"))
-    inbound = server_plain_config["inbounds"][0]
-    if "multiplex" in inbound:
-        raise AuditFailure("RU sing-box inbound должен оставаться простым VLESS/Reality без multiplex")
-    if "" not in inbound["tls"]["reality"].get("short_id", []):
-        raise AuditFailure("RU sing-box inbound не принимает пустой REALITY short_id")
-    inbound["listen"] = "127.0.0.1"
-    inbound["listen_port"] = 14443
-    server_plain_config["log"] = {"level": "info", "timestamp": True}
-    for dns_server in server_plain_config.get("dns", {}).get("servers", []):
+    router_config = json.loads(config_path.read_text(encoding="utf-8"))
+    inbound = router_config["inbounds"][0]
+    if inbound.get("type") != "mixed" or inbound.get("tag") != "router-in" or inbound.get("listen") != "127.0.0.1":
+        raise AuditFailure("RU sing-box должен быть локальным mixed-router, а публичный VLESS/Reality должен быть в Xray")
+    router_config["log"] = {"level": "info", "timestamp": True}
+    for dns_server in router_config.get("dns", {}).get("servers", []):
         dns_server.pop("detour", None)
-    server_plain_config["route"]["final"] = "direct-ru"
-    server_plain_config["outbounds"] = [
-        {"type": "direct", "tag": "direct-ru"},
-        {"type": "direct", "tag": "to-foreign"},
+    router_config["route"]["final"] = "direct-ru"
+    router_config["outbounds"] = [
+        {"type": "direct", "tag": "direct-ru", "domain_resolver": {"server": "dns-ru-direct", "strategy": "ipv4_only"}},
+        {"type": "direct", "tag": "to-foreign", "domain_resolver": {"server": "dns-global", "strategy": "ipv4_only"}},
         {"type": "block", "tag": "blocked"},
     ]
-    server_plain_config["route"]["rules"].insert(0, {"ip_cidr": ["127.0.0.0/8"], "action": "route", "outbound": "direct-ru"})
-
-    client_profile = json.loads((out_dir / "client" / "linux-sing-box.json").read_text(encoding="utf-8"))
-    client_outbound = next(outbound for outbound in client_profile["outbounds"] if outbound.get("type") == "vless")
-    client_outbound["server"] = "127.0.0.1"
-    client_outbound["server_port"] = 14443
-    client_plain_config = {
-        "log": {"level": "info", "timestamp": True},
-        "inbounds": [{"type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": 20882}],
-        "outbounds": [client_outbound, {"type": "direct", "tag": "direct"}],
-        "route": {"final": client_outbound["tag"]},
-    }
-    client_plain_no_sid_config = json.loads(json.dumps(client_plain_config))
-    client_plain_no_sid_config["inbounds"][0]["listen_port"] = 20883
-    client_plain_no_sid_config["outbounds"][0]["tls"]["reality"].pop("short_id", None)
-    write_bytes(server_plain_path, json.dumps(server_plain_config, ensure_ascii=False, indent=2).encode("utf-8") + b"\n")
-    write_bytes(client_plain_path, json.dumps(client_plain_config, ensure_ascii=False, indent=2).encode("utf-8") + b"\n")
-    write_bytes(client_plain_no_sid_path, json.dumps(client_plain_no_sid_config, ensure_ascii=False, indent=2).encode("utf-8") + b"\n")
+    router_config["route"]["rules"].insert(0, {"ip_cidr": ["127.0.0.0/8"], "action": "route", "outbound": "direct-ru"})
+    write_bytes(router_plain_path, json.dumps(router_config, ensure_ascii=False, indent=2).encode("utf-8") + b"\n")
 
     with runner.docker_container(container, AUDIT_IMAGE):
         runner.docker_exec(container, "mkdir -p /work /var/lib/vpn-stack/rules")
@@ -452,119 +433,169 @@ def test_ru_singbox_runtime_smoke(runner: AuditRunner, out_dir: Path) -> dict[st
             "timeout 3s sing-box run -c /work/ru-sing-box.json >/tmp/ru-singbox.log 2>&1",
             expected_codes={124},
         )
-        runner.docker_copy(container, server_plain_path, "/work/ru-sing-box-plain-server.json")
-        runner.docker_copy(container, client_plain_path, "/work/ru-sing-box-plain-client.json")
-        runner.docker_copy(container, client_plain_no_sid_path, "/work/ru-sing-box-plain-client-no-sid.json")
-        runner.docker_exec(container, "sing-box check -c /work/ru-sing-box-plain-server.json")
-        runner.docker_exec(container, "sing-box check -c /work/ru-sing-box-plain-client.json")
-        runner.docker_exec(container, "sing-box check -c /work/ru-sing-box-plain-client-no-sid.json")
+        runner.docker_copy(container, router_plain_path, "/work/ru-sing-box-router.json")
+        runner.docker_exec(container, "sing-box check -c /work/ru-sing-box-router.json")
         runner.docker_exec(container, "mkdir -p /srv/ru-plain && printf 'ru plain ok\\n' >/srv/ru-plain/index.html")
         runner.docker_exec(container, "python3 -m http.server 18080 --bind 127.0.0.1 --directory /srv/ru-plain >/tmp/ru-plain-web.log 2>&1 &")
-        runner.docker_exec(container, "sing-box run -c /work/ru-sing-box-plain-server.json >/tmp/ru-plain-server.log 2>&1 & sleep 1")
-        runner.docker_exec(container, "sing-box run -c /work/ru-sing-box-plain-client.json >/tmp/ru-plain-client.log 2>&1 & sleep 1")
+        runner.docker_exec(container, "sing-box run -c /work/ru-sing-box-router.json >/tmp/ru-router.log 2>&1 & sleep 1")
         try:
             completed = runner.docker_exec(
                 container,
-                "curl --silent --show-error --fail --max-time 10 --socks5-hostname 127.0.0.1:20882 http://127.0.0.1:18080/",
+                "curl --silent --show-error --fail --max-time 10 --socks5-hostname 127.0.0.1:2080 http://127.0.0.1:18080/",
             )
         except Exception:
-            runner.docker_exec(container, "cat /tmp/ru-plain-server.log /tmp/ru-plain-client.log", expected_codes={0, 1})
+            runner.docker_exec(container, "cat /tmp/ru-router.log", expected_codes={0, 1})
             raise
         if "ru plain ok" not in completed.stdout:
-            raise AuditFailure("RU sing-box plain runtime smoke не вернул ожидаемый HTTP payload")
-        runner.docker_exec(container, "sing-box run -c /work/ru-sing-box-plain-client-no-sid.json >/tmp/ru-plain-client-no-sid.log 2>&1 & sleep 1")
-        try:
-            no_sid_completed = runner.docker_exec(
-                container,
-                "curl --silent --show-error --fail --max-time 10 --socks5-hostname 127.0.0.1:20883 http://127.0.0.1:18080/",
-            )
-        except Exception:
-            runner.docker_exec(container, "cat /tmp/ru-plain-server.log /tmp/ru-plain-client-no-sid.log", expected_codes={0, 1})
-            raise
-        if "ru plain ok" not in no_sid_completed.stdout:
-            raise AuditFailure("RU sing-box no-sid runtime smoke не вернул ожидаемый HTTP payload")
-    return {"config": str(config_path), "plain_config": str(server_plain_path), "result": "runtime-smoke-ok"}
+            raise AuditFailure("RU sing-box router runtime smoke не вернул ожидаемый HTTP payload")
+    return {"config": str(config_path), "router_config": str(router_plain_path), "result": "runtime-smoke-ok"}
 
 
 def test_xray_reality_interop(runner: AuditRunner, out_dir: Path) -> dict[str, str]:
     network = f"audit-xray-interop-{runner.run_id}"
-    singbox = f"audit-singbox-interop-{runner.run_id}"
-    web = f"audit-web-interop-{runner.run_id}"
-    xray = f"audit-xray-interop-{runner.run_id}"
+    router = f"audit-singbox-router-{runner.run_id}"
+    xray_front = f"audit-xray-front-{runner.run_id}"
+    xray_client = f"audit-xray-client-{runner.run_id}"
     work_dir = runner.work_dir / "xray-reality-interop"
     work_dir.mkdir(parents=True, exist_ok=True)
-    server_config_path = work_dir / "sing-box.json"
+    router_config_path = work_dir / "sing-box-router.json"
+    xray_server_config_path = work_dir / "xray-server.json"
     client_config_path = work_dir / "xray-client.json"
-    server_config = json.loads((out_dir / "preview" / "ru" / "sing-box.json").read_text(encoding="utf-8"))
-    server_config["inbounds"][0]["listen"] = "0.0.0.0"
-    server_config["route"]["rules"].insert(0, {"ip_cidr": ["172.31.240.30/32"], "action": "route", "outbound": "direct-ru"})
-    client_config = json.loads((out_dir / "client" / "windows-xray.json").read_text(encoding="utf-8"))
-    client_config["inbounds"][0]["listen"] = "0.0.0.0"
-    client_config["inbounds"][0]["port"] = 10808
-    client_config["outbounds"][0]["settings"]["vnext"][0]["address"] = "singbox-server"
-    client_config["outbounds"][0]["settings"]["vnext"][0]["port"] = server_config["inbounds"][0]["listen_port"]
-    write_bytes(server_config_path, json.dumps(server_config, ensure_ascii=False, indent=2).encode("utf-8") + b"\n")
+
+    router_config = json.loads((out_dir / "preview" / "ru" / "sing-box.json").read_text(encoding="utf-8"))
+    router_config["inbounds"][0]["listen"] = "0.0.0.0"
+    router_config["log"] = {"level": "debug", "timestamp": True}
+    for dns_server in router_config.get("dns", {}).get("servers", []):
+        dns_server.pop("detour", None)
+    router_config["route"]["final"] = "direct-ru"
+    router_config["route"].pop("default_domain_resolver", None)
+    router_config["route"]["rules"] = [rule for rule in router_config["route"]["rules"] if rule.get("action") != "resolve"]
+    router_config["outbounds"] = [
+        {"type": "direct", "tag": "direct-ru"},
+        {"type": "direct", "tag": "to-foreign"},
+        {"type": "block", "tag": "blocked"},
+    ]
+
+    xray_server_config = json.loads((out_dir / "preview" / "ru" / "xray.json").read_text(encoding="utf-8"))
+    xray_server_config["log"] = {"loglevel": "debug"}
+    xray_server_config["inbounds"][0]["listen"] = "0.0.0.0"
+    xray_server_config["inbounds"][0]["port"] = 443
+    xray_server_config["outbounds"][0]["settings"]["servers"][0]["address"] = "172.31.240.10"
+    xray_server_config["outbounds"][0]["settings"]["servers"][0]["port"] = router_config["inbounds"][0]["listen_port"]
+
+    generated_client_config = json.loads((out_dir / "client" / "windows-xray.json").read_text(encoding="utf-8"))
+    proxy_outbound = generated_client_config["outbounds"][0]
+    proxy_outbound["settings"]["vnext"][0]["address"] = "172.31.240.20"
+    proxy_outbound["settings"]["vnext"][0]["port"] = 443
+    client_config = {
+        "log": {"loglevel": "debug"},
+        "inbounds": [
+            {
+                "tag": "socks",
+                "listen": "0.0.0.0",
+                "port": 10808,
+                "protocol": "socks",
+                "settings": {"udp": True},
+                "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"], "routeOnly": False},
+            }
+        ],
+        "outbounds": [proxy_outbound],
+    }
+    write_bytes(router_config_path, json.dumps(router_config, ensure_ascii=False, indent=2).encode("utf-8") + b"\n")
+    write_bytes(xray_server_config_path, json.dumps(xray_server_config, ensure_ascii=False, indent=2).encode("utf-8") + b"\n")
     write_bytes(client_config_path, json.dumps(client_config, ensure_ascii=False, indent=2).encode("utf-8") + b"\n")
     with runner.docker_network(network, "172.31.240.0/24", "172.31.240.1"):
         try:
-            with runner.docker_container(singbox, AUDIT_IMAGE, network=network, ip="172.31.240.10", extra_args=["--network-alias", "singbox-server"]):
-                with runner.docker_container(web, AUDIT_IMAGE, network=network, ip="172.31.240.30"):
-                    runner.docker_exec(web, "mkdir -p /srv/interop && printf 'xray reality interop ok\\n' >/srv/interop/index.html && python3 -m http.server 8080 --bind 0.0.0.0 --directory /srv/interop >/tmp/web.log 2>&1 &")
-                    runner.docker_exec(singbox, "mkdir -p /work /var/lib/vpn-stack/rules")
-                    for asset in ("geosite-ru.srs", "geoip-ru.srs"):
-                        runner.docker_copy(singbox, out_dir / "assets" / asset, f"/var/lib/vpn-stack/rules/{asset}")
-                    runner.docker_copy(singbox, server_config_path, "/work/sing-box.json")
-                    runner.docker_exec(singbox, "sing-box check -c /work/sing-box.json")
-                    runner.docker_exec(singbox, "sing-box run -c /work/sing-box.json >/tmp/sing-box.log 2>&1 & sleep 1")
-                    runner.docker(
-                        "run-xray-reality-interop",
+            with runner.docker_container(router, AUDIT_IMAGE, network=network, ip="172.31.240.10", extra_args=["--network-alias", "singbox-router"]):
+                runner.docker_exec(router, "mkdir -p /work /var/lib/vpn-stack/rules")
+                for asset in ("geosite-ru.srs", "geoip-ru.srs"):
+                    runner.docker_copy(router, out_dir / "assets" / asset, f"/var/lib/vpn-stack/rules/{asset}")
+                runner.docker_copy(router, router_config_path, "/work/sing-box-router.json")
+                runner.docker_exec(router, "ENABLE_DEPRECATED_MISSING_DOMAIN_RESOLVER=true sing-box check -c /work/sing-box-router.json")
+                runner.docker_exec(router, "printf '127.0.0.1 example.com\\n' >>/etc/hosts")
+                runner.docker_exec(router, "openssl req -x509 -newkey rsa:2048 -nodes -keyout /tmp/example.key -out /tmp/example.crt -subj /CN=www.bing.com -days 1 >/tmp/openssl-gen.log 2>&1")
+                runner.docker_exec(router, "openssl s_server -quiet -accept 443 -cert /tmp/example.crt -key /tmp/example.key -www >/tmp/example-tls.log 2>&1 & sleep 1")
+                runner.docker_exec(router, "ENABLE_DEPRECATED_MISSING_DOMAIN_RESOLVER=true sing-box run -c /work/sing-box-router.json >/tmp/sing-box-router.log 2>&1 & sleep 1")
+                runner.docker(
+                    "run-xray-front-interop",
+                    [
+                        "run",
+                        "-d",
+                        "--name",
+                        xray_front,
+                        "--label",
+                        "vpn-installer.audit=1",
+                        "--network",
+                        network,
+                        "--ip",
+                        "172.31.240.20",
+                        "--network-alias",
+                        "xray-front",
+                        "--add-host",
+                        "www.bing.com:172.31.240.10",
+                        "-v",
+                        f"{xray_server_config_path}:/etc/xray/config.json:ro",
+                        "ghcr.io/xtls/xray-core:latest",
+                        "run",
+                        "-config",
+                        "/etc/xray/config.json",
+                    ],
+                )
+                runner.docker(
+                    "run-xray-client-interop",
+                    [
+                        "run",
+                        "-d",
+                        "--name",
+                        xray_client,
+                        "--label",
+                        "vpn-installer.audit=1",
+                        "--network",
+                        network,
+                        "--ip",
+                        "172.31.240.21",
+                        "-v",
+                        f"{client_config_path}:/etc/xray/config.json:ro",
+                        "ghcr.io/xtls/xray-core:latest",
+                        "run",
+                        "-config",
+                        "/etc/xray/config.json",
+                    ],
+                )
+                try:
+                    completed = runner.docker(
+                        "curl-xray-reality-interop",
                         [
                             "run",
-                            "-d",
-                            "--name",
-                            xray,
-                            "--label",
-                            "vpn-installer.audit=1",
+                            "--rm",
                             "--network",
                             network,
-                            "--ip",
-                            "172.31.240.20",
-                            "-v",
-                            f"{client_config_path}:/etc/xray/config.json:ro",
-                            "ghcr.io/xtls/xray-core:latest",
-                            "run",
-                            "-config",
-                            "/etc/xray/config.json",
+                            "curlimages/curl:latest",
+                            "-k",
+                            "-fsS",
+                            "--max-time",
+                            "45",
+                            "-x",
+                            f"socks5://{xray_client}:10808",
+                            "--connect-to",
+                            "example.com:443:[2606:2800:220:1:248:1893:25c8:1946]:443",
+                            "https://example.com/",
                         ],
                     )
-                    try:
-                        completed = runner.docker(
-                            "curl-xray-reality-interop",
-                            [
-                                "run",
-                                "--rm",
-                                "--network",
-                                network,
-                                "curlimages/curl:latest",
-                                "-4",
-                                "-fsS",
-                                "--max-time",
-                                "20",
-                                "-x",
-                                f"socks5h://{xray}:10808",
-                                "http://172.31.240.30:8080/",
-                            ],
-                        )
-                    except Exception:
-                        runner.docker("logs-singbox-reality-interop", ["logs", singbox], expected_codes={0, 1})
-                        runner.docker("logs-xray-reality-interop", ["logs", xray], expected_codes={0, 1})
-                        raise
-                    if "xray reality interop ok" not in completed.stdout:
-                        raise AuditFailure("Xray Reality interop не вернул ожидаемый HTTP payload")
+                except Exception:
+                    runner.docker_exec(router, "cat /tmp/sing-box-router.log", expected_codes={0, 1})
+                    runner.docker_exec(router, "cat /tmp/example-tls.log", expected_codes={0, 1})
+                    runner.docker("logs-singbox-router-interop", ["logs", router], expected_codes={0, 1})
+                    runner.docker("logs-xray-front-interop", ["logs", xray_front], expected_codes={0, 1})
+                    runner.docker("logs-xray-client-interop", ["logs", xray_client], expected_codes={0, 1})
+                    raise
+                if not completed.stdout.strip():
+                    raise AuditFailure("Xray Reality interop не вернул ответ от локального TLS probe")
         finally:
             if not runner.keep_docker:
-                runner._docker_cleanup(f"rm-{xray}", ["rm", "-f", xray])
-    return {"server_config": str(server_config_path), "client_config": str(client_config_path)}
+                runner._docker_cleanup(f"rm-{xray_front}", ["rm", "-f", xray_front])
+                runner._docker_cleanup(f"rm-{xray_client}", ["rm", "-f", xray_client])
+    return {"xray_server_config": str(xray_server_config_path), "router_config": str(router_config_path), "client_config": str(client_config_path)}
 
 
 def test_cloud_init_schema(runner: AuditRunner, out_dir: Path) -> dict[str, str]:

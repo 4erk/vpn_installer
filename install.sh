@@ -125,6 +125,7 @@ GUARD_REALITY_BLOCK_ENABLED="${GUARD_REALITY_BLOCK_ENABLED:-0}"
 
 CLIENT_FLOW="${CLIENT_FLOW:-xtls-rprx-vision}"
 RU_LISTEN_PORT="${RU_LISTEN_PORT:-443}"
+RU_ROUTER_LISTEN_PORT="${RU_ROUTER_LISTEN_PORT:-2080}"
 RU_REALITY_HANDSHAKE_PORT="${RU_REALITY_HANDSHAKE_PORT:-443}"
 RU_REALITY_ACCEPT_EMPTY_SHORT_ID="${RU_REALITY_ACCEPT_EMPTY_SHORT_ID:-1}"
 RU_REALITY_MAX_TIME_DIFFERENCE="${RU_REALITY_MAX_TIME_DIFFERENCE:-24h}"
@@ -203,6 +204,9 @@ APT_LOCK_TIMEOUT_SECONDS="${APT_LOCK_TIMEOUT_SECONDS:-900}"
 APT_LOCK_RETRY_SECONDS="${APT_LOCK_RETRY_SECONDS:-5}"
 SINGBOX_CONFIG_PATH="/etc/sing-box/config.json"
 SINGBOX_REQUIRED_VERSION="1.13.12"
+XRAY_CONFIG_PATH="/etc/xray/config.json"
+XRAY_SERVICE_PATH="/etc/systemd/system/vpn-stack-xray.service"
+XRAY_REQUIRED_VERSION="${XRAY_REQUIRED_VERSION:-}"
 WG_CONFIG_PATH="/etc/wireguard/${WG_INTERFACE}.conf"
 NFTABLES_PATH="/etc/nftables.conf"
 SSHD_CONFIG_PATH="/etc/ssh/sshd_config.d/90-vpn-stack.conf"
@@ -349,6 +353,8 @@ WIREGUARD_ENABLED=$(service_enabled_flag "wg-quick@${WG_INTERFACE}")
 WIREGUARD_ACTIVE=$(service_active_flag "wg-quick@${WG_INTERFACE}")
 SINGBOX_ENABLED=$(service_enabled_flag sing-box)
 SINGBOX_ACTIVE=$(service_active_flag sing-box)
+XRAY_ENABLED=$(service_enabled_flag vpn-stack-xray.service)
+XRAY_ACTIVE=$(service_active_flag vpn-stack-xray.service)
 SYNC_TIMER_ENABLED=$(service_enabled_flag vpn-stack-sync.timer)
 SYNC_TIMER_ACTIVE=$(service_active_flag vpn-stack-sync.timer)
 HEALTH_TIMER_ENABLED=$(service_enabled_flag vpn-stack-health.timer)
@@ -365,6 +371,8 @@ EOF
 managed_paths() {
   printf '%s\n' \
     "${SINGBOX_CONFIG_PATH}" \
+    "${XRAY_CONFIG_PATH}" \
+    "${XRAY_SERVICE_PATH}" \
     "${WG_CONFIG_PATH}" \
     "${NFTABLES_PATH}" \
     "${SSHD_CONFIG_PATH}" \
@@ -480,6 +488,7 @@ restore_service_state() {
   apply_service_restore_flags vpn-stack-health.timer "${HEALTH_TIMER_ENABLED:-0}" "${HEALTH_TIMER_ACTIVE:-0}"
   apply_service_restore_flags vpn-stack-guard.timer "${GUARD_TIMER_ENABLED:-0}" "${GUARD_TIMER_ACTIVE:-0}"
   apply_service_restore_flags sing-box "${SINGBOX_ENABLED:-0}" "${SINGBOX_ACTIVE:-0}"
+  apply_service_restore_flags vpn-stack-xray.service "${XRAY_ENABLED:-0}" "${XRAY_ACTIVE:-0}"
   apply_service_restore_flags ssh.service "${SSH_SERVICE_ENABLED:-0}" "${SSH_SERVICE_ACTIVE:-0}"
   apply_service_restore_flags ssh.socket "${SSH_SOCKET_ENABLED:-0}" "${SSH_SOCKET_ACTIVE:-0}"
 }
@@ -519,6 +528,7 @@ install_exit_trap() {
 
 stop_managed_services() {
   systemctl stop sing-box >/dev/null 2>&1 || true
+  systemctl stop vpn-stack-xray.service >/dev/null 2>&1 || true
   systemctl stop "wg-quick@${WG_INTERFACE}" >/dev/null 2>&1 || true
   systemctl stop vpn-stack-sync.service >/dev/null 2>&1 || true
   systemctl stop vpn-stack-sync.timer >/dev/null 2>&1 || true
@@ -650,6 +660,7 @@ run_apt_get() {
 
 disable_managed_services() {
   systemctl disable sing-box >/dev/null 2>&1 || true
+  systemctl disable vpn-stack-xray.service >/dev/null 2>&1 || true
   systemctl disable "wg-quick@${WG_INTERFACE}" >/dev/null 2>&1 || true
   systemctl disable vpn-stack-sync.timer >/dev/null 2>&1 || true
   systemctl disable vpn-stack-health.timer >/dev/null 2>&1 || true
@@ -661,6 +672,8 @@ disable_managed_services() {
 remove_managed_files() {
   rm -f \
     "${SINGBOX_CONFIG_PATH}" \
+    "${XRAY_CONFIG_PATH}" \
+    "${XRAY_SERVICE_PATH}" \
     "${WG_CONFIG_PATH}" \
     "${NFTABLES_PATH}" \
     "${SSHD_CONFIG_PATH}" \
@@ -859,6 +872,7 @@ print_status() {
   echo "guard_ssh_blocked_count=${guard_ssh_blocked}"
   echo "guard_reality_blocked_count=${guard_reality_blocked}"
   echo "sing_box_active=$(service_active_flag sing-box)"
+  echo "xray_active=$(service_active_flag vpn-stack-xray.service)"
 }
 
 python_candidate_works() {
@@ -1014,6 +1028,13 @@ prepare_role_artifacts() {
 copy_role_artifacts() {
   local source_dir="$1"
   copy_if_present "${source_dir}/sing-box.json" "${SINGBOX_CONFIG_PATH}" || { echo "Missing sing-box.json in ${source_dir}" >&2; exit 1; }
+  if [[ "$ROLE" == "ru-gateway" ]]; then
+    mkdir -p "$(dirname "${XRAY_CONFIG_PATH}")"
+    copy_if_present "${source_dir}/xray.json" "${XRAY_CONFIG_PATH}" || { echo "Missing xray.json in ${source_dir}" >&2; exit 1; }
+    copy_if_present "${source_dir}/vpn-stack-xray.service" "${XRAY_SERVICE_PATH}" || { echo "Missing vpn-stack-xray.service in ${source_dir}" >&2; exit 1; }
+  else
+    rm -f "${XRAY_CONFIG_PATH}" "${XRAY_SERVICE_PATH}"
+  fi
   copy_if_present "${source_dir}/${WG_INTERFACE}.conf" "${WG_CONFIG_PATH}" || { echo "Missing ${WG_INTERFACE}.conf in ${source_dir}" >&2; exit 1; }
   copy_if_present "${source_dir}/nftables.conf" "${NFTABLES_PATH}" || { echo "Missing nftables.conf in ${source_dir}" >&2; exit 1; }
   copy_if_present "${source_dir}/sshd-vpn-stack.conf" "${SSHD_CONFIG_PATH}" || { echo "Missing sshd-vpn-stack.conf in ${source_dir}" >&2; exit 1; }
@@ -1029,6 +1050,9 @@ copy_role_artifacts() {
   rm -f "${SUBSCRIPTION_SERVICE_PATH}"
   rm -rf "${SUBSCRIPTION_ROOT}"
   chmod 0644 "${SSHD_CONFIG_PATH}"
+  if [[ "$ROLE" == "ru-gateway" ]]; then
+    chmod 0644 "${XRAY_SERVICE_PATH}"
+  fi
   chmod 0755 "${RULE_SYNC_SCRIPT}" "${HEALTH_SCRIPT_PATH}" "${GUARD_SCRIPT_PATH}"
 }
 
@@ -1164,6 +1188,7 @@ run_apt_get install -y \
   mtr-tiny \
   nftables \
   python3 \
+  unzip \
   unattended-upgrades \
   wireguard \
   wireguard-tools
@@ -1179,11 +1204,29 @@ current_singbox_version() {
   sing-box version 2>/dev/null | awk 'NR == 1 {print $3}'
 }
 
+install_xray() {
+  if [[ -n "${XRAY_REQUIRED_VERSION}" ]]; then
+    curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh | bash -s -- install --version "${XRAY_REQUIRED_VERSION}"
+  else
+    curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh | bash -s -- install
+  fi
+}
+
+current_xray_version() {
+  if ! command -v xray >/dev/null 2>&1; then
+    return 1
+  fi
+  xray version 2>/dev/null | awk 'NR == 1 {print $2}'
+}
+
 if [[ "$(current_singbox_version || true)" != "${SINGBOX_REQUIRED_VERSION}" ]]; then
   install_sing_box
 fi
+if [[ "$ROLE" == "ru-gateway" && ! -x /usr/local/bin/xray && -z "$(command -v xray 2>/dev/null)" ]]; then
+  install_xray
+fi
 
-mkdir -p "${VPNSTACK_ROOT}" /etc/sing-box /etc/wireguard /etc/ssh/sshd_config.d "${RULESET_DIR}" /usr/local/lib/vpn-stack /etc/systemd/system
+mkdir -p "${VPNSTACK_ROOT}" /etc/sing-box /etc/xray /etc/wireguard /etc/ssh/sshd_config.d "${RULESET_DIR}" /usr/local/lib/vpn-stack /etc/systemd/system
 
 RUNTIME_QDISC_INTERFACE="$(detect_primary_interface)"
 
@@ -1284,9 +1327,14 @@ systemctl start vpn-stack-guard.service || true
 if [[ "$ROLE" == "ru-gateway" ]]; then
   systemctl enable sing-box
   systemctl restart sing-box
+  systemctl enable vpn-stack-xray.service
+  systemctl restart vpn-stack-xray.service
 fi
 
 chmod 0600 "${SINGBOX_CONFIG_PATH}" "${WG_CONFIG_PATH}"
+if [[ "$ROLE" == "ru-gateway" ]]; then
+  chmod 0600 "${XRAY_CONFIG_PATH}"
+fi
 
 systemctl enable unattended-upgrades || true
 

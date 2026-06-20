@@ -623,6 +623,7 @@ def postcheck_command(role: str, wg_interface: str) -> str:
         '\n'.join(
             [
                 'check_service_active sing-box sing-box',
+                'check_service_active vpn-stack-xray.service vpn-stack-xray',
             ]
         )
         if role == ROLE_RU

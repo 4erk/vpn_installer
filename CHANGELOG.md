@@ -6,6 +6,22 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.6.0] - 2026-06-20
+
+### Changed
+
+- Российский сервер переведён на двухслойную схему: публичный `VLESS/Reality` вход обслуживает Xray с `sniffing.destOverride`, а `sing-box` остаётся внутренним split-router'ом через локальный SOCKS/mixed вход.
+- `vless-uri.txt` остаётся основным способом подключения и не меняет формат. Изменение находится на серверной стороне: Xray восстанавливает домен из TLS/HTTP/QUIC SNI даже когда клиент прислал IP/IPv6 literal, а затем передаёт доменный destination во внутренний `sing-box` router.
+- Внутренний `sing-box` router на российском сервере слушает локальный `RU_ROUTER_LISTEN_PORT=2080`, использует IPv4-only `domain_resolver` для `direct-ru` и `to-foreign`, а публичный порт `RU_LISTEN_PORT=443` остаётся за Xray.
+- `status`, preflight и postcheck теперь учитывают `vpn-stack-xray.service`, чтобы публичный вход не выпадал из диагностики.
+
+## [0.5.9] - 2026-06-20
+
+### Fixed
+
+- IPv6 literal destinations на российском сервере теперь fast-fail до любых `direct-ru` правил. Это закрывает свежий live-сбой, где Google/YouTube/Opera IPv6-адреса попадали в forced-direct маршрут и висели на `i/o timeout` через российский сервер.
+- Обновлена регрессия порядка правил: `sniff` и DNS hijack остаются первыми, но `ip_version: 6` теперь стоит перед forced-direct domain/geosite/CIDR routes и перед общим IPv4 resolve.
+
 ## [0.5.8] - 2026-06-20
 
 ### Fixed

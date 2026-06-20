@@ -135,19 +135,6 @@ def render_ru_singbox(env: dict[str, str]) -> str:
     block_ip_cidrs = env_list(env, "RU_BLOCK_IP_CIDR")
     ipv6_policy = env.get("RU_IPV6_POLICY", "fast-fail").strip().lower()
     geoip_direct = env.get("RU_GEOIP_DIRECT", "0").strip().lower() in {"1", "true", "yes", "on"}
-    reality_short_ids = [env["RU_REALITY_SHORT_ID"]]
-    if env.get("RU_REALITY_ACCEPT_EMPTY_SHORT_ID", "1").strip().lower() not in {"0", "false", "no", "off"}:
-        reality_short_ids.append("")
-    reality_settings: dict[str, Any] = {
-        "enabled": True,
-        "handshake": {"server": env["RU_REALITY_HANDSHAKE_SERVER"], "server_port": env_int(env, "RU_REALITY_HANDSHAKE_PORT")},
-        "private_key": env["RU_REALITY_PRIVATE_KEY"],
-        "short_id": list(dict.fromkeys(reality_short_ids)),
-    }
-    reality_max_time_difference = env.get("RU_REALITY_MAX_TIME_DIFFERENCE", "").strip()
-    if reality_max_time_difference:
-        reality_settings["max_time_difference"] = reality_max_time_difference
-
     dns_rules: list[dict[str, Any]] = [{"query_type": ["AAAA"], "action": "reject"}]
     if direct_domains:
         dns_rules.append({"domain": direct_domains, "action": "route", "server": "dns-ru-direct", "strategy": "ipv4_only"})
@@ -161,7 +148,7 @@ def render_ru_singbox(env: dict[str, str]) -> str:
         else {"ip_version": 6, "action": "reject"}
     )
     route_rules: list[dict[str, Any]] = [
-        {"inbound": ["vless-in"], "action": "sniff", "timeout": sniff_timeout},
+        {"inbound": ["router-in"], "action": "sniff", "timeout": sniff_timeout},
         {"action": "route-options", "udp_disable_domain_unmapping": True},
         {"protocol": "dns", "action": "hijack-dns"},
     ]
@@ -180,8 +167,8 @@ def render_ru_singbox(env: dict[str, str]) -> str:
     if block_ip_cidrs:
         route_rules.append({"ip_cidr": block_ip_cidrs, "action": "route", "outbound": "blocked"})
     route_rules.append({"action": "resolve", "server": "dns-global", "strategy": "ipv4_only"})
-    route_rules.append(ipv6_rule)
     route_rules.append({"ip_is_private": True, "action": "route", "outbound": "blocked"})
+    route_rules.append(ipv6_rule)
     if geoip_direct:
         route_rules.append({"rule_set": ["ru-geoip"], "action": "route", "outbound": "direct-ru"})
 
@@ -190,6 +177,7 @@ def render_ru_singbox(env: dict[str, str]) -> str:
         "tag": "to-foreign",
         "bind_interface": env["WG_INTERFACE"],
         "routing_mark": env_int(env, "APP_ROUTE_MARK"),
+        "domain_resolver": {"server": "dns-global", "strategy": "ipv4_only"},
     }
     if to_foreign_connect_timeout:
         to_foreign_outbound["connect_timeout"] = to_foreign_connect_timeout
@@ -208,20 +196,14 @@ def render_ru_singbox(env: dict[str, str]) -> str:
         },
         "inbounds": [
             {
-                "type": "vless",
-                "tag": "vless-in",
-                "listen": "::",
-                "listen_port": env_int(env, "RU_LISTEN_PORT"),
-                "users": [{"name": f"{env['DEPLOY_NAME']}-client", "uuid": env["CLIENT_UUID"], "flow": env["CLIENT_FLOW"]}],
-                "tls": {
-                    "enabled": True,
-                    "server_name": env["RU_REALITY_SERVER_NAME"],
-                    "reality": reality_settings,
-                },
+                "type": "mixed",
+                "tag": "router-in",
+                "listen": "127.0.0.1",
+                "listen_port": env_int(env, "RU_ROUTER_LISTEN_PORT"),
             }
         ],
         "outbounds": [
-            {"type": "direct", "tag": "direct-ru"},
+            {"type": "direct", "tag": "direct-ru", "domain_resolver": {"server": "dns-ru-direct", "strategy": "ipv4_only"}},
             to_foreign_outbound,
             {"type": "block", "tag": "blocked"},
         ],
@@ -235,6 +217,44 @@ def render_ru_singbox(env: dict[str, str]) -> str:
             "rules": route_rules,
             "final": "to-foreign",
         },
+    }
+    return render_json(payload)
+
+
+def render_ru_xray(env: dict[str, str]) -> str:
+    short_ids = [env["RU_REALITY_SHORT_ID"]]
+    if env.get("RU_REALITY_ACCEPT_EMPTY_SHORT_ID", "1").strip().lower() not in {"0", "false", "no", "off"}:
+        short_ids.append("")
+    reality: dict[str, Any] = {
+        "show": False,
+        "dest": f"{env['RU_REALITY_HANDSHAKE_SERVER']}:{env_int(env, 'RU_REALITY_HANDSHAKE_PORT')}",
+        "xver": 0,
+        "serverNames": [env["RU_REALITY_SERVER_NAME"]],
+        "privateKey": env["RU_REALITY_PRIVATE_KEY"],
+        "shortIds": list(dict.fromkeys(short_ids)),
+    }
+    payload = {
+        "log": {"loglevel": "warning"},
+        "inbounds": [
+            {
+                "listen": "0.0.0.0",
+                "port": env_int(env, "RU_LISTEN_PORT"),
+                "protocol": "vless",
+                "settings": {
+                    "clients": [{"id": env["CLIENT_UUID"], "flow": env["CLIENT_FLOW"], "email": f"{env['DEPLOY_NAME']}-client"}],
+                    "decryption": "none",
+                },
+                "streamSettings": {"network": "tcp", "security": "reality", "realitySettings": reality},
+                "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"], "routeOnly": False},
+            }
+        ],
+        "outbounds": [
+            {
+                "protocol": "socks",
+                "tag": "split-router",
+                "settings": {"servers": [{"address": "127.0.0.1", "port": env_int(env, "RU_ROUTER_LISTEN_PORT")}]},
+            }
+        ],
     }
     return render_json(payload)
 
@@ -541,6 +561,28 @@ def render_sync_timer() -> str:
             "",
             "[Install]",
             "WantedBy=timers.target",
+            "",
+        ]
+    )
+
+
+def render_xray_service() -> str:
+    return "\n".join(
+        [
+            "[Unit]",
+            "Description=vpn-stack Xray public VLESS/Reality front",
+            "After=network-online.target sing-box.service",
+            "Wants=network-online.target sing-box.service",
+            "",
+            "[Service]",
+            "Type=simple",
+            "ExecStart=/usr/bin/env xray run -c /etc/xray/config.json",
+            "Restart=on-failure",
+            "RestartSec=3s",
+            "LimitNOFILE=1048576",
+            "",
+            "[Install]",
+            "WantedBy=multi-user.target",
             "",
         ]
     )
@@ -1322,13 +1364,13 @@ def render_guard_script(env: dict[str, str], role: str) -> str:
         ssh_noise_ips() {{
           journalctl -u ssh.service -u ssh.socket --since "-${{LOOKBACK_MINUTES}} minutes" --no-pager 2>/dev/null \\
             | grep -E 'Failed password|Invalid user|maximum authentication attempts|Timeout before authentication|kex_exchange_identification|banner exchange' \\
-            | extract_ipv4
+            | extract_ipv4 || true
         }}
 
         reality_noise_ips() {{
-          journalctl -u sing-box.service --since "-${{LOOKBACK_MINUTES}} minutes" --no-pager 2>/dev/null \\
+          journalctl -u vpn-stack-xray.service --since "-${{LOOKBACK_MINUTES}} minutes" --no-pager 2>/dev/null \\
             | grep -F 'REALITY: processed invalid connection' \\
-            | extract_ipv4
+            | extract_ipv4 || true
         }}
 
         count_repeated_ips() {{
@@ -1471,6 +1513,7 @@ def rendered_files_for_role(env: dict[str, str], role: str) -> dict[str, str]:
     if role == ROLE_RU:
         return {
             "sing-box.json": render_ru_singbox(env),
+            "xray.json": render_ru_xray(env),
             f"{env['WG_INTERFACE']}.conf": render_ru_wg(env),
             "nftables.conf": render_ru_firewall_nftables(env),
             "sshd-vpn-stack.conf": render_sshd_hardening(env),
@@ -1483,6 +1526,7 @@ def rendered_files_for_role(env: dict[str, str], role: str) -> dict[str, str]:
             "vpn-stack-health.timer": render_health_timer(env),
             "vpn-stack-guard.service": render_guard_service(),
             "vpn-stack-guard.timer": render_guard_timer(env),
+            "vpn-stack-xray.service": render_xray_service(),
         }
     wan_iface = env.get("WAN_INTERFACE", "").strip() or "eth0"
     return {

@@ -259,6 +259,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("sleep 1", command)
         self.assertIn("journalctl -u \"$service\" -n 20 --no-pager", command)
         self.assertIn("check_service_active sing-box sing-box", command)
+        self.assertIn("check_service_active vpn-stack-xray.service vpn-stack-xray", command)
         self.assertIn("check_service_active vpn-stack-health.timer vpn-stack-health.timer", command)
         self.assertNotIn("vpn-stack-subscription.service", command)
 
@@ -445,6 +446,7 @@ class WorkflowTests(unittest.TestCase):
             workflows.postcheck_remote_role(RemoteTarget(role=ROLE_RU), "wg0")
         mocked.assert_called_once()
         self.assertIn("check_service_active sing-box sing-box", mocked.call_args.args[1])
+        self.assertIn("check_service_active vpn-stack-xray.service vpn-stack-xray", mocked.call_args.args[1])
 
     def test_filter_targets_for_remove_skips_unmanaged_hosts(self) -> None:
         ru = RemoteTarget(role=ROLE_RU)

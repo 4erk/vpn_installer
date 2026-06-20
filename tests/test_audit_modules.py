@@ -86,6 +86,7 @@ class AuditModuleTests(unittest.TestCase):
             (server / "ru.env").write_text('DEPLOY_NAME="demo"\n', encoding="utf-8")
             for path in [
                 preview / "ru" / "sing-box.json",
+                preview / "ru" / "xray.json",
                 preview / "foreign" / "sing-box.json",
                 client / "hiddify-cross-platform.json",
                 client / "linux-sing-box.json",

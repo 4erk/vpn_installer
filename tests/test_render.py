@@ -123,13 +123,13 @@ class RenderTests(unittest.TestCase):
 
     def test_ru_server_config_accepts_single_primary_vless_user(self) -> None:
         env = self.make_env()
-        payload = json.loads(render.render_ru_singbox(env))
-        users = payload["inbounds"][0]["users"]
-        self.assertEqual(users, [{"name": "demo-client", "uuid": env["CLIENT_UUID"], "flow": env["CLIENT_FLOW"]}])
+        payload = json.loads(render.render_ru_xray(env))
+        clients = payload["inbounds"][0]["settings"]["clients"]
+        self.assertEqual(clients, [{"id": env["CLIENT_UUID"], "flow": env["CLIENT_FLOW"], "email": "demo-client"}])
 
     def test_ru_server_config_uses_plain_vless_inbound_without_multiplex(self) -> None:
         env = self.make_env()
-        payload = json.loads(render.render_ru_singbox(env))
+        payload = json.loads(render.render_ru_xray(env))
         self.assertNotIn("multiplex", payload["inbounds"][0])
 
     def test_ru_server_config_uses_configured_log_level(self) -> None:
@@ -138,41 +138,44 @@ class RenderTests(unittest.TestCase):
         payload = json.loads(render.render_ru_singbox(env))
         self.assertEqual(payload["log"], {"level": "info", "timestamp": True})
 
-    def test_ru_server_config_renders_only_443_inbound(self) -> None:
+    def test_ru_server_config_renders_xray_public_443_and_local_singbox_router(self) -> None:
         env = self.make_env()
-        payload = json.loads(render.render_ru_singbox(env))
-        listen_ports = [inbound["listen_port"] for inbound in payload["inbounds"]]
-        self.assertEqual(listen_ports, [443])
-        self.assertEqual([inbound["tag"] for inbound in payload["inbounds"]], ["vless-in"])
-        inbound_rules = [rule for rule in payload["route"]["rules"] if rule.get("inbound")]
-        self.assertEqual(inbound_rules, [{"inbound": ["vless-in"], "action": "sniff", "timeout": "1s"}])
+        router_payload = json.loads(render.render_ru_singbox(env))
+        xray_payload = json.loads(render.render_ru_xray(env))
+        self.assertEqual([inbound["listen_port"] for inbound in router_payload["inbounds"]], [2080])
+        self.assertEqual([inbound["tag"] for inbound in router_payload["inbounds"]], ["router-in"])
+        inbound_rules = [rule for rule in router_payload["route"]["rules"] if rule.get("inbound")]
+        self.assertEqual(inbound_rules, [{"inbound": ["router-in"], "action": "sniff", "timeout": "1s"}])
+        self.assertEqual(xray_payload["inbounds"][0]["port"], 443)
+        self.assertEqual(xray_payload["outbounds"][0]["protocol"], "socks")
+        self.assertEqual(xray_payload["outbounds"][0]["settings"]["servers"][0], {"address": "127.0.0.1", "port": 2080})
 
     def test_ru_server_reality_sets_explicit_time_tolerance_by_default(self) -> None:
         env = self.make_env()
-        payload = json.loads(render.render_ru_singbox(env))
-        reality = payload["inbounds"][0]["tls"]["reality"]
-        self.assertEqual(payload["inbounds"][0]["listen_port"], 443)
-        self.assertEqual(reality["max_time_difference"], "24h")
+        payload = json.loads(render.render_ru_xray(env))
+        reality = payload["inbounds"][0]["streamSettings"]["realitySettings"]
+        self.assertEqual(payload["inbounds"][0]["port"], 443)
+        self.assertNotIn("maxTimeDiff", reality)
 
     def test_ru_server_reality_accepts_primary_and_empty_short_id_by_default(self) -> None:
         env = self.make_env()
-        payload = json.loads(render.render_ru_singbox(env))
-        reality = payload["inbounds"][0]["tls"]["reality"]
-        self.assertEqual(reality["short_id"], [env["RU_REALITY_SHORT_ID"], ""])
+        payload = json.loads(render.render_ru_xray(env))
+        reality = payload["inbounds"][0]["streamSettings"]["realitySettings"]
+        self.assertEqual(reality["shortIds"], [env["RU_REALITY_SHORT_ID"], ""])
 
     def test_ru_server_reality_can_disable_empty_short_id_compat(self) -> None:
         env = self.make_env()
         env["RU_REALITY_ACCEPT_EMPTY_SHORT_ID"] = "0"
-        payload = json.loads(render.render_ru_singbox(env))
-        reality = payload["inbounds"][0]["tls"]["reality"]
-        self.assertEqual(reality["short_id"], [env["RU_REALITY_SHORT_ID"]])
+        payload = json.loads(render.render_ru_xray(env))
+        reality = payload["inbounds"][0]["streamSettings"]["realitySettings"]
+        self.assertEqual(reality["shortIds"], [env["RU_REALITY_SHORT_ID"]])
 
     def test_ru_server_reality_can_render_explicit_time_tolerance(self) -> None:
         env = self.make_env()
         env["RU_REALITY_MAX_TIME_DIFFERENCE"] = "30s"
-        payload = json.loads(render.render_ru_singbox(env))
-        reality = payload["inbounds"][0]["tls"]["reality"]
-        self.assertEqual(reality["max_time_difference"], "30s")
+        payload = json.loads(render.render_ru_xray(env))
+        reality = payload["inbounds"][0]["streamSettings"]["realitySettings"]
+        self.assertNotIn("maxTimeDiff", reality)
 
     def test_ru_server_dns_servers_keep_global_detour_but_not_direct_detour(self) -> None:
         env = self.make_env()
@@ -197,7 +200,7 @@ class RenderTests(unittest.TestCase):
         self.assertIn('SYNC_DOWNLOAD_MAX_TIME="${SYNC_DOWNLOAD_MAX_TIME:-20}"', script)
         self.assertIn('curl -fsSL --connect-timeout "$SYNC_DOWNLOAD_CONNECT_TIMEOUT" --max-time "$SYNC_DOWNLOAD_MAX_TIME"', script)
 
-    def test_ru_server_sniffs_domains_before_fast_failing_ipv6_by_default(self) -> None:
+    def test_ru_server_fast_fails_ipv6_literals_before_direct_routes_by_default(self) -> None:
         env = self.make_env()
         payload = json.loads(render.render_ru_singbox(env))
         route_rules = payload["route"]["rules"]
@@ -206,10 +209,12 @@ class RenderTests(unittest.TestCase):
         ipv6_rules = [rule for rule in route_rules if rule.get("ip_version") == 6]
         global_resolve_index = next(index for index, rule in enumerate(route_rules) if rule.get("action") == "resolve" and rule.get("server") == "dns-global")
         ipv6_index = next(index for index, rule in enumerate(route_rules) if rule.get("ip_version") == 6)
-        self.assertEqual(sniff_rule, {"inbound": ["vless-in"], "action": "sniff", "timeout": "1s"})
+        first_direct_route_index = next(index for index, rule in enumerate(route_rules) if rule.get("outbound") == "direct-ru")
+        self.assertEqual(sniff_rule, {"inbound": ["router-in"], "action": "sniff", "timeout": "1s"})
         self.assertFalse(any(rule.get("network") == "udp" and rule.get("port") == 443 for rule in route_rules))
         self.assertEqual(ipv6_rules, [{"ip_version": 6, "action": "reject"}])
         self.assertEqual(payload["route"]["final"], "to-foreign")
+        self.assertLess(first_direct_route_index, ipv6_index)
         self.assertLess(global_resolve_index, ipv6_index)
         self.assertNotIn("connect_timeout", outbounds["to-foreign"])
         self.assertFalse(any(rule.get("outbound") == "blocked" and "ip_cidr" in rule for rule in route_rules))
@@ -250,8 +255,8 @@ class RenderTests(unittest.TestCase):
         self.assertLess(sniff_index, route_options_index)
         self.assertLess(route_options_index, dns_hijack_index)
         self.assertLess(dns_hijack_index, global_resolve_index)
-        self.assertLess(global_resolve_index, ipv6_index)
         self.assertLess(global_resolve_index, private_index)
+        self.assertLess(private_index, ipv6_index)
         self.assertEqual(route_rules[global_resolve_index]["strategy"], "ipv4_only")
 
     def test_ru_server_resolves_forced_direct_domains_before_direct_route(self) -> None:
@@ -288,7 +293,7 @@ class RenderTests(unittest.TestCase):
         ipv6_rules = [rule for rule in payload["route"]["rules"] if rule.get("ip_version") == 6]
         self.assertEqual(ipv6_rules, [{"ip_version": 6, "action": "reject"}])
 
-    def test_ru_server_resolves_and_forces_direct_before_ipv6_fast_fail(self) -> None:
+    def test_ru_server_rejects_unresolved_ipv6_literals_after_domain_routes(self) -> None:
         env = self.make_env()
         env["RU_FORCE_DIRECT_IP_CIDR"] = "2001:db8::/32"
         payload = json.loads(render.render_ru_singbox(env))
@@ -307,8 +312,8 @@ class RenderTests(unittest.TestCase):
         self.assertLess(direct_suffix_route_index, ipv6_index)
         self.assertLess(ru_geosite_route_index, ipv6_index)
         self.assertLess(explicit_cidr_index, ipv6_index)
-        self.assertLess(global_resolve_index, private_index)
         self.assertLess(global_resolve_index, ipv6_index)
+        self.assertLess(private_index, ipv6_index)
         self.assertEqual(private_rule["outbound"], "blocked")
 
     def test_ru_server_geoip_direct_is_opt_in_for_unknown_ip_literals(self) -> None:
@@ -548,6 +553,7 @@ class RenderTests(unittest.TestCase):
         env = self.make_env()
         files = render.rendered_files_for_role(env, render.ROLE_RU)
         self.assertIn("sing-box.json", files)
+        self.assertIn("xray.json", files)
         self.assertIn(f"{env['WG_INTERFACE']}.conf", files)
         self.assertIn("sshd-vpn-stack.conf", files)
         self.assertIn("health-check.sh", files)
@@ -557,6 +563,7 @@ class RenderTests(unittest.TestCase):
         self.assertIn("vpn-stack-health.timer", files)
         self.assertIn("vpn-stack-guard.service", files)
         self.assertIn("vpn-stack-guard.timer", files)
+        self.assertIn("vpn-stack-xray.service", files)
 
     def test_health_script_probes_wireguard_path_before_stale_handshake_verdict(self) -> None:
         env = self.make_env()
@@ -738,7 +745,10 @@ class RenderTests(unittest.TestCase):
         self.assertIn('SSH_FAILURE_THRESHOLD="6"', ru_script)
         self.assertIn('REALITY_INVALID_THRESHOLD="8"', ru_script)
         self.assertIn('REALITY_BLOCK_ENABLED="0"', ru_script)
+        self.assertIn("journalctl -u vpn-stack-xray.service", ru_script)
+        self.assertNotIn("journalctl -u sing-box.service --since", ru_script)
         self.assertIn("REALITY: processed invalid connection", ru_script)
+        self.assertIn("| extract_ipv4 || true", ru_script)
         self.assertIn('if [[ "$ROLE" == "ru-gateway" ]]; then', ru_script)
         self.assertIn('if [[ "$REALITY_BLOCK_ENABLED" == "1" ]]; then', ru_script)
         self.assertIn('count_repeated_ips "$REALITY_INVALID_THRESHOLD"', ru_script)
@@ -862,10 +872,11 @@ class RenderTests(unittest.TestCase):
             )
             self.assertEqual(completed.returncode, 0, msg=f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}")
             payload = json.loads((output_dir / "sing-box.json").read_text(encoding="utf-8"))
+            xray_payload = json.loads((output_dir / "xray.json").read_text(encoding="utf-8"))
         dns_rules = payload["dns"]["rules"]
         route_rules = payload["route"]["rules"]
         servers = {server["tag"]: server for server in payload["dns"]["servers"]}
-        self.assertEqual(payload["inbounds"][0]["tls"]["reality"]["max_time_difference"], "24h")
+        self.assertNotIn("maxTimeDiff", xray_payload["inbounds"][0]["streamSettings"]["realitySettings"])
         direct_domain_rule = next(rule for rule in route_rules if rule.get("outbound") == "direct-ru" and "domain" in rule)
         self.assertIn("api.ok.ru", direct_domain_rule["domain"])
         self.assertIn("checkip.amazonaws.com", direct_domain_rule["domain"])

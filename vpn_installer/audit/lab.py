@@ -45,12 +45,10 @@ def build_lab_client_config(env: dict[str, str]) -> str:
         "inbounds": [{"type": "socks", "tag": "socks-in", "listen": "0.0.0.0", "listen_port": 1080}],
         "outbounds": [
             {
-                "type": "vless",
+                "type": "socks",
                 "tag": "ru-gateway",
                 "server": LAB_IPS["ru"],
-                "server_port": int(env["RU_LISTEN_PORT"]),
-                "uuid": env["CLIENT_UUID"],
-                "flow": "",
+                "server_port": int(env.get("RU_ROUTER_LISTEN_PORT", "2080")),
             },
             {"type": "block", "tag": "block"},
         ],
@@ -71,9 +69,7 @@ def build_lab_ru_config(env: dict[str, str]) -> str:
     ]
     payload["dns"]["final"] = "dns-global"
     payload["inbounds"][0]["listen"] = "0.0.0.0"
-    payload["inbounds"][0]["listen_port"] = int(env["RU_LISTEN_PORT"])
-    payload["inbounds"][0].pop("tls", None)
-    payload["inbounds"][0]["users"][0]["flow"] = ""
+    payload["inbounds"][0]["listen_port"] = int(env.get("RU_ROUTER_LISTEN_PORT", "2080"))
     for outbound in payload.get("outbounds", []):
         if outbound.get("tag") == "to-foreign":
             outbound["bind_interface"] = env["WG_INTERFACE"]
@@ -195,6 +191,7 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
             runner.docker_exec(ru_container, "wg-quick up /opt/wg0.conf")
             runner.docker_exec(foreign_container, "nft -f /opt/nftables.conf && nft add element inet vpnstack ru_ipv4 { 203.0.113.0/24 }")
             runner.docker_exec(ru_container, "nft -f /opt/nftables.conf")
+            runner.docker_exec(ru_container, f"nft insert rule inet vpnstack input tcp dport {env['RU_ROUTER_LISTEN_PORT']} counter accept")
             runner.docker_exec(ru_container, "nohup sing-box run -c /opt/ru-singbox.json >/opt/ru-singbox.log 2>&1 &")
             runner.docker_exec(client_container, "nohup sing-box run -c /opt/client-singbox.json >/opt/client-singbox.log 2>&1 &")
             runner.docker_exec(client_container, "for i in $(seq 1 20); do nc -z 127.0.0.1 1080 && exit 0; sleep 1; done; exit 1")
