@@ -349,6 +349,16 @@ class RemoteTests(unittest.TestCase):
                     "singbox_direct_ru_timeout_count": "2",
                     "singbox_dns_timeout_count": "1",
                     "singbox_recent_timeout_sample": "connection: open connection to [2001:db8::1]:443 using outbound/direct[to-foreign]: i/o timeout",
+                    "singbox_log_window_minutes": "30",
+                    "singbox_recent_blocked_count": "22",
+                    "singbox_recent_mux_closed_count": "36",
+                    "singbox_recent_eof_count": "38",
+                    "singbox_recent_dns_failed_count": "1",
+                    "singbox_recent_timeout_count": "0",
+                    "singbox_recent_invalid_reality_count": "3",
+                    "singbox_recent_sources": "91.193.149.187=36,193.46.56.226=2",
+                    "singbox_recent_blocked_destinations": "[fdfd::1ad5:632a]:55517=6,172.19.0.2:853=1",
+                    "singbox_recent_error_sample": "connection: listen packet connection using outbound/block[blocked]: operation not permitted",
                     "sync_timer": "active",
                 },
             )
@@ -383,6 +393,11 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("sing-box direct-ru timeouts / 4h: 2", output)
         self.assertIn("sing-box DNS timeouts / 4h: 1", output)
         self.assertIn("sing-box last timeout sample: connection: open connection to [2001:db8::1]:443", output)
+        self.assertIn("sing-box recent window (min): 30", output)
+        self.assertIn("sing-box recent grouped errors: blocked=22, mux_closed=36, eof=38, dns_failed=1, timeout=0, invalid_reality=3", output)
+        self.assertIn("sing-box recent sources: 91.193.149.187=36,193.46.56.226=2", output)
+        self.assertIn("sing-box recent blocked destinations: [fdfd::1ad5:632a]:55517=6,172.19.0.2:853=1", output)
+        self.assertIn("sing-box recent sample: connection: listen packet connection using outbound/block[blocked]: operation not permitted", output)
 
     def test_ensure_remote_privilege_paths(self) -> None:
         target = RemoteTarget(role=ROLE_RU)

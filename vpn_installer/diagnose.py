@@ -152,6 +152,39 @@ journalctl -u vpn-stack-health.service --since '-6 hours' --no-pager 2>/dev/null
 
 section recent_guard_logs
 journalctl -u vpn-stack-guard.service --since '-6 hours' --no-pager 2>/dev/null | tail -n 120 || true
+
+section recent_singbox_grouped
+if [[ "${{role}}" == "ru-gateway" ]]; then
+  singbox_log="$(journalctl -u sing-box --since '-30 minutes' --no-pager -o cat 2>/dev/null || true)"
+  printf 'window_minutes=30\n'
+  printf 'blocked=%s\n' "$(grep -c 'outbound/block\\[blocked\\]' <<<"${{singbox_log}}" || true)"
+  printf 'mux_closed=%s\n' "$(grep -c 'mux connection closed' <<<"${{singbox_log}}" || true)"
+  printf 'eof=%s\n' "$(grep -c 'EOF' <<<"${{singbox_log}}" || true)"
+  printf 'dns_failed=%s\n' "$(grep -c 'dns: lookup failed' <<<"${{singbox_log}}" || true)"
+  printf 'timeout=%s\n' "$(grep -Ec 'i/o timeout|context deadline exceeded' <<<"${{singbox_log}}" || true)"
+  printf 'invalid_reality=%s\n' "$(grep -c 'REALITY: processed invalid connection' <<<"${{singbox_log}}" || true)"
+  printf 'sources='
+  printf '%s\n' "${{singbox_log}}" |
+    sed -n 's/.*process connection from \\([^: ]*\\):.*/\\1/p; s/.*REALITY: processed invalid connection from \\([^: ]*\\):.*/\\1/p' |
+    sort | uniq -c | sort -nr | head -n 12 |
+    awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
+  printf '\nblocked_destinations='
+  printf '%s\n' "${{singbox_log}}" |
+    grep 'outbound/block\\[blocked\\]' |
+    sed -n 's/.*open connection to \\([^ ]*\\) using outbound\\/block.*/\\1/p; s/.*blocked packet connection to \\([^ ]*\\).*/\\1/p' |
+    sort | uniq -c | sort -nr | head -n 12 |
+    awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
+  printf '\nlast_error_sample='
+  printf '%s\n' "${{singbox_log}}" |
+    grep -E 'outbound/block\\[blocked\\]|mux connection closed|dns: lookup failed|i/o timeout|context deadline exceeded|REALITY: processed invalid connection|FATAL|ERROR|EOF' |
+    tail -n1 |
+    tr -d '\r' |
+    cut -c1-240
+  printf '\n'
+fi
+
+section recent_singbox_raw
+journalctl -u sing-box --since '-30 minutes' --no-pager 2>/dev/null | tail -n 240 || true
 """
 
 

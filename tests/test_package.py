@@ -62,6 +62,7 @@ class PackageTests(unittest.TestCase):
         self.assertIn('RU_LISTEN_PORT="${RU_LISTEN_PORT:-443}"', install_script)
         self.assertIn('RU_REALITY_ACCEPT_EMPTY_SHORT_ID="${RU_REALITY_ACCEPT_EMPTY_SHORT_ID:-1}"', install_script)
         self.assertIn('RU_REALITY_MAX_TIME_DIFFERENCE="${RU_REALITY_MAX_TIME_DIFFERENCE:-24h}"', install_script)
+        self.assertIn('SING_BOX_LOG_LEVEL="${SING_BOX_LOG_LEVEL:-info}"', install_script)
         self.assertIn('if [[ "${RU_LISTEN_PORT}" == "8443" ]]; then', install_script)
         self.assertIn('seen_ru_listen_port="0"', install_script)
         self.assertNotIn('seen_ru_compat_ports="0"', install_script)
@@ -116,7 +117,7 @@ class PackageTests(unittest.TestCase):
 
     def test_package_exposes_version_via_getattr(self) -> None:
         package = importlib.import_module("vpn_installer")
-        self.assertEqual(package.__version__, "0.5.4")
+        self.assertEqual(package.__version__, "0.5.5")
         with self.assertRaises(AttributeError):
             package.__getattr__("nope")
 

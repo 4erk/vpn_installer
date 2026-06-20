@@ -67,6 +67,10 @@ class ConfigTests(unittest.TestCase):
         env = config.generate_default_env("sample")
         self.assertEqual(env["UTLS_FINGERPRINT"], "chrome")
 
+    def test_default_sing_box_log_level_keeps_server_diagnostics_visible(self) -> None:
+        env = config.generate_default_env("sample")
+        self.assertEqual(env["SING_BOX_LOG_LEVEL"], "info")
+
     def test_merge_env_with_defaults_migrates_randomized_fingerprint(self) -> None:
         env = config.merge_env_with_defaults({"UTLS_FINGERPRINT": "randomized"}, "sample")
         self.assertEqual(env["UTLS_FINGERPRINT"], "chrome")

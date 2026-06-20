@@ -97,26 +97,23 @@ chmod +x ./vpn.sh
 
 Главный результат:
 
-- быстрый `VLESS URI` копируется в буфер обмена
-- на Android основной стабильный путь: импортировать `android-v2rayng-xray.json` в `v2rayNG`
-- этот Android/v2rayNG профиль принудительно использует IPv4 DNS и блокирует клиентский IPv6
-- `vless-uri.txt` — простой URI fallback для клиентов, которые не ломаются на локальном IPv6 DNS
-- `windows-xray.json` — полный Xray-профиль для Windows/v2rayN
-- `hiddify-cross-platform.json` — fallback, если нужен локальный файл
+- простой `VLESS URI` копируется в буфер обмена и считается основным профилем
+- `vless-uri.txt` — главный низкоуровневый артефакт для клиентов с поддержкой `VLESS/Reality`
+- `windows-xray.json` и `android-v2rayng-xray.json` — JSON fallback, если конкретный клиент не умеет нормально импортировать URI
+- `hiddify-cross-platform.json` — fallback, если нужен локальный JSON-файл
 - `hiddify-android.json` — Android-safe fallback
 - `hiddify-uri.txt` — совместимый alias того же `VLESS URI` для старых сценариев
 
 ## Как подключить клиент
 
-1. На Android/v2rayNG сначала импортируй `android-v2rayng-xray.json`
-2. На Windows/v2rayN в режиме TUN/full VPN используй `windows-xray.json`, потому что там включён sniffing и явно исключены IP обоих серверов
-3. Если клиент точно корректно отдаёт домены серверу, можно использовать простой `vless-uri.txt`
-4. Если используешь `Hiddify` на Windows/Linux, добавляй локальный `hiddify-cross-platform.json`
-5. Если используешь `Hiddify` на Android, сначала пробуй локальный `hiddify-android.json`
-6. Если нужен максимально нейтральный низкоуровневый путь, используй `vless-uri.txt`, но учитывай ограничение ниже
-7. `hiddify-uri.txt` оставлен как совместимый alias того же `VLESS URI`
+1. Сначала импортируй простой `vless-uri.txt`
+2. Если нужен Hiddify, сначала пробуй `hiddify-uri.txt`, это тот же `VLESS URI`
+3. JSON-файлы используй как fallback для клиентов, которым нужен импорт файлом
+4. Если сайты висят, сначала смотри `vpn status --deployment <name> --role ru-gateway`: там будут группы ошибок `sing-box`
+5. `sing-box recent blocked destinations` показывает случаи, когда клиент отправляет на сервер private/fake IP вместо домена
+6. Если включён TUN/full VPN и `client-check` показывает self-tunnel, используй route bypass helper ниже
 
-Сырой `VLESS URI` не универсален: некоторые клиенты сначала локально резолвят сайт в IPv6 literal и отправляют на сервер уже IP-адрес вместо домена. Такие попытки на сервере закрываются быстро, потому IPv6 path зарубежного сервера нестабилен и даёт долгие timeout'ы. Поэтому для Android/v2rayNG штатный путь — полный `android-v2rayng-xray.json` с IPv4-only DNS, блокировкой `::/0` и включённым sniffing.
+Сервер ожидает обычный VLESS/Reality tunnel, где клиент по возможности передаёт домен, а не локальный fake/private IP. Если клиентский TUN/JSON отправляет на сервер fake IP вроде `fdfd::...`, сервер это не угадывает как домен; такие случаи теперь явно группируются в `status/diagnose`.
 
 Внешняя подписка с сервера больше не считается штатным путём; локальные JSON остаются управляемым вариантом.
 

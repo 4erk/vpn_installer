@@ -123,10 +123,16 @@ class RenderTests(unittest.TestCase):
         users = payload["inbounds"][0]["users"]
         self.assertEqual(users, [{"name": "demo-client", "uuid": env["CLIENT_UUID"], "flow": env["CLIENT_FLOW"]}])
 
-    def test_ru_server_config_enables_inbound_multiplex(self) -> None:
+    def test_ru_server_config_uses_plain_vless_inbound_without_multiplex(self) -> None:
         env = self.make_env()
         payload = json.loads(render.render_ru_singbox(env))
-        self.assertEqual(payload["inbounds"][0]["multiplex"], {"enabled": True})
+        self.assertNotIn("multiplex", payload["inbounds"][0])
+
+    def test_ru_server_config_uses_configured_log_level(self) -> None:
+        env = self.make_env()
+        env["SING_BOX_LOG_LEVEL"] = "info"
+        payload = json.loads(render.render_ru_singbox(env))
+        self.assertEqual(payload["log"], {"level": "info", "timestamp": True})
 
     def test_ru_server_config_renders_only_443_inbound(self) -> None:
         env = self.make_env()
@@ -310,19 +316,19 @@ class RenderTests(unittest.TestCase):
         env = self.make_env()
         text = render.render_next_steps(env)
         self.assertIn("VLESS URI", text)
+        self.assertIn("Основной простой VLESS URI", text)
         self.assertIn("android-v2rayng-xray.json", text)
-        self.assertIn("IPv6 literal", text)
+        self.assertIn("fallback", text)
+        self.assertIn("fake IP", text)
         self.assertIn("v2rayNG", text)
-        self.assertIn("NekoBox", text)
         self.assertIn("Hiddify", text)
         self.assertIn("windows-xray.json", text)
-        self.assertIn("Xray core", text)
         self.assertIn("vpn status", text)
         self.assertIn("vless-uri.txt", text)
         self.assertIn("hiddify-cross-platform.json", text)
         self.assertIn("hiddify-android.json", text)
         self.assertIn("windows-route-bypass.ps1", text)
-        self.assertIn("совместимый alias", text)
+        self.assertIn("Совместимый Hiddify URI alias", text)
 
     def test_render_client_profiles_writes_user_artifacts(self) -> None:
         env = self.make_env()

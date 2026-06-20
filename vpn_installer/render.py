@@ -125,6 +125,7 @@ def wg_host_address(cidr: str) -> str:
 
 
 def render_ru_singbox(env: dict[str, str]) -> str:
+    log_level = env.get("SING_BOX_LOG_LEVEL", "info").strip() or "info"
     direct_domains = env_list(env, "RU_FORCE_DIRECT_DOMAIN")
     direct_domain_suffixes = env_list(env, "RU_FORCE_DIRECT_DOMAIN_SUFFIX")
     direct_ip_cidrs = env_list(env, "RU_FORCE_DIRECT_IP_CIDR")
@@ -180,7 +181,7 @@ def render_ru_singbox(env: dict[str, str]) -> str:
     )
 
     payload = {
-        "log": {"level": "warn", "timestamp": True},
+        "log": {"level": log_level, "timestamp": True},
         "dns": {
             "strategy": "ipv4_only",
             "servers": [
@@ -198,7 +199,6 @@ def render_ru_singbox(env: dict[str, str]) -> str:
                 "listen": "::",
                 "listen_port": env_int(env, "RU_LISTEN_PORT"),
                 "users": [{"name": f"{env['DEPLOY_NAME']}-client", "uuid": env["CLIENT_UUID"], "flow": env["CLIENT_FLOW"]}],
-                "multiplex": {"enabled": True},
                 "tls": {
                     "enabled": True,
                     "server_name": env["RU_REALITY_SERVER_NAME"],
