@@ -57,12 +57,19 @@ class PackageTests(unittest.TestCase):
         self.assertIn('HEALTH_TARGET_PROBE_URLS="${HEALTH_TARGET_PROBE_URLS:-https://chatgpt.com/ https://discord.com/ https://github.com/ https://www.google.com/generate_204 https://telegram.org/ https://api.telegram.org/ https://t.me/}"', install_script)
         self.assertIn('RU_BLOCK_IP_CIDR="${RU_BLOCK_IP_CIDR:-}"', install_script)
         self.assertIn('RU_IPV6_POLICY="${RU_IPV6_POLICY:-fast-fail}"', install_script)
+        self.assertIn('RU_BLOCK_QUIC="${RU_BLOCK_QUIC:-0}"', install_script)
+        self.assertIn('RU_GEOIP_DIRECT="${RU_GEOIP_DIRECT:-0}"', install_script)
         self.assertIn('if [[ "${RU_BLOCK_IP_CIDR}" == "91.108.56.0/22" ]]; then', install_script)
         self.assertIn('if [[ "${RU_IPV6_POLICY}" == "block" || "${RU_IPV6_POLICY}" == "to-foreign" ]]; then', install_script)
+        self.assertIn('if [[ "${TO_FOREIGN_CONNECT_TIMEOUT}" == "1s" ]]; then', install_script)
+        self.assertIn("timeout 60s systemctl start vpn-stack-sync.service", install_script)
+        self.assertIn("continuing with bootstrap assets", install_script)
         self.assertIn('RU_LISTEN_PORT="${RU_LISTEN_PORT:-443}"', install_script)
         self.assertIn('RU_REALITY_ACCEPT_EMPTY_SHORT_ID="${RU_REALITY_ACCEPT_EMPTY_SHORT_ID:-1}"', install_script)
         self.assertIn('RU_REALITY_MAX_TIME_DIFFERENCE="${RU_REALITY_MAX_TIME_DIFFERENCE:-24h}"', install_script)
         self.assertIn('SING_BOX_LOG_LEVEL="${SING_BOX_LOG_LEVEL:-info}"', install_script)
+        self.assertIn('RU_SNIFF_TIMEOUT="${RU_SNIFF_TIMEOUT:-1s}"', install_script)
+        self.assertIn('TO_FOREIGN_CONNECT_TIMEOUT="${TO_FOREIGN_CONNECT_TIMEOUT:-}"', install_script)
         self.assertIn('if [[ "${RU_LISTEN_PORT}" == "8443" ]]; then', install_script)
         self.assertIn('seen_ru_listen_port="0"', install_script)
         self.assertNotIn('seen_ru_compat_ports="0"', install_script)
@@ -117,7 +124,7 @@ class PackageTests(unittest.TestCase):
 
     def test_package_exposes_version_via_getattr(self) -> None:
         package = importlib.import_module("vpn_installer")
-        self.assertEqual(package.__version__, "0.5.5")
+        self.assertEqual(package.__version__, "0.5.8")
         with self.assertRaises(AttributeError):
             package.__getattr__("nope")
 

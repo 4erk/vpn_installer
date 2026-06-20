@@ -48,6 +48,8 @@ REMOTE_ENV_CRITICAL_KEYS = {
     "RU_REALITY_SHORT_ID",
     "RU_REALITY_ACCEPT_EMPTY_SHORT_ID",
     "SING_BOX_LOG_LEVEL",
+    "RU_SNIFF_TIMEOUT",
+    "TO_FOREIGN_CONNECT_TIMEOUT",
     "GUARD_ENABLED",
     "GUARD_INTERVAL_MINUTES",
     "GUARD_LOOKBACK_MINUTES",
@@ -82,6 +84,8 @@ REMOTE_ENV_CRITICAL_KEYS = {
     "RU_FORCE_DIRECT_IP_CIDR",
     "RU_BLOCK_IP_CIDR",
     "RU_IPV6_POLICY",
+    "RU_BLOCK_QUIC",
+    "RU_GEOIP_DIRECT",
     "RU_GEOSITE_URL",
     "RU_GEOIP_URL",
     "FOREIGN_BLOCK_RU",
@@ -221,6 +225,8 @@ def generate_default_env(deploy_name: str) -> dict[str, str]:
         "RU_REALITY_MAX_TIME_DIFFERENCE": "24h",
         "UTLS_FINGERPRINT": "chrome",
         "SING_BOX_LOG_LEVEL": "info",
+        "RU_SNIFF_TIMEOUT": "1s",
+        "TO_FOREIGN_CONNECT_TIMEOUT": "",
         "WG_INTERFACE": "wg0",
         "WG_PORT": "51820",
         "WG_MTU": "1360",
@@ -248,6 +254,8 @@ def generate_default_env(deploy_name: str) -> dict[str, str]:
         "RU_FORCE_DIRECT_IP_CIDR": "",
         "RU_BLOCK_IP_CIDR": "",
         "RU_IPV6_POLICY": "fast-fail",
+        "RU_BLOCK_QUIC": "0",
+        "RU_GEOIP_DIRECT": "0",
         "RULESET_DIR": "/var/lib/vpn-stack/rules",
         "RU_GEOSITE_URL": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ru.srs https://cdn.jsdelivr.net/gh/SagerNet/sing-geosite@rule-set/geosite-category-ru.srs https://github.com/SagerNet/sing-geosite/raw/rule-set/geosite-category-ru.srs",
         "RU_GEOIP_URL": "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-ru.srs https://cdn.jsdelivr.net/gh/SagerNet/sing-geoip@rule-set/geoip-ru.srs https://github.com/SagerNet/sing-geoip/raw/rule-set/geoip-ru.srs",
@@ -279,6 +287,7 @@ def generate_default_env(deploy_name: str) -> dict[str, str]:
         "CLIENT_TUN_ADDRESS_V6": "fdfe:dcba:9876::1/126",
         "CLIENT_FAKEIP_V4": "198.18.0.0/15",
         "CLIENT_FAKEIP_V6": "fc00::/18",
+        "CLIENT_ENABLE_IPV6": "0",
         "CLIENT_ROUTE_EXCLUDE_V4": "",
         "CLIENT_ROUTE_EXCLUDE_V6": "",
     }
@@ -370,6 +379,8 @@ def merge_env_with_defaults(existing: dict[str, str], deploy_name: str) -> dict[
         merged["RU_BLOCK_IP_CIDR"] = defaults["RU_BLOCK_IP_CIDR"]
     if merged.get("RU_IPV6_POLICY") in {"block", "to-foreign"}:
         merged["RU_IPV6_POLICY"] = defaults["RU_IPV6_POLICY"]
+    if merged.get("TO_FOREIGN_CONNECT_TIMEOUT") == "1s":
+        merged["TO_FOREIGN_CONNECT_TIMEOUT"] = defaults["TO_FOREIGN_CONNECT_TIMEOUT"]
     merged["DEPLOY_NAME"] = deploy_name
     return merged
 

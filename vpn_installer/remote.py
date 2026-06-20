@@ -177,6 +177,63 @@ def paramiko_exec(
         client.close()
 
 
+def paramiko_stream(
+    target: RemoteTarget,
+    remote_command: str,
+    *,
+    input_text: str | None = None,
+    command_timeout: int = SSH_COMMAND_TIMEOUT,
+    get_pty: bool = False,
+) -> int:
+    client = paramiko_connect(target)
+    try:
+        stdin, stdout, stderr = client.exec_command(remote_command, get_pty=get_pty)
+        if input_text:
+            stdin.write(input_text)
+            stdin.flush()
+            try:
+                stdin.channel.shutdown_write()
+            except Exception:  # noqa: BLE001
+                pass
+        channel = stdout.channel
+        out_tail: list[str] = []
+        err_tail: list[str] = []
+        started_at = time.monotonic()
+        while True:
+            if channel.recv_ready():
+                text = channel.recv(4096).decode("utf-8", errors="replace")
+                if text:
+                    sys.stdout.write(text)
+                    sys.stdout.flush()
+                    out_tail.append(text)
+                    out_tail[:] = out_tail[-20:]
+            if channel.recv_stderr_ready():
+                text = channel.recv_stderr(4096).decode("utf-8", errors="replace")
+                if text:
+                    sys.stderr.write(text)
+                    sys.stderr.flush()
+                    err_tail.append(text)
+                    err_tail[:] = err_tail[-20:]
+            if channel.exit_status_ready() and not channel.recv_ready() and not channel.recv_stderr_ready():
+                break
+            if command_timeout > 0 and time.monotonic() - started_at > command_timeout:
+                try:
+                    channel.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                detail = "".join(err_tail).strip() or "".join(out_tail).strip()
+                if detail:
+                    detail = f"\nPartial remote output:\n{detail[-4000:]}"
+                raise AppError(
+                    f"Удалённая команда не завершилась за {command_timeout} сек. на {target.label}."
+                    f"{detail}"
+                )
+            time.sleep(0.05)
+        return channel.recv_exit_status()
+    finally:
+        client.close()
+
+
 def paramiko_upload(target: RemoteTarget, local_path: Path, remote_path: str) -> None:
     client = paramiko_connect(target)
     try:
@@ -206,14 +263,9 @@ def ssh_capture(target: RemoteTarget, command_body: str, *, as_root: bool = Fals
 def ssh_stream(target: RemoteTarget, command_body: str, *, as_root: bool = False) -> None:
     remote_command, input_text = build_remote_command(command_body, target, as_root)
     if use_python_ssh_backend(target):
-        exit_status, stdout, stderr = paramiko_exec(target, remote_command, input_text=input_text, get_pty=bool(input_text))
-        if stdout.strip():
-            print(stdout.rstrip())
-        if stderr.strip():
-            print(stderr.rstrip(), file=sys.stderr)
+        exit_status = paramiko_stream(target, remote_command, input_text=input_text, get_pty=bool(input_text))
         if exit_status != 0:
-            detail = (stderr or stdout).strip()
-            raise AppError(f"Удалённая команда завершилась с ошибкой на {target.label}.\n{detail or exit_status}")
+            raise AppError(f"Удалённая команда завершилась с ошибкой на {target.label}.\n{exit_status}")
         return
     run_command(ssh_base_args(target) + [remote_command], input_text=input_text)
 
@@ -478,6 +530,14 @@ singbox_recent_timeout_count="0"
 singbox_recent_invalid_reality_count="0"
 singbox_recent_sources=""
 singbox_recent_blocked_destinations=""
+singbox_recent_to_foreign_count="0"
+singbox_recent_direct_ru_count="0"
+singbox_recent_to_foreign_destinations=""
+singbox_recent_direct_ru_destinations=""
+singbox_recent_ipv6_literal_count="0"
+singbox_recent_ipv6_literal_destinations=""
+singbox_recent_mux_sources=""
+singbox_recent_inbound_destinations=""
 singbox_recent_error_sample=""
 
 if [[ "${{role}}" == "ru-gateway" ]] && command -v journalctl >/dev/null 2>&1; then
@@ -488,7 +548,7 @@ if [[ "${{role}}" == "ru-gateway" ]] && command -v journalctl >/dev/null 2>&1; t
     singbox_dns_timeout_count="$(grep -c 'dns: lookup failed' <<<"${{singbox_recent_timeouts}}" || true)"
     singbox_recent_timeout_sample="$(tail -n1 <<<"${{singbox_recent_timeouts}}" | tr -d '\\r' | cut -c1-240)"
   fi
-  singbox_recent_log="$(journalctl -u sing-box --since "-${{singbox_log_window_minutes}} minutes" --no-pager -o cat 2>/dev/null || true)"
+  singbox_recent_log="$(journalctl -u sing-box --since "-${{singbox_log_window_minutes}} minutes" --no-pager -o cat 2>/dev/null | sed -r 's/\\x1B\\[[0-9;]*[mK]//g' || true)"
   if [[ -n "${{singbox_recent_log}}" ]]; then
     singbox_recent_blocked_count="$(grep -c 'outbound/block\\[blocked\\]' <<<"${{singbox_recent_log}}" || true)"
     singbox_recent_mux_closed_count="$(grep -c 'mux connection closed' <<<"${{singbox_recent_log}}" || true)"
@@ -507,7 +567,6 @@ if [[ "${{role}}" == "ru-gateway" ]] && command -v journalctl >/dev/null 2>&1; t
     )"
     singbox_recent_blocked_destinations="$(
         printf '%s\n' "${{singbox_recent_log}}" |
-        grep 'outbound/block\\[blocked\\]' |
         sed -n 's/.*open connection to \\([^ ]*\\) using outbound\\/block.*/\\1/p; s/.*blocked packet connection to \\([^ ]*\\).*/\\1/p' |
         sort |
         uniq -c |
@@ -515,9 +574,57 @@ if [[ "${{role}}" == "ru-gateway" ]] && command -v journalctl >/dev/null 2>&1; t
         head -n 8 |
         awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
     )"
+    singbox_recent_to_foreign_count="$(grep -c 'outbound/direct\\[to-foreign\\]: outbound connection to' <<<"${{singbox_recent_log}}" || true)"
+    singbox_recent_direct_ru_count="$(grep -c 'outbound/direct\\[direct-ru\\]: outbound connection to' <<<"${{singbox_recent_log}}" || true)"
+    singbox_recent_to_foreign_destinations="$(
+      printf '%s\n' "${{singbox_recent_log}}" |
+        sed -n 's/.*outbound\\/direct\\[to-foreign\\]: outbound connection to \\([^ ]*\\).*/\\1/p' |
+        sort |
+        uniq -c |
+        sort -nr |
+        head -n 8 |
+        awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
+    )"
+    singbox_recent_direct_ru_destinations="$(
+      printf '%s\n' "${{singbox_recent_log}}" |
+        sed -n 's/.*outbound\\/direct\\[direct-ru\\]: outbound connection to \\([^ ]*\\).*/\\1/p' |
+        sort |
+        uniq -c |
+        sort -nr |
+        head -n 8 |
+        awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
+    )"
+    singbox_recent_ipv6_literal_count="$(grep -Ec 'inbound connection to \\[[0-9A-Fa-f:.]+\\]:' <<<"${{singbox_recent_log}}" || true)"
+    singbox_recent_ipv6_literal_destinations="$(
+      printf '%s\n' "${{singbox_recent_log}}" |
+        sed -n 's/.*inbound connection to \\(\\[[0-9A-Fa-f:.]*\\]:[0-9][0-9]*\\).*/\\1/p' |
+        sort |
+        uniq -c |
+        sort -nr |
+        head -n 8 |
+        awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
+    )"
+    singbox_recent_mux_sources="$(
+      printf '%s\n' "${{singbox_recent_log}}" |
+        sed -n '/mux connection closed/s/.*process connection from \\([^: ]*\\):.*/\\1/p' |
+        sort |
+        uniq -c |
+        sort -nr |
+        head -n 8 |
+        awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
+    )"
+    singbox_recent_inbound_destinations="$(
+      printf '%s\n' "${{singbox_recent_log}}" |
+        sed -n 's/.*inbound packet connection to \\([^ ]*\\).*/\\1/p; s/.*inbound connection to \\([^ ]*\\).*/\\1/p' |
+        sort |
+        uniq -c |
+        sort -nr |
+        head -n 12 |
+        awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
+    )"
     singbox_recent_error_sample="$(
       printf '%s\n' "${{singbox_recent_log}}" |
-        grep -E 'outbound/block\\[blocked\\]|mux connection closed|dns: lookup failed|i/o timeout|context deadline exceeded|REALITY: processed invalid connection|FATAL|ERROR|EOF' |
+        (grep -E 'outbound/block\\[blocked\\]|mux connection closed|dns: lookup failed|i/o timeout|context deadline exceeded|REALITY: processed invalid connection|FATAL|ERROR|EOF' || true) |
         tail -n1 |
         tr -d '\\r' |
         cut -c1-240
@@ -686,6 +793,14 @@ printf 'singbox_recent_timeout_count=%s\\n' "${{singbox_recent_timeout_count}}"
 printf 'singbox_recent_invalid_reality_count=%s\\n' "${{singbox_recent_invalid_reality_count}}"
 printf 'singbox_recent_sources=%s\\n' "${{singbox_recent_sources}}"
 printf 'singbox_recent_blocked_destinations=%s\\n' "${{singbox_recent_blocked_destinations}}"
+printf 'singbox_recent_to_foreign_count=%s\\n' "${{singbox_recent_to_foreign_count}}"
+printf 'singbox_recent_direct_ru_count=%s\\n' "${{singbox_recent_direct_ru_count}}"
+printf 'singbox_recent_to_foreign_destinations=%s\\n' "${{singbox_recent_to_foreign_destinations}}"
+printf 'singbox_recent_direct_ru_destinations=%s\\n' "${{singbox_recent_direct_ru_destinations}}"
+printf 'singbox_recent_ipv6_literal_count=%s\\n' "${{singbox_recent_ipv6_literal_count}}"
+printf 'singbox_recent_ipv6_literal_destinations=%s\\n' "${{singbox_recent_ipv6_literal_destinations}}"
+printf 'singbox_recent_mux_sources=%s\\n' "${{singbox_recent_mux_sources}}"
+printf 'singbox_recent_inbound_destinations=%s\\n' "${{singbox_recent_inbound_destinations}}"
 printf 'singbox_recent_error_sample=%s\\n' "${{singbox_recent_error_sample}}"
 printf 'guard_last_run=%s\\n' "${{guard_last_run}}"
 printf 'guard_ssh_blocked_count=%s\\n' "${{guard_ssh_blocked_count}}"
@@ -784,6 +899,7 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
     if preflight.get("reality_invalid_recent_count") not in {"", None, "0"}:
         print(f"recent invalid Reality handshakes: {preflight.get('reality_invalid_recent_count', '-')}")
         print(f"invalid Reality sources: {preflight.get('reality_invalid_recent_sources', '-')}")
+        print("diagnosis: invalid Reality happens before routing; if this is your IP, at least one active client/profile does not match current generated credentials.")
     if any(preflight.get(key) not in {"", None, "0"} for key in ("singbox_to_foreign_timeout_count", "singbox_direct_ru_timeout_count", "singbox_dns_timeout_count")):
         print(f"sing-box to-foreign timeouts / 4h: {preflight.get('singbox_to_foreign_timeout_count', '0')}")
         print(f"sing-box direct-ru timeouts / 4h: {preflight.get('singbox_direct_ru_timeout_count', '0')}")
@@ -812,8 +928,31 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
             print(f"sing-box recent sources: {preflight.get('singbox_recent_sources')}")
         if preflight.get("singbox_recent_blocked_destinations"):
             print(f"sing-box recent blocked destinations: {preflight.get('singbox_recent_blocked_destinations')}")
+        if preflight.get("singbox_recent_mux_sources"):
+            print(f"sing-box recent mux sources: {preflight.get('singbox_recent_mux_sources')}")
         if preflight.get("singbox_recent_error_sample"):
             print(f"sing-box recent sample: {preflight.get('singbox_recent_error_sample')}")
+    recent_route_keys = (
+        "singbox_recent_to_foreign_count",
+        "singbox_recent_direct_ru_count",
+        "singbox_recent_ipv6_literal_count",
+    )
+    if any(preflight.get(key) not in {"", None, "0"} for key in recent_route_keys):
+        print(
+            "sing-box recent routed: "
+            f"to_foreign={preflight.get('singbox_recent_to_foreign_count', '0')}, "
+            f"direct_ru={preflight.get('singbox_recent_direct_ru_count', '0')}, "
+            f"ipv6_literals={preflight.get('singbox_recent_ipv6_literal_count', '0')}"
+        )
+        if preflight.get("singbox_recent_to_foreign_destinations"):
+            print(f"sing-box recent to-foreign destinations: {preflight.get('singbox_recent_to_foreign_destinations')}")
+        if preflight.get("singbox_recent_direct_ru_destinations"):
+            print(f"sing-box recent direct-ru destinations: {preflight.get('singbox_recent_direct_ru_destinations')}")
+        if preflight.get("singbox_recent_ipv6_literal_destinations"):
+            print(f"sing-box recent IPv6 literal destinations: {preflight.get('singbox_recent_ipv6_literal_destinations')}")
+            print("diagnosis: client still sends IPv6 literal destinations; the server cannot recover a domain from a bare IPv6 address, so IPv4-only client DNS/profile is required for that path.")
+        if preflight.get("singbox_recent_inbound_destinations"):
+            print(f"sing-box recent inbound destinations: {preflight.get('singbox_recent_inbound_destinations')}")
     if preflight.get("guard_last_run"):
         print(f"guard timer: {preflight.get('guard_timer', '-')}")
         print(f"guard last run: {preflight.get('guard_last_run', '-')}")

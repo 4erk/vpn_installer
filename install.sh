@@ -130,6 +130,8 @@ RU_REALITY_ACCEPT_EMPTY_SHORT_ID="${RU_REALITY_ACCEPT_EMPTY_SHORT_ID:-1}"
 RU_REALITY_MAX_TIME_DIFFERENCE="${RU_REALITY_MAX_TIME_DIFFERENCE:-24h}"
 UTLS_FINGERPRINT="${UTLS_FINGERPRINT:-chrome}"
 SING_BOX_LOG_LEVEL="${SING_BOX_LOG_LEVEL:-info}"
+RU_SNIFF_TIMEOUT="${RU_SNIFF_TIMEOUT:-1s}"
+TO_FOREIGN_CONNECT_TIMEOUT="${TO_FOREIGN_CONNECT_TIMEOUT:-}"
 if [[ "${RU_LISTEN_PORT}" == "8443" ]]; then
   RU_LISTEN_PORT="443"
 fi
@@ -158,11 +160,16 @@ RU_FORCE_DIRECT_DOMAIN_SUFFIX="${RU_FORCE_DIRECT_DOMAIN_SUFFIX:-.gstatic.com,.go
 RU_FORCE_DIRECT_IP_CIDR="${RU_FORCE_DIRECT_IP_CIDR:-}"
 RU_BLOCK_IP_CIDR="${RU_BLOCK_IP_CIDR:-}"
 RU_IPV6_POLICY="${RU_IPV6_POLICY:-fast-fail}"
+RU_BLOCK_QUIC="${RU_BLOCK_QUIC:-0}"
+RU_GEOIP_DIRECT="${RU_GEOIP_DIRECT:-0}"
 if [[ "${RU_BLOCK_IP_CIDR}" == "91.108.56.0/22" ]]; then
   RU_BLOCK_IP_CIDR=""
 fi
 if [[ "${RU_IPV6_POLICY}" == "block" || "${RU_IPV6_POLICY}" == "to-foreign" ]]; then
   RU_IPV6_POLICY="fast-fail"
+fi
+if [[ "${TO_FOREIGN_CONNECT_TIMEOUT}" == "1s" ]]; then
+  TO_FOREIGN_CONNECT_TIMEOUT=""
 fi
 
 RULESET_DIR="${RULESET_DIR:-/var/lib/vpn-stack/rules}"
@@ -1260,11 +1267,12 @@ fi
 restart_wireguard_service
 systemctl enable vpn-stack-sync.timer
 systemctl restart vpn-stack-sync.timer
-if ! systemctl start vpn-stack-sync.service; then
+if ! timeout 60s systemctl start vpn-stack-sync.service; then
   if ! have_bootstrap_assets; then
     echo "vpn-stack-sync.service failed and no bootstrap assets are present." >&2
     exit 1
   fi
+  echo "vpn-stack-sync.service did not complete during install, continuing with bootstrap assets." >&2
 fi
 systemctl enable vpn-stack-health.timer
 systemctl restart vpn-stack-health.timer

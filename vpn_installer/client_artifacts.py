@@ -39,7 +39,8 @@ def client_route_excludes(env: dict[str, str]) -> list[str]:
 
 def render_client_profile(env: dict[str, str], auto_redirect: bool, *, android_safe: bool = False) -> str:
     tun_addresses = [env["CLIENT_TUN_ADDRESS_V4"]]
-    if not android_safe:
+    enable_ipv6 = env.get("CLIENT_ENABLE_IPV6", "0").strip().lower() in {"1", "true", "yes", "on"}
+    if enable_ipv6 and not android_safe:
         tun_addresses.append(env["CLIENT_TUN_ADDRESS_V6"])
     route_excludes = client_route_excludes(env)
     payload: dict[str, Any] = {
@@ -95,6 +96,7 @@ def render_client_profile(env: dict[str, str], auto_redirect: bool, *, android_s
             "auto_detect_interface": True,
             "default_domain_resolver": {"server": "dns-remote", "strategy": "ipv4_only"},
             "rules": [
+                {"inbound": ["tun-in"], "action": "sniff", "timeout": "1s"},
                 {"ip_version": 6, "action": "route", "outbound": "block"},
                 {"protocol": "dns", "action": "hijack-dns"},
                 {"ip_is_private": True, "action": "route", "outbound": "direct"},

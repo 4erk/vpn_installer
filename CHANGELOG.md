@@ -6,6 +6,35 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.5.8] - 2026-06-20
+
+### Fixed
+
+- `ru-geoip` больше не является дефолтным прямым fallback-маршрутом для неизвестных IP-literal соединений. Российский выход сохраняется для доменов, суффиксов, `ru-geosite` и явных `RU_FORCE_DIRECT_IP_CIDR`, а неизвестные IP теперь уходят через зарубежный сервер по `route.final`.
+- Добавлен явный opt-in `RU_GEOIP_DIRECT=1` для операторов, которым всё же нужен старый geoip-based fallback.
+
+## [0.5.7] - 2026-06-20
+
+### Fixed
+
+- Пользовательский трафик переведён в IPv4-first режим: клиентские JSON-профили больше не добавляют IPv6 TUN-адрес по умолчанию, DNS продолжает отклонять AAAA, а российский сервер после `sniff` сначала делает IPv4 `resolve` для доменных соединений и только потом быстро отклоняет оставшиеся IPv6 literal destinations.
+- Убран дефолтный `TO_FOREIGN_CONNECT_TIMEOUT=1s`: короткий connect-timeout ломал медленные, но рабочие IPv4 endpoints. Поле осталось только как явный диагностический override.
+- Добавлен `RU_SNIFF_TIMEOUT=1s`, чтобы сервер успевал считать TLS/SNI и не превращал нормальные доменные сайты в слепой IPv6 reject.
+- Первичный `vpn-stack-sync.service` во время установки больше не может зависнуть на внешнем rule-set источнике: downloads ограничены по времени, а installer продолжает работу с bootstrap assets.
+- Client JSON переведён на route-level `sniff`, совместимый с sing-box 1.13, без legacy inbound sniff fields.
+- Добавлена регрессия на quoting удалённых команд с heredoc/одинарными кавычками, чтобы диагностика и workflow не собирали `bash -lc` вручную.
+
+## [0.5.6] - 2026-06-20
+
+### Fixed
+
+- Российский сервер теперь после `sniff` сначала применяет доменные правила и общий `dns-global` IPv4 resolve, и только потом делает IPv6 fast-fail. Это снижает зависания на доменных TLS/SNI соединениях, но сохраняет normal server-side routing для доменных соединений.
+- Добавлен выключенный по умолчанию диагностический флаг `RU_BLOCK_QUIC=0/1`; после live-проверки QUIC-блок не включается дефолтом, потому отдельные сайты могут зависеть от UDP/443.
+- Outbound `to-foreign` временно получил короткий `connect_timeout=1s` для diagnostic/override режима.
+- `install.sh` и Python defaults снова согласованы: `RU_IPV6_POLICY=fast-fail` является единым дефолтом, а legacy `block`/`to-foreign` мигрируют в текущий стабильный профиль.
+- После `sniff` добавлены серверные `hijack-dns` и `udp_disable_domain_unmapping`, чтобы UDP/DNS-клиенты с fakeIP не тянули на российский сервер бесполезные `fdfd::...` назначения вместо доменного запроса.
+- `status/preflight` и `diagnose path` дополнительно показывают успешные свежие маршруты `to-foreign`/`direct-ru`, top destinations, источники `mux connection closed` и IPv6 literal destinations. Это отделяет реальный отказ dataplane от клиентских IPv6/fakeIP попыток.
+
 ## [0.5.5] - 2026-06-20
 
 ### Fixed

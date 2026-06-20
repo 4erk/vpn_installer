@@ -155,7 +155,7 @@ journalctl -u vpn-stack-guard.service --since '-6 hours' --no-pager 2>/dev/null 
 
 section recent_singbox_grouped
 if [[ "${{role}}" == "ru-gateway" ]]; then
-  singbox_log="$(journalctl -u sing-box --since '-30 minutes' --no-pager -o cat 2>/dev/null || true)"
+  singbox_log="$(journalctl -u sing-box --since '-30 minutes' --no-pager -o cat 2>/dev/null | sed -r 's/\\x1B\\[[0-9;]*[mK]//g' || true)"
   printf 'window_minutes=30\n'
   printf 'blocked=%s\n' "$(grep -c 'outbound/block\\[blocked\\]' <<<"${{singbox_log}}" || true)"
   printf 'mux_closed=%s\n' "$(grep -c 'mux connection closed' <<<"${{singbox_log}}" || true)"
@@ -170,13 +170,40 @@ if [[ "${{role}}" == "ru-gateway" ]]; then
     awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
   printf '\nblocked_destinations='
   printf '%s\n' "${{singbox_log}}" |
-    grep 'outbound/block\\[blocked\\]' |
     sed -n 's/.*open connection to \\([^ ]*\\) using outbound\\/block.*/\\1/p; s/.*blocked packet connection to \\([^ ]*\\).*/\\1/p' |
+    sort | uniq -c | sort -nr | head -n 12 |
+    awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
+  printf '\nto_foreign=%s\n' "$(grep -c 'outbound/direct\\[to-foreign\\]: outbound connection to' <<<"${{singbox_log}}" || true)"
+  printf 'direct_ru=%s\n' "$(grep -c 'outbound/direct\\[direct-ru\\]: outbound connection to' <<<"${{singbox_log}}" || true)"
+  printf 'ipv6_literals=%s\n' "$(grep -Ec 'inbound connection to \\[[0-9A-Fa-f:.]+\\]:' <<<"${{singbox_log}}" || true)"
+  printf 'to_foreign_destinations='
+  printf '%s\n' "${{singbox_log}}" |
+    sed -n 's/.*outbound\\/direct\\[to-foreign\\]: outbound connection to \\([^ ]*\\).*/\\1/p' |
+    sort | uniq -c | sort -nr | head -n 12 |
+    awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
+  printf '\ndirect_ru_destinations='
+  printf '%s\n' "${{singbox_log}}" |
+    sed -n 's/.*outbound\\/direct\\[direct-ru\\]: outbound connection to \\([^ ]*\\).*/\\1/p' |
+    sort | uniq -c | sort -nr | head -n 12 |
+    awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
+  printf '\nipv6_literal_destinations='
+  printf '%s\n' "${{singbox_log}}" |
+    sed -n 's/.*inbound connection to \\(\\[[0-9A-Fa-f:.]*\\]:[0-9][0-9]*\\).*/\\1/p' |
+    sort | uniq -c | sort -nr | head -n 12 |
+    awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
+  printf '\nmux_sources='
+  printf '%s\n' "${{singbox_log}}" |
+    sed -n '/mux connection closed/s/.*process connection from \\([^: ]*\\):.*/\\1/p' |
+    sort | uniq -c | sort -nr | head -n 12 |
+    awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
+  printf '\ninbound_destinations='
+  printf '%s\n' "${{singbox_log}}" |
+    sed -n 's/.*inbound packet connection to \\([^ ]*\\).*/\\1/p; s/.*inbound connection to \\([^ ]*\\).*/\\1/p' |
     sort | uniq -c | sort -nr | head -n 12 |
     awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
   printf '\nlast_error_sample='
   printf '%s\n' "${{singbox_log}}" |
-    grep -E 'outbound/block\\[blocked\\]|mux connection closed|dns: lookup failed|i/o timeout|context deadline exceeded|REALITY: processed invalid connection|FATAL|ERROR|EOF' |
+    (grep -E 'outbound/block\\[blocked\\]|mux connection closed|dns: lookup failed|i/o timeout|context deadline exceeded|REALITY: processed invalid connection|FATAL|ERROR|EOF' || true) |
     tail -n1 |
     tr -d '\r' |
     cut -c1-240

@@ -126,11 +126,15 @@ def wg_host_address(cidr: str) -> str:
 
 def render_ru_singbox(env: dict[str, str]) -> str:
     log_level = env.get("SING_BOX_LOG_LEVEL", "info").strip() or "info"
+    sniff_timeout = env.get("RU_SNIFF_TIMEOUT", "1s").strip() or "1s"
+    to_foreign_connect_timeout = env.get("TO_FOREIGN_CONNECT_TIMEOUT", "").strip()
+    block_quic = env.get("RU_BLOCK_QUIC", "0").strip().lower() not in {"0", "false", "no", "off"}
     direct_domains = env_list(env, "RU_FORCE_DIRECT_DOMAIN")
     direct_domain_suffixes = env_list(env, "RU_FORCE_DIRECT_DOMAIN_SUFFIX")
     direct_ip_cidrs = env_list(env, "RU_FORCE_DIRECT_IP_CIDR")
     block_ip_cidrs = env_list(env, "RU_BLOCK_IP_CIDR")
     ipv6_policy = env.get("RU_IPV6_POLICY", "fast-fail").strip().lower()
+    geoip_direct = env.get("RU_GEOIP_DIRECT", "0").strip().lower() in {"1", "true", "yes", "on"}
     reality_short_ids = [env["RU_REALITY_SHORT_ID"]]
     if env.get("RU_REALITY_ACCEPT_EMPTY_SHORT_ID", "1").strip().lower() not in {"0", "false", "no", "off"}:
         reality_short_ids.append("")
@@ -151,9 +155,18 @@ def render_ru_singbox(env: dict[str, str]) -> str:
         dns_rules.append({"domain_suffix": direct_domain_suffixes, "action": "route", "server": "dns-ru-direct", "strategy": "ipv4_only"})
     dns_rules.append({"rule_set": ["ru-geosite"], "action": "route", "server": "dns-ru-direct", "strategy": "ipv4_only"})
 
+    ipv6_rule = (
+        {"ip_version": 6, "action": "route", "outbound": "to-foreign"}
+        if ipv6_policy in {"to-foreign", "foreign", "proxy"}
+        else {"ip_version": 6, "action": "reject"}
+    )
     route_rules: list[dict[str, Any]] = [
-        {"inbound": ["vless-in"], "action": "sniff"},
+        {"inbound": ["vless-in"], "action": "sniff", "timeout": sniff_timeout},
+        {"action": "route-options", "udp_disable_domain_unmapping": True},
+        {"protocol": "dns", "action": "hijack-dns"},
     ]
+    if block_quic:
+        route_rules.append({"network": "udp", "port": 443, "action": "reject"})
     if direct_domains:
         route_rules.append({"domain": direct_domains, "action": "resolve", "server": "dns-ru-direct", "strategy": "ipv4_only"})
         route_rules.append({"domain": direct_domains, "action": "route", "outbound": "direct-ru"})
@@ -166,19 +179,20 @@ def render_ru_singbox(env: dict[str, str]) -> str:
         route_rules.append({"ip_cidr": direct_ip_cidrs, "action": "route", "outbound": "direct-ru"})
     if block_ip_cidrs:
         route_rules.append({"ip_cidr": block_ip_cidrs, "action": "route", "outbound": "blocked"})
-    ipv6_rule = (
-        {"ip_version": 6, "action": "route", "outbound": "to-foreign"}
-        if ipv6_policy in {"to-foreign", "foreign", "proxy"}
-        else {"ip_version": 6, "action": "reject"}
-    )
-    route_rules.extend(
-        [
-            {"ip_is_private": True, "action": "route", "outbound": "blocked"},
-            ipv6_rule,
-            {"action": "resolve", "server": "dns-global", "strategy": "ipv4_only"},
-            {"rule_set": ["ru-geoip"], "action": "route", "outbound": "direct-ru"},
-        ]
-    )
+    route_rules.append({"action": "resolve", "server": "dns-global", "strategy": "ipv4_only"})
+    route_rules.append(ipv6_rule)
+    route_rules.append({"ip_is_private": True, "action": "route", "outbound": "blocked"})
+    if geoip_direct:
+        route_rules.append({"rule_set": ["ru-geoip"], "action": "route", "outbound": "direct-ru"})
+
+    to_foreign_outbound: dict[str, Any] = {
+        "type": "direct",
+        "tag": "to-foreign",
+        "bind_interface": env["WG_INTERFACE"],
+        "routing_mark": env_int(env, "APP_ROUTE_MARK"),
+    }
+    if to_foreign_connect_timeout:
+        to_foreign_outbound["connect_timeout"] = to_foreign_connect_timeout
 
     payload = {
         "log": {"level": log_level, "timestamp": True},
@@ -208,7 +222,7 @@ def render_ru_singbox(env: dict[str, str]) -> str:
         ],
         "outbounds": [
             {"type": "direct", "tag": "direct-ru"},
-            {"type": "direct", "tag": "to-foreign", "bind_interface": env["WG_INTERFACE"], "routing_mark": env_int(env, "APP_ROUTE_MARK")},
+            to_foreign_outbound,
             {"type": "block", "tag": "blocked"},
         ],
         "route": {
@@ -401,6 +415,8 @@ def render_sync_script(env: dict[str, str]) -> str:
             f'FOREIGN_BLOCK_RU="${{5:-{env["FOREIGN_BLOCK_RU"]}}}"',
             f'FOREIGN_RU_IPV4_LIST_URL="${{6:-{env["FOREIGN_RU_IPV4_LIST_URL"]}}}"',
             f'FOREIGN_RU_IPV6_LIST_URL="${{7:-{env["FOREIGN_RU_IPV6_LIST_URL"]}}}"',
+            'SYNC_DOWNLOAD_CONNECT_TIMEOUT="${SYNC_DOWNLOAD_CONNECT_TIMEOUT:-5}"',
+            'SYNC_DOWNLOAD_MAX_TIME="${SYNC_DOWNLOAD_MAX_TIME:-20}"',
             "",
             'mkdir -p "$RULESET_DIR"',
             "",
@@ -411,7 +427,7 @@ def render_sync_script(env: dict[str, str]) -> str:
             '  local response_tmp="$output.response.tmp"',
             '  local render_tmp="$output.render.tmp"',
             '  rm -f "$response_tmp" "$render_tmp"',
-            '  curl -fsSL "$source" -o "$response_tmp"',
+            '  curl -fsSL --connect-timeout "$SYNC_DOWNLOAD_CONNECT_TIMEOUT" --max-time "$SYNC_DOWNLOAD_MAX_TIME" "$source" -o "$response_tmp"',
             '  if [[ "$source" == *"stat.ripe.net/data/country-resource-list/"* ]]; then',
             '    python3 - "$asset_kind" "$response_tmp" "$render_tmp" <<\'PY\'',
             "import json",

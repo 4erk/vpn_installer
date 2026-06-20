@@ -70,6 +70,12 @@ class ConfigTests(unittest.TestCase):
     def test_default_sing_box_log_level_keeps_server_diagnostics_visible(self) -> None:
         env = config.generate_default_env("sample")
         self.assertEqual(env["SING_BOX_LOG_LEVEL"], "info")
+        self.assertEqual(env["RU_SNIFF_TIMEOUT"], "1s")
+        self.assertEqual(env["TO_FOREIGN_CONNECT_TIMEOUT"], "")
+
+    def test_merge_env_with_defaults_removes_old_to_foreign_timeout_default(self) -> None:
+        env = config.merge_env_with_defaults({"TO_FOREIGN_CONNECT_TIMEOUT": "1s"}, "sample")
+        self.assertEqual(env["TO_FOREIGN_CONNECT_TIMEOUT"], "")
 
     def test_merge_env_with_defaults_migrates_randomized_fingerprint(self) -> None:
         env = config.merge_env_with_defaults({"UTLS_FINGERPRINT": "randomized"}, "sample")
@@ -163,6 +169,9 @@ class ConfigTests(unittest.TestCase):
         self.assertIn(".ipinfo.io", env["RU_FORCE_DIRECT_DOMAIN_SUFFIX"])
         self.assertEqual(env["RU_BLOCK_IP_CIDR"], "")
         self.assertEqual(env["RU_IPV6_POLICY"], "fast-fail")
+        self.assertEqual(env["RU_BLOCK_QUIC"], "0")
+        self.assertEqual(env["RU_GEOIP_DIRECT"], "0")
+        self.assertEqual(env["CLIENT_ENABLE_IPV6"], "0")
         self.assertEqual(env["GUARD_REALITY_BLOCK_ENABLED"], "0")
         self.assertIn("https://telegram.org/", env["HEALTH_TARGET_PROBE_URLS"])
 

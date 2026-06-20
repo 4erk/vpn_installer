@@ -17,6 +17,7 @@ from vpn_installer.remote import (
     parse_kv_output,
     paramiko_connect,
     paramiko_exec,
+    paramiko_stream,
     paramiko_upload,
     preflight_script,
     print_preflight,
@@ -67,6 +68,15 @@ class RemoteTests(unittest.TestCase):
         command, input_text = build_remote_command("echo test", target, as_root=True)
         self.assertIn("sudo -S", command)
         self.assertEqual(input_text, "secret\n")
+
+    def test_build_remote_command_quotes_heredoc_and_single_quotes(self) -> None:
+        target = RemoteTarget(role=ROLE_RU, ssh_user="root")
+        body = "python3 - <<'PY'\nprint('ok')\nPY"
+        command, input_text = build_remote_command(body, target, as_root=True)
+        self.assertIsNone(input_text)
+        self.assertTrue(command.startswith("bash -lc "))
+        self.assertIn("'\"'\"'PY'\"'\"'", command)
+        self.assertIn("print('\"'\"'ok'\"'\"')", command)
 
     def test_key_mode_uses_system_ssh_when_available(self) -> None:
         target = RemoteTarget(role=ROLE_RU, auth_mode="key")
@@ -204,6 +214,33 @@ class RemoteTests(unittest.TestCase):
         channel.close.assert_called_once()
         client.close.assert_called_once()
 
+    def test_paramiko_stream_writes_output_as_it_arrives(self) -> None:
+        channel = Mock()
+        channel.recv_ready.side_effect = [True, False, False]
+        channel.recv_stderr_ready.side_effect = [True, False, False]
+        channel.exit_status_ready.side_effect = [False, True, True]
+        channel.recv.return_value = b"out\n"
+        channel.recv_stderr.return_value = b"err\n"
+        channel.recv_exit_status.return_value = 0
+        stdin = Mock()
+        stdout = Mock(channel=channel)
+        stderr = Mock(channel=channel)
+        client = Mock()
+        client.exec_command.return_value = (stdin, stdout, stderr)
+        target = RemoteTarget(role=ROLE_RU)
+        with (
+            patch("vpn_installer.remote.paramiko_connect", return_value=client),
+            patch("vpn_installer.remote.time.sleep"),
+            patch("sys.stdout", new_callable=io.StringIO) as out_stream,
+            patch("sys.stderr", new_callable=io.StringIO) as err_stream,
+        ):
+            code = paramiko_stream(target, "echo test", input_text="secret\n")
+        self.assertEqual(code, 0)
+        self.assertIn("out", out_stream.getvalue())
+        self.assertIn("err", err_stream.getvalue())
+        client.exec_command.assert_called_once_with("echo test", get_pty=False)
+        client.close.assert_called_once()
+
     def test_paramiko_upload_wraps_error(self) -> None:
         client = Mock()
         sftp = Mock()
@@ -239,14 +276,13 @@ class RemoteTests(unittest.TestCase):
 
     def test_ssh_stream_prints_paramiko_output(self) -> None:
         target = RemoteTarget(role=ROLE_RU, auth_mode="password", ssh_password="secret")
-        with patch("vpn_installer.remote.paramiko_exec", return_value=(0, "out\n", "err\n")), patch("sys.stdout", new_callable=io.StringIO) as stdout, patch("sys.stderr", new_callable=io.StringIO) as stderr:
+        with patch("vpn_installer.remote.paramiko_stream", return_value=0) as mocked:
             ssh_stream(target, "echo ok", as_root=False)
-        self.assertIn("out", stdout.getvalue())
-        self.assertIn("err", stderr.getvalue())
+        mocked.assert_called_once()
 
     def test_ssh_stream_uses_pty_only_for_sudo_password_input(self) -> None:
         target = RemoteTarget(role=ROLE_RU, auth_mode="password", ssh_password="secret", ssh_user="ubuntu", sudo_mode="password", sudo_password="sudo-secret")
-        with patch("vpn_installer.remote.paramiko_exec", return_value=(0, "", "")) as mocked:
+        with patch("vpn_installer.remote.paramiko_stream", return_value=0) as mocked:
             ssh_stream(target, "echo ok", as_root=True)
         self.assertTrue(mocked.call_args.kwargs["get_pty"])
         self.assertEqual(mocked.call_args.kwargs["input_text"], "sudo-secret\n")
@@ -358,6 +394,14 @@ class RemoteTests(unittest.TestCase):
                     "singbox_recent_invalid_reality_count": "3",
                     "singbox_recent_sources": "91.193.149.187=36,193.46.56.226=2",
                     "singbox_recent_blocked_destinations": "[fdfd::1ad5:632a]:55517=6,172.19.0.2:853=1",
+                    "singbox_recent_mux_sources": "91.193.149.187=36",
+                    "singbox_recent_to_foreign_count": "44",
+                    "singbox_recent_direct_ru_count": "12",
+                    "singbox_recent_to_foreign_destinations": "20.42.65.94:443=5,8.8.8.8:443=1",
+                    "singbox_recent_direct_ru_destinations": "142.251.143.131:80=2",
+                    "singbox_recent_ipv6_literal_count": "7",
+                    "singbox_recent_ipv6_literal_destinations": "[2400:52e0:1e00::722:1]:443=4,[fdfd::1ad5:632a]:55517=3",
+                    "singbox_recent_inbound_destinations": "chatgpt.com:443=2,[2606:4700::6810:5c12]:443=1",
                     "singbox_recent_error_sample": "connection: listen packet connection using outbound/block[blocked]: operation not permitted",
                     "sync_timer": "active",
                 },
@@ -389,6 +433,7 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("self-heal last action: restart-wireguard/scheduled", output)
         self.assertIn("recent invalid Reality handshakes: 7", output)
         self.assertIn("invalid Reality sources: 178.66.129.100=7", output)
+        self.assertIn("diagnosis: invalid Reality happens before routing", output)
         self.assertIn("sing-box to-foreign timeouts / 4h: 11", output)
         self.assertIn("sing-box direct-ru timeouts / 4h: 2", output)
         self.assertIn("sing-box DNS timeouts / 4h: 1", output)
@@ -397,7 +442,14 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("sing-box recent grouped errors: blocked=22, mux_closed=36, eof=38, dns_failed=1, timeout=0, invalid_reality=3", output)
         self.assertIn("sing-box recent sources: 91.193.149.187=36,193.46.56.226=2", output)
         self.assertIn("sing-box recent blocked destinations: [fdfd::1ad5:632a]:55517=6,172.19.0.2:853=1", output)
+        self.assertIn("sing-box recent mux sources: 91.193.149.187=36", output)
         self.assertIn("sing-box recent sample: connection: listen packet connection using outbound/block[blocked]: operation not permitted", output)
+        self.assertIn("sing-box recent routed: to_foreign=44, direct_ru=12, ipv6_literals=7", output)
+        self.assertIn("sing-box recent to-foreign destinations: 20.42.65.94:443=5,8.8.8.8:443=1", output)
+        self.assertIn("sing-box recent direct-ru destinations: 142.251.143.131:80=2", output)
+        self.assertIn("sing-box recent IPv6 literal destinations: [2400:52e0:1e00::722:1]:443=4,[fdfd::1ad5:632a]:55517=3", output)
+        self.assertIn("diagnosis: client still sends IPv6 literal destinations", output)
+        self.assertIn("sing-box recent inbound destinations: chatgpt.com:443=2,[2606:4700::6810:5c12]:443=1", output)
 
     def test_ensure_remote_privilege_paths(self) -> None:
         target = RemoteTarget(role=ROLE_RU)
