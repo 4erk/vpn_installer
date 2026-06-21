@@ -119,7 +119,6 @@ def render_xray_client_profile(env: dict[str, str]) -> str:
         route_rules.append({"type": "field", "ip": route_excludes, "outboundTag": "direct"})
     payload = {
         "log": {"loglevel": "warning"},
-        "dns": {"queryStrategy": "UseIPv4", "servers": ["1.1.1.1", "8.8.8.8"]},
         "inbounds": [
             {
                 "tag": "socks",
@@ -164,7 +163,7 @@ def render_xray_client_profile(env: dict[str, str]) -> str:
             {"tag": "direct", "protocol": "freedom"},
             {"tag": "block", "protocol": "blackhole"},
         ],
-        "routing": {"domainStrategy": "IPIfNonMatch", "rules": route_rules},
+        "routing": {"domainStrategy": "AsIs", "rules": route_rules},
     }
     return _render_json(payload)
 

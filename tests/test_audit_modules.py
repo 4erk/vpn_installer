@@ -95,9 +95,11 @@ class AuditModuleTests(unittest.TestCase):
             (client / "android-v2rayng-xray.json").write_text(
                 json.dumps(
                     {
-                        "dns": {"queryStrategy": "UseIPv4"},
                         "inbounds": [{"sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"], "routeOnly": False}}],
-                        "routing": {"rules": [{"type": "field", "ip": ["::/0"], "outboundTag": "block"}]},
+                        "routing": {
+                            "domainStrategy": "AsIs",
+                            "rules": [{"type": "field", "ip": ["::/0"], "outboundTag": "block"}],
+                        },
                     }
                 )
                 + "\n",

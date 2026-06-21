@@ -49,7 +49,8 @@ class RenderTests(unittest.TestCase):
     def test_render_xray_client_profile_uses_reality_vless(self) -> None:
         env = self.make_env()
         payload = json.loads(render.render_xray_client_profile(env))
-        self.assertEqual(payload["dns"], {"queryStrategy": "UseIPv4", "servers": ["1.1.1.1", "8.8.8.8"]})
+        self.assertNotIn("dns", payload)
+        self.assertEqual(payload["routing"]["domainStrategy"], "AsIs")
         self.assertEqual(payload["inbounds"][0]["protocol"], "socks")
         self.assertEqual(payload["inbounds"][0]["sniffing"], {"enabled": True, "destOverride": ["http", "tls", "quic"], "routeOnly": False})
         outbound = payload["outbounds"][0]
