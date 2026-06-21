@@ -166,9 +166,13 @@ def render_ru_singbox(env: dict[str, str]) -> str:
         route_rules.append({"ip_cidr": direct_ip_cidrs, "action": "route", "outbound": "direct-ru"})
     if block_ip_cidrs:
         route_rules.append({"ip_cidr": block_ip_cidrs, "action": "route", "outbound": "blocked"})
-    route_rules.append({"action": "resolve", "server": "dns-global", "strategy": "ipv4_only"})
     route_rules.append({"ip_is_private": True, "action": "route", "outbound": "blocked"})
     route_rules.append(ipv6_rule)
+    if geoip_direct:
+        route_rules.append({"rule_set": ["ru-geoip"], "action": "route", "outbound": "direct-ru"})
+    route_rules.append({"ip_cidr": ["0.0.0.0/0"], "action": "route", "outbound": "to-foreign"})
+    route_rules.append({"action": "resolve", "server": "dns-global", "strategy": "ipv4_only"})
+    route_rules.append({"ip_is_private": True, "action": "route", "outbound": "blocked"})
     if geoip_direct:
         route_rules.append({"rule_set": ["ru-geoip"], "action": "route", "outbound": "direct-ru"})
 

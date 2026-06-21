@@ -231,7 +231,7 @@ def generate_default_env(deploy_name: str) -> dict[str, str]:
         "RU_REALITY_MAX_TIME_DIFFERENCE": "24h",
         "UTLS_FINGERPRINT": "chrome",
         "SING_BOX_LOG_LEVEL": "info",
-        "RU_SNIFF_TIMEOUT": "1s",
+        "RU_SNIFF_TIMEOUT": "250ms",
         "TO_FOREIGN_CONNECT_TIMEOUT": "",
         "WG_INTERFACE": "wg0",
         "WG_PORT": "51820",
@@ -388,6 +388,8 @@ def merge_env_with_defaults(existing: dict[str, str], deploy_name: str) -> dict[
         merged["RU_BLOCK_IP_CIDR"] = defaults["RU_BLOCK_IP_CIDR"]
     if merged.get("RU_IPV6_POLICY") in {"block", "to-foreign"}:
         merged["RU_IPV6_POLICY"] = defaults["RU_IPV6_POLICY"]
+    if merged.get("RU_SNIFF_TIMEOUT") == "1s":
+        merged["RU_SNIFF_TIMEOUT"] = defaults["RU_SNIFF_TIMEOUT"]
     if merged.get("TO_FOREIGN_CONNECT_TIMEOUT") in {"1s", "2s"}:
         merged["TO_FOREIGN_CONNECT_TIMEOUT"] = defaults["TO_FOREIGN_CONNECT_TIMEOUT"]
     merged["DEPLOY_NAME"] = deploy_name
