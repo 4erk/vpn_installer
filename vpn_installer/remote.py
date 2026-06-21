@@ -575,6 +575,7 @@ xray_recent_ipv6_literal_destinations=""
 xray_recent_error_sample=""
 
 if [[ "${{role}}" == "ru-gateway" ]] && command -v journalctl >/dev/null 2>&1; then
+  set +o pipefail
   xray_recent_log="$(journalctl -u vpn-stack-xray.service --since "-${{xray_log_window_minutes}} minutes" --no-pager -o cat 2>/dev/null | sed -r 's/\\x1B\\[[0-9;]*[mK]//g' || true)"
   if [[ -n "${{xray_recent_log}}" ]]; then
     xray_recent_error_count="$(grep -Eic 'error|failed|timeout|refused|reset|invalid|EOF|panic|fatal|denied|processed invalid connection' <<<"${{xray_recent_log}}" || true)"
@@ -787,6 +788,7 @@ if command -v wg >/dev/null 2>&1; then
 fi
 
 if [[ "${{installed}}" == "1" && "${{role}}" == "ru-gateway" ]] && command -v journalctl >/dev/null 2>&1; then
+  set +o pipefail
   reality_invalid_lines="$(journalctl -u vpn-stack-xray.service --since '-30 minutes' --no-pager 2>/dev/null | grep 'REALITY: processed invalid connection' || true)"
   if [[ -n "${{reality_invalid_lines}}" ]]; then
     reality_invalid_recent_count="$(printf '%s\n' "${{reality_invalid_lines}}" | grep -c . || true)"
@@ -801,6 +803,7 @@ if [[ "${{installed}}" == "1" && "${{role}}" == "ru-gateway" ]] && command -v jo
     )"
   fi
 fi
+set -o pipefail
 
 printf 'login_user=%s\\n' "${{login_user}}"
 printf 'is_root=%s\\n' "${{is_root}}"

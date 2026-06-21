@@ -216,7 +216,7 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(payload["route"]["final"], "to-foreign")
         self.assertLess(first_direct_route_index, ipv6_index)
         self.assertLess(global_resolve_index, ipv6_index)
-        self.assertEqual(outbounds["to-foreign"]["connect_timeout"], "2s")
+        self.assertNotIn("connect_timeout", outbounds["to-foreign"])
         self.assertFalse(any(rule.get("outbound") == "blocked" and "ip_cidr" in rule for rule in route_rules))
 
     def test_ru_server_allows_configurable_sniff_timeout(self) -> None:

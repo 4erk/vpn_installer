@@ -71,6 +71,12 @@ class RemoteTests(unittest.TestCase):
         self.assertIn('--connect-timeout "${connect_timeout}" --max-time "${max_time}"', script)
         self.assertNotIn("--connect-timeout 6 --max-time 10", script)
 
+    def test_preflight_log_grouping_does_not_fail_on_pipe_sigpipe(self) -> None:
+        script = preflight_script("wg0")
+        self.assertIn("set -euo pipefail", script)
+        self.assertIn("set +o pipefail", script)
+        self.assertIn("set -o pipefail\n\nprintf 'login_user=%s", script)
+
     def test_password_mode_forces_python_backend(self) -> None:
         target = RemoteTarget(role=ROLE_RU, auth_mode="password")
         self.assertTrue(use_python_ssh_backend(target))
