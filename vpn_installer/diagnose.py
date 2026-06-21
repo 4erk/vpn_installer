@@ -153,6 +153,38 @@ journalctl -u vpn-stack-health.service --since '-6 hours' --no-pager 2>/dev/null
 section recent_guard_logs
 journalctl -u vpn-stack-guard.service --since '-6 hours' --no-pager 2>/dev/null | tail -n 120 || true
 
+section recent_xray_grouped
+if [[ "${{role}}" == "ru-gateway" ]]; then
+  xray_log="$(journalctl -u vpn-stack-xray.service --since '-30 minutes' --no-pager -o cat 2>/dev/null | sed -r 's/\\x1B\\[[0-9;]*[mK]//g' || true)"
+  printf 'window_minutes=30\n'
+  printf 'accepted=%s\n' "$(grep -c 'accepted tcp:' <<<"${{xray_log}}" || true)"
+  printf 'errors=%s\n' "$(grep -Eic 'error|failed|timeout|refused|reset|invalid|EOF|panic|fatal|denied|processed invalid connection' <<<"${{xray_log}}" || true)"
+  printf 'invalid_reality=%s\n' "$(grep -c 'REALITY: processed invalid connection' <<<"${{xray_log}}" || true)"
+  printf 'ipv6_literals=%s\n' "$(grep -Ec 'accepted tcp:\\[[0-9A-Fa-f:.]+\\]:' <<<"${{xray_log}}" || true)"
+  printf 'sources='
+  printf '%s\n' "${{xray_log}}" |
+    sed -n 's/.*from \\([^: ]*\\):[0-9][0-9]* accepted tcp:.*/\\1/p; s/.*REALITY: processed invalid connection from \\([^: ]*\\):.*/\\1/p' |
+    sort | uniq -c | sort -nr | head -n 12 |
+    awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
+  printf '\naccepted_destinations='
+  printf '%s\n' "${{xray_log}}" |
+    sed -n 's/.*accepted tcp:\\([^ ]*\\).*/\\1/p' |
+    sort | uniq -c | sort -nr | head -n 12 |
+    awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
+  printf '\nipv6_literal_destinations='
+  printf '%s\n' "${{xray_log}}" |
+    sed -n 's/.*accepted tcp:\\(\\[[0-9A-Fa-f:.]*\\]:[0-9][0-9]*\\).*/\\1/p' |
+    sort | uniq -c | sort -nr | head -n 12 |
+    awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
+  printf '\nlast_error_sample='
+  printf '%s\n' "${{xray_log}}" |
+    (grep -Ei 'error|failed|timeout|refused|reset|invalid|EOF|panic|fatal|denied|processed invalid connection' || true) |
+    tail -n1 |
+    tr -d '\r' |
+    cut -c1-240
+  printf '\n'
+fi
+
 section recent_singbox_grouped
 if [[ "${{role}}" == "ru-gateway" ]]; then
   singbox_log="$(journalctl -u sing-box --since '-30 minutes' --no-pager -o cat 2>/dev/null | sed -r 's/\\x1B\\[[0-9;]*[mK]//g' || true)"
@@ -184,6 +216,11 @@ if [[ "${{role}}" == "ru-gateway" ]]; then
   printf '\ndirect_ru_destinations='
   printf '%s\n' "${{singbox_log}}" |
     sed -n 's/.*outbound\\/direct\\[direct-ru\\]: outbound connection to \\([^ ]*\\).*/\\1/p' |
+    sort | uniq -c | sort -nr | head -n 12 |
+    awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
+  printf '\ntimeout_destinations='
+  printf '%s\n' "${{singbox_log}}" |
+    sed -n 's/.*open connection to \\([^ ]*\\) using outbound\\/direct\\[[^]]*\\].*/\\1/p; s/.*lookup failed for \\([^: ]*\\):.*/\\1/p' |
     sort | uniq -c | sort -nr | head -n 12 |
     awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
   printf '\nipv6_literal_destinations='

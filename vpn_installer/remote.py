@@ -534,19 +534,79 @@ singbox_recent_to_foreign_count="0"
 singbox_recent_direct_ru_count="0"
 singbox_recent_to_foreign_destinations=""
 singbox_recent_direct_ru_destinations=""
+singbox_recent_timeout_destinations=""
 singbox_recent_ipv6_literal_count="0"
 singbox_recent_ipv6_literal_destinations=""
 singbox_recent_mux_sources=""
 singbox_recent_inbound_destinations=""
 singbox_recent_error_sample=""
+xray_log_window_minutes="30"
+xray_recent_error_count="0"
+xray_recent_invalid_reality_count="0"
+xray_recent_accepted_count="0"
+xray_recent_sources=""
+xray_recent_accepted_destinations=""
+xray_recent_ipv6_literal_count="0"
+xray_recent_ipv6_literal_destinations=""
+xray_recent_error_sample=""
 
 if [[ "${{role}}" == "ru-gateway" ]] && command -v journalctl >/dev/null 2>&1; then
+  xray_recent_log="$(journalctl -u vpn-stack-xray.service --since "-${{xray_log_window_minutes}} minutes" --no-pager -o cat 2>/dev/null | sed -r 's/\\x1B\\[[0-9;]*[mK]//g' || true)"
+  if [[ -n "${{xray_recent_log}}" ]]; then
+    xray_recent_error_count="$(grep -Eic 'error|failed|timeout|refused|reset|invalid|EOF|panic|fatal|denied|processed invalid connection' <<<"${{xray_recent_log}}" || true)"
+    xray_recent_invalid_reality_count="$(grep -c 'REALITY: processed invalid connection' <<<"${{xray_recent_log}}" || true)"
+    xray_recent_accepted_count="$(grep -c 'accepted tcp:' <<<"${{xray_recent_log}}" || true)"
+    xray_recent_sources="$(
+      printf '%s\n' "${{xray_recent_log}}" |
+        sed -n 's/.*from \\([^: ]*\\):[0-9][0-9]* accepted tcp:.*/\\1/p; s/.*REALITY: processed invalid connection from \\([^: ]*\\):.*/\\1/p' |
+        sort |
+        uniq -c |
+        sort -nr |
+        head -n 8 |
+        awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
+    )"
+    xray_recent_accepted_destinations="$(
+      printf '%s\n' "${{xray_recent_log}}" |
+        sed -n 's/.*accepted tcp:\\([^ ]*\\).*/\\1/p' |
+        sort |
+        uniq -c |
+        sort -nr |
+        head -n 12 |
+        awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
+    )"
+    xray_recent_ipv6_literal_count="$(grep -Ec 'accepted tcp:\\[[0-9A-Fa-f:.]+\\]:' <<<"${{xray_recent_log}}" || true)"
+    xray_recent_ipv6_literal_destinations="$(
+      printf '%s\n' "${{xray_recent_log}}" |
+        sed -n 's/.*accepted tcp:\\(\\[[0-9A-Fa-f:.]*\\]:[0-9][0-9]*\\).*/\\1/p' |
+        sort |
+        uniq -c |
+        sort -nr |
+        head -n 12 |
+        awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
+    )"
+    xray_recent_error_sample="$(
+      printf '%s\n' "${{xray_recent_log}}" |
+        (grep -Ei 'error|failed|timeout|refused|reset|invalid|EOF|panic|fatal|denied|processed invalid connection' || true) |
+        tail -n1 |
+        tr -d '\r' |
+        cut -c1-240
+    )"
+  fi
   singbox_recent_timeouts="$(journalctl -u sing-box --since '4 hours ago' --no-pager 2>/dev/null | grep -E 'i/o timeout|lookup failed|context deadline exceeded' || true)"
   if [[ -n "${{singbox_recent_timeouts}}" ]]; then
     singbox_to_foreign_timeout_count="$(grep -c 'outbound/direct\\[to-foreign\\].*i/o timeout' <<<"${{singbox_recent_timeouts}}" || true)"
     singbox_direct_ru_timeout_count="$(grep -c 'outbound/direct\\[direct-ru\\].*i/o timeout' <<<"${{singbox_recent_timeouts}}" || true)"
     singbox_dns_timeout_count="$(grep -c 'dns: lookup failed' <<<"${{singbox_recent_timeouts}}" || true)"
     singbox_recent_timeout_sample="$(tail -n1 <<<"${{singbox_recent_timeouts}}" | tr -d '\\r' | cut -c1-240)"
+    singbox_recent_timeout_destinations="$(
+      printf '%s\n' "${{singbox_recent_timeouts}}" |
+        sed -n 's/.*open connection to \\([^ ]*\\) using outbound\\/direct\\[[^]]*\\].*/\\1/p; s/.*lookup failed for \\([^: ]*\\):.*/\\1/p' |
+        sort |
+        uniq -c |
+        sort -nr |
+        head -n 12 |
+        awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
+    )"
   fi
   singbox_recent_log="$(journalctl -u sing-box --since "-${{singbox_log_window_minutes}} minutes" --no-pager -o cat 2>/dev/null | sed -r 's/\\x1B\\[[0-9;]*[mK]//g' || true)"
   if [[ -n "${{singbox_recent_log}}" ]]; then
@@ -700,7 +760,7 @@ if command -v wg >/dev/null 2>&1; then
 fi
 
 if [[ "${{installed}}" == "1" && "${{role}}" == "ru-gateway" ]] && command -v journalctl >/dev/null 2>&1; then
-  reality_invalid_lines="$(journalctl -u sing-box --since '-30 minutes' --no-pager 2>/dev/null | grep 'REALITY: processed invalid connection' || true)"
+  reality_invalid_lines="$(journalctl -u vpn-stack-xray.service --since '-30 minutes' --no-pager 2>/dev/null | grep 'REALITY: processed invalid connection' || true)"
   if [[ -n "${{reality_invalid_lines}}" ]]; then
     reality_invalid_recent_count="$(printf '%s\n' "${{reality_invalid_lines}}" | grep -c . || true)"
     reality_invalid_recent_sources="$(
@@ -797,11 +857,21 @@ printf 'singbox_recent_to_foreign_count=%s\\n' "${{singbox_recent_to_foreign_cou
 printf 'singbox_recent_direct_ru_count=%s\\n' "${{singbox_recent_direct_ru_count}}"
 printf 'singbox_recent_to_foreign_destinations=%s\\n' "${{singbox_recent_to_foreign_destinations}}"
 printf 'singbox_recent_direct_ru_destinations=%s\\n' "${{singbox_recent_direct_ru_destinations}}"
+printf 'singbox_recent_timeout_destinations=%s\\n' "${{singbox_recent_timeout_destinations}}"
 printf 'singbox_recent_ipv6_literal_count=%s\\n' "${{singbox_recent_ipv6_literal_count}}"
 printf 'singbox_recent_ipv6_literal_destinations=%s\\n' "${{singbox_recent_ipv6_literal_destinations}}"
 printf 'singbox_recent_mux_sources=%s\\n' "${{singbox_recent_mux_sources}}"
 printf 'singbox_recent_inbound_destinations=%s\\n' "${{singbox_recent_inbound_destinations}}"
 printf 'singbox_recent_error_sample=%s\\n' "${{singbox_recent_error_sample}}"
+printf 'xray_log_window_minutes=%s\\n' "${{xray_log_window_minutes}}"
+printf 'xray_recent_error_count=%s\\n' "${{xray_recent_error_count}}"
+printf 'xray_recent_invalid_reality_count=%s\\n' "${{xray_recent_invalid_reality_count}}"
+printf 'xray_recent_accepted_count=%s\\n' "${{xray_recent_accepted_count}}"
+printf 'xray_recent_sources=%s\\n' "${{xray_recent_sources}}"
+printf 'xray_recent_accepted_destinations=%s\\n' "${{xray_recent_accepted_destinations}}"
+printf 'xray_recent_ipv6_literal_count=%s\\n' "${{xray_recent_ipv6_literal_count}}"
+printf 'xray_recent_ipv6_literal_destinations=%s\\n' "${{xray_recent_ipv6_literal_destinations}}"
+printf 'xray_recent_error_sample=%s\\n' "${{xray_recent_error_sample}}"
 printf 'guard_last_run=%s\\n' "${{guard_last_run}}"
 printf 'guard_ssh_blocked_count=%s\\n' "${{guard_ssh_blocked_count}}"
 printf 'guard_reality_blocked_count=%s\\n' "${{guard_reality_blocked_count}}"
@@ -906,7 +976,32 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
         print(f"sing-box to-foreign timeouts / 4h: {preflight.get('singbox_to_foreign_timeout_count', '0')}")
         print(f"sing-box direct-ru timeouts / 4h: {preflight.get('singbox_direct_ru_timeout_count', '0')}")
         print(f"sing-box DNS timeouts / 4h: {preflight.get('singbox_dns_timeout_count', '0')}")
+        if preflight.get("singbox_recent_timeout_destinations"):
+            print(f"sing-box timeout destinations / 4h: {preflight.get('singbox_recent_timeout_destinations')}")
         print(f"sing-box last timeout sample: {preflight.get('singbox_recent_timeout_sample', '-')}")
+    xray_keys = (
+        "xray_recent_error_count",
+        "xray_recent_invalid_reality_count",
+        "xray_recent_accepted_count",
+        "xray_recent_ipv6_literal_count",
+    )
+    if any(preflight.get(key) not in {"", None, "0"} for key in xray_keys):
+        print(f"Xray front recent window (min): {preflight.get('xray_log_window_minutes', '-')}")
+        print(
+            "Xray front recent: "
+            f"accepted={preflight.get('xray_recent_accepted_count', '0')}, "
+            f"errors={preflight.get('xray_recent_error_count', '0')}, "
+            f"invalid_reality={preflight.get('xray_recent_invalid_reality_count', '0')}, "
+            f"ipv6_literals={preflight.get('xray_recent_ipv6_literal_count', '0')}"
+        )
+        if preflight.get("xray_recent_sources"):
+            print(f"Xray front recent sources: {preflight.get('xray_recent_sources')}")
+        if preflight.get("xray_recent_accepted_destinations"):
+            print(f"Xray front recent destinations: {preflight.get('xray_recent_accepted_destinations')}")
+        if preflight.get("xray_recent_ipv6_literal_destinations"):
+            print(f"Xray front recent IPv6 literal destinations: {preflight.get('xray_recent_ipv6_literal_destinations')}")
+        if preflight.get("xray_recent_error_sample"):
+            print(f"Xray front recent sample: {preflight.get('xray_recent_error_sample')}")
     recent_singbox_keys = (
         "singbox_recent_blocked_count",
         "singbox_recent_mux_closed_count",

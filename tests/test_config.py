@@ -71,11 +71,13 @@ class ConfigTests(unittest.TestCase):
         env = config.generate_default_env("sample")
         self.assertEqual(env["SING_BOX_LOG_LEVEL"], "info")
         self.assertEqual(env["RU_SNIFF_TIMEOUT"], "1s")
-        self.assertEqual(env["TO_FOREIGN_CONNECT_TIMEOUT"], "")
+        self.assertEqual(env["TO_FOREIGN_CONNECT_TIMEOUT"], "2s")
 
-    def test_merge_env_with_defaults_removes_old_to_foreign_timeout_default(self) -> None:
+    def test_merge_env_with_defaults_migrates_old_to_foreign_timeout_defaults(self) -> None:
         env = config.merge_env_with_defaults({"TO_FOREIGN_CONNECT_TIMEOUT": "1s"}, "sample")
-        self.assertEqual(env["TO_FOREIGN_CONNECT_TIMEOUT"], "")
+        self.assertEqual(env["TO_FOREIGN_CONNECT_TIMEOUT"], "2s")
+        env = config.merge_env_with_defaults({"TO_FOREIGN_CONNECT_TIMEOUT": ""}, "sample")
+        self.assertEqual(env["TO_FOREIGN_CONNECT_TIMEOUT"], "2s")
 
     def test_merge_env_with_defaults_migrates_randomized_fingerprint(self) -> None:
         env = config.merge_env_with_defaults({"UTLS_FINGERPRINT": "randomized"}, "sample")

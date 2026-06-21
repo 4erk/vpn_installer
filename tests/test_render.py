@@ -216,7 +216,7 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(payload["route"]["final"], "to-foreign")
         self.assertLess(first_direct_route_index, ipv6_index)
         self.assertLess(global_resolve_index, ipv6_index)
-        self.assertNotIn("connect_timeout", outbounds["to-foreign"])
+        self.assertEqual(outbounds["to-foreign"]["connect_timeout"], "2s")
         self.assertFalse(any(rule.get("outbound") == "blocked" and "ip_cidr" in rule for rule in route_rules))
 
     def test_ru_server_allows_configurable_sniff_timeout(self) -> None:
@@ -234,10 +234,10 @@ class RenderTests(unittest.TestCase):
 
     def test_ru_server_allows_configurable_to_foreign_connect_timeout(self) -> None:
         env = self.make_env()
-        env["TO_FOREIGN_CONNECT_TIMEOUT"] = "2s"
+        env["TO_FOREIGN_CONNECT_TIMEOUT"] = "3s"
         payload = json.loads(render.render_ru_singbox(env))
         outbounds = {outbound["tag"]: outbound for outbound in payload["outbounds"]}
-        self.assertEqual(outbounds["to-foreign"]["connect_timeout"], "2s")
+        self.assertEqual(outbounds["to-foreign"]["connect_timeout"], "3s")
 
     def test_ru_server_sniffs_before_ip_literal_policy_rules(self) -> None:
         env = self.make_env()

@@ -399,10 +399,20 @@ class RemoteTests(unittest.TestCase):
                     "singbox_recent_direct_ru_count": "12",
                     "singbox_recent_to_foreign_destinations": "20.42.65.94:443=5,8.8.8.8:443=1",
                     "singbox_recent_direct_ru_destinations": "142.251.143.131:80=2",
+                    "singbox_recent_timeout_destinations": "[185.234.59.121]=2,ipv6.msftncsi.com=1",
                     "singbox_recent_ipv6_literal_count": "7",
                     "singbox_recent_ipv6_literal_destinations": "[2400:52e0:1e00::722:1]:443=4,[fdfd::1ad5:632a]:55517=3",
                     "singbox_recent_inbound_destinations": "chatgpt.com:443=2,[2606:4700::6810:5c12]:443=1",
                     "singbox_recent_error_sample": "connection: listen packet connection using outbound/block[blocked]: operation not permitted",
+                    "xray_log_window_minutes": "30",
+                    "xray_recent_error_count": "1",
+                    "xray_recent_invalid_reality_count": "0",
+                    "xray_recent_accepted_count": "55",
+                    "xray_recent_sources": "178.66.131.179=44,213.109.48.231=11",
+                    "xray_recent_accepted_destinations": "chatgpt.com:443=10,8.8.8.8:53=5",
+                    "xray_recent_ipv6_literal_count": "2",
+                    "xray_recent_ipv6_literal_destinations": "[2001:4860:4860::8888]:443=2",
+                    "xray_recent_error_sample": "REALITY: processed invalid connection from 203.0.113.20:12345",
                     "sync_timer": "active",
                 },
             )
@@ -437,7 +447,14 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("sing-box to-foreign timeouts / 4h: 11", output)
         self.assertIn("sing-box direct-ru timeouts / 4h: 2", output)
         self.assertIn("sing-box DNS timeouts / 4h: 1", output)
+        self.assertIn("sing-box timeout destinations / 4h: [185.234.59.121]=2,ipv6.msftncsi.com=1", output)
         self.assertIn("sing-box last timeout sample: connection: open connection to [2001:db8::1]:443", output)
+        self.assertIn("Xray front recent window (min): 30", output)
+        self.assertIn("Xray front recent: accepted=55, errors=1, invalid_reality=0, ipv6_literals=2", output)
+        self.assertIn("Xray front recent sources: 178.66.131.179=44,213.109.48.231=11", output)
+        self.assertIn("Xray front recent destinations: chatgpt.com:443=10,8.8.8.8:53=5", output)
+        self.assertIn("Xray front recent IPv6 literal destinations: [2001:4860:4860::8888]:443=2", output)
+        self.assertIn("Xray front recent sample: REALITY: processed invalid connection from 203.0.113.20:12345", output)
         self.assertIn("sing-box recent window (min): 30", output)
         self.assertIn("sing-box recent grouped errors: blocked=22, mux_closed=36, eof=38, dns_failed=1, timeout=0, invalid_reality=3", output)
         self.assertIn("sing-box recent sources: 91.193.149.187=36,193.46.56.226=2", output)

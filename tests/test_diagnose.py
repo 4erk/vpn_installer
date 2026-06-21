@@ -17,6 +17,10 @@ class DiagnoseTests(unittest.TestCase):
         self.assertIn("curl -4kLsS", script)
         self.assertIn("peer_wg", script)
         self.assertIn("10.74.0.2", script)
+        self.assertIn("section recent_xray_grouped", script)
+        self.assertIn("vpn-stack-xray.service", script)
+        self.assertIn("accepted_destinations=", script)
+        self.assertIn("timeout_destinations=", script)
 
     def test_diagnose_path_writes_reports_for_targets(self) -> None:
         ru = RemoteTarget(role=ROLE_RU, ssh_host="ru.example", ssh_user="root")
