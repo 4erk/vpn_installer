@@ -33,6 +33,7 @@ MERGED_SOURCE_DEFAULT_KEYS = {
     "FOREIGN_RU_IPV4_LIST_URL",
     "FOREIGN_RU_IPV6_LIST_URL",
     "HEALTH_TARGET_PROBE_URLS",
+    "HEALTH_RU_DIRECT_TARGET_PROBE_URLS",
 }
 
 DEPRECATED_ENV_KEYS = {
@@ -80,6 +81,9 @@ REMOTE_ENV_CRITICAL_KEYS = {
     "HEALTH_SELF_HEAL_MAX_ACTIONS_PER_HOUR",
     "HEALTH_SELF_HEAL_CONFIRMATIONS",
     "HEALTH_TARGET_PROBE_URLS",
+    "HEALTH_RU_DIRECT_TARGET_PROBE_URLS",
+    "HEALTH_TARGET_CONNECT_TIMEOUT_SECONDS",
+    "HEALTH_TARGET_MAX_TIME_SECONDS",
     "RU_FORCE_DIRECT_DOMAIN",
     "RU_FORCE_DIRECT_DOMAIN_SUFFIX",
     "RU_FORCE_DIRECT_IP_CIDR",
@@ -284,6 +288,9 @@ def generate_default_env(deploy_name: str) -> dict[str, str]:
         "HEALTH_SELF_HEAL_MAX_ACTIONS_PER_HOUR": "2",
         "HEALTH_SELF_HEAL_CONFIRMATIONS": "2",
         "HEALTH_TARGET_PROBE_URLS": "https://chatgpt.com/ https://discord.com/ https://github.com/ https://www.google.com/generate_204 https://telegram.org/ https://api.telegram.org/ https://t.me/",
+        "HEALTH_RU_DIRECT_TARGET_PROBE_URLS": "https://api.ipify.org/ https://2ip.ru/",
+        "HEALTH_TARGET_CONNECT_TIMEOUT_SECONDS": "2",
+        "HEALTH_TARGET_MAX_TIME_SECONDS": "4",
         "CLIENT_TUN_NAME": "tun0",
         "CLIENT_TUN_ADDRESS_V4": "172.19.0.1/30",
         "CLIENT_TUN_ADDRESS_V6": "fdfe:dcba:9876::1/126",

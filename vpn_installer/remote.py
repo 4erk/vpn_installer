@@ -378,29 +378,45 @@ target_verdict() {{
   fi
 }}
 
+target_probe_needs_body_fallback() {{
+  local code="$1"
+  local exit_code="$2"
+  if [[ "${{exit_code}}" != "0" || "${{code}}" == "000" || -z "${{code}}" || "${{code}}" == "405" ]]; then
+    return 0
+  fi
+  if [[ "${{code}}" =~ ^[23] || "${{code}}" == "401" || "${{code}}" == "403" || "${{code}}" == "404" || "${{code}}" == "421" || "${{code}}" == "429" || "${{code}}" == "451" ]]; then
+    return 1
+  fi
+  return 0
+}}
+
 probe_target_urls() {{
   local bind_iface="$1"
   local urls="$2"
+  local connect_timeout="$3"
+  local max_time="$4"
   local url="" label="" result="" result_tail="" code="" exit_code="" remote_ip="" time_total="" verdict="" joined=""
   if ! command -v curl >/dev/null 2>&1 || [[ -z "${{urls}}" ]]; then
     return 0
   fi
+  if ! [[ "${{connect_timeout}}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then connect_timeout="2"; fi
+  if ! [[ "${{max_time}}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then max_time="4"; fi
   for url in ${{urls}}; do
     label="${{url#*://}}"
     label="${{label%%/*}}"
     if [[ -n "${{bind_iface}}" ]]; then
-      result="$(curl -4kIsS --interface "${{bind_iface}}" --connect-timeout 6 --max-time 10 -o /dev/null -w '%{{http_code}}|%{{exitcode}}|%{{remote_ip}}|%{{time_total}}' "${{url}}" 2>/dev/null || true)"
+      result="$(curl -4kIsS --interface "${{bind_iface}}" --connect-timeout "${{connect_timeout}}" --max-time "${{max_time}}" -o /dev/null -w '%{{http_code}}|%{{exitcode}}|%{{remote_ip}}|%{{time_total}}' "${{url}}" 2>/dev/null || true)"
     else
-      result="$(curl -4kIsS --connect-timeout 6 --max-time 10 -o /dev/null -w '%{{http_code}}|%{{exitcode}}|%{{remote_ip}}|%{{time_total}}' "${{url}}" 2>/dev/null || true)"
+      result="$(curl -4kIsS --connect-timeout "${{connect_timeout}}" --max-time "${{max_time}}" -o /dev/null -w '%{{http_code}}|%{{exitcode}}|%{{remote_ip}}|%{{time_total}}' "${{url}}" 2>/dev/null || true)"
     fi
     code="${{result%%|*}}"
     result_tail="${{result#*|}}"
     exit_code="${{result_tail%%|*}}"
-    if [[ -z "${{result}}" || "${{code}}" == "000" || "${{exit_code}}" != "0" || "${{code}}" == "405" ]]; then
+    if target_probe_needs_body_fallback "${{code}}" "${{exit_code}}"; then
       if [[ -n "${{bind_iface}}" ]]; then
-        result="$(curl -4kLsS --range 0-0 --interface "${{bind_iface}}" --connect-timeout 6 --max-time 10 -o /dev/null -w '%{{http_code}}|%{{exitcode}}|%{{remote_ip}}|%{{time_total}}' "${{url}}" 2>/dev/null || printf '000|curl_failed||0')"
+        result="$(curl -4kLsS --range 0-0 --interface "${{bind_iface}}" --connect-timeout "${{connect_timeout}}" --max-time "${{max_time}}" -o /dev/null -w '%{{http_code}}|%{{exitcode}}|%{{remote_ip}}|%{{time_total}}' "${{url}}" 2>/dev/null || printf '000|curl_failed||0')"
       else
-        result="$(curl -4kLsS --range 0-0 --connect-timeout 6 --max-time 10 -o /dev/null -w '%{{http_code}}|%{{exitcode}}|%{{remote_ip}}|%{{time_total}}' "${{url}}" 2>/dev/null || printf '000|curl_failed||0')"
+        result="$(curl -4kLsS --range 0-0 --connect-timeout "${{connect_timeout}}" --max-time "${{max_time}}" -o /dev/null -w '%{{http_code}}|%{{exitcode}}|%{{remote_ip}}|%{{time_total}}' "${{url}}" 2>/dev/null || printf '000|curl_failed||0')"
       fi
     fi
     code="${{result%%|*}}"
@@ -472,6 +488,14 @@ target_probe_urls="$(env_value HEALTH_TARGET_PROBE_URLS)"
 if [[ -z "${{target_probe_urls}}" ]]; then
   target_probe_urls="https://chatgpt.com/ https://discord.com/ https://github.com/ https://www.google.com/generate_204"
 fi
+ru_direct_target_probe_urls="$(env_value HEALTH_RU_DIRECT_TARGET_PROBE_URLS)"
+if [[ -z "${{ru_direct_target_probe_urls}}" ]]; then
+  ru_direct_target_probe_urls="https://api.ipify.org/ https://2ip.ru/"
+fi
+target_probe_connect_timeout="$(env_value HEALTH_TARGET_CONNECT_TIMEOUT_SECONDS)"
+if [[ -z "${{target_probe_connect_timeout}}" ]]; then target_probe_connect_timeout="2"; fi
+target_probe_max_time="$(env_value HEALTH_TARGET_MAX_TIME_SECONDS)"
+if [[ -z "${{target_probe_max_time}}" ]]; then target_probe_max_time="4"; fi
 throughput_url="${{throughput_urls%% *}}"
 if [[ -z "${{throughput_url}}" ]]; then throughput_url="https://cachefly.cachefly.net/1mb.test"; fi
 ssh_port="$(env_value SSH_PORT)"
@@ -737,13 +761,16 @@ if [[ "${{role}}" == "ru-gateway" ]] && ip link show dev {wg_interface} >/dev/nu
   wg_observed_ipv4="$(curl -4fsS --interface {wg_interface} --max-time 8 https://api.ipify.org 2>/dev/null || true)"
 fi
 
-if [[ "${{installed}}" == "1" ]]; then
+if [[ "${{installed}}" == "1" && "${{role}}" == "foreign-exit" ]]; then
   direct_download_bps="$(probe_download_bps "" "${{throughput_url}}")"
-  target_probe_direct="$(probe_target_urls "" "${{target_probe_urls}}")"
+  target_probe_direct="$(probe_target_urls "" "${{target_probe_urls}}" "${{target_probe_connect_timeout}}" "${{target_probe_max_time}}")"
+elif [[ "${{installed}}" == "1" && "${{role}}" == "ru-gateway" ]]; then
+  direct_download_bps="$(probe_download_bps "" "${{throughput_url}}")"
+  target_probe_direct="$(probe_target_urls "" "${{ru_direct_target_probe_urls}}" "${{target_probe_connect_timeout}}" "${{target_probe_max_time}}")"
 fi
 if [[ "${{installed}}" == "1" && "${{role}}" == "ru-gateway" ]] && ip link show dev {wg_interface} >/dev/null 2>&1; then
   wg_download_bps="$(probe_download_bps "{wg_interface}" "${{throughput_url}}")"
-  target_probe_wg="$(probe_target_urls "{wg_interface}" "${{target_probe_urls}}")"
+  target_probe_wg="$(probe_target_urls "{wg_interface}" "${{target_probe_urls}}" "${{target_probe_connect_timeout}}" "${{target_probe_max_time}}")"
 fi
 
 if command -v wg >/dev/null 2>&1; then
@@ -810,6 +837,9 @@ printf 'nft_ssh_drop_packets=%s\\n' "${{nft_ssh_drop_packets}}"
 printf 'nft_vless_accept_packets=%s\\n' "${{nft_vless_accept_packets}}"
 printf 'nft_vless_drop_packets=%s\\n' "${{nft_vless_drop_packets}}"
 printf 'target_probe_urls=%s\\n' "${{target_probe_urls}}"
+printf 'ru_direct_target_probe_urls=%s\\n' "${{ru_direct_target_probe_urls}}"
+printf 'target_probe_connect_timeout_seconds=%s\\n' "${{target_probe_connect_timeout}}"
+printf 'target_probe_max_time_seconds=%s\\n' "${{target_probe_max_time}}"
 printf 'target_probe_direct=%s\\n' "${{target_probe_direct}}"
 printf 'target_probe_wg=%s\\n' "${{target_probe_wg}}"
 printf 'deep_probe_at=%s\\n' "${{deep_probe_at}}"

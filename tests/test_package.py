@@ -55,6 +55,9 @@ class PackageTests(unittest.TestCase):
         self.assertIn('HEALTH_SELF_HEAL_MAX_ACTIONS_PER_HOUR="${HEALTH_SELF_HEAL_MAX_ACTIONS_PER_HOUR:-2}"', install_script)
         self.assertIn('HEALTH_SELF_HEAL_CONFIRMATIONS="${HEALTH_SELF_HEAL_CONFIRMATIONS:-2}"', install_script)
         self.assertIn('HEALTH_TARGET_PROBE_URLS="${HEALTH_TARGET_PROBE_URLS:-https://chatgpt.com/ https://discord.com/ https://github.com/ https://www.google.com/generate_204 https://telegram.org/ https://api.telegram.org/ https://t.me/}"', install_script)
+        self.assertIn('HEALTH_RU_DIRECT_TARGET_PROBE_URLS="${HEALTH_RU_DIRECT_TARGET_PROBE_URLS:-https://api.ipify.org/ https://2ip.ru/}"', install_script)
+        self.assertIn('HEALTH_TARGET_CONNECT_TIMEOUT_SECONDS="${HEALTH_TARGET_CONNECT_TIMEOUT_SECONDS:-2}"', install_script)
+        self.assertIn('HEALTH_TARGET_MAX_TIME_SECONDS="${HEALTH_TARGET_MAX_TIME_SECONDS:-4}"', install_script)
         self.assertIn('RU_BLOCK_IP_CIDR="${RU_BLOCK_IP_CIDR:-}"', install_script)
         self.assertIn('RU_IPV6_POLICY="${RU_IPV6_POLICY:-fast-fail}"', install_script)
         self.assertIn('RU_BLOCK_QUIC="${RU_BLOCK_QUIC:-0}"', install_script)
@@ -124,7 +127,7 @@ class PackageTests(unittest.TestCase):
 
     def test_package_exposes_version_via_getattr(self) -> None:
         package = importlib.import_module("vpn_installer")
-        self.assertEqual(package.__version__, "0.6.1")
+        self.assertEqual(package.__version__, "0.6.2")
         with self.assertRaises(AttributeError):
             package.__getattr__("nope")
 

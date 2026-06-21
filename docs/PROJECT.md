@@ -184,7 +184,8 @@
   - `WireGuard` transfer/handshake summary
   - observed public IPv4 на `зарубежном сервере`
   - observed public IPv4 на `российском сервере` через `wg0`
-  - target probes по `HEALTH_TARGET_PROBE_URLS`: `reachable`, `blocked` или `broken`
+  - target probes по `HEALTH_TARGET_PROBE_URLS` для зарубежного пути: `reachable`, `blocked` или `broken`
+  - отдельные короткие RU-direct probes по `HEALTH_RU_DIRECT_TARGET_PROBE_URLS`, чтобы не проверять глобальные сайты прямым российским каналом
   - итоговый `health verdict`
 
 ### diagnose path

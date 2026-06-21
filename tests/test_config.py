@@ -176,6 +176,10 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(env["CLIENT_ENABLE_IPV6"], "0")
         self.assertEqual(env["GUARD_REALITY_BLOCK_ENABLED"], "0")
         self.assertIn("https://telegram.org/", env["HEALTH_TARGET_PROBE_URLS"])
+        self.assertIn("https://api.ipify.org/", env["HEALTH_RU_DIRECT_TARGET_PROBE_URLS"])
+        self.assertIn("https://2ip.ru/", env["HEALTH_RU_DIRECT_TARGET_PROBE_URLS"])
+        self.assertEqual(env["HEALTH_TARGET_CONNECT_TIMEOUT_SECONDS"], "2")
+        self.assertEqual(env["HEALTH_TARGET_MAX_TIME_SECONDS"], "4")
 
     def test_render_env_roundtrip(self) -> None:
         env = config.generate_default_env("sample")
@@ -249,6 +253,16 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("https://github.com/", probe_sources)
         self.assertIn("https://telegram.org/", probe_sources)
         self.assertEqual(probe_sources.count("https://chatgpt.com/"), 1)
+
+    def test_merge_env_with_defaults_appends_new_ru_direct_health_target_probes(self) -> None:
+        merged = config.merge_env_with_defaults(
+            {"HEALTH_RU_DIRECT_TARGET_PROBE_URLS": "https://api.ipify.org/"},
+            "sample",
+        )
+        probe_sources = config.split_asset_sources(merged["HEALTH_RU_DIRECT_TARGET_PROBE_URLS"])
+        self.assertEqual(probe_sources[0], "https://api.ipify.org/")
+        self.assertIn("https://2ip.ru/", probe_sources)
+        self.assertEqual(probe_sources.count("https://api.ipify.org/"), 1)
 
     def test_apply_ru_direct_overlays_merges_files_with_comments_and_deduplicates(self) -> None:
         env = config.generate_default_env("demo")

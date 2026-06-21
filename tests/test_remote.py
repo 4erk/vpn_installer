@@ -59,6 +59,18 @@ class RemoteTests(unittest.TestCase):
         self.assertNotIn("curl -4kLsS --interface \"${bind_iface}\" --connect-timeout 8 --max-time 20", script)
         self.assertNotIn("curl -4kLsS --connect-timeout 8 --max-time 20", script)
 
+    def test_target_probe_uses_path_specific_lists_and_short_timeouts(self) -> None:
+        script = preflight_script("wg0")
+        self.assertIn('ru_direct_target_probe_urls="$(env_value HEALTH_RU_DIRECT_TARGET_PROBE_URLS)"', script)
+        self.assertIn('target_probe_connect_timeout="$(env_value HEALTH_TARGET_CONNECT_TIMEOUT_SECONDS)"', script)
+        self.assertIn('target_probe_max_time="$(env_value HEALTH_TARGET_MAX_TIME_SECONDS)"', script)
+        self.assertIn('probe_target_urls "" "${target_probe_urls}" "${target_probe_connect_timeout}" "${target_probe_max_time}"', script)
+        self.assertIn('probe_target_urls "" "${ru_direct_target_probe_urls}" "${target_probe_connect_timeout}" "${target_probe_max_time}"', script)
+        self.assertIn('probe_target_urls "wg0" "${target_probe_urls}" "${target_probe_connect_timeout}" "${target_probe_max_time}"', script)
+        self.assertIn("target_probe_needs_body_fallback", script)
+        self.assertIn('--connect-timeout "${connect_timeout}" --max-time "${max_time}"', script)
+        self.assertNotIn("--connect-timeout 6 --max-time 10", script)
+
     def test_password_mode_forces_python_backend(self) -> None:
         target = RemoteTarget(role=ROLE_RU, auth_mode="password")
         self.assertTrue(use_python_ssh_backend(target))
