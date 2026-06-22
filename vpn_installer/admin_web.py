@@ -6,8 +6,10 @@ import hmac
 import json
 import os
 import secrets
+import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
 import ipaddress
@@ -27,9 +29,11 @@ RULES_PATH = admin_apply.RULES_PATH
 APPLY_SCRIPT = Path("/usr/local/lib/vpn-stack/admin_apply.py")
 PBKDF2_ROUNDS = 200_000
 CSRF_TOKEN = secrets.token_urlsafe(32)
+CLIENT_IP_CACHE: dict[str, Any] = {"expires_at": 0.0, "listen_port": None, "ips": set()}
 
 
-def load_env(path: Path = ENV_PATH) -> dict[str, str]:
+def load_env(path: Path | None = None) -> dict[str, str]:
+    path = path or ENV_PATH
     env: dict[str, str] = {}
     if not path.exists():
         return env
@@ -115,8 +119,136 @@ def assert_safe_bind(env: dict[str, str]) -> None:
     if AUTH_PATH.exists():
         auth = json.loads(AUTH_PATH.read_text(encoding="utf-8"))
         default_credentials = hmac.compare_digest(str(auth.get("username", "")), "user") and verify_password("password", auth.get("password", {}))
-    if default_credentials:
+    client_match_enabled = env.get("ADMIN_WEB_ACTIVE_CLIENT_REQUIRED", "1").strip().lower() in {"1", "true", "yes", "on"}
+    allow_wg = env.get("ADMIN_WEB_ALLOW_WG", "0").strip().lower() in {"1", "true", "yes", "on"}
+    allowed_cidr = env.get("ADMIN_WEB_ALLOWED_CIDR", "").strip()
+    if default_credentials and not (client_match_enabled and not allow_wg and not allowed_cidr):
         raise RuntimeError("ADMIN_WEB_BIND is public but admin credentials are still user/password")
+
+
+def split_endpoint(endpoint: str) -> tuple[str, str]:
+    value = endpoint.strip()
+    if value.startswith("[") and "]:" in value:
+        host, port = value[1:].split("]:", 1)
+        return host, port
+    host, sep, port = value.rpartition(":")
+    if not sep:
+        return "", ""
+    return host, port
+
+
+def parse_established_client_ips(ss_text: str, listen_port: int) -> set[str]:
+    ips: set[str] = set()
+    expected_port = str(listen_port)
+    for line in ss_text.splitlines():
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        local_host, local_port = split_endpoint(parts[-2])
+        peer_host, _peer_port = split_endpoint(parts[-1])
+        if local_port != expected_port:
+            continue
+        try:
+            ip = ipaddress.ip_address(peer_host.strip("[]"))
+        except ValueError:
+            continue
+        if ip.version == 4:
+            ips.add(str(ip))
+    return ips
+
+
+def active_xray_client_ips(listen_port: int) -> set[str]:
+    now = time.monotonic()
+    if CLIENT_IP_CACHE["listen_port"] == listen_port and now < float(CLIENT_IP_CACHE["expires_at"]):
+        return set(CLIENT_IP_CACHE["ips"])
+    try:
+        completed = subprocess.run(
+            ["ss", "-Htn", "state", "established"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except Exception:
+        ips: set[str] = set()
+    else:
+        ips = parse_established_client_ips(completed.stdout, listen_port)
+    CLIENT_IP_CACHE.update({"expires_at": now + 1, "listen_port": listen_port, "ips": set(ips)})
+    return ips
+
+
+def active_client_ip_allowed(client_ip: str, env: dict[str, str]) -> bool:
+    if env.get("ADMIN_WEB_ACTIVE_CLIENT_REQUIRED", "1").strip().lower() not in {"1", "true", "yes", "on"}:
+        return False
+    try:
+        listen_port = int(env.get("RU_LISTEN_PORT", "443") or "443")
+    except ValueError:
+        listen_port = 443
+    return client_ip in active_xray_client_ips(listen_port)
+
+
+def any_active_client(env: dict[str, str]) -> bool:
+    if env.get("ADMIN_WEB_ACTIVE_CLIENT_REQUIRED", "1").strip().lower() not in {"1", "true", "yes", "on"}:
+        return True
+    try:
+        listen_port = int(env.get("RU_LISTEN_PORT", "443") or "443")
+    except ValueError:
+        listen_port = 443
+    return bool(active_xray_client_ips(listen_port))
+
+
+def tunnel_source_allowed(client_ip: str, env: dict[str, str]) -> bool:
+    if env.get("ADMIN_WEB_ALLOW_TUNNEL_CLIENTS", "1").strip().lower() not in {"1", "true", "yes", "on"}:
+        return False
+    try:
+        ip = ipaddress.ip_address(client_ip)
+    except ValueError:
+        return False
+    candidates = [
+        env.get("RU_PUBLIC_IP", ""),
+        env.get("FOREIGN_PUBLIC_IP", ""),
+        env.get("WG_RU_ADDRESS", ""),
+        env.get("WG_FOREIGN_ADDRESS", ""),
+    ]
+    for value in candidates:
+        value = value.strip()
+        if not value:
+            continue
+        try:
+            if ip in ipaddress.ip_network(value, strict=False):
+                return any_active_client(env)
+        except ValueError:
+            continue
+    return False
+
+
+def sync_admin_client_nft_set(env: dict[str, str]) -> None:
+    if env.get("ADMIN_WEB_ACTIVE_CLIENT_REQUIRED", "1").strip().lower() not in {"1", "true", "yes", "on"}:
+        return
+    try:
+        listen_port = int(env.get("RU_LISTEN_PORT", "443") or "443")
+        timeout_seconds = int(env.get("ADMIN_WEB_ACTIVE_CLIENT_TIMEOUT_SECONDS", "5") or "5")
+    except ValueError:
+        listen_port = 443
+        timeout_seconds = 5
+    timeout_seconds = max(2, min(timeout_seconds, 300))
+    for ip in active_xray_client_ips(listen_port):
+        subprocess.run(
+            ["nft", "add", "element", "inet", "vpnstack", "admin_clients_ipv4", f"{{ {ip} timeout {timeout_seconds}s }}"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+        )
+
+
+def sync_admin_client_nft_set_loop() -> None:
+    while True:
+        try:
+            sync_admin_client_nft_set(load_env())
+        except Exception:
+            pass
+        time.sleep(1)
 
 
 def client_ip_allowed(client_ip: str, env: dict[str, str]) -> bool:
@@ -127,6 +259,10 @@ def client_ip_allowed(client_ip: str, env: dict[str, str]) -> bool:
     except ValueError:
         return False
     if ip.is_loopback:
+        return True
+    if active_client_ip_allowed(str(ip), env):
+        return True
+    if tunnel_source_allowed(str(ip), env):
         return True
     allow_wg = env.get("ADMIN_WEB_ALLOW_WG", "0").strip().lower() in {"1", "true", "yes", "on"}
     if allow_wg:
@@ -401,12 +537,21 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: Any) -> None:
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
 
+    def drop_connection(self) -> None:
+        self.close_connection = True
+        try:
+            self.connection.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            self.connection.close()
+        except OSError:
+            pass
+
     def require_auth(self) -> bool:
         env = load_env()
         if not client_ip_allowed(self.client_address[0], env):
-            self.send_response(HTTPStatus.FORBIDDEN)
-            self.end_headers()
-            self.wfile.write("Forbidden\n".encode("utf-8"))
+            self.drop_connection()
             return False
         if check_basic_auth(self.headers.get("Authorization")):
             return True
@@ -531,13 +676,33 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json({"rules": load_rules(), "message": "Правило удалено и конфиг применён."})
 
 
+class StealthAdminServer(ThreadingHTTPServer):
+    def verify_request(self, request: Any, client_address: tuple[Any, ...]) -> bool:
+        env = load_env()
+        client_ip = str(client_address[0]) if client_address else ""
+        allowed = client_ip_allowed(client_ip, env)
+        if not allowed:
+            try:
+                request.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                request.close()
+            except OSError:
+                pass
+        return allowed
+
+
 def serve() -> None:
     env = load_env()
     bind = env.get("ADMIN_WEB_BIND", "127.0.0.1") or "127.0.0.1"
     port = int(env.get("ADMIN_WEB_PORT", "11333") or "11333")
     assert_safe_bind(env)
     init_auth(env.get("ADMIN_WEB_USERNAME", "user") or "user", env.get("ADMIN_WEB_PASSWORD", "password") or "password")
-    ThreadingHTTPServer((bind, port), Handler).serve_forever()
+    if env.get("ADMIN_WEB_ACTIVE_CLIENT_REQUIRED", "1").strip().lower() in {"1", "true", "yes", "on"}:
+        sync_admin_client_nft_set(env)
+        threading.Thread(target=sync_admin_client_nft_set_loop, daemon=True).start()
+    StealthAdminServer((bind, port), Handler).serve_forever()
 
 
 def main(argv: list[str] | None = None) -> int:

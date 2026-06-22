@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import http.client
+import subprocess
 import threading
 import tempfile
 import unittest
@@ -49,13 +51,29 @@ class AdminWebTests(unittest.TestCase):
                 self.assertTrue(admin_web.check_basic_auth(self.basic_header("operator", "secret-password")))
                 self.assertFalse(admin_web.check_basic_auth(self.basic_header("operator", "bad-password")))
 
-    def test_public_bind_rejects_default_credentials(self) -> None:
+    def test_load_auth_initializes_from_env_when_hash_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            env_path = tmp_path / "deployment.env"
+            auth_path = tmp_path / "admin-auth.json"
+            env_path.write_text('ADMIN_WEB_USERNAME="operator"\nADMIN_WEB_PASSWORD="secret-password"\n', encoding="utf-8")
+            with patch.object(admin_web, "ENV_PATH", env_path), patch.object(admin_web, "AUTH_PATH", auth_path):
+                auth = admin_web.load_auth()
+        self.assertEqual(auth["username"], "operator")
+        self.assertTrue(admin_web.verify_password("secret-password", auth["password"]))
+
+    def test_public_bind_allows_default_credentials_only_with_active_client_gate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             auth_path = Path(tmp) / "auth.json"
             with patch.object(admin_web, "AUTH_PATH", auth_path):
                 admin_web.init_auth("user", "password")
+                admin_web.assert_safe_bind({"ADMIN_WEB_BIND": "0.0.0.0"})
                 with self.assertRaises(RuntimeError):
-                    admin_web.assert_safe_bind({"ADMIN_WEB_BIND": "0.0.0.0"})
+                    admin_web.assert_safe_bind({"ADMIN_WEB_BIND": "0.0.0.0", "ADMIN_WEB_ACTIVE_CLIENT_REQUIRED": "0"})
+                with self.assertRaises(RuntimeError):
+                    admin_web.assert_safe_bind({"ADMIN_WEB_BIND": "0.0.0.0", "ADMIN_WEB_ALLOW_WG": "1"})
+                with self.assertRaises(RuntimeError):
+                    admin_web.assert_safe_bind({"ADMIN_WEB_BIND": "0.0.0.0", "ADMIN_WEB_ALLOWED_CIDR": "0.0.0.0/0"})
 
     def test_public_bind_allows_custom_credentials_and_allowed_cidr(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -70,12 +88,141 @@ class AdminWebTests(unittest.TestCase):
     def test_wg_allowlist_accepts_wireguard_peer_ip(self) -> None:
         env = {
             "ADMIN_WEB_BIND": "0.0.0.0",
+            "ADMIN_WEB_ACTIVE_CLIENT_REQUIRED": "0",
             "ADMIN_WEB_ALLOW_WG": "1",
             "WG_RU_ADDRESS": "10.74.0.1/32",
             "WG_FOREIGN_ADDRESS": "10.74.0.2/32",
         }
         self.assertTrue(admin_web.client_ip_allowed("10.74.0.2", env))
         self.assertFalse(admin_web.client_ip_allowed("10.74.0.3", env))
+
+    def test_active_client_parsing_uses_all_current_vpn_peers(self) -> None:
+        sample = "\n".join(
+            [
+                "short",
+                "0 0 94.232.248.35:443 198.51.100.10:53000",
+                "0 0 94.232.248.35:443 203.0.113.20:53001",
+                "0 0 94.232.248.35:11333 203.0.113.30:53002",
+                "0 0 94.232.248.35:443 not-an-ip:53004",
+                "0 0 [::ffff:94.232.248.35]:443 [2001:db8::1]:53003",
+            ]
+        )
+        self.assertEqual(admin_web.parse_established_client_ips(sample, 443), {"198.51.100.10", "203.0.113.20"})
+        self.assertEqual(admin_web.split_endpoint("missing-port"), ("", ""))
+
+    def test_active_client_access_allows_any_current_vpn_peer(self) -> None:
+        env = {"ADMIN_WEB_BIND": "0.0.0.0", "RU_LISTEN_PORT": "443"}
+        with patch.object(admin_web, "active_xray_client_ips", return_value={"198.51.100.10", "203.0.113.20"}):
+            self.assertTrue(admin_web.client_ip_allowed("198.51.100.10", env))
+            self.assertTrue(admin_web.client_ip_allowed("203.0.113.20", env))
+            self.assertFalse(admin_web.client_ip_allowed("203.0.113.21", env))
+
+    def test_active_client_cache_and_fallback_paths(self) -> None:
+        admin_web.CLIENT_IP_CACHE.update({"expires_at": 0.0, "listen_port": None, "ips": set()})
+        completed = subprocess.CompletedProcess(["ss"], 0, stdout="0 0 94.232.248.35:443 198.51.100.10:53000\n", stderr="")
+        with patch("vpn_installer.admin_web.subprocess.run", return_value=completed) as run_mock:
+            self.assertEqual(admin_web.active_xray_client_ips(443), {"198.51.100.10"})
+            self.assertEqual(admin_web.active_xray_client_ips(443), {"198.51.100.10"})
+        run_mock.assert_called_once()
+
+        admin_web.CLIENT_IP_CACHE.update({"expires_at": 0.0, "listen_port": None, "ips": set()})
+        with patch("vpn_installer.admin_web.subprocess.run", side_effect=OSError("no ss")):
+            self.assertEqual(admin_web.active_xray_client_ips(443), set())
+
+    def test_active_client_helpers_handle_disabled_and_bad_ports(self) -> None:
+        with patch.object(admin_web, "active_xray_client_ips", return_value={"198.51.100.10"}) as active_mock:
+            self.assertFalse(admin_web.active_client_ip_allowed("198.51.100.10", {"ADMIN_WEB_ACTIVE_CLIENT_REQUIRED": "0"}))
+            self.assertTrue(admin_web.active_client_ip_allowed("198.51.100.10", {"RU_LISTEN_PORT": "bad"}))
+            self.assertTrue(admin_web.any_active_client({"RU_LISTEN_PORT": "bad"}))
+            self.assertTrue(admin_web.any_active_client({"ADMIN_WEB_ACTIVE_CLIENT_REQUIRED": "0"}))
+        active_mock.assert_any_call(443)
+
+    def test_tunnel_source_requires_at_least_one_active_client(self) -> None:
+        env = {
+            "ADMIN_WEB_BIND": "0.0.0.0",
+            "ADMIN_WEB_ALLOW_TUNNEL_CLIENTS": "1",
+            "RU_PUBLIC_IP": "94.232.248.35",
+            "FOREIGN_PUBLIC_IP": "132.243.21.108",
+            "WG_RU_ADDRESS": "10.74.0.1/32",
+            "WG_FOREIGN_ADDRESS": "10.74.0.2/32",
+        }
+        with patch.object(admin_web, "active_xray_client_ips", return_value=set()):
+            self.assertFalse(admin_web.client_ip_allowed("94.232.248.35", env))
+            self.assertFalse(admin_web.client_ip_allowed("132.243.21.108", env))
+        with patch.object(admin_web, "active_xray_client_ips", return_value={"198.51.100.10"}):
+            self.assertTrue(admin_web.client_ip_allowed("94.232.248.35", env))
+            self.assertTrue(admin_web.client_ip_allowed("132.243.21.108", env))
+        self.assertFalse(admin_web.tunnel_source_allowed("not-an-ip", env))
+        self.assertFalse(admin_web.tunnel_source_allowed("94.232.248.35", {**env, "ADMIN_WEB_ALLOW_TUNNEL_CLIENTS": "0"}))
+        with patch.object(admin_web, "active_xray_client_ips", return_value={"198.51.100.10"}):
+            self.assertFalse(admin_web.tunnel_source_allowed("94.232.248.36", {**env, "RU_PUBLIC_IP": "bad-cidr"}))
+
+    def test_sync_admin_client_nft_set_adds_current_peers_with_timeout(self) -> None:
+        env = {"RU_LISTEN_PORT": "443", "ADMIN_WEB_ACTIVE_CLIENT_TIMEOUT_SECONDS": "5"}
+        with patch.object(admin_web, "active_xray_client_ips", return_value={"198.51.100.10"}), patch("vpn_installer.admin_web.subprocess.run") as run_mock:
+            admin_web.sync_admin_client_nft_set(env)
+        run_mock.assert_called_once()
+        self.assertEqual(
+            run_mock.call_args.args[0],
+            ["nft", "add", "element", "inet", "vpnstack", "admin_clients_ipv4", "{ 198.51.100.10 timeout 5s }"],
+        )
+
+    def test_sync_admin_client_nft_set_handles_disabled_bad_values_and_clamps_timeout(self) -> None:
+        with patch("vpn_installer.admin_web.subprocess.run") as run_mock:
+            admin_web.sync_admin_client_nft_set({"ADMIN_WEB_ACTIVE_CLIENT_REQUIRED": "0"})
+        run_mock.assert_not_called()
+
+        with patch.object(admin_web, "active_xray_client_ips", return_value={"198.51.100.10"}), patch("vpn_installer.admin_web.subprocess.run") as run_mock:
+            admin_web.sync_admin_client_nft_set({"RU_LISTEN_PORT": "bad", "ADMIN_WEB_ACTIVE_CLIENT_TIMEOUT_SECONDS": "1"})
+        self.assertEqual(run_mock.call_args.args[0][-1], "{ 198.51.100.10 timeout 5s }")
+
+    def test_client_ip_allowed_rejects_bad_sources_and_invalid_allowlist_entries(self) -> None:
+        self.assertTrue(admin_web.is_loopback_bind("localhost"))
+        self.assertFalse(admin_web.is_loopback_bind("not-an-ip"))
+        self.assertTrue(admin_web.client_ip_allowed("127.0.0.1", {"ADMIN_WEB_BIND": "0.0.0.0"}))
+        self.assertFalse(admin_web.client_ip_allowed("not-an-ip", {"ADMIN_WEB_BIND": "0.0.0.0"}))
+        env = {
+            "ADMIN_WEB_BIND": "0.0.0.0",
+            "ADMIN_WEB_ACTIVE_CLIENT_REQUIRED": "0",
+            "ADMIN_WEB_ALLOW_WG": "1",
+            "WG_RU_ADDRESS": "",
+            "WG_FOREIGN_ADDRESS": "bad-cidr",
+            "ADMIN_WEB_ALLOWED_CIDR": "bad-cidr 203.0.113.4/32",
+        }
+        self.assertTrue(admin_web.client_ip_allowed("203.0.113.4", env))
+        self.assertFalse(admin_web.client_ip_allowed("203.0.113.5", env))
+
+    def test_load_rules_and_apply_rules_failure_edges(self) -> None:
+        with patch("vpn_installer.admin_web.admin_apply.load_rules", side_effect=ValueError("bad rules")):
+            self.assertEqual(admin_web.load_rules(), [])
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / "admin_apply.py"
+            script.write_text("print('bad')\n", encoding="utf-8")
+            failure = subprocess.CalledProcessError(1, ["python"], output="stdout detail", stderr="")
+            with patch.object(admin_web, "APPLY_SCRIPT", script), patch("vpn_installer.admin_web.subprocess.run", side_effect=failure):
+                self.assertEqual(admin_web.apply_rules(), (False, "stdout detail"))
+
+    def test_stealth_admin_server_closes_disallowed_sources_before_http(self) -> None:
+        class FakeSocket:
+            def __init__(self) -> None:
+                self.shutdown_called = False
+                self.close_called = False
+
+            def shutdown(self, _how: int) -> None:
+                self.shutdown_called = True
+
+            def close(self) -> None:
+                self.close_called = True
+
+        server = object.__new__(admin_web.StealthAdminServer)
+        sock = FakeSocket()
+        with patch("vpn_installer.admin_web.load_env", return_value={"ADMIN_WEB_BIND": "0.0.0.0"}), patch("vpn_installer.admin_web.client_ip_allowed", return_value=False):
+            self.assertFalse(admin_web.StealthAdminServer.verify_request(server, sock, ("198.51.100.10", 12345)))
+        self.assertTrue(sock.shutdown_called)
+        self.assertTrue(sock.close_called)
+
+        with patch("vpn_installer.admin_web.load_env", return_value={"ADMIN_WEB_BIND": "0.0.0.0"}), patch("vpn_installer.admin_web.client_ip_allowed", return_value=True):
+            self.assertTrue(admin_web.StealthAdminServer.verify_request(server, sock, ("198.51.100.10", 12345)))
 
     def test_page_and_settings_escape_untrusted_values(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -129,7 +276,7 @@ class AdminWebTests(unittest.TestCase):
                 created.append(server)
                 return server
 
-            with patch.object(admin_web, "ENV_PATH", env_path), patch.object(admin_web, "AUTH_PATH", auth_path), patch("vpn_installer.admin_web.ThreadingHTTPServer", side_effect=fake_server):
+            with patch.object(admin_web, "ENV_PATH", env_path), patch.object(admin_web, "AUTH_PATH", auth_path), patch("vpn_installer.admin_web.StealthAdminServer", side_effect=fake_server), patch("vpn_installer.admin_web.sync_admin_client_nft_set"), patch("vpn_installer.admin_web.threading.Thread"):
                 self.assertEqual(admin_web.main(["init-auth", "operator", "new-password", "--force"]), 0)
                 self.assertTrue(admin_web.check_basic_auth(self.basic_header("operator", "new-password")))
                 self.assertEqual(admin_web.main([]), 0)
@@ -181,9 +328,8 @@ class AdminWebTests(unittest.TestCase):
 
                 forbidden_request = urllib.request.Request(f"{base_url}/api/routes", headers={"Authorization": auth})
                 with patch("vpn_installer.admin_web.client_ip_allowed", return_value=False):
-                    with self.assertRaises(urllib.error.HTTPError) as forbidden_error:
+                    with self.assertRaises((http.client.RemoteDisconnected, ConnectionResetError, urllib.error.URLError)):
                         urllib.request.urlopen(forbidden_request, timeout=5)
-                self.assertEqual(forbidden_error.exception.code, 403)
 
                 no_csrf_request = urllib.request.Request(
                     f"{base_url}/api/routes",

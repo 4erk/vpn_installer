@@ -59,8 +59,11 @@ class PackageTests(unittest.TestCase):
         self.assertIn('HEALTH_TARGET_CONNECT_TIMEOUT_SECONDS="${HEALTH_TARGET_CONNECT_TIMEOUT_SECONDS:-2}"', install_script)
         self.assertIn('HEALTH_TARGET_MAX_TIME_SECONDS="${HEALTH_TARGET_MAX_TIME_SECONDS:-4}"', install_script)
         self.assertIn('ADMIN_WEB_ENABLED="${ADMIN_WEB_ENABLED:-1}"', install_script)
-        self.assertIn('ADMIN_WEB_BIND="${ADMIN_WEB_BIND:-127.0.0.1}"', install_script)
+        self.assertIn('ADMIN_WEB_BIND="${ADMIN_WEB_BIND:-0.0.0.0}"', install_script)
         self.assertIn('ADMIN_WEB_PORT="${ADMIN_WEB_PORT:-11333}"', install_script)
+        self.assertIn('ADMIN_WEB_ACTIVE_CLIENT_REQUIRED="${ADMIN_WEB_ACTIVE_CLIENT_REQUIRED:-1}"', install_script)
+        self.assertIn('ADMIN_WEB_ACTIVE_CLIENT_TIMEOUT_SECONDS="${ADMIN_WEB_ACTIVE_CLIENT_TIMEOUT_SECONDS:-5}"', install_script)
+        self.assertIn('ADMIN_WEB_ALLOW_TUNNEL_CLIENTS="${ADMIN_WEB_ALLOW_TUNNEL_CLIENTS:-1}"', install_script)
         self.assertIn('ADMIN_WEB_USERNAME="${ADMIN_WEB_USERNAME:-user}"', install_script)
         self.assertIn('ADMIN_WEB_PASSWORD="${ADMIN_WEB_PASSWORD:-password}"', install_script)
         self.assertIn('python3 "${ADMIN_APPLY_SCRIPT_PATH}" --no-restart', install_script)
@@ -134,7 +137,7 @@ class PackageTests(unittest.TestCase):
 
     def test_package_exposes_version_via_getattr(self) -> None:
         package = importlib.import_module("vpn_installer")
-        self.assertEqual(package.__version__, "0.8.0")
+        self.assertEqual(package.__version__, "0.8.1")
         with self.assertRaises(AttributeError):
             package.__getattr__("nope")
 

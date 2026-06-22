@@ -174,26 +174,26 @@ Web admin — это операторский интерфейс на `росс�
 Компоненты:
 
 - `vpn-stack-admin.service` запускает `python3 /usr/local/lib/vpn-stack/admin_web.py`
-- интерфейс слушает `ADMIN_WEB_BIND:ADMIN_WEB_PORT`, по умолчанию `127.0.0.1:11333`
+- интерфейс слушает `ADMIN_WEB_BIND:ADMIN_WEB_PORT`, по умолчанию `0.0.0.0:11333`
 - авторизация: HTTP Basic Auth, hash хранится в `/etc/vpn-stack/admin-auth.json`
 - стартовый доступ: `ADMIN_WEB_USERNAME=user`, `ADMIN_WEB_PASSWORD=password`
 - смена логина/пароля доступна в самом интерфейсе, но только после успешной авторизации
 
-Безопасный операторский доступ:
+Основной операторский доступ:
 
-```bash
-ssh -L 11333:127.0.0.1:11333 root@<ip-российского-сервера>
+```text
+http://<ip-российского-сервера>:11333
 ```
 
-Затем открыть `http://127.0.0.1:11333`.
+Доступ не привязан к одному конкретному пользователю или устройству. Кто сейчас является активным VPN-клиентом российского сервера, тот имеет право открыть админку.
 
-Публичный bind — только явный opt-in:
+Защита:
 
-- `ADMIN_WEB_BIND=0.0.0.0`
-- `ADMIN_WEB_ALLOWED_CIDR=<operator-ip>/32`
-- нестандартные `ADMIN_WEB_USERNAME` и `ADMIN_WEB_PASSWORD`
-
-Если публичный bind включён, но пароль остался дефолтным `user/password`, сервис откажется стартовать. Это сделано намеренно: TLS нет, поэтому нельзя безопасно оставлять дефолтный HTTP Basic Auth в интернете.
+- `ADMIN_WEB_ACTIVE_CLIENT_REQUIRED=1` держит публичный порт закрытым для всех, кроме IP-адресов, у которых сейчас есть established TCP-сессия к `RU_LISTEN_PORT`
+- `vpn-stack-admin.service` регулярно синхронизирует динамический nftables set `admin_clients_ipv4`
+- если доступ идёт через VPN/hairpin и source выглядит как `RU_PUBLIC_IP`, `FOREIGN_PUBLIC_IP` или WireGuard-адрес сервера, `ADMIN_WEB_ALLOW_TUNNEL_CLIENTS=1` разрешает такой вход только пока есть хотя бы один активный VPN-клиент
+- `ADMIN_WEB_ALLOWED_CIDR` и `ADMIN_WEB_ALLOW_WG` остаются аварийными allowlist-ручками и не должны быть основным режимом
+- если `ADMIN_WEB_ACTIVE_CLIENT_REQUIRED=0`, публичный bind с дефолтными `user/password` запрещён
 
 Правила:
 
@@ -202,6 +202,8 @@ ssh -L 11333:127.0.0.1:11333 root@<ip-российского-сервера>
 - тип `cidr`: `203.0.113.0/24`
 - outbound `direct-ru` = через `российский сервер`
 - outbound `to-foreign` = через `зарубежный сервер`
+
+SSH-туннель остаётся запасным способом: `ssh -L 11333:127.0.0.1:11333 root@<ip-российского-сервера>` и затем `http://127.0.0.1:11333`.
 
 Применение:
 

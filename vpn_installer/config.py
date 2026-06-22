@@ -292,8 +292,11 @@ def generate_default_env(deploy_name: str) -> dict[str, str]:
         "HEALTH_TARGET_CONNECT_TIMEOUT_SECONDS": "2",
         "HEALTH_TARGET_MAX_TIME_SECONDS": "4",
         "ADMIN_WEB_ENABLED": "1",
-        "ADMIN_WEB_BIND": "127.0.0.1",
+        "ADMIN_WEB_BIND": "0.0.0.0",
         "ADMIN_WEB_PORT": "11333",
+        "ADMIN_WEB_ACTIVE_CLIENT_REQUIRED": "1",
+        "ADMIN_WEB_ACTIVE_CLIENT_TIMEOUT_SECONDS": "5",
+        "ADMIN_WEB_ALLOW_TUNNEL_CLIENTS": "1",
         "ADMIN_WEB_ALLOWED_CIDR": "",
         "ADMIN_WEB_ALLOW_WG": "0",
         "ADMIN_WEB_USERNAME": "user",
@@ -399,6 +402,13 @@ def merge_env_with_defaults(existing: dict[str, str], deploy_name: str) -> dict[
         merged["RU_SNIFF_TIMEOUT"] = defaults["RU_SNIFF_TIMEOUT"]
     if merged.get("TO_FOREIGN_CONNECT_TIMEOUT") in {"1s", "2s"}:
         merged["TO_FOREIGN_CONNECT_TIMEOUT"] = defaults["TO_FOREIGN_CONNECT_TIMEOUT"]
+    if (
+        existing.get("ADMIN_WEB_BIND") in {"127.0.0.1", "localhost"}
+        and merged.get("ADMIN_WEB_ACTIVE_CLIENT_REQUIRED", "1").strip().lower() in {"1", "true", "yes", "on"}
+        and not existing.get("ADMIN_WEB_ALLOWED_CIDR", "").strip()
+        and existing.get("ADMIN_WEB_ALLOW_WG", "0").strip().lower() in {"", "0", "false", "no", "off"}
+    ):
+        merged["ADMIN_WEB_BIND"] = defaults["ADMIN_WEB_BIND"]
     merged["DEPLOY_NAME"] = deploy_name
     return merged
 

@@ -401,9 +401,16 @@ def render_foreign_nftables(env: dict[str, str], wan_iface: str) -> str:
 
 def render_ru_firewall_nftables(env: dict[str, str]) -> str:
     admin_enabled = env.get("ADMIN_WEB_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
-    admin_port = env.get("ADMIN_WEB_PORT", "11333").strip() or "11333"
+    admin_port = str(env_int(env, "ADMIN_WEB_PORT"))
+    admin_active_client_required = env.get("ADMIN_WEB_ACTIVE_CLIENT_REQUIRED", "1").strip().lower() in {"1", "true", "yes", "on"}
+    admin_allow_tunnel_clients = env.get("ADMIN_WEB_ALLOW_TUNNEL_CLIENTS", "1").strip().lower() in {"1", "true", "yes", "on"}
     admin_allowed_cidrs = env_list(env, "ADMIN_WEB_ALLOWED_CIDR")
     admin_allow_wg = env.get("ADMIN_WEB_ALLOW_WG", "0").strip().lower() in {"1", "true", "yes", "on"}
+    admin_tunnel_sources: list[str] = []
+    for key in ("RU_PUBLIC_IP", "FOREIGN_PUBLIC_IP"):
+        value = env.get(key, "").strip()
+        if value:
+            admin_tunnel_sources.append(value)
     lines = [
         "flush ruleset",
         "",
@@ -412,6 +419,19 @@ def render_ru_firewall_nftables(env: dict[str, str]) -> str:
         "    type ipv4_addr",
         "    flags timeout",
         "  }",
+    ]
+    if admin_enabled and admin_active_client_required:
+        lines.extend(
+            [
+                "",
+                "  set admin_clients_ipv4 {",
+                "    type ipv4_addr",
+                "    flags timeout",
+                "  }",
+            ]
+        )
+    lines.extend(
+        [
         "",
         "  chain input {",
         "    type filter hook input priority 0;",
@@ -423,7 +443,12 @@ def render_ru_firewall_nftables(env: dict[str, str]) -> str:
         "    ip6 nexthdr icmpv6 accept",
         "    ip protocol icmp accept",
         "    ct state established,related accept",
-    ]
+        ]
+    )
+    if admin_enabled and admin_active_client_required:
+        lines.append(f'    ip saddr @admin_clients_ipv4 tcp dport {admin_port} counter accept comment "vpnstack-admin-active-client"')
+    if admin_enabled and admin_active_client_required and admin_allow_tunnel_clients and admin_tunnel_sources:
+        lines.append(f'    ip saddr {{ {", ".join(admin_tunnel_sources)} }} tcp dport {admin_port} counter accept comment "vpnstack-admin-tunnel-client"')
     if admin_enabled and admin_allow_wg:
         lines.append(f'    iifname "{env["WG_INTERFACE"]}" tcp dport {admin_port} counter accept')
     if admin_enabled and admin_allowed_cidrs:

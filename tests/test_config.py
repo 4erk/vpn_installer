@@ -83,6 +83,15 @@ class ConfigTests(unittest.TestCase):
         env = config.merge_env_with_defaults({"TO_FOREIGN_CONNECT_TIMEOUT": "2s"}, "sample")
         self.assertEqual(env["TO_FOREIGN_CONNECT_TIMEOUT"], "")
 
+    def test_merge_env_with_defaults_migrates_legacy_admin_loopback_bind_to_active_client_gate(self) -> None:
+        env = config.merge_env_with_defaults({"ADMIN_WEB_BIND": "127.0.0.1", "ADMIN_WEB_ALLOW_WG": "0", "ADMIN_WEB_ALLOWED_CIDR": ""}, "sample")
+        self.assertEqual(env["ADMIN_WEB_BIND"], "0.0.0.0")
+        self.assertEqual(env["ADMIN_WEB_ACTIVE_CLIENT_REQUIRED"], "1")
+        self.assertEqual(env["ADMIN_WEB_ALLOW_TUNNEL_CLIENTS"], "1")
+
+        explicit_env = config.merge_env_with_defaults({"ADMIN_WEB_BIND": "127.0.0.1", "ADMIN_WEB_ACTIVE_CLIENT_REQUIRED": "0"}, "sample")
+        self.assertEqual(explicit_env["ADMIN_WEB_BIND"], "127.0.0.1")
+
     def test_merge_env_with_defaults_migrates_randomized_fingerprint(self) -> None:
         env = config.merge_env_with_defaults({"UTLS_FINGERPRINT": "randomized"}, "sample")
         self.assertEqual(env["UTLS_FINGERPRINT"], "chrome")

@@ -824,9 +824,24 @@ class RenderTests(unittest.TestCase):
         self.assertNotIn("vless_guard", rules)
         self.assertNotIn(f"tcp dport {env['RU_LISTEN_PORT']} counter drop", rules)
         self.assertNotIn("subscription_guard", rules)
+        self.assertIn("set admin_clients_ipv4", rules)
+        self.assertIn('ip saddr @admin_clients_ipv4 tcp dport 11333 counter accept comment "vpnstack-admin-active-client"', rules)
+        self.assertIn('ip saddr { 203.0.113.10, 198.51.100.20 } tcp dport 11333 counter accept comment "vpnstack-admin-tunnel-client"', rules)
+        self.assertNotIn("tcp dport 11333 counter accept\n", rules)
+
+    def test_render_ru_nftables_opens_admin_web_for_current_vpn_clients_by_default(self) -> None:
+        env = self.make_env()
+        rules = render.render_ru_firewall_nftables(env)
+        self.assertIn("set admin_clients_ipv4", rules)
+        self.assertIn('ip saddr @admin_clients_ipv4 tcp dport 11333 counter accept comment "vpnstack-admin-active-client"', rules)
+
+        env = self.make_env()
+        env["ADMIN_WEB_ACTIVE_CLIENT_REQUIRED"] = "0"
+        rules = render.render_ru_firewall_nftables(env)
+        self.assertNotIn("admin_clients_ipv4", rules)
         self.assertNotIn("tcp dport 11333", rules)
 
-    def test_render_ru_nftables_opens_admin_web_only_when_explicitly_allowed(self) -> None:
+    def test_render_ru_nftables_keeps_explicit_admin_web_allowlists(self) -> None:
         env = self.make_env()
         env["ADMIN_WEB_ALLOWED_CIDR"] = "203.0.113.4/32"
         rules = render.render_ru_firewall_nftables(env)
