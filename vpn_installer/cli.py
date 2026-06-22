@@ -18,12 +18,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     install = subparsers.add_parser("install", help="Интерактивная установка или обновление.")
     install.add_argument("--deployment", help="Имя deployment.")
-    install.set_defaults(func=lambda args: install_workflow(args.deployment))
+    install.add_argument("--non-interactive", action="store_true", help="Не задавать вопросы; брать подключение из state/env.")
+    install.add_argument("--yes", action="store_true", help="Не спрашивать финальное подтверждение.")
+    install.set_defaults(func=lambda args: install_workflow(args.deployment, non_interactive=args.non_interactive, yes=args.yes))
 
     status = subparsers.add_parser("status", help="Проверить состояние серверов без изменений.")
     status.add_argument("--deployment", help="Имя deployment.")
     status.add_argument("--role", choices=["all", ROLE_RU, ROLE_FOREIGN], default="all", help="Какую роль проверять.")
-    status.set_defaults(func=lambda args: status_workflow(args.deployment, args.role))
+    status.add_argument("--non-interactive", action="store_true", help="Не задавать вопросы; брать подключение из state/env.")
+    status.set_defaults(func=lambda args: status_workflow(args.deployment, args.role, non_interactive=args.non_interactive))
 
     client_check = subparsers.add_parser("client-check", help="Проверить локальные маршруты клиента до серверов.")
     client_check.add_argument("--deployment", help="Имя deployment.")
@@ -38,7 +41,9 @@ def build_parser() -> argparse.ArgumentParser:
         sub = subparsers.add_parser(action, help=help_text)
         sub.add_argument("--deployment", help="Имя deployment.")
         sub.add_argument("--role", choices=["all", ROLE_RU, ROLE_FOREIGN], default="all", help="Какую роль затронуть.")
-        sub.set_defaults(func=lambda args, action_name=action: remote_action_workflow(args.deployment, args.role, action_name))
+        sub.add_argument("--non-interactive", action="store_true", help="Не задавать вопросы; брать подключение из state/env.")
+        sub.add_argument("--yes", action="store_true", help="Не спрашивать подтверждение действия.")
+        sub.set_defaults(func=lambda args, action_name=action: remote_action_workflow(args.deployment, args.role, action_name, non_interactive=args.non_interactive, yes=args.yes))
 
     cleanup = subparsers.add_parser("cleanup-local", help="Удалить локальные артефакты deployment.")
     cleanup.add_argument("--deployment", help="Имя deployment.")
@@ -64,7 +69,8 @@ def build_parser() -> argparse.ArgumentParser:
     path.add_argument("--deployment", help="Имя deployment.")
     path.add_argument("--role", choices=["all", ROLE_RU, ROLE_FOREIGN], default="all", help="Какую роль проверять.")
     path.add_argument("--iperf", action="store_true", help="Временно открыть wg0-only iperf smoke и удалить правила после теста.")
-    path.set_defaults(func=lambda args: diagnose_path_workflow(args.deployment, args.role, iperf=args.iperf))
+    path.add_argument("--non-interactive", action="store_true", help="Не задавать вопросы; брать подключение из state/env.")
+    path.set_defaults(func=lambda args: diagnose_path_workflow(args.deployment, args.role, iperf=args.iperf, non_interactive=args.non_interactive))
 
     return parser
 

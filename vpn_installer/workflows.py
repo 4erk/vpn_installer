@@ -38,6 +38,7 @@ from .prompts import (
     select_deployment,
     select_existing_deployment,
     select_role_for_menu,
+    validate_target_settings,
 )
 from .remote import ensure_remote_privilege, fetch_remote_deployment_env, print_preflight, remote_preflight, scp_upload, ssh_stream
 from .client_artifacts import client_artifact_paths, render_client_profiles
@@ -66,6 +67,47 @@ def build_target(role: str, env: dict[str, str], state: dict[str, Any]) -> Remot
         identity_path=str((role_state.get("identity_path") if saved_connection else None) or ""),
         saved_connection=saved_connection,
     )
+
+
+def role_env_prefix(role: str) -> str:
+    return "VPN_RU" if role == ROLE_RU else "VPN_FOREIGN"
+
+
+def apply_env_connection_overrides(target: RemoteTarget) -> RemoteTarget:
+    prefix = role_env_prefix(target.role)
+    public_ip = os.environ.get(f"{prefix}_PUBLIC_IP", "").strip()
+    ssh_host = os.environ.get(f"{prefix}_SSH_HOST", "").strip()
+    ssh_port = os.environ.get(f"{prefix}_SSH_PORT", "").strip()
+    ssh_user = os.environ.get(f"{prefix}_SSH_USER", "").strip()
+    auth_mode = os.environ.get(f"{prefix}_SSH_AUTH_MODE", "").strip()
+    identity_path = os.environ.get(f"{prefix}_SSH_IDENTITY_PATH", "").strip()
+    password = os.environ.get(f"{prefix}_SSH_PASSWORD", "") or os.environ.get("VPN_SSH_PASSWORD", "")
+
+    if public_ip:
+        target.public_ip = public_ip
+    if ssh_host:
+        target.ssh_host = ssh_host
+    if ssh_port:
+        try:
+            target.ssh_port = int(ssh_port)
+        except ValueError as exc:
+            raise AppError(f"{target.label}: некорректный {prefix}_SSH_PORT={ssh_port}") from exc
+    if ssh_user:
+        target.ssh_user = ssh_user
+    if auth_mode:
+        target.auth_mode = auth_mode
+    if identity_path:
+        target.identity_path = identity_path
+    if password:
+        target.auth_mode = "password"
+        target.identity_path = ""
+        target.ssh_password = password
+
+    if target.public_ip and not target.ssh_host:
+        target.ssh_host = target.public_ip
+    if target.public_ip and target.ssh_host and target.ssh_user and target.ssh_port:
+        target.saved_connection = True
+    return target
 
 
 def current_wg_interface(env: dict[str, str]) -> str:
@@ -276,6 +318,12 @@ def deployment_health_snapshot(env: dict[str, str], preflights: dict[str, dict[s
         verdict = "ru_wg_target_degraded"
     elif foreign_target_degraded:
         verdict = "foreign_target_degraded"
+    elif foreign_gateway_ping_loss_pct > max_foreign_internet_ping_loss_pct >= 0:
+        verdict = "foreign_gateway_ping_loss_degraded"
+    elif foreign_ru_ping_loss_pct > max_foreign_ru_ping_loss_pct >= 0:
+        verdict = "foreign_ru_ping_loss_degraded"
+    elif foreign_internet_ping_loss_pct > max_foreign_internet_ping_loss_pct >= 0:
+        verdict = "foreign_internet_ping_loss_degraded"
     elif below_soft_min(foreign_download_bps, min_foreign_download_bps):
         verdict = "foreign_direct_download_degraded"
     elif below_soft_min(ru_wg_download_bps, min_ru_wg_download_bps):
@@ -570,6 +618,46 @@ def verify_target_interactively(
                 force_prompt = True
 
 
+def verify_target_non_interactively(
+    target: RemoteTarget,
+    *,
+    env: dict[str, str],
+    wg_interface: str,
+    require_privilege: bool,
+    validate_os: bool,
+) -> tuple[RemoteTarget, dict[str, str]]:
+    if not target.saved_connection:
+        raise AppError(
+            f"{target.label}: нет полного сохранённого подключения для non-interactive режима. "
+            f"Задай state через обычный запуск или env {role_env_prefix(target.role)}_PUBLIC_IP/{role_env_prefix(target.role)}_SSH_HOST."
+        )
+    validate_target_settings(target)
+    if target.auth_mode == "password" and not target.ssh_password:
+        raise AppError(
+            f"{target.label}: для non-interactive password-входа нужен env "
+            f"{role_env_prefix(target.role)}_SSH_PASSWORD или VPN_SSH_PASSWORD."
+        )
+    print(f"Проверяю подключение к {target.label}: {target.ssh_user}@{target.ssh_host}:{target.ssh_port}")
+    assert_server_route_not_self_tunneled(target, env)
+    preflight = remote_preflight(target, wg_interface)
+    print_preflight(target, preflight)
+    if validate_os:
+        if preflight.get("os_id") != "ubuntu":
+            fail(f"{target.label} должен быть Ubuntu.")
+        if preflight.get("os_version") and preflight["os_version"] != "24.04":
+            warn(f"{target.label} не на Ubuntu 24.04: {preflight['os_version']}")
+    if require_privilege:
+        if preflight.get("is_root") == "1":
+            target.sudo_mode = "root"
+            print(f"{target.label}: удалённый вход уже под root.")
+        elif preflight.get("has_sudo") == "1":
+            target.sudo_mode = "nopasswd"
+            print(f"{target.label}: найден passwordless sudo.")
+        else:
+            raise AppError(f"{target.label}: для non-interactive режима нужен root или passwordless sudo.")
+    return target, preflight
+
+
 def prepare_remote_session(
     deployment_arg: str | None,
     *,
@@ -579,6 +667,7 @@ def prepare_remote_session(
     allow_create: bool = False,
     persist_local: bool = True,
     confirm_existing_connections: bool = True,
+    non_interactive: bool = False,
 ) -> tuple[str, Path, dict[str, str], dict[str, Any], list[RemoteTarget], dict[str, dict[str, str]]]:
     if allow_create or persist_local:
         ensure_directories()
@@ -596,17 +685,26 @@ def prepare_remote_session(
     preflights: dict[str, dict[str, str]] = {}
     wg_interface = current_wg_interface(env)
     for role in roles:
-        target = build_target(role, env, state)
+        target = apply_env_connection_overrides(build_target(role, env, state))
         if target.saved_connection:
             assert_server_route_not_self_tunneled(target, env)
-        target, preflight = verify_target_interactively(
-            target,
-            env=env,
-            wg_interface=wg_interface,
-            require_privilege=require_privilege,
-            validate_os=validate_os,
-            confirm_existing_connection=confirm_existing_connections,
-        )
+        if non_interactive:
+            target, preflight = verify_target_non_interactively(
+                target,
+                env=env,
+                wg_interface=wg_interface,
+                require_privilege=require_privilege,
+                validate_os=validate_os,
+            )
+        else:
+            target, preflight = verify_target_interactively(
+                target,
+                env=env,
+                wg_interface=wg_interface,
+                require_privilege=require_privilege,
+                validate_os=validate_os,
+                confirm_existing_connection=confirm_existing_connections,
+            )
         targets.append(target)
         preflights[role] = preflight
     update_env_with_targets(env, targets)
@@ -828,7 +926,7 @@ def run_selected_remote_action(
             print_preflight(target, remote_preflight(target, wg_interface))
 
 
-def install_workflow(deployment: str | None) -> int:
+def install_workflow(deployment: str | None, *, non_interactive: bool = False, yes: bool = False) -> int:
     print_header("Установка / обновление VPN")
     print("Сценарий:")
     print("1. Выбор или создание deployment")
@@ -843,20 +941,21 @@ def install_workflow(deployment: str | None) -> int:
         require_privilege=True,
         allow_create=True,
         persist_local=True,
-        confirm_existing_connections=True,
+        confirm_existing_connections=not non_interactive,
+        non_interactive=non_interactive,
     )
     ensure_foreign_wan_interface(env, preflights[ROLE_FOREIGN])
     write_text(env_path, render_env_text(env))
     write_state(deployment_name, targets, existing_state=state)
     print_summary(deployment_name, env, targets)
     actions = {
-        ROLE_RU: ask_install_action(ROLE_RU, deployment_name, preflights[ROLE_RU]),
-        ROLE_FOREIGN: ask_install_action(ROLE_FOREIGN, deployment_name, preflights[ROLE_FOREIGN]),
+        ROLE_RU: ("reinstall" if preflights[ROLE_RU].get("installed") == "1" else "install") if non_interactive else ask_install_action(ROLE_RU, deployment_name, preflights[ROLE_RU]),
+        ROLE_FOREIGN: ("reinstall" if preflights[ROLE_FOREIGN].get("installed") == "1" else "install") if non_interactive else ask_install_action(ROLE_FOREIGN, deployment_name, preflights[ROLE_FOREIGN]),
     }
     if all(action == "skip" for action in actions.values()):
         print("Обе роли пропущены.")
         return 0
-    if not prompt_yes_no("Продолжить установку / обновление?", default=True):
+    if not yes and not prompt_yes_no("Продолжить установку / обновление?", default=True):
         print("Остановлено пользователем.")
         return 0
     total_steps = 1 + 2 * sum(1 for action in actions.values() if action != "skip")
@@ -882,7 +981,7 @@ def install_workflow(deployment: str | None) -> int:
     return 0
 
 
-def status_workflow(deployment: str | None, role: str) -> int:
+def status_workflow(deployment: str | None, role: str, *, non_interactive: bool = False) -> int:
     roles = requested_roles(role)
     deployment_name, env_path, env, _state, targets, _preflights = prepare_remote_session(
         deployment,
@@ -892,6 +991,7 @@ def status_workflow(deployment: str | None, role: str) -> int:
         allow_create=False,
         persist_local=False,
         confirm_existing_connections=False,
+        non_interactive=non_interactive,
     )
     print_summary(deployment_name, env, targets)
     if set(roles) == {ROLE_RU, ROLE_FOREIGN} and {target.role for target in targets} == {ROLE_RU, ROLE_FOREIGN}:
@@ -900,7 +1000,7 @@ def status_workflow(deployment: str | None, role: str) -> int:
     return 0
 
 
-def remote_action_workflow(deployment: str | None, role: str, action: str) -> int:
+def remote_action_workflow(deployment: str | None, role: str, action: str, *, non_interactive: bool = False, yes: bool = False) -> int:
     roles = requested_roles(role)
     deployment_name, env_path, env, state, targets, preflights = prepare_remote_session(
         deployment,
@@ -908,7 +1008,8 @@ def remote_action_workflow(deployment: str | None, role: str, action: str) -> in
         require_privilege=True,
         allow_create=False,
         persist_local=True,
-        confirm_existing_connections=True,
+        confirm_existing_connections=not non_interactive,
+        non_interactive=non_interactive,
     )
     if action in {"install", "reinstall"} and ROLE_FOREIGN in roles:
         ensure_foreign_wan_interface(env, preflights[ROLE_FOREIGN])
@@ -920,7 +1021,7 @@ def remote_action_workflow(deployment: str | None, role: str, action: str) -> in
         print_header("Готово")
         print("Подходящих серверов для действия не найдено.")
         return 0
-    if not prompt_yes_no(f"Продолжить действие {action}?", default=False):
+    if not yes and not prompt_yes_no(f"Продолжить действие {action}?", default=False):
         print("Остановлено пользователем.")
         return 0
     run_selected_remote_action(action, deployment_name, env_path, env, targets, role_arg=role)

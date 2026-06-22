@@ -677,6 +677,7 @@ class RenderTests(unittest.TestCase):
         self.assertIn('HEALTH_THROUGHPUT_URLS="https://cachefly.cachefly.net/1mb.test https://proof.ovh.net/files/1Mb.dat"', script)
         self.assertIn('HEALTH_STATE_PATH="/var/lib/vpn-stack/health-state.env"', script)
         self.assertIn("run_deep_probe()", script)
+        self.assertIn('log "deep probe degraded: ${reasons_joined}"', script)
         self.assertIn('last_verdict="$(state_value DEEP_PROBE_VERDICT)"', script)
         self.assertIn('[[ -n "${last_verdict}" && "${last_verdict}" != "ok" ]]', script)
         self.assertIn('DEEP_RU_WG_DOWNLOAD_MIN_BPS=', script)
@@ -698,6 +699,12 @@ class RenderTests(unittest.TestCase):
         self.assertIn('log "handshake age ${age}s exceeds dynamic grace ${HANDSHAKE_EFFECTIVE_GRACE}s, but WireGuard path is alive"', script)
         self.assertNotIn('maybe_self_heal "soft" "${soft_reasons[@]}"', script)
         self.assertIn('maybe_self_heal "hard" "${hard_reasons[@]}"', script)
+        self_heal_key = script.split("self_heal_reason_key() {", 1)[1].split("self_heal_action_for_key()", 1)[0]
+        self.assertIn("wg_handshake_stale=*", self_heal_key)
+        self.assertIn("ru_wg_egress", self_heal_key)
+        self.assertNotIn("ru_wg_download=*", self_heal_key)
+        self.assertNotIn("ru_wg_upload=*", self_heal_key)
+        self.assertNotIn("ru_foreign_ping_loss_fast=*", self_heal_key)
 
     def test_render_health_script_hardens_foreign_runtime(self) -> None:
         env = self.make_env()
@@ -712,11 +719,19 @@ class RenderTests(unittest.TestCase):
         self.assertIn('probe_ping_loss_pct "${RU_PUBLIC_IP}"', script)
         self.assertIn('probe_ping_loss_pct_fast "${RU_PUBLIC_IP}"', script)
         self.assertIn("foreign_ru_ping_loss_fast", script)
+        self.assertIn('reasons+=("foreign_gateway_ping_loss=${gateway_ping_loss}")', script)
+        self.assertIn('reasons+=("foreign_ru_ping_loss=${peer_ping_loss}")', script)
+        self.assertIn('reasons+=("foreign_internet_ping_loss=${internet_ping_loss}")', script)
         self.assertIn('DEEP_FOREIGN_DIRECT_DOWNLOAD_MIN_BPS=', script)
         self.assertIn('DEEP_FOREIGN_RU_PING_LOSS_PCT=', script)
         self.assertIn('probe_http_ipv4 ""', script)
         self.assertIn("detect_default_iface", script)
         self.assertIn('log "latest deep degradation snapshot: ${soft_reasons[*]}"', script)
+        self_heal_key = script.split("self_heal_reason_key() {", 1)[1].split("self_heal_action_for_key()", 1)[0]
+        self.assertNotIn("foreign_direct_download=*", self_heal_key)
+        self.assertNotIn("foreign_direct_upload=*", self_heal_key)
+        self.assertNotIn("foreign_ru_ping_loss=*", self_heal_key)
+        self.assertNotIn("foreign_ru_ping_loss_fast=*", self_heal_key)
 
     @unittest.skipUnless(preferred_bash(), "bash is required for health script syntax test")
     def test_render_health_script_is_bash_valid_for_both_roles(self) -> None:

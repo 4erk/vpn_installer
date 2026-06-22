@@ -1016,6 +1016,15 @@ def render_health_script(env: dict[str, str], role: str) -> str:
             gateway_ping_loss="$(probe_ping_loss_pct "$(ip route show default 2>/dev/null | awk '/default/ {{print $3; exit}}')")"
             peer_ping_loss="$(probe_ping_loss_pct "${{RU_PUBLIC_IP}}")"
             internet_ping_loss="$(probe_ping_loss_pct "1.1.1.1")"
+            if [[ "${{gateway_ping_loss}}" =~ ^[0-9]+$ && "${{gateway_ping_loss}}" -gt "${{MAX_FOREIGN_INTERNET_PING_LOSS_PCT}}" ]]; then
+              reasons+=("foreign_gateway_ping_loss=${{gateway_ping_loss}}")
+            fi
+            if [[ "${{peer_ping_loss}}" =~ ^[0-9]+$ && "${{peer_ping_loss}}" -gt "${{MAX_FOREIGN_RU_PING_LOSS_PCT}}" ]]; then
+              reasons+=("foreign_ru_ping_loss=${{peer_ping_loss}}")
+            fi
+            if [[ "${{internet_ping_loss}}" =~ ^[0-9]+$ && "${{internet_ping_loss}}" -gt "${{MAX_FOREIGN_INTERNET_PING_LOSS_PCT}}" ]]; then
+              reasons+=("foreign_internet_ping_loss=${{internet_ping_loss}}")
+            fi
             if below_soft_min "${{direct_min}}" "${{MIN_FOREIGN_DIRECT_DOWNLOAD_BPS}}"; then
               reasons+=("foreign_direct_download=${{direct_min}}")
             fi
@@ -1067,6 +1076,7 @@ EOF
           mv "${{HEALTH_STATE_PATH}}.tmp" "${{HEALTH_STATE_PATH}}"
 
           if [[ "${{#reasons[@]}}" -gt 0 ]]; then
+            log "deep probe degraded: ${{reasons_joined}}"
             printf '%s\\n' "${{reasons[@]}}"
           fi
         }}
@@ -1081,12 +1091,12 @@ EOF
                   key="${{key}},ru_wireguard_route"
                 fi
                 ;;
-              wg_handshake_stale=*|ru_wg_egress|foreign_wg_peer_unreachable|foreign_ru_ping_loss=*|foreign_ru_ping_loss_fast=*|ru_foreign_ping_loss_fast=*|ru_wg_download=*|ru_wg_upload=*)
+              wg_handshake_stale=*|ru_wg_egress|foreign_wg_peer_unreachable)
                 if [[ "${{key}}" != *wireguard_path* ]]; then
                   key="${{key}},wireguard_path"
                 fi
                 ;;
-              foreign_direct_egress|foreign_direct_download=*|foreign_direct_upload=*)
+              foreign_direct_egress)
                 if [[ "${{key}}" != *foreign_nftables* ]]; then
                   key="${{key}},foreign_nftables"
                 fi
@@ -1242,10 +1252,16 @@ EOF
             fast_loss="$(probe_ping_loss_pct_fast "${{RU_PUBLIC_IP}}")"
             set_state_value FAST_FOREIGN_RU_PING_LOSS_PCT "${{fast_loss}}"
             set_state_value PROFILE_FAST_PING_LOSS_PCT "${{fast_loss}}"
+            if [[ "${{fast_loss}}" =~ ^[0-9]+$ && "${{fast_loss}}" -gt "${{MAX_FOREIGN_RU_PING_LOSS_PCT}}" ]]; then
+              printf 'foreign_ru_ping_loss_fast=%s\\n' "${{fast_loss}}"
+            fi
           else
             fast_loss="$(probe_ping_loss_pct_fast "${{FOREIGN_PUBLIC_IP}}")"
             set_state_value FAST_RU_FOREIGN_PING_LOSS_PCT "${{fast_loss}}"
             set_state_value PROFILE_FAST_PING_LOSS_PCT "${{fast_loss}}"
+            if [[ "${{fast_loss}}" =~ ^[0-9]+$ && "${{fast_loss}}" -gt "${{MAX_FOREIGN_RU_PING_LOSS_PCT}}" ]]; then
+              printf 'ru_foreign_ping_loss_fast=%s\\n' "${{fast_loss}}"
+            fi
           fi
           if should_run_deep_probe; then
             mapfile -t deep_reasons < <(run_deep_probe)

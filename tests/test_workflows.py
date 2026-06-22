@@ -36,6 +36,28 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(target.public_ip, "203.0.113.10")
         self.assertFalse(target.saved_connection)
 
+    def test_apply_env_connection_overrides_supports_unattended_password_login(self) -> None:
+        target = RemoteTarget(role=ROLE_RU)
+        with patch.dict(
+            "vpn_installer.workflows.os.environ",
+            {
+                "VPN_RU_PUBLIC_IP": "203.0.113.10",
+                "VPN_RU_SSH_HOST": "ssh.example.test",
+                "VPN_RU_SSH_PORT": "2222",
+                "VPN_RU_SSH_USER": "root",
+                "VPN_RU_SSH_PASSWORD": "secret",
+            },
+            clear=False,
+        ):
+            updated = workflows.apply_env_connection_overrides(target)
+        self.assertTrue(updated.saved_connection)
+        self.assertEqual(updated.public_ip, "203.0.113.10")
+        self.assertEqual(updated.ssh_host, "ssh.example.test")
+        self.assertEqual(updated.ssh_port, 2222)
+        self.assertEqual(updated.ssh_user, "root")
+        self.assertEqual(updated.auth_mode, "password")
+        self.assertEqual(updated.ssh_password, "secret")
+
     def test_update_env_with_targets(self) -> None:
         env = {}
         workflows.update_env_with_targets(
@@ -127,6 +149,31 @@ class WorkflowTests(unittest.TestCase):
         self.assertIs(updated, target)
         self.assertEqual(preflight["os_id"], "ubuntu")
         self.assertEqual(target.ssh_password, "")
+
+    def test_verify_target_non_interactively_uses_existing_target_without_prompts(self) -> None:
+        target = RemoteTarget(
+            role=ROLE_RU,
+            public_ip="203.0.113.10",
+            ssh_host="203.0.113.10",
+            ssh_port=22,
+            ssh_user="root",
+            auth_mode="password",
+            ssh_password="secret",
+            saved_connection=True,
+        )
+        with patch("vpn_installer.workflows.assert_server_route_not_self_tunneled") as route_check, patch("vpn_installer.workflows.remote_preflight", return_value={"os_id": "ubuntu", "os_version": "24.04", "is_root": "1"}) as preflight, patch("vpn_installer.workflows.print_preflight"), patch("vpn_installer.workflows.prompt_server_connection") as prompt:
+            updated, result = workflows.verify_target_non_interactively(
+                target,
+                env=generate_default_env("demo"),
+                wg_interface="wg0",
+                require_privilege=True,
+                validate_os=True,
+            )
+        self.assertEqual(updated.sudo_mode, "root")
+        self.assertEqual(result["os_id"], "ubuntu")
+        route_check.assert_called_once()
+        preflight.assert_called_once()
+        prompt.assert_not_called()
 
     def test_verify_target_interactively_checks_remote_privilege(self) -> None:
         target = RemoteTarget(role=ROLE_RU, public_ip="203.0.113.10", ssh_host="203.0.113.10", ssh_port=22, ssh_user="root")
@@ -334,7 +381,7 @@ class WorkflowTests(unittest.TestCase):
                 },
             },
         )
-        self.assertEqual(loss_profile_only["health_verdict"], "ok")
+        self.assertEqual(loss_profile_only["health_verdict"], "foreign_ru_ping_loss_degraded")
         self.assertEqual(loss_profile_only["foreign_ru_ping_loss_pct"], "12")
 
         gateway_loss_profile_only = workflows.deployment_health_snapshot(
@@ -352,7 +399,7 @@ class WorkflowTests(unittest.TestCase):
                 },
             },
         )
-        self.assertEqual(gateway_loss_profile_only["health_verdict"], "ok")
+        self.assertEqual(gateway_loss_profile_only["health_verdict"], "foreign_gateway_ping_loss_degraded")
         self.assertEqual(gateway_loss_profile_only["foreign_gateway_ping_loss_pct"], "12")
 
         partial_target_issue = workflows.deployment_health_snapshot(

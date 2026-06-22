@@ -309,7 +309,7 @@ def _run_iperf_smoke(output_dir: Path, targets: list[RemoteTarget]) -> None:
         _cleanup_iperf_rules(foreign)
 
 
-def diagnose_path_workflow(deployment: str | None, role: str, *, iperf: bool = False) -> int:
+def diagnose_path_workflow(deployment: str | None, role: str, *, iperf: bool = False, non_interactive: bool = False) -> int:
     roles = requested_roles(role)
     deployment_name, _env_path, env, _state, targets, _preflights = prepare_remote_session(
         deployment,
@@ -319,6 +319,7 @@ def diagnose_path_workflow(deployment: str | None, role: str, *, iperf: bool = F
         allow_create=False,
         persist_local=False,
         confirm_existing_connections=False,
+        non_interactive=non_interactive,
     )
     output_dir = _diagnostic_run_dir(deployment_name)
     output_dir.mkdir(parents=True, exist_ok=True)

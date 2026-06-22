@@ -38,6 +38,19 @@ class CliTests(unittest.TestCase):
         args = parser.parse_args(["reinstall", "--deployment", "demo", "--role", "ru-gateway"])
         self.assertEqual(args.role, "ru-gateway")
 
+    def test_reinstall_dispatch_forwards_unattended_flags(self) -> None:
+        with patch("vpn_installer.cli.remote_action_workflow", return_value=0) as mocked:
+            self.assertEqual(
+                cli.main(["reinstall", "--deployment", "demo", "--role", "all", "--non-interactive", "--yes"]),
+                0,
+            )
+        mocked.assert_called_once_with("demo", "all", "reinstall", non_interactive=True, yes=True)
+
+    def test_status_dispatch_forwards_non_interactive(self) -> None:
+        with patch("vpn_installer.cli.status_workflow", return_value=0) as mocked:
+            self.assertEqual(cli.main(["status", "--deployment", "demo", "--role", "all", "--non-interactive"]), 0)
+        mocked.assert_called_once_with("demo", "all", non_interactive=True)
+
     def test_android_diagnose_dispatch(self) -> None:
         with patch("vpn_installer.cli.android_diagnose", return_value=0) as mocked:
             self.assertEqual(cli.main(["android-diagnose", "--serial", "ABC123", "--logcat-lines", "50"]), 0)
@@ -45,8 +58,8 @@ class CliTests(unittest.TestCase):
 
     def test_path_diagnose_dispatch(self) -> None:
         with patch("vpn_installer.cli.diagnose_path_workflow", return_value=0) as mocked:
-            self.assertEqual(cli.main(["diagnose", "path", "--deployment", "demo", "--role", "all", "--iperf"]), 0)
-        mocked.assert_called_once_with("demo", "all", iperf=True)
+            self.assertEqual(cli.main(["diagnose", "path", "--deployment", "demo", "--role", "all", "--iperf", "--non-interactive"]), 0)
+        mocked.assert_called_once_with("demo", "all", iperf=True, non_interactive=True)
 
 
 if __name__ == "__main__":

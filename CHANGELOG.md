@@ -6,6 +6,18 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.7.0] - 2026-06-22
+
+### Added
+
+- Добавлен штатный non-interactive CLI для `install`, `reinstall`, `status` и `diagnose path`: теперь обслуживание можно запускать через `vpn.cmd`/`vpn.sh` без ручных временных скриптов.
+- Добавлены runtime-only env-переменные для SSH-доступа в консольном режиме: `VPN_RU_SSH_PASSWORD`, `VPN_FOREIGN_SSH_PASSWORD`, общий fallback `VPN_SSH_PASSWORD` и role-scoped overrides для host/port/user/auth/key.
+
+### Changed
+
+- Packet loss теперь участвует в итоговом `health verdict`, а не теряется в необработанных числах диагностики.
+- Фоновое самовосстановление больше не перезапускает WireGuard/NAT из-за мягких speed/ping degradation reasons. Такие симптомы логируются и видны в `status/diagnose`, но не запускают restart loop без подтверждённой поломки dataplane.
+
 ## [0.6.5] - 2026-06-21
 
 ### Fixed

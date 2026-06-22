@@ -54,6 +54,18 @@ chmod +x ./vpn.sh
 ./vpn.sh install
 ```
 
+Если нужно переустановить без вопросов из консоли, используй штатный CLI, а не временные скрипты:
+
+```powershell
+$env:VPN_RU_SSH_PASSWORD="пароль-российского-сервера"
+$env:VPN_FOREIGN_SSH_PASSWORD="пароль-зарубежного-сервера"
+$env:VPN_NO_PAUSE="1"
+.\vpn.cmd reinstall --deployment 1 --role all --non-interactive --yes
+.\vpn.cmd status --deployment 1 --role all --non-interactive
+```
+
+Пароли из этих переменных используются только в текущем запуске и не сохраняются в `deployments` или `state`.
+
 ## Что спросит мастер
 
 Сначала всегда проверяется `российский сервер`, потом `зарубежный сервер`.

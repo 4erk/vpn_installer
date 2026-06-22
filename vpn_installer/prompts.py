@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import getpass
+import os
 from typing import Any
 
 from .common import fail, print_header, sanitize_name, warn
@@ -129,6 +130,17 @@ def display_target_connection(target: RemoteTarget) -> None:
 def hydrate_runtime_auth(target: RemoteTarget) -> RemoteTarget:
     target.ssh_password = ""
     if target.auth_mode == "password":
+        env_names = []
+        if target.role == ROLE_RU:
+            env_names.append("VPN_RU_SSH_PASSWORD")
+        elif target.role == ROLE_FOREIGN:
+            env_names.append("VPN_FOREIGN_SSH_PASSWORD")
+        env_names.append("VPN_SSH_PASSWORD")
+        for env_name in env_names:
+            password = os.environ.get(env_name, "")
+            if password:
+                target.ssh_password = password
+                return target
         while True:
             password = prompt_secret(f"{target.label}: SSH пароль")
             if password:

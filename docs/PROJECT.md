@@ -47,6 +47,23 @@
 
 Для Windows пользовательский путь по умолчанию: `vpn.cmd`.
 
+### Консольный режим без вопросов
+
+Для обслуживания без интерактивного меню используются те же entrypoints, что и у обычного пользователя:
+
+- `vpn.cmd install --deployment <name> --non-interactive --yes`
+- `vpn.cmd reinstall --deployment <name> --role all --non-interactive --yes`
+- `vpn.cmd status --deployment <name> --role all --non-interactive`
+- `vpn.cmd diagnose path --deployment <name> --role all --non-interactive`
+
+Role-scoped env overrides:
+
+- `VPN_RU_PUBLIC_IP`, `VPN_RU_SSH_HOST`, `VPN_RU_SSH_PORT`, `VPN_RU_SSH_USER`, `VPN_RU_SSH_AUTH_MODE`, `VPN_RU_SSH_IDENTITY_PATH`, `VPN_RU_SSH_PASSWORD`
+- `VPN_FOREIGN_PUBLIC_IP`, `VPN_FOREIGN_SSH_HOST`, `VPN_FOREIGN_SSH_PORT`, `VPN_FOREIGN_SSH_USER`, `VPN_FOREIGN_SSH_AUTH_MODE`, `VPN_FOREIGN_SSH_IDENTITY_PATH`, `VPN_FOREIGN_SSH_PASSWORD`
+- `VPN_SSH_PASSWORD` — общий fallback, если пароль одинаковый или роль явно не задана
+
+Пароли из env живут только в памяти текущего процесса. В `state/<name>.json` сохраняются только адрес, порт, пользователь, режим входа и путь к ключу.
+
 ## Архитектура
 
 ### Российский сервер
