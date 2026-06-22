@@ -267,6 +267,18 @@ class AdminWebTests(unittest.TestCase):
                 self.assertEqual(message, "bad apply")
                 self.assertEqual(admin_web.load_rules(), old_rules)
 
+    def test_routes_payload_reports_foreign_block_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            env_path = tmp_path / "deployment.env"
+            rules_path = tmp_path / "rules.json"
+            env_path.write_text('FOREIGN_BLOCK_RU="1"\n', encoding="utf-8")
+            rules_path.write_text(json.dumps({"rules": []}), encoding="utf-8")
+            with patch.object(admin_web, "ENV_PATH", env_path), patch.object(admin_web, "RULES_PATH", rules_path):
+                payload = admin_web.routes_payload()
+            self.assertEqual(payload["rules"], [])
+            self.assertTrue(payload["config"]["foreign_block_ru"])
+
     def test_serve_and_main_entrypoints(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -324,6 +336,8 @@ class AdminWebTests(unittest.TestCase):
                 html_request = urllib.request.Request(f"{base_url}/routes", headers={"Authorization": auth})
                 html = urllib.request.urlopen(html_request, timeout=5).read().decode("utf-8")
                 self.assertIn("Новое исключение", html)
+                self.assertIn("foreign-block-warning", html)
+                self.assertIn("Загружаю исключения", html)
 
                 root_request = urllib.request.Request(f"{base_url}/", headers={"Authorization": auth})
                 root_html = urllib.request.urlopen(root_request, timeout=5).read().decode("utf-8")
@@ -339,7 +353,9 @@ class AdminWebTests(unittest.TestCase):
                 self.assertEqual(missing_error.exception.code, 404)
 
                 api_request = urllib.request.Request(f"{base_url}/api/routes", headers={"Authorization": auth})
-                self.assertEqual(json.loads(urllib.request.urlopen(api_request, timeout=5).read().decode("utf-8")), {"rules": []})
+                api_response = json.loads(urllib.request.urlopen(api_request, timeout=5).read().decode("utf-8"))
+                self.assertEqual(api_response["rules"], [])
+                self.assertFalse(api_response["config"]["foreign_block_ru"])
 
                 forbidden_request = urllib.request.Request(f"{base_url}/api/routes", headers={"Authorization": auth})
                 with patch("vpn_installer.admin_web.client_ip_allowed", return_value=False):

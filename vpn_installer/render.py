@@ -59,7 +59,7 @@ def fetch_assets(env: dict[str, str], assets_dir: Path) -> dict[str, Path]:
         "geoip-ru.srs": (split_asset_sources(env["RU_GEOIP_URL"]), assets_dir / "geoip-ru.srs"),
     }
     required_assets = {"geosite-ru.srs", "geoip-ru.srs"}
-    if env.get("FOREIGN_BLOCK_RU", "1") == "1":
+    if env.get("FOREIGN_BLOCK_RU", "0") == "1":
         targets["ru-ipv4.zone"] = (split_asset_sources(env["FOREIGN_RU_IPV4_LIST_URL"]), assets_dir / "ru-ipv4.zone")
         targets["ru-ipv6.zone"] = (split_asset_sources(env["FOREIGN_RU_IPV6_LIST_URL"]), assets_dir / "ru-ipv6.zone")
         required_assets.update({"ru-ipv4.zone", "ru-ipv6.zone"})
@@ -334,52 +334,69 @@ def render_rate_limited_tcp_accept(service_tag: str, port: str, rate: str, burst
 
 
 def render_foreign_nftables(env: dict[str, str], wan_iface: str) -> str:
+    block_ru = env.get("FOREIGN_BLOCK_RU", "0").strip() == "1"
     lines = [
         "flush ruleset",
         "",
         "table inet vpnstack {",
-        "  set ru_ipv4 {",
-        "    type ipv4_addr",
-        "    flags interval",
-        "    auto-merge",
-        "  }",
-        "",
-        "  set ru_ipv6 {",
-        "    type ipv6_addr",
-        "    flags interval",
-        "    auto-merge",
-        "  }",
-        "",
-        "  set abuse_ipv4 {",
-        "    type ipv4_addr",
-        "    flags timeout",
-        "  }",
-        "",
-        "  chain input {",
-        "    type filter hook input priority 0;",
-        "    policy drop;",
-        "",
-        '    iifname "lo" accept',
-        "    ct state invalid drop",
-        '    ip saddr @abuse_ipv4 counter drop comment "vpnstack-abuse-block"',
-        "    ip6 nexthdr icmpv6 accept",
-        "    ip protocol icmp accept",
-        "    ct state established,related accept",
     ]
-    lines.extend(render_rate_limited_tcp_accept("ssh_guard", env["SSH_PORT"], env["SSH_INPUT_RATE"], env["SSH_INPUT_BURST"]))
+    if block_ru:
+        lines.extend(
+            [
+                "  set ru_ipv4 {",
+                "    type ipv4_addr",
+                "    flags interval",
+                "    auto-merge",
+                "  }",
+                "",
+                "  set ru_ipv6 {",
+                "    type ipv6_addr",
+                "    flags interval",
+                "    auto-merge",
+                "  }",
+                "",
+            ]
+        )
     lines.extend(
         [
-            f"    udp dport {env['WG_PORT']} accept",
+            "  set abuse_ipv4 {",
+            "    type ipv4_addr",
+            "    flags timeout",
             "  }",
             "",
-            "  chain forward {",
-            "    type filter hook forward priority 0;",
+            "  chain input {",
+            "    type filter hook input priority 0;",
             "    policy drop;",
             "",
+            '    iifname "lo" accept',
             "    ct state invalid drop",
+            '    ip saddr @abuse_ipv4 counter drop comment "vpnstack-abuse-block"',
+            "    ip6 nexthdr icmpv6 accept",
+            "    ip protocol icmp accept",
             "    ct state established,related accept",
-            f'    iifname "{env["WG_INTERFACE"]}" oifname "{wan_iface}" ip daddr @ru_ipv4 drop',
-            f'    iifname "{env["WG_INTERFACE"]}" oifname "{wan_iface}" ip6 daddr @ru_ipv6 drop',
+        ]
+    )
+    lines.extend(render_rate_limited_tcp_accept("ssh_guard", env["SSH_PORT"], env["SSH_INPUT_RATE"], env["SSH_INPUT_BURST"]))
+    forward_rules = [
+        f"    udp dport {env['WG_PORT']} accept",
+        "  }",
+        "",
+        "  chain forward {",
+        "    type filter hook forward priority 0;",
+        "    policy drop;",
+        "",
+        "    ct state invalid drop",
+        "    ct state established,related accept",
+    ]
+    if block_ru:
+        forward_rules.extend(
+            [
+                f'    iifname "{env["WG_INTERFACE"]}" oifname "{wan_iface}" ip daddr @ru_ipv4 drop',
+                f'    iifname "{env["WG_INTERFACE"]}" oifname "{wan_iface}" ip6 daddr @ru_ipv6 drop',
+            ]
+        )
+    forward_rules.extend(
+        [
             f'    iifname "{env["WG_INTERFACE"]}" oifname "{wan_iface}" accept',
             f'    iifname "{wan_iface}" oifname "{env["WG_INTERFACE"]}" ct state established,related accept',
             "  }",
@@ -401,6 +418,7 @@ def render_foreign_nftables(env: dict[str, str], wan_iface: str) -> str:
             "",
         ]
     )
+    lines.extend(forward_rules)
     return "\n".join(lines)
 
 
@@ -1764,8 +1782,9 @@ def package_bundle(env: dict[str, str]) -> Path:
     shutil.copytree(preview_dir_for_role(out_dir / "preview", ROLE_FOREIGN), foreign_bundle / "rendered", dirs_exist_ok=True)
     for asset_name in ("geosite-ru.srs", "geoip-ru.srs"):
         copy_asset_if_present(assets_dir / asset_name, ru_bundle / "assets" / asset_name)
-    for asset_name in ("ru-ipv4.zone", "ru-ipv6.zone"):
-        copy_asset_if_present(assets_dir / asset_name, foreign_bundle / "assets" / asset_name)
+    if env.get("FOREIGN_BLOCK_RU", "0") == "1":
+        for asset_name in ("ru-ipv4.zone", "ru-ipv6.zone"):
+            copy_asset_if_present(assets_dir / asset_name, foreign_bundle / "assets" / asset_name)
     create_tarball(ru_bundle, bundle_dir / f"{ROLE_RU}.tar.gz")
     create_tarball(foreign_bundle, bundle_dir / f"{ROLE_FOREIGN}.tar.gz")
     return bundle_dir

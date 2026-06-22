@@ -463,6 +463,7 @@ class RenderTests(unittest.TestCase):
 
     def test_fetch_assets_fail_fast_without_cache(self) -> None:
         env = self.make_env()
+        env["FOREIGN_BLOCK_RU"] = "1"
         env["RU_GEOSITE_URL"] = "http://127.0.0.1:9/geosite-ru.srs"
         env["RU_GEOIP_URL"] = "http://127.0.0.1:9/geoip-ru.srs"
         env["FOREIGN_RU_IPV4_LIST_URL"] = "http://127.0.0.1:9/ru-ipv4.zone"
@@ -474,6 +475,7 @@ class RenderTests(unittest.TestCase):
 
     def test_fetch_assets_uses_global_cache_after_source_failures(self) -> None:
         env = self.make_env()
+        env["FOREIGN_BLOCK_RU"] = "1"
         env["RU_GEOSITE_URL"] = "https://cache-fail.example/geosite-ru.srs"
         env["RU_GEOIP_URL"] = "https://cache-fail.example/geoip-ru.srs"
         env["FOREIGN_RU_IPV4_LIST_URL"] = "https://cache-fail.example/ru-ipv4.zone"
@@ -493,6 +495,7 @@ class RenderTests(unittest.TestCase):
 
     def test_fetch_assets_tries_next_source_after_failure(self) -> None:
         env = self.make_env()
+        env["FOREIGN_BLOCK_RU"] = "1"
         env["RU_GEOSITE_URL"] = "https://bad.example/geosite-ru.srs https://good.example/geosite-ru.srs"
         env["RU_GEOIP_URL"] = "https://good.example/geoip-ru.srs"
         env["FOREIGN_RU_IPV4_LIST_URL"] = "https://good.example/ru-ipv4.zone"
@@ -866,6 +869,8 @@ class RenderTests(unittest.TestCase):
         rules = render.render_foreign_nftables(env, "eth0")
         self.assertIn("ct state invalid drop", rules)
         self.assertIn("set abuse_ipv4", rules)
+        self.assertNotIn("set ru_ipv4", rules)
+        self.assertNotIn("ip daddr @ru_ipv4 drop", rules)
         self.assertIn('ip saddr @abuse_ipv4 counter drop comment "vpnstack-abuse-block"', rules)
         self.assertIn(f"tcp dport {env['SSH_PORT']} ct state new meter ssh_guard", rules)
         self.assertIn(f"limit rate {env['SSH_INPUT_RATE']} burst {env['SSH_INPUT_BURST']} packets", rules)
@@ -873,6 +878,15 @@ class RenderTests(unittest.TestCase):
         self.assertIn(f"udp dport {env['WG_PORT']} accept", rules)
         self.assertIn("table ip6 nat", rules)
         self.assertIn(f'ip6 saddr {env["WG_IPV6_PREFIX"]} oifname "eth0" masquerade', rules)
+
+    def test_render_foreign_nftables_can_enable_ru_block_explicitly(self) -> None:
+        env = self.make_env()
+        env["FOREIGN_BLOCK_RU"] = "1"
+        rules = render.render_foreign_nftables(env, "eth0")
+        self.assertIn("set ru_ipv4", rules)
+        self.assertIn("set ru_ipv6", rules)
+        self.assertIn(f'    iifname "{env["WG_INTERFACE"]}" oifname "eth0" ip daddr @ru_ipv4 drop', rules)
+        self.assertIn(f'    iifname "{env["WG_INTERFACE"]}" oifname "eth0" ip6 daddr @ru_ipv6 drop', rules)
 
     def test_write_role_rendered_files_and_package_bundle(self) -> None:
         env = self.make_env()

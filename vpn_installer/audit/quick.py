@@ -371,7 +371,7 @@ def test_validate_bundle(out_dir: Path) -> dict[str, str]:
             "rendered/vpn-stack-xray.service",
             "vpn_installer/install_support.py",
         },
-        "foreign-exit.tar.gz": {"install.sh", "deployment.env", "assets/ru-ipv4.zone", "assets/ru-ipv6.zone", "rendered/sing-box.json", "rendered/sync-state.sh", "vpn_installer/install_support.py"},
+        "foreign-exit.tar.gz": {"install.sh", "deployment.env", "rendered/sing-box.json", "rendered/sync-state.sh", "vpn_installer/install_support.py"},
     }
     for tarball in tarballs:
         if not tarball.is_file():

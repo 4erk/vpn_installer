@@ -309,6 +309,10 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(env["RU_PUBLIC_IP"], "203.0.113.10")
         self.assertEqual(env["RU_LISTEN_PORT"], "443")
         self.assertEqual(env["RU_REALITY_MAX_TIME_DIFFERENCE"], "24h")
+        self.assertEqual(env["FOREIGN_BLOCK_RU"], "0")
+        self.assertEqual(env["ADMIN_WEB_ENABLED"], "1")
+        self.assertEqual(env["ADMIN_WEB_BIND"], "0.0.0.0")
+        self.assertEqual(env["ADMIN_WEB_ACTIVE_CLIENT_REQUIRED"], "1")
 
     def test_split_asset_sources_supports_spaces_and_pipe(self) -> None:
         self.assertEqual(

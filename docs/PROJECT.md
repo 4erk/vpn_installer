@@ -287,13 +287,12 @@ SSH-туннель остаётся запасным способом: `ssh -L 1
 Обязательные assets:
 
 - для российского сервера: `geosite-ru.srs`, `geoip-ru.srs`
-- для зарубежного сервера: `ru-ipv4.zone`
-- дополнительно `ru-ipv6.zone`, если `FOREIGN_BLOCK_RU=1`
+- для зарубежного сервера: `ru-ipv4.zone`, `ru-ipv6.zone`, только если явно включён `FOREIGN_BLOCK_RU=1`
 
 Стратегия устойчивости по источникам:
 
 - для `geosite` и `geoip` по умолчанию используется цепочка из нескольких URL, а не один источник
-- для RU CIDR-листов по умолчанию используются `IPdeny` и fallback через `RIPE Stat country-resource-list`
+- для RU CIDR-листов при включённом `FOREIGN_BLOCK_RU=1` используются `IPdeny` и fallback через `RIPE Stat country-resource-list`
 - если обновление не удалось, локальная сборка использует уже сохранённый cache
 - bundle и `cloud-init` всегда несут preseed-копии assets с собой
 - server-side `vpn-stack-sync` при неудачном обновлении оставляет последнюю рабочую копию, если она уже есть

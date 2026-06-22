@@ -334,6 +334,16 @@ def commit_rules(new_rules: list[dict[str, Any]], old_rules: list[dict[str, Any]
     return True, message
 
 
+def routes_payload() -> dict[str, Any]:
+    env = load_env()
+    return {
+        "rules": load_rules(),
+        "config": {
+            "foreign_block_ru": env.get("FOREIGN_BLOCK_RU", "0").strip() == "1",
+        },
+    }
+
+
 def page(title: str, active: str, body: str, message: str = "") -> bytes:
     nav_routes = "active" if active == "routes" else ""
     nav_settings = "active" if active == "settings" else ""
@@ -358,7 +368,7 @@ def page(title: str, active: str, body: str, message: str = "") -> bytes:
 <nav class="navbar navbar-expand-lg bg-white bg-opacity-75 border-bottom sticky-top">
   <div class="container shell">
     <a class="navbar-brand fw-bold" href="/routes">VPN Admin</a>
-    <div class="navbar-nav">
+    <div class="navbar-nav flex-row flex-nowrap gap-3 align-items-center">
       <a class="nav-link {nav_routes}" href="/routes">Исключения</a>
       <a class="nav-link {nav_settings}" href="/settings">Доступ</a>
     </div>
@@ -410,8 +420,8 @@ ROUTES_BODY = """
             <option value="to-foreign">зарубежный сервер</option>
           </select>
         </div>
-        <div class="alert alert-warning small">
-          Если российский IP отправить на зарубежный сервер, его может отрезать foreign-side RU block. Это будет видно в диагностике.
+        <div id="foreign-block-warning" class="alert alert-warning small d-none">
+          Foreign-side RU block включён. Российские IP через зарубежный сервер могут отрезаться на foreign host.
         </div>
         <button id="add-rule" class="btn btn-dark btn-lg w-100">Добавить и применить</button>
       </div>
@@ -477,9 +487,20 @@ function setRowBusy(row, busy) {
   row.find("input, select, button").prop("disabled", busy);
   row.toggleClass("opacity-50", busy);
 }
+function setLoadingRules() {
+  $("#rules-table").html('<tr><td colspan="4" class="text-muted"><span class="spinner-border spinner-border-sm me-2" aria-hidden="true"></span>Загружаю исключения...</td></tr>');
+}
+function applyRoutesConfig(config) {
+  $("#foreign-block-warning").toggleClass("d-none", !(config && config.foreign_block_ru));
+}
 function loadRules() {
+  setLoadingRules();
   $.getJSON("/api/routes", function(data) {
+    applyRoutesConfig(data.config || {});
     renderRules(data.rules || []);
+  }).fail(function(xhr) {
+    const data = xhr.responseJSON || {};
+    $("#rules-table").html('<tr><td colspan="4" class="text-danger">' + $("<div>").text(data.error || "Не удалось загрузить список исключений.").html() + '</td></tr>');
   });
 }
 $("#add-rule").on("click", function() {
@@ -499,6 +520,7 @@ $("#add-rule").on("click", function() {
     },
     success: function(data) {
       showMessage("success", data.message || "Сохранено.");
+      applyRoutesConfig(data.config || {});
       renderRules(data.rules || []);
       $("#rule-value").val("");
       $("#rule-subdomains").prop("checked", false);
@@ -523,6 +545,7 @@ $("#rules-table").on("click", ".rule-delete", function() {
     },
     success: function(data) {
       showMessage("success", data.message || "Удалено.");
+      applyRoutesConfig(data.config || {});
       renderRules(data.rules || []);
     },
     error: function(xhr) {
@@ -550,6 +573,7 @@ $("#rules-table").on("change", ".rule-enabled, .rule-subdomains, .rule-outbound"
     },
     success: function(data) {
       showMessage("success", data.message || "Правило обновлено.");
+      applyRoutesConfig(data.config || {});
       renderRules(data.rules || []);
     },
     error: function(xhr) {
@@ -678,7 +702,7 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/settings":
             self.send_html(settings_body())
         elif path == "/api/routes":
-            self.send_json({"rules": load_rules()})
+            self.send_json(routes_payload())
         else:
             self.send_error(HTTPStatus.NOT_FOUND)
 
@@ -698,7 +722,7 @@ class Handler(BaseHTTPRequestHandler):
                 ok, message = commit_rules(new_rules, old_rules)
                 if not ok:
                     raise RuntimeError(message)
-                self.send_json({"rules": load_rules(), "message": "Правило сохранено и применено."})
+                self.send_json({**routes_payload(), "message": "Правило сохранено и применено."})
                 schedule_singbox_restart()
             except Exception as exc:
                 self.send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
@@ -759,7 +783,7 @@ class Handler(BaseHTTPRequestHandler):
             ok, message = commit_rules(new_rules, old_rules)
             if not ok:
                 raise RuntimeError(message)
-            self.send_json({"rules": load_rules(), "message": "Правило обновлено и применено."})
+            self.send_json({**routes_payload(), "message": "Правило обновлено и применено."})
             schedule_singbox_restart()
         except Exception as exc:
             self.send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
@@ -784,7 +808,7 @@ class Handler(BaseHTTPRequestHandler):
         if not ok:
             self.send_json({"error": message}, HTTPStatus.BAD_REQUEST)
             return
-        self.send_json({"rules": load_rules(), "message": "Правило удалено и конфиг применён."})
+        self.send_json({**routes_payload(), "message": "Правило удалено и конфиг применён."})
         schedule_singbox_restart()
 
 

@@ -125,6 +125,7 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
             "FOREIGN_PUBLIC_IP": LAB_IPS["foreign"],
             "WAN_INTERFACE": "eth1",
             "WG_INTERFACE": "wg0",
+            "FOREIGN_BLOCK_RU": "1",
         },
     )
     runner.seed_foreign_block_cache(env["DEPLOY_NAME"])
