@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import http.client
 import subprocess
+import sys
 import threading
 import tempfile
 import unittest
@@ -240,8 +241,9 @@ class AdminWebTests(unittest.TestCase):
             script = Path(tmp) / "admin_apply.py"
             script.write_text("print('ok')\n", encoding="utf-8")
             with patch.object(admin_web, "APPLY_SCRIPT", script), patch("vpn_installer.admin_web.subprocess.run") as run_mock:
-                self.assertEqual(admin_web.apply_rules(), (True, "Правила применены."))
+                self.assertEqual(admin_web.apply_rules(), (True, "Правила проверены и записаны."))
             run_mock.assert_called_once()
+            self.assertEqual(run_mock.call_args.args[0], [sys.executable, str(script), "--no-restart"])
             with patch.object(admin_web, "APPLY_SCRIPT", script), patch("vpn_installer.admin_web.subprocess.run", side_effect=Exception("boom")):
                 ok, message = admin_web.apply_rules()
         self.assertFalse(ok)
@@ -251,8 +253,19 @@ class AdminWebTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             missing = Path(tmp) / "missing.py"
             with patch.object(admin_web, "APPLY_SCRIPT", missing), patch("vpn_installer.admin_web.admin_apply.apply_rules") as apply_mock:
-                self.assertEqual(admin_web.apply_rules(), (True, "Правила применены."))
-            apply_mock.assert_called_once()
+                self.assertEqual(admin_web.apply_rules(), (True, "Правила проверены и записаны."))
+            apply_mock.assert_called_once_with(restart=False)
+
+    def test_commit_rules_rolls_back_when_apply_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            rules_path = Path(tmp) / "rules.json"
+            old_rules = [admin_apply.normalize_rule({"id": "1", "value": "old.example", "outbound": "direct-ru"})]
+            new_rules = [admin_apply.normalize_rule({"id": "2", "value": "new.example", "outbound": "direct-ru"})]
+            with patch.object(admin_web, "RULES_PATH", rules_path), patch("vpn_installer.admin_web.apply_rules", return_value=(False, "bad apply")):
+                ok, message = admin_web.commit_rules(new_rules, old_rules)
+                self.assertFalse(ok)
+                self.assertEqual(message, "bad apply")
+                self.assertEqual(admin_web.load_rules(), old_rules)
 
     def test_serve_and_main_entrypoints(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -295,6 +308,7 @@ class AdminWebTests(unittest.TestCase):
             stack.enter_context(patch.object(admin_web, "AUTH_PATH", auth_path))
             stack.enter_context(patch.object(admin_web, "RULES_PATH", rules_path))
             apply_mock = stack.enter_context(patch.object(admin_web, "apply_rules", return_value=(True, "applied")))
+            restart_mock = stack.enter_context(patch.object(admin_web, "schedule_singbox_restart"))
             admin_web.init_auth("user", "password")
             server = ThreadingHTTPServer(("127.0.0.1", 0), admin_web.Handler)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -385,7 +399,31 @@ class AdminWebTests(unittest.TestCase):
                 )
                 add_response = json.loads(urllib.request.urlopen(add_request, timeout=5).read().decode("utf-8"))
                 self.assertEqual(add_response["rules"][0]["value"], "example.com")
+                self.assertTrue(add_response["rules"][0]["enabled"])
+                self.assertTrue(add_response["rules"][0]["include_subdomains"])
                 rule_id = add_response["rules"][0]["id"]
+                restart_mock.assert_called()
+
+                patch_request = urllib.request.Request(
+                    f"{base_url}/api/routes/{urllib.parse.quote(rule_id)}",
+                    data=json.dumps({"enabled": False, "include_subdomains": False, "outbound": "direct-ru"}).encode("utf-8"),
+                    method="PATCH",
+                    headers={"Authorization": auth, "Content-Type": "application/json", "X-CSRF-Token": admin_web.CSRF_TOKEN},
+                )
+                patch_response = json.loads(urllib.request.urlopen(patch_request, timeout=5).read().decode("utf-8"))
+                self.assertFalse(patch_response["rules"][0]["enabled"])
+                self.assertFalse(patch_response["rules"][0]["include_subdomains"])
+                self.assertEqual(patch_response["rules"][0]["outbound"], "direct-ru")
+
+                missing_patch = urllib.request.Request(
+                    f"{base_url}/api/routes/missing",
+                    data=json.dumps({"enabled": True}).encode("utf-8"),
+                    method="PATCH",
+                    headers={"Authorization": auth, "Content-Type": "application/json", "X-CSRF-Token": admin_web.CSRF_TOKEN},
+                )
+                with self.assertRaises(urllib.error.HTTPError) as missing_patch_error:
+                    urllib.request.urlopen(missing_patch, timeout=5)
+                self.assertEqual(missing_patch_error.exception.code, 404)
 
                 delete_request = urllib.request.Request(
                     f"{base_url}/api/routes/{urllib.parse.quote(rule_id)}",
@@ -394,6 +432,15 @@ class AdminWebTests(unittest.TestCase):
                 )
                 delete_response = json.loads(urllib.request.urlopen(delete_request, timeout=5).read().decode("utf-8"))
                 self.assertEqual(delete_response["rules"], [])
+
+                missing_delete = urllib.request.Request(
+                    f"{base_url}/api/routes/{urllib.parse.quote(rule_id)}",
+                    method="DELETE",
+                    headers={"Authorization": auth, "X-CSRF-Token": admin_web.CSRF_TOKEN},
+                )
+                with self.assertRaises(urllib.error.HTTPError) as missing_delete_error:
+                    urllib.request.urlopen(missing_delete, timeout=5)
+                self.assertEqual(missing_delete_error.exception.code, 404)
 
                 bad_delete = urllib.request.Request(
                     f"{base_url}/not-routes/{urllib.parse.quote(rule_id)}",
@@ -413,9 +460,18 @@ class AdminWebTests(unittest.TestCase):
                     urllib.request.urlopen(no_csrf_delete, timeout=5)
                 self.assertEqual(delete_csrf_error.exception.code, 403)
 
+                second_payload = json.dumps({"value": "delete-fail.example", "outbound": "direct-ru"}).encode("utf-8")
+                second_add = urllib.request.Request(
+                    f"{base_url}/api/routes",
+                    data=second_payload,
+                    method="POST",
+                    headers={"Authorization": auth, "Content-Type": "application/json", "X-CSRF-Token": admin_web.CSRF_TOKEN},
+                )
+                second_response = json.loads(urllib.request.urlopen(second_add, timeout=5).read().decode("utf-8"))
+                second_rule_id = second_response["rules"][0]["id"]
                 apply_mock.return_value = (False, "delete failed")
                 delete_fail = urllib.request.Request(
-                    f"{base_url}/api/routes/{urllib.parse.quote(rule_id)}",
+                    f"{base_url}/api/routes/{urllib.parse.quote(second_rule_id)}",
                     method="DELETE",
                     headers={"Authorization": auth, "X-CSRF-Token": admin_web.CSRF_TOKEN},
                 )

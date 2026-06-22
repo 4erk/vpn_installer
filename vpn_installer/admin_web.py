@@ -303,15 +303,35 @@ def save_rules(rules: list[dict[str, Any]]) -> None:
 def apply_rules() -> tuple[bool, str]:
     try:
         if APPLY_SCRIPT.exists():
-            subprocess.run([sys.executable, str(APPLY_SCRIPT)], check=True, capture_output=True, text=True, timeout=30)
+            subprocess.run([sys.executable, str(APPLY_SCRIPT), "--no-restart"], check=True, capture_output=True, text=True, timeout=30)
         else:
-            admin_apply.apply_rules()
-        return True, "Правила применены."
+            admin_apply.apply_rules(restart=False)
+        return True, "Правила проверены и записаны."
     except subprocess.CalledProcessError as exc:
         detail = (exc.stderr or exc.stdout or str(exc)).strip()
         return False, detail
     except Exception as exc:
         return False, str(exc)
+
+
+def schedule_singbox_restart(delay_seconds: float = 0.35) -> None:
+    def restart() -> None:
+        time.sleep(delay_seconds)
+        try:
+            subprocess.run(["systemctl", "restart", "sing-box"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+        except Exception:
+            pass
+
+    threading.Thread(target=restart, daemon=True).start()
+
+
+def commit_rules(new_rules: list[dict[str, Any]], old_rules: list[dict[str, Any]]) -> tuple[bool, str]:
+    save_rules(new_rules)
+    ok, message = apply_rules()
+    if not ok:
+        save_rules(old_rules)
+        return False, message
+    return True, message
 
 
 def page(title: str, active: str, body: str, message: str = "") -> bytes:
@@ -433,23 +453,33 @@ function serverLabel(outbound) {
 function showMessage(kind, text) {
   $("#rules-message").html('<div class="alert alert-' + kind + '">' + $("<div>").text(text).html() + '</div>');
 }
+function renderRules(rules) {
+  const body = $("#rules-table").empty();
+  if (!rules.length) {
+    body.append('<tr><td colspan="4" class="text-muted">Исключений пока нет.</td></tr>');
+    return;
+  }
+  rules.forEach(function(rule) {
+    const value = $("<span>").text(rule.value).html();
+    const row = $('<tr>').attr("data-id", rule.id);
+    row.append('<td><div class="d-flex align-items-center gap-2"><div class="form-check form-switch mb-0"><input class="form-check-input rule-enabled" type="checkbox" ' + (rule.enabled ? "checked" : "") + '></div><code>' + value + '</code></div></td>');
+    row.append('<td><select class="form-select form-select-sm rule-outbound"><option value="direct-ru">российский сервер</option><option value="to-foreign">зарубежный сервер</option></select></td>');
+    row.append('<td><div class="form-check form-switch mb-0"><input class="form-check-input rule-subdomains" type="checkbox" ' + (rule.include_subdomains ? "checked" : "") + '></div></td>');
+    row.append('<td class="text-end"><button class="btn btn-outline-danger btn-sm rule-delete">Удалить</button></td>');
+    row.find(".rule-outbound").val(rule.outbound);
+    body.append(row);
+  });
+}
+function setFormBusy(busy) {
+  $("#rule-value, #rule-subdomains, #rule-outbound, #add-rule, #refresh-rules").prop("disabled", busy);
+}
+function setRowBusy(row, busy) {
+  row.find("input, select, button").prop("disabled", busy);
+  row.toggleClass("opacity-50", busy);
+}
 function loadRules() {
   $.getJSON("/api/routes", function(data) {
-    const body = $("#rules-table").empty();
-    if (!data.rules.length) {
-      body.append('<tr><td colspan="4" class="text-muted">Исключений пока нет.</td></tr>');
-      return;
-    }
-    data.rules.forEach(function(rule) {
-      const sub = rule.include_subdomains ? "да" : "нет";
-      const value = $("<span>").text(rule.value).html();
-      const row = $('<tr>');
-      row.append('<td><code>' + value + '</code></td>');
-      row.append('<td><span class="badge text-bg-light badge-server">' + serverLabel(rule.outbound) + '</span></td>');
-      row.append('<td>' + sub + '</td>');
-      row.append('<td class="text-end"><button class="btn btn-outline-danger btn-sm" data-id="' + rule.id + '">Удалить</button></td>');
-      body.append(row);
-    });
+    renderRules(data.rules || []);
   });
 }
 $("#add-rule").on("click", function() {
@@ -464,30 +494,68 @@ $("#add-rule").on("click", function() {
     contentType: "application/json",
     headers: {"X-CSRF-Token": window.CSRF_TOKEN},
     data: JSON.stringify(payload),
+    beforeSend: function() {
+      setFormBusy(true);
+    },
     success: function(data) {
       showMessage("success", data.message || "Сохранено.");
+      renderRules(data.rules || []);
       $("#rule-value").val("");
       $("#rule-subdomains").prop("checked", false);
-      loadRules();
     },
     error: function(xhr) {
       const data = xhr.responseJSON || {};
-      showMessage("danger", data.error || "Ошибка сохранения.");
+      showMessage("danger", data.error || (xhr.status === 0 ? "Соединение оборвалось во время применения. Обнови список." : "Ошибка сохранения."));
+    },
+    complete: function() {
+      setFormBusy(false);
     }
   });
 });
-$("#rules-table").on("click", "button[data-id]", function() {
+$("#rules-table").on("click", ".rule-delete", function() {
+  const row = $(this).closest("tr");
   $.ajax({
-    url: "/api/routes/" + encodeURIComponent($(this).data("id")),
+    url: "/api/routes/" + encodeURIComponent(row.data("id")),
     method: "DELETE",
     headers: {"X-CSRF-Token": window.CSRF_TOKEN},
+    beforeSend: function() {
+      setRowBusy(row, true);
+    },
     success: function(data) {
       showMessage("success", data.message || "Удалено.");
-      loadRules();
+      renderRules(data.rules || []);
     },
     error: function(xhr) {
       const data = xhr.responseJSON || {};
       showMessage("danger", data.error || "Ошибка удаления.");
+      setRowBusy(row, false);
+    }
+  });
+});
+$("#rules-table").on("change", ".rule-enabled, .rule-subdomains, .rule-outbound", function() {
+  const row = $(this).closest("tr");
+  const payload = {
+    enabled: row.find(".rule-enabled").is(":checked"),
+    include_subdomains: row.find(".rule-subdomains").is(":checked"),
+    outbound: row.find(".rule-outbound").val()
+  };
+  $.ajax({
+    url: "/api/routes/" + encodeURIComponent(row.data("id")),
+    method: "PATCH",
+    contentType: "application/json",
+    headers: {"X-CSRF-Token": window.CSRF_TOKEN},
+    data: JSON.stringify(payload),
+    beforeSend: function() {
+      setRowBusy(row, true);
+    },
+    success: function(data) {
+      showMessage("success", data.message || "Правило обновлено.");
+      renderRules(data.rules || []);
+    },
+    error: function(xhr) {
+      const data = xhr.responseJSON || {};
+      showMessage("danger", data.error || "Ошибка обновления.");
+      loadRules();
     }
   });
 });
@@ -586,6 +654,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+        try:
+            self.wfile.flush()
+        except OSError:
+            pass
 
     def read_json(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0") or "0")
@@ -623,12 +695,11 @@ class Handler(BaseHTTPRequestHandler):
                 rule = admin_apply.normalize_rule(raw_rule)
                 old_rules = load_rules()
                 new_rules = [*old_rules, rule]
-                save_rules(new_rules)
-                ok, message = apply_rules()
+                ok, message = commit_rules(new_rules, old_rules)
                 if not ok:
-                    save_rules(old_rules)
                     raise RuntimeError(message)
                 self.send_json({"rules": load_rules(), "message": "Правило сохранено и применено."})
+                schedule_singbox_restart()
             except Exception as exc:
                 self.send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
         elif path == "/settings":
@@ -656,6 +727,43 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self.send_error(HTTPStatus.NOT_FOUND)
 
+    def do_PATCH(self) -> None:
+        if not self.require_auth():
+            return
+        if not self.require_csrf():
+            return
+        path = urllib.parse.urlparse(self.path).path
+        prefix = "/api/routes/"
+        if not path.startswith(prefix):
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        rule_id = urllib.parse.unquote(path[len(prefix):])
+        old_rules = load_rules()
+        matched = False
+        try:
+            patch = self.read_json()
+            new_rules: list[dict[str, Any]] = []
+            for rule in old_rules:
+                if rule.get("id") != rule_id:
+                    new_rules.append(rule)
+                    continue
+                matched = True
+                merged = {**rule}
+                for key in ("enabled", "include_subdomains", "outbound"):
+                    if key in patch:
+                        merged[key] = patch[key]
+                new_rules.append(admin_apply.normalize_rule(merged))
+            if not matched:
+                self.send_json({"error": "Правило не найдено."}, HTTPStatus.NOT_FOUND)
+                return
+            ok, message = commit_rules(new_rules, old_rules)
+            if not ok:
+                raise RuntimeError(message)
+            self.send_json({"rules": load_rules(), "message": "Правило обновлено и применено."})
+            schedule_singbox_restart()
+        except Exception as exc:
+            self.send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+
     def do_DELETE(self) -> None:
         if not self.require_auth():
             return
@@ -669,13 +777,15 @@ class Handler(BaseHTTPRequestHandler):
         rule_id = urllib.parse.unquote(path[len(prefix):])
         old_rules = load_rules()
         new_rules = [rule for rule in old_rules if rule.get("id") != rule_id]
-        save_rules(new_rules)
-        ok, message = apply_rules()
+        if len(new_rules) == len(old_rules):
+            self.send_json({"error": "Правило не найдено."}, HTTPStatus.NOT_FOUND)
+            return
+        ok, message = commit_rules(new_rules, old_rules)
         if not ok:
-            save_rules(old_rules)
             self.send_json({"error": message}, HTTPStatus.BAD_REQUEST)
             return
         self.send_json({"rules": load_rules(), "message": "Правило удалено и конфиг применён."})
+        schedule_singbox_restart()
 
 
 class StealthAdminServer(ThreadingHTTPServer):
