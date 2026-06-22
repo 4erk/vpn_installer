@@ -6,6 +6,19 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.8.0] - 2026-06-22
+
+### Added
+
+- Добавлен web admin на `российском сервере` для server-side исключений маршрутизации: домен, wildcard-поддомены или CIDR можно добавить/удалить через простой Bootstrap 5 + jQuery интерфейс.
+- Добавлены настройки `ADMIN_WEB_ENABLED`, `ADMIN_WEB_BIND`, `ADMIN_WEB_PORT`, `ADMIN_WEB_ALLOWED_CIDR`, `ADMIN_WEB_ALLOW_WG`, `ADMIN_WEB_USERNAME` и `ADMIN_WEB_PASSWORD`.
+- Правила web admin сохраняются в `/etc/vpn-stack/admin-routing-rules.json`, накладываются поверх `/etc/vpn-stack/sing-box.base.json`, проверяются через `sing-box check` и применяются перезапуском `sing-box`.
+
+### Security
+
+- По умолчанию web admin слушает только `127.0.0.1:11333`; штатный доступ с компьютера оператора — через SSH-туннель.
+- Если web admin явно привязать к публичному адресу, приложение откажется стартовать с дефолтными `user/password`, а доступ дополнительно ограничивается `ADMIN_WEB_ALLOWED_CIDR`.
+
 ## [0.7.0] - 2026-06-22
 
 ### Added

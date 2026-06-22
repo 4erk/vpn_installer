@@ -202,10 +202,18 @@ HEALTH_TARGET_PROBE_URLS="${HEALTH_TARGET_PROBE_URLS:-https://chatgpt.com/ https
 HEALTH_RU_DIRECT_TARGET_PROBE_URLS="${HEALTH_RU_DIRECT_TARGET_PROBE_URLS:-https://api.ipify.org/ https://2ip.ru/}"
 HEALTH_TARGET_CONNECT_TIMEOUT_SECONDS="${HEALTH_TARGET_CONNECT_TIMEOUT_SECONDS:-2}"
 HEALTH_TARGET_MAX_TIME_SECONDS="${HEALTH_TARGET_MAX_TIME_SECONDS:-4}"
+ADMIN_WEB_ENABLED="${ADMIN_WEB_ENABLED:-1}"
+ADMIN_WEB_BIND="${ADMIN_WEB_BIND:-127.0.0.1}"
+ADMIN_WEB_PORT="${ADMIN_WEB_PORT:-11333}"
+ADMIN_WEB_ALLOWED_CIDR="${ADMIN_WEB_ALLOWED_CIDR:-}"
+ADMIN_WEB_ALLOW_WG="${ADMIN_WEB_ALLOW_WG:-0}"
+ADMIN_WEB_USERNAME="${ADMIN_WEB_USERNAME:-user}"
+ADMIN_WEB_PASSWORD="${ADMIN_WEB_PASSWORD:-password}"
 DISABLE_NIC_OFFLOADS="${DISABLE_NIC_OFFLOADS:-1}"
 APT_LOCK_TIMEOUT_SECONDS="${APT_LOCK_TIMEOUT_SECONDS:-900}"
 APT_LOCK_RETRY_SECONDS="${APT_LOCK_RETRY_SECONDS:-5}"
 SINGBOX_CONFIG_PATH="/etc/sing-box/config.json"
+SINGBOX_BASE_CONFIG_PATH="${VPNSTACK_ROOT}/sing-box.base.json"
 SINGBOX_REQUIRED_VERSION="1.13.12"
 XRAY_CONFIG_PATH="/etc/xray/config.json"
 XRAY_SERVICE_PATH="/etc/systemd/system/vpn-stack-xray.service"
@@ -216,12 +224,15 @@ SSHD_CONFIG_PATH="/etc/ssh/sshd_config.d/90-vpn-stack.conf"
 RULE_SYNC_SCRIPT="/usr/local/lib/vpn-stack/sync-state.sh"
 HEALTH_SCRIPT_PATH="/usr/local/lib/vpn-stack/health-check.sh"
 GUARD_SCRIPT_PATH="/usr/local/lib/vpn-stack/guard.sh"
+ADMIN_WEB_SCRIPT_PATH="/usr/local/lib/vpn-stack/admin_web.py"
+ADMIN_APPLY_SCRIPT_PATH="/usr/local/lib/vpn-stack/admin_apply.py"
 SYNC_SERVICE_PATH="/etc/systemd/system/vpn-stack-sync.service"
 SYNC_TIMER_PATH="/etc/systemd/system/vpn-stack-sync.timer"
 HEALTH_SERVICE_PATH="/etc/systemd/system/vpn-stack-health.service"
 HEALTH_TIMER_PATH="/etc/systemd/system/vpn-stack-health.timer"
 GUARD_SERVICE_PATH="/etc/systemd/system/vpn-stack-guard.service"
 GUARD_TIMER_PATH="/etc/systemd/system/vpn-stack-guard.timer"
+ADMIN_WEB_SERVICE_PATH="/etc/systemd/system/vpn-stack-admin.service"
 SUBSCRIPTION_SERVICE_PATH="/etc/systemd/system/vpn-stack-subscription.service"
 SYSCTL_PATH="/etc/sysctl.d/90-vpn-stack.conf"
 SUBSCRIPTION_ROOT="/var/lib/vpn-stack/subscription"
@@ -358,6 +369,8 @@ SINGBOX_ENABLED=$(service_enabled_flag sing-box)
 SINGBOX_ACTIVE=$(service_active_flag sing-box)
 XRAY_ENABLED=$(service_enabled_flag vpn-stack-xray.service)
 XRAY_ACTIVE=$(service_active_flag vpn-stack-xray.service)
+ADMIN_WEB_ENABLED_STATE=$(service_enabled_flag vpn-stack-admin.service)
+ADMIN_WEB_ACTIVE_STATE=$(service_active_flag vpn-stack-admin.service)
 SYNC_TIMER_ENABLED=$(service_enabled_flag vpn-stack-sync.timer)
 SYNC_TIMER_ACTIVE=$(service_active_flag vpn-stack-sync.timer)
 HEALTH_TIMER_ENABLED=$(service_enabled_flag vpn-stack-health.timer)
@@ -374,6 +387,7 @@ EOF
 managed_paths() {
   printf '%s\n' \
     "${SINGBOX_CONFIG_PATH}" \
+    "${SINGBOX_BASE_CONFIG_PATH}" \
     "${XRAY_CONFIG_PATH}" \
     "${XRAY_SERVICE_PATH}" \
     "${WG_CONFIG_PATH}" \
@@ -382,12 +396,15 @@ managed_paths() {
     "${RULE_SYNC_SCRIPT}" \
     "${HEALTH_SCRIPT_PATH}" \
     "${GUARD_SCRIPT_PATH}" \
+    "${ADMIN_WEB_SCRIPT_PATH}" \
+    "${ADMIN_APPLY_SCRIPT_PATH}" \
     "${SYNC_SERVICE_PATH}" \
     "${SYNC_TIMER_PATH}" \
     "${HEALTH_SERVICE_PATH}" \
     "${HEALTH_TIMER_PATH}" \
     "${GUARD_SERVICE_PATH}" \
     "${GUARD_TIMER_PATH}" \
+    "${ADMIN_WEB_SERVICE_PATH}" \
     "${SUBSCRIPTION_SERVICE_PATH}" \
     "${SUBSCRIPTION_ROOT}" \
     "${SYSCTL_PATH}" \
@@ -492,6 +509,7 @@ restore_service_state() {
   apply_service_restore_flags vpn-stack-guard.timer "${GUARD_TIMER_ENABLED:-0}" "${GUARD_TIMER_ACTIVE:-0}"
   apply_service_restore_flags sing-box "${SINGBOX_ENABLED:-0}" "${SINGBOX_ACTIVE:-0}"
   apply_service_restore_flags vpn-stack-xray.service "${XRAY_ENABLED:-0}" "${XRAY_ACTIVE:-0}"
+  apply_service_restore_flags vpn-stack-admin.service "${ADMIN_WEB_ENABLED_STATE:-0}" "${ADMIN_WEB_ACTIVE_STATE:-0}"
   apply_service_restore_flags ssh.service "${SSH_SERVICE_ENABLED:-0}" "${SSH_SERVICE_ACTIVE:-0}"
   apply_service_restore_flags ssh.socket "${SSH_SOCKET_ENABLED:-0}" "${SSH_SOCKET_ACTIVE:-0}"
 }
@@ -539,6 +557,7 @@ stop_managed_services() {
   systemctl stop vpn-stack-health.timer >/dev/null 2>&1 || true
   systemctl stop vpn-stack-guard.service >/dev/null 2>&1 || true
   systemctl stop vpn-stack-guard.timer >/dev/null 2>&1 || true
+  systemctl stop vpn-stack-admin.service >/dev/null 2>&1 || true
   systemctl stop vpn-stack-subscription.service >/dev/null 2>&1 || true
   systemctl stop nftables >/dev/null 2>&1 || true
 }
@@ -668,6 +687,7 @@ disable_managed_services() {
   systemctl disable vpn-stack-sync.timer >/dev/null 2>&1 || true
   systemctl disable vpn-stack-health.timer >/dev/null 2>&1 || true
   systemctl disable vpn-stack-guard.timer >/dev/null 2>&1 || true
+  systemctl disable vpn-stack-admin.service >/dev/null 2>&1 || true
   systemctl disable vpn-stack-subscription.service >/dev/null 2>&1 || true
   systemctl disable nftables >/dev/null 2>&1 || true
 }
@@ -675,6 +695,7 @@ disable_managed_services() {
 remove_managed_files() {
   rm -f \
     "${SINGBOX_CONFIG_PATH}" \
+    "${SINGBOX_BASE_CONFIG_PATH}" \
     "${XRAY_CONFIG_PATH}" \
     "${XRAY_SERVICE_PATH}" \
     "${WG_CONFIG_PATH}" \
@@ -683,12 +704,15 @@ remove_managed_files() {
     "${RULE_SYNC_SCRIPT}" \
     "${HEALTH_SCRIPT_PATH}" \
     "${GUARD_SCRIPT_PATH}" \
+    "${ADMIN_WEB_SCRIPT_PATH}" \
+    "${ADMIN_APPLY_SCRIPT_PATH}" \
     "${SYNC_SERVICE_PATH}" \
     "${SYNC_TIMER_PATH}" \
     "${HEALTH_SERVICE_PATH}" \
     "${HEALTH_TIMER_PATH}" \
     "${GUARD_SERVICE_PATH}" \
     "${GUARD_TIMER_PATH}" \
+    "${ADMIN_WEB_SERVICE_PATH}" \
     "${SUBSCRIPTION_SERVICE_PATH}" \
     "${SYSCTL_PATH}"
   rm -rf "${SUBSCRIPTION_ROOT}"
@@ -1031,12 +1055,17 @@ prepare_role_artifacts() {
 copy_role_artifacts() {
   local source_dir="$1"
   copy_if_present "${source_dir}/sing-box.json" "${SINGBOX_CONFIG_PATH}" || { echo "Missing sing-box.json in ${source_dir}" >&2; exit 1; }
+  copy_if_present "${source_dir}/sing-box.json" "${SINGBOX_BASE_CONFIG_PATH}" || { echo "Missing sing-box.json in ${source_dir}" >&2; exit 1; }
   if [[ "$ROLE" == "ru-gateway" ]]; then
     mkdir -p "$(dirname "${XRAY_CONFIG_PATH}")"
     copy_if_present "${source_dir}/xray.json" "${XRAY_CONFIG_PATH}" || { echo "Missing xray.json in ${source_dir}" >&2; exit 1; }
     copy_if_present "${source_dir}/vpn-stack-xray.service" "${XRAY_SERVICE_PATH}" || { echo "Missing vpn-stack-xray.service in ${source_dir}" >&2; exit 1; }
+    copy_if_present "${source_dir}/admin_web.py" "${ADMIN_WEB_SCRIPT_PATH}" || { echo "Missing admin_web.py in ${source_dir}" >&2; exit 1; }
+    copy_if_present "${source_dir}/admin_apply.py" "${ADMIN_APPLY_SCRIPT_PATH}" || { echo "Missing admin_apply.py in ${source_dir}" >&2; exit 1; }
+    copy_if_present "${source_dir}/vpn-stack-admin.service" "${ADMIN_WEB_SERVICE_PATH}" || { echo "Missing vpn-stack-admin.service in ${source_dir}" >&2; exit 1; }
   else
     rm -f "${XRAY_CONFIG_PATH}" "${XRAY_SERVICE_PATH}"
+    rm -f "${ADMIN_WEB_SCRIPT_PATH}" "${ADMIN_APPLY_SCRIPT_PATH}" "${ADMIN_WEB_SERVICE_PATH}"
   fi
   copy_if_present "${source_dir}/${WG_INTERFACE}.conf" "${WG_CONFIG_PATH}" || { echo "Missing ${WG_INTERFACE}.conf in ${source_dir}" >&2; exit 1; }
   copy_if_present "${source_dir}/nftables.conf" "${NFTABLES_PATH}" || { echo "Missing nftables.conf in ${source_dir}" >&2; exit 1; }
@@ -1055,6 +1084,8 @@ copy_role_artifacts() {
   chmod 0644 "${SSHD_CONFIG_PATH}"
   if [[ "$ROLE" == "ru-gateway" ]]; then
     chmod 0644 "${XRAY_SERVICE_PATH}"
+    chmod 0644 "${ADMIN_WEB_SERVICE_PATH}"
+    chmod 0755 "${ADMIN_WEB_SCRIPT_PATH}" "${ADMIN_APPLY_SCRIPT_PATH}"
   fi
   chmod 0755 "${RULE_SYNC_SCRIPT}" "${HEALTH_SCRIPT_PATH}" "${GUARD_SCRIPT_PATH}"
 }
@@ -1328,10 +1359,25 @@ systemctl restart vpn-stack-guard.timer
 systemctl start vpn-stack-guard.service || true
 
 if [[ "$ROLE" == "ru-gateway" ]]; then
+  if [[ ! -f "${VPNSTACK_ROOT}/admin-auth.json" || "${ADMIN_WEB_USERNAME}" != "user" || "${ADMIN_WEB_PASSWORD}" != "password" ]]; then
+    if [[ "${ADMIN_WEB_USERNAME}" != "user" || "${ADMIN_WEB_PASSWORD}" != "password" ]]; then
+      python3 "${ADMIN_WEB_SCRIPT_PATH}" init-auth "${ADMIN_WEB_USERNAME}" "${ADMIN_WEB_PASSWORD}" --force
+    else
+      python3 "${ADMIN_WEB_SCRIPT_PATH}" init-auth "${ADMIN_WEB_USERNAME}" "${ADMIN_WEB_PASSWORD}"
+    fi
+  fi
+  python3 "${ADMIN_APPLY_SCRIPT_PATH}" --no-restart
   systemctl enable sing-box
   systemctl restart sing-box
   systemctl enable vpn-stack-xray.service
   systemctl restart vpn-stack-xray.service
+  if [[ "${ADMIN_WEB_ENABLED,,}" != "0" && "${ADMIN_WEB_ENABLED,,}" != "false" && "${ADMIN_WEB_ENABLED,,}" != "no" && "${ADMIN_WEB_ENABLED,,}" != "off" ]]; then
+    systemctl enable vpn-stack-admin.service
+    systemctl restart vpn-stack-admin.service
+  else
+    systemctl disable vpn-stack-admin.service >/dev/null 2>&1 || true
+    systemctl stop vpn-stack-admin.service >/dev/null 2>&1 || true
+  fi
 fi
 
 chmod 0600 "${SINGBOX_CONFIG_PATH}" "${WG_CONFIG_PATH}"

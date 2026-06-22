@@ -722,6 +722,9 @@ def postcheck_command(role: str, wg_interface: str) -> str:
             [
                 'check_service_active sing-box sing-box',
                 'check_service_active vpn-stack-xray.service vpn-stack-xray',
+                'admin_web_enabled="$(grep -E \'^ADMIN_WEB_ENABLED=\' /etc/vpn-stack/deployment.env 2>/dev/null | head -n1 | cut -d= -f2- | sed \'s/^"//; s/"$//\')"',
+                'admin_web_enabled="${admin_web_enabled:-1}"',
+                'case "${admin_web_enabled,,}" in 0|false|no|off) ;; *) check_service_active vpn-stack-admin.service vpn-stack-admin ;; esac',
             ]
         )
         if role == ROLE_RU

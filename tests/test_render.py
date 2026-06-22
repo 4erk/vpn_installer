@@ -588,7 +588,14 @@ class RenderTests(unittest.TestCase):
         self.assertIn("vpn-stack-health.timer", files)
         self.assertIn("vpn-stack-guard.service", files)
         self.assertIn("vpn-stack-guard.timer", files)
+        self.assertIn("admin_apply.py", files)
+        self.assertIn("admin_web.py", files)
+        self.assertIn("vpn-stack-admin.service", files)
         self.assertIn("vpn-stack-xray.service", files)
+        foreign_files = render.rendered_files_for_role(env, render.ROLE_FOREIGN)
+        self.assertNotIn("admin_apply.py", foreign_files)
+        self.assertNotIn("admin_web.py", foreign_files)
+        self.assertNotIn("vpn-stack-admin.service", foreign_files)
 
     def test_health_script_probes_wireguard_path_before_stale_handshake_verdict(self) -> None:
         env = self.make_env()
@@ -817,6 +824,18 @@ class RenderTests(unittest.TestCase):
         self.assertNotIn("vless_guard", rules)
         self.assertNotIn(f"tcp dport {env['RU_LISTEN_PORT']} counter drop", rules)
         self.assertNotIn("subscription_guard", rules)
+        self.assertNotIn("tcp dport 11333", rules)
+
+    def test_render_ru_nftables_opens_admin_web_only_when_explicitly_allowed(self) -> None:
+        env = self.make_env()
+        env["ADMIN_WEB_ALLOWED_CIDR"] = "203.0.113.4/32"
+        rules = render.render_ru_firewall_nftables(env)
+        self.assertIn("ip saddr { 203.0.113.4/32 } tcp dport 11333 counter accept", rules)
+
+        env = self.make_env()
+        env["ADMIN_WEB_ALLOW_WG"] = "1"
+        rules = render.render_ru_firewall_nftables(env)
+        self.assertIn(f'iifname "{env["WG_INTERFACE"]}" tcp dport 11333 counter accept', rules)
 
     def test_render_foreign_nftables_rate_limits_ssh(self) -> None:
         env = self.make_env()

@@ -72,6 +72,18 @@ ENV_SECTIONS = [
             "HEALTH_TARGET_MAX_TIME_SECONDS",
         ],
     ),
+    (
+        "# Optional web admin for server-side routing exceptions",
+        [
+            "ADMIN_WEB_ENABLED",
+            "ADMIN_WEB_BIND",
+            "ADMIN_WEB_PORT",
+            "ADMIN_WEB_ALLOWED_CIDR",
+            "ADMIN_WEB_ALLOW_WG",
+            "ADMIN_WEB_USERNAME",
+            "ADMIN_WEB_PASSWORD",
+        ],
+    ),
     ("# Client tun profile", ["CLIENT_TUN_NAME", "CLIENT_TUN_ADDRESS_V4", "CLIENT_TUN_ADDRESS_V6", "CLIENT_FAKEIP_V4", "CLIENT_FAKEIP_V6", "CLIENT_ENABLE_IPV6"]),
     ("# Optional extra route exclusions on the client profile", ["CLIENT_ROUTE_EXCLUDE_V4", "CLIENT_ROUTE_EXCLUDE_V6"]),
 ]

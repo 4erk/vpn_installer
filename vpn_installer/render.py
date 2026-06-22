@@ -400,6 +400,10 @@ def render_foreign_nftables(env: dict[str, str], wan_iface: str) -> str:
 
 
 def render_ru_firewall_nftables(env: dict[str, str]) -> str:
+    admin_enabled = env.get("ADMIN_WEB_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+    admin_port = env.get("ADMIN_WEB_PORT", "11333").strip() or "11333"
+    admin_allowed_cidrs = env_list(env, "ADMIN_WEB_ALLOWED_CIDR")
+    admin_allow_wg = env.get("ADMIN_WEB_ALLOW_WG", "0").strip().lower() in {"1", "true", "yes", "on"}
     lines = [
         "flush ruleset",
         "",
@@ -420,10 +424,38 @@ def render_ru_firewall_nftables(env: dict[str, str]) -> str:
         "    ip protocol icmp accept",
         "    ct state established,related accept",
     ]
+    if admin_enabled and admin_allow_wg:
+        lines.append(f'    iifname "{env["WG_INTERFACE"]}" tcp dport {admin_port} counter accept')
+    if admin_enabled and admin_allowed_cidrs:
+        lines.append(f"    ip saddr {{ {', '.join(admin_allowed_cidrs)} }} tcp dport {admin_port} counter accept")
     lines.extend(render_rate_limited_tcp_accept("ssh_guard", env["SSH_PORT"], env["SSH_INPUT_RATE"], env["SSH_INPUT_BURST"]))
     lines.append(f"    tcp dport {env['RU_LISTEN_PORT']} counter accept")
     lines.extend(["  }", "}", ""])
     return "\n".join(lines)
+
+
+def render_admin_web_service() -> str:
+    return textwrap.dedent(
+        """
+        [Unit]
+        Description=vpn-stack web admin
+        After=network-online.target sing-box.service
+        Wants=network-online.target sing-box.service
+
+        [Service]
+        Type=simple
+        ExecStart=/usr/bin/python3 /usr/local/lib/vpn-stack/admin_web.py
+        Restart=on-failure
+        RestartSec=3
+
+        [Install]
+        WantedBy=multi-user.target
+        """
+    ).strip() + "\n"
+
+
+def server_script_asset(name: str) -> str:
+    return (ROOT_DIR / "vpn_installer" / name).read_text(encoding="utf-8")
 
 
 def render_sync_script(env: dict[str, str]) -> str:
@@ -1540,12 +1572,15 @@ def rendered_files_for_role(env: dict[str, str], role: str) -> dict[str, str]:
             "sync-state.sh": render_sync_script(env),
             "health-check.sh": render_health_script(env, ROLE_RU),
             "guard.sh": render_guard_script(env, ROLE_RU),
+            "admin_apply.py": server_script_asset("admin_apply.py"),
+            "admin_web.py": server_script_asset("admin_web.py"),
             "vpn-stack-sync.service": render_sync_service(ROLE_RU),
             "vpn-stack-sync.timer": render_sync_timer(),
             "vpn-stack-health.service": render_health_service(),
             "vpn-stack-health.timer": render_health_timer(env),
             "vpn-stack-guard.service": render_guard_service(),
             "vpn-stack-guard.timer": render_guard_timer(env),
+            "vpn-stack-admin.service": render_admin_web_service(),
             "vpn-stack-xray.service": render_xray_service(),
         }
     wan_iface = env.get("WAN_INTERFACE", "").strip() or "eth0"

@@ -127,6 +127,14 @@ Role-scoped env overrides:
 - `out/<name>/client`
 - `out/<name>/NEXT-STEPS.txt`
 
+Server-side артефакты на `российском сервере`:
+
+- `/etc/vpn-stack/sing-box.base.json` — базовый router-конфиг, который пришёл из установщика
+- `/etc/vpn-stack/admin-routing-rules.json` — правила web admin поверх базового конфига
+- `/etc/vpn-stack/admin-auth.json` — hash логина/пароля web admin
+- `/usr/local/lib/vpn-stack/admin_web.py` — HTTP admin server
+- `/usr/local/lib/vpn-stack/admin_apply.py` — безопасное применение правил через `sing-box check`
+
 Основные клиентские файлы:
 
 - `out/<name>/client/vless-uri.txt`
@@ -158,6 +166,51 @@ Role-scoped env overrides:
 - `RU_IPV6_POLICY=fast-fail` по умолчанию быстро закрывает IPv6 literals на российском сервере: текущий рабочий контур держится на стабильном IPv4 dataplane, а IPv6 path зарубежного сервера даёт частые timeout'ы и подвисы сайтов
 - публичный VLESS/Reality вход обслуживает `vpn-stack-xray.service`; `sing-box` на российском сервере не слушает внешний `443/tcp`, а принимает локальный SOCKS/Mixed трафик от Xray front
 - `GUARD_REALITY_BLOCK_ENABLED=0` по умолчанию оставляет Reality-invalid события в диагностике, но не блокирует клиентские IP; включай `1` только если точно подтверждён внешний сканер, потому нормальные клиенты тоже могут дать серию invalid/EOF при старых профилях или обрывах сети
+
+## Web Admin
+
+Web admin — это операторский интерфейс на `российском сервере` для изменения server-side исключений маршрутизации без пересборки клиентских профилей.
+
+Компоненты:
+
+- `vpn-stack-admin.service` запускает `python3 /usr/local/lib/vpn-stack/admin_web.py`
+- интерфейс слушает `ADMIN_WEB_BIND:ADMIN_WEB_PORT`, по умолчанию `127.0.0.1:11333`
+- авторизация: HTTP Basic Auth, hash хранится в `/etc/vpn-stack/admin-auth.json`
+- стартовый доступ: `ADMIN_WEB_USERNAME=user`, `ADMIN_WEB_PASSWORD=password`
+- смена логина/пароля доступна в самом интерфейсе, но только после успешной авторизации
+
+Безопасный операторский доступ:
+
+```bash
+ssh -L 11333:127.0.0.1:11333 root@<ip-российского-сервера>
+```
+
+Затем открыть `http://127.0.0.1:11333`.
+
+Публичный bind — только явный opt-in:
+
+- `ADMIN_WEB_BIND=0.0.0.0`
+- `ADMIN_WEB_ALLOWED_CIDR=<operator-ip>/32`
+- нестандартные `ADMIN_WEB_USERNAME` и `ADMIN_WEB_PASSWORD`
+
+Если публичный bind включён, но пароль остался дефолтным `user/password`, сервис откажется стартовать. Это сделано намеренно: TLS нет, поэтому нельзя безопасно оставлять дефолтный HTTP Basic Auth в интернете.
+
+Правила:
+
+- тип `domain`: `example.com`
+- wildcard/subdomains: `*.example.com` или чекбокс "включить все поддомены"
+- тип `cidr`: `203.0.113.0/24`
+- outbound `direct-ru` = через `российский сервер`
+- outbound `to-foreign` = через `зарубежный сервер`
+
+Применение:
+
+1. UI валидирует и сохраняет правило в `/etc/vpn-stack/admin-routing-rules.json`.
+2. `admin_apply.py` накладывает правила на `/etc/vpn-stack/sing-box.base.json`.
+3. Новый `/etc/sing-box/config.json` сначала проверяется через `sing-box check`.
+4. Только после успешной проверки файл заменяется атомарно и перезапускается `sing-box`.
+
+`reinstall` обновляет `/etc/vpn-stack/sing-box.base.json`, но сохраняет существующие web-admin правила и повторно накладывает их перед restart `sing-box`.
 
 ## Lifecycle
 
