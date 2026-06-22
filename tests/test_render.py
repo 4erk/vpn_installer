@@ -277,6 +277,15 @@ class RenderTests(unittest.TestCase):
         self.assertLess(private_indexes[0], ipv4_literal_index)
         self.assertLess(ipv4_literal_index, global_resolve_index)
 
+    def test_ru_server_routes_own_public_ip_direct_before_foreign_catchall(self) -> None:
+        env = self.make_env()
+        payload = json.loads(render.render_ru_singbox(env))
+        route_rules = payload["route"]["rules"]
+        own_ip_index = next(index for index, rule in enumerate(route_rules) if rule.get("ip_cidr") == [f"{env['RU_PUBLIC_IP']}/32"])
+        ipv4_literal_index = next(index for index, rule in enumerate(route_rules) if rule.get("ip_cidr") == ["0.0.0.0/0"])
+        self.assertEqual(route_rules[own_ip_index]["outbound"], "direct-ru")
+        self.assertLess(own_ip_index, ipv4_literal_index)
+
     def test_ru_server_resolves_forced_direct_domains_before_direct_route(self) -> None:
         env = self.make_env()
         payload = json.loads(render.render_ru_singbox(env))
@@ -402,7 +411,7 @@ class RenderTests(unittest.TestCase):
         env["RU_FORCE_DIRECT_IP_CIDR"] = "203.0.113.0/24,198.51.100.4/32"
         payload = json.loads(render.render_ru_singbox(env))
         cidr_rule = next(rule for rule in payload["route"]["rules"] if rule.get("outbound") == "direct-ru" and "ip_cidr" in rule)
-        self.assertEqual(cidr_rule["ip_cidr"], ["203.0.113.0/24", "198.51.100.4/32"])
+        self.assertEqual(cidr_rule["ip_cidr"], ["203.0.113.0/24", "198.51.100.4/32", f"{env['RU_PUBLIC_IP']}/32"])
 
     def test_render_next_steps_mentions_uri_first_contract(self) -> None:
         env = self.make_env()
@@ -958,7 +967,7 @@ class RenderTests(unittest.TestCase):
         direct_suffix_rule = next(rule for rule in route_rules if rule.get("outbound") == "direct-ru" and "domain_suffix" in rule)
         self.assertIn(".ipify.org", direct_suffix_rule["domain_suffix"])
         cidr_rule = next(rule for rule in route_rules if rule.get("outbound") == "direct-ru" and "ip_cidr" in rule)
-        self.assertEqual(cidr_rule["ip_cidr"], ["203.0.113.0/24"])
+        self.assertEqual(cidr_rule["ip_cidr"], ["203.0.113.0/24", "203.0.113.10/32"])
         dns_direct_rule = next(rule for rule in dns_rules if "domain" in rule)
         self.assertIn("api.oneme.ru", dns_direct_rule["domain"])
         self.assertIn("ip.mail.ru", dns_direct_rule["domain"])

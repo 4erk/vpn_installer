@@ -152,6 +152,8 @@ def parse_established_client_ips(ss_text: str, listen_port: int) -> set[str]:
             ip = ipaddress.ip_address(peer_host.strip("[]"))
         except ValueError:
             continue
+        if ip.version == 6 and ip.ipv4_mapped:
+            ip = ip.ipv4_mapped
         if ip.version == 4:
             ips.add(str(ip))
     return ips

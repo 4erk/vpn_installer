@@ -104,10 +104,11 @@ class AdminWebTests(unittest.TestCase):
                 "0 0 94.232.248.35:443 203.0.113.20:53001",
                 "0 0 94.232.248.35:11333 203.0.113.30:53002",
                 "0 0 94.232.248.35:443 not-an-ip:53004",
+                "0 0 [::ffff:94.232.248.35]:443 [::ffff:192.0.2.44]:53005",
                 "0 0 [::ffff:94.232.248.35]:443 [2001:db8::1]:53003",
             ]
         )
-        self.assertEqual(admin_web.parse_established_client_ips(sample, 443), {"198.51.100.10", "203.0.113.20"})
+        self.assertEqual(admin_web.parse_established_client_ips(sample, 443), {"198.51.100.10", "203.0.113.20", "192.0.2.44"})
         self.assertEqual(admin_web.split_endpoint("missing-port"), ("", ""))
 
     def test_active_client_access_allows_any_current_vpn_peer(self) -> None:

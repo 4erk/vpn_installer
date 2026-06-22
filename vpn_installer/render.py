@@ -132,6 +132,11 @@ def render_ru_singbox(env: dict[str, str]) -> str:
     direct_domains = env_list(env, "RU_FORCE_DIRECT_DOMAIN")
     direct_domain_suffixes = env_list(env, "RU_FORCE_DIRECT_DOMAIN_SUFFIX")
     direct_ip_cidrs = env_list(env, "RU_FORCE_DIRECT_IP_CIDR")
+    ru_public_ip = env.get("RU_PUBLIC_IP", "").strip()
+    if ru_public_ip:
+        ru_public_cidr = f"{ru_public_ip}/32"
+        if ru_public_cidr not in direct_ip_cidrs:
+            direct_ip_cidrs.append(ru_public_cidr)
     block_ip_cidrs = env_list(env, "RU_BLOCK_IP_CIDR")
     ipv6_policy = env.get("RU_IPV6_POLICY", "fast-fail").strip().lower()
     geoip_direct = env.get("RU_GEOIP_DIRECT", "0").strip().lower() in {"1", "true", "yes", "on"}
