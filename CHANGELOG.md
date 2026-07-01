@@ -6,6 +6,15 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.8.5] - 2026-07-01
+
+### Fixed
+
+- Голые публичные IPv4 назначения на российском `sing-box` теперь идут через отдельный outbound `to-foreign-ip-literal` с коротким `TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT=2s`. Это сокращает подвисы на недоступных IP literal, но не возвращает глобальный timeout для обычного доменного `to-foreign`.
+- `status` и `diagnose path` теперь отдельно показывают timeout'ы `to-foreign-ip-literal`, обычного `to-foreign`, `direct-ru` и DNS, а Xray `disabled.invalid` больше не смешивается с invalid REALITY.
+- Foreign health-check повторяет быструю WG-проверку и не пишет hard failure на одиночный промах, если предыдущий профильный WireGuard path свежий и живой.
+- Installer добавляет управляемый journald drop-in (`SystemMaxUse=256M`, `MaxRetentionSec=14day`) и bounded vacuum, чтобы серверные журналы не разрастались до сотен мегабайт на малых VPS.
+
 ## [0.8.4] - 2026-06-22
 
 ### Changed

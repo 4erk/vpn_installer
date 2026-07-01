@@ -158,8 +158,9 @@ if [[ "${{role}}" == "ru-gateway" ]]; then
   xray_log="$(journalctl -u vpn-stack-xray.service --since '-30 minutes' --no-pager -o cat 2>/dev/null | sed -r 's/\\x1B\\[[0-9;]*[mK]//g' || true)"
   printf 'window_minutes=30\n'
   printf 'accepted=%s\n' "$(grep -c 'accepted tcp:' <<<"${{xray_log}}" || true)"
-  printf 'errors=%s\n' "$(grep -Eic 'error|failed|timeout|refused|reset|invalid|EOF|panic|fatal|denied|processed invalid connection' <<<"${{xray_log}}" || true)"
+  printf 'errors=%s\n' "$(printf '%s\n' "${{xray_log}}" | grep -Ev 'accepted tcp:disabled[.]invalid' | grep -Eic 'error|failed|timeout|refused|reset|EOF|panic|fatal|denied|processed invalid connection' || true)"
   printf 'invalid_reality=%s\n' "$(grep -c 'REALITY: processed invalid connection' <<<"${{xray_log}}" || true)"
+  printf 'disabled_invalid=%s\n' "$(grep -c 'accepted tcp:disabled[.]invalid' <<<"${{xray_log}}" || true)"
   printf 'ipv6_literals=%s\n' "$(grep -Ec 'accepted tcp:\\[[0-9A-Fa-f:.]+\\]:' <<<"${{xray_log}}" || true)"
   printf 'sources='
   printf '%s\n' "${{xray_log}}" |
@@ -206,11 +207,17 @@ if [[ "${{role}}" == "ru-gateway" ]]; then
     sort | uniq -c | sort -nr | head -n 12 |
     awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
   printf '\nto_foreign=%s\n' "$(grep -c 'outbound/direct\\[to-foreign\\]: outbound connection to' <<<"${{singbox_log}}" || true)"
+  printf 'to_foreign_ip_literal=%s\n' "$(grep -c 'outbound/direct\\[to-foreign-ip-literal\\]: outbound connection to' <<<"${{singbox_log}}" || true)"
   printf 'direct_ru=%s\n' "$(grep -c 'outbound/direct\\[direct-ru\\]: outbound connection to' <<<"${{singbox_log}}" || true)"
   printf 'ipv6_literals=%s\n' "$(grep -Ec 'inbound connection to \\[[0-9A-Fa-f:.]+\\]:' <<<"${{singbox_log}}" || true)"
   printf 'to_foreign_destinations='
   printf '%s\n' "${{singbox_log}}" |
     sed -n 's/.*outbound\\/direct\\[to-foreign\\]: outbound connection to \\([^ ]*\\).*/\\1/p' |
+    sort | uniq -c | sort -nr | head -n 12 |
+    awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
+  printf '\nto_foreign_ip_literal_destinations='
+  printf '%s\n' "${{singbox_log}}" |
+    sed -n 's/.*outbound\\/direct\\[to-foreign-ip-literal\\]: outbound connection to \\([^ ]*\\).*/\\1/p' |
     sort | uniq -c | sort -nr | head -n 12 |
     awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
   printf '\ndirect_ru_destinations='
@@ -221,6 +228,11 @@ if [[ "${{role}}" == "ru-gateway" ]]; then
   printf '\ntimeout_destinations='
   printf '%s\n' "${{singbox_log}}" |
     sed -n 's/.*open connection to \\([^ ]*\\) using outbound\\/direct\\[[^]]*\\].*/\\1/p; s/.*lookup failed for \\([^: ]*\\):.*/\\1/p' |
+    sort | uniq -c | sort -nr | head -n 12 |
+    awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
+  printf '\nip_literal_timeout_destinations='
+  printf '%s\n' "${{singbox_log}}" |
+    sed -n 's/.*open connection to \\([^ ]*\\) using outbound\\/direct\\[to-foreign-ip-literal\\].*/\\1/p' |
     sort | uniq -c | sort -nr | head -n 12 |
     awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
   printf '\nipv6_literal_destinations='

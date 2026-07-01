@@ -420,6 +420,7 @@ def test_ru_singbox_runtime_smoke(runner: AuditRunner, out_dir: Path) -> dict[st
     router_config["outbounds"] = [
         {"type": "direct", "tag": "direct-ru", "domain_resolver": {"server": "dns-ru-direct", "strategy": "ipv4_only"}},
         {"type": "direct", "tag": "to-foreign", "domain_resolver": {"server": "dns-global", "strategy": "ipv4_only"}},
+        {"type": "direct", "tag": "to-foreign-ip-literal", "domain_resolver": {"server": "dns-global", "strategy": "ipv4_only"}},
         {"type": "block", "tag": "blocked"},
     ]
     router_config["route"]["rules"].insert(0, {"ip_cidr": ["127.0.0.0/8"], "action": "route", "outbound": "direct-ru"})
@@ -475,6 +476,7 @@ def test_xray_reality_interop(runner: AuditRunner, out_dir: Path) -> dict[str, s
     router_config["outbounds"] = [
         {"type": "direct", "tag": "direct-ru"},
         {"type": "direct", "tag": "to-foreign"},
+        {"type": "direct", "tag": "to-foreign-ip-literal"},
         {"type": "block", "tag": "blocked"},
     ]
 

@@ -133,6 +133,7 @@ UTLS_FINGERPRINT="${UTLS_FINGERPRINT:-chrome}"
 SING_BOX_LOG_LEVEL="${SING_BOX_LOG_LEVEL:-info}"
 RU_SNIFF_TIMEOUT="${RU_SNIFF_TIMEOUT:-1s}"
 TO_FOREIGN_CONNECT_TIMEOUT="${TO_FOREIGN_CONNECT_TIMEOUT:-}"
+TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT="${TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT-2s}"
 if [[ "${RU_LISTEN_PORT}" == "8443" ]]; then
   RU_LISTEN_PORT="443"
 fi
@@ -213,6 +214,9 @@ ADMIN_WEB_ALLOW_WG="${ADMIN_WEB_ALLOW_WG:-0}"
 ADMIN_WEB_USERNAME="${ADMIN_WEB_USERNAME:-user}"
 ADMIN_WEB_PASSWORD="${ADMIN_WEB_PASSWORD:-password}"
 DISABLE_NIC_OFFLOADS="${DISABLE_NIC_OFFLOADS:-1}"
+JOURNAL_LIMIT_ENABLED="${JOURNAL_LIMIT_ENABLED:-1}"
+JOURNAL_SYSTEM_MAX_USE="${JOURNAL_SYSTEM_MAX_USE:-256M}"
+JOURNAL_MAX_RETENTION_SEC="${JOURNAL_MAX_RETENTION_SEC:-14day}"
 APT_LOCK_TIMEOUT_SECONDS="${APT_LOCK_TIMEOUT_SECONDS:-900}"
 APT_LOCK_RETRY_SECONDS="${APT_LOCK_RETRY_SECONDS:-5}"
 SINGBOX_CONFIG_PATH="/etc/sing-box/config.json"
@@ -238,6 +242,7 @@ GUARD_TIMER_PATH="/etc/systemd/system/vpn-stack-guard.timer"
 ADMIN_WEB_SERVICE_PATH="/etc/systemd/system/vpn-stack-admin.service"
 SUBSCRIPTION_SERVICE_PATH="/etc/systemd/system/vpn-stack-subscription.service"
 SYSCTL_PATH="/etc/sysctl.d/90-vpn-stack.conf"
+JOURNALD_DROPIN_PATH="/etc/systemd/journald.conf.d/90-vpn-stack.conf"
 SUBSCRIPTION_ROOT="/var/lib/vpn-stack/subscription"
 VPNSTACK_ROLE_FILE="${VPNSTACK_ROOT}/role"
 VPNSTACK_DEPLOYMENT_FILE="${VPNSTACK_ROOT}/deployment.env"
@@ -411,6 +416,7 @@ managed_paths() {
     "${SUBSCRIPTION_SERVICE_PATH}" \
     "${SUBSCRIPTION_ROOT}" \
     "${SYSCTL_PATH}" \
+    "${JOURNALD_DROPIN_PATH}" \
     "${VPNSTACK_DEPLOYMENT_FILE}" \
     "${VPNSTACK_ROLE_FILE}" \
     "${VPNSTACK_INSTALLED_AT_FILE}" \
@@ -729,6 +735,10 @@ record_install_metadata() {
       local seen_ru_listen_port="0"
       local seen_reality_empty_short_id="0"
       local seen_reality_time="0"
+      local seen_ip_literal_timeout="0"
+      local seen_journal_limit_enabled="0"
+      local seen_journal_system_max_use="0"
+      local seen_journal_max_retention_sec="0"
       local line=""
       while IFS= read -r line || [[ -n "${line}" ]]; do
         case "${line}" in
@@ -747,6 +757,22 @@ record_install_metadata() {
             printf 'RU_REALITY_ACCEPT_EMPTY_SHORT_ID="%s"\n' "${RU_REALITY_ACCEPT_EMPTY_SHORT_ID}"
             seen_reality_empty_short_id="1"
             ;;
+          TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT=*)
+            printf 'TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT="%s"\n' "${TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT}"
+            seen_ip_literal_timeout="1"
+            ;;
+          JOURNAL_LIMIT_ENABLED=*)
+            printf 'JOURNAL_LIMIT_ENABLED="%s"\n' "${JOURNAL_LIMIT_ENABLED}"
+            seen_journal_limit_enabled="1"
+            ;;
+          JOURNAL_SYSTEM_MAX_USE=*)
+            printf 'JOURNAL_SYSTEM_MAX_USE="%s"\n' "${JOURNAL_SYSTEM_MAX_USE}"
+            seen_journal_system_max_use="1"
+            ;;
+          JOURNAL_MAX_RETENTION_SEC=*)
+            printf 'JOURNAL_MAX_RETENTION_SEC="%s"\n' "${JOURNAL_MAX_RETENTION_SEC}"
+            seen_journal_max_retention_sec="1"
+            ;;
           *)
             printf '%s\n' "${line}"
             ;;
@@ -760,6 +786,18 @@ record_install_metadata() {
       fi
       if [[ "${seen_reality_time}" != "1" && -n "${RU_REALITY_MAX_TIME_DIFFERENCE}" ]]; then
         printf 'RU_REALITY_MAX_TIME_DIFFERENCE="%s"\n' "${RU_REALITY_MAX_TIME_DIFFERENCE}"
+      fi
+      if [[ "${seen_ip_literal_timeout}" != "1" ]]; then
+        printf 'TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT="%s"\n' "${TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT}"
+      fi
+      if [[ "${seen_journal_limit_enabled}" != "1" ]]; then
+        printf 'JOURNAL_LIMIT_ENABLED="%s"\n' "${JOURNAL_LIMIT_ENABLED}"
+      fi
+      if [[ "${seen_journal_system_max_use}" != "1" ]]; then
+        printf 'JOURNAL_SYSTEM_MAX_USE="%s"\n' "${JOURNAL_SYSTEM_MAX_USE}"
+      fi
+      if [[ "${seen_journal_max_retention_sec}" != "1" ]]; then
+        printf 'JOURNAL_MAX_RETENTION_SEC="%s"\n' "${JOURNAL_MAX_RETENTION_SEC}"
       fi
     } | write_file "${VPNSTACK_DEPLOYMENT_FILE}"
     chmod 0600 "${VPNSTACK_DEPLOYMENT_FILE}"
@@ -1023,6 +1061,23 @@ configure_ssh_daemon_mode() {
   systemctl disable --now ssh.socket >/dev/null 2>&1 || true
   systemctl enable ssh.service >/dev/null 2>&1 || true
   systemctl restart ssh.service >/dev/null 2>&1 || systemctl start ssh.service >/dev/null 2>&1 || true
+}
+
+configure_journald_limits() {
+  if [[ "${JOURNAL_LIMIT_ENABLED,,}" == "0" || "${JOURNAL_LIMIT_ENABLED,,}" == "false" || "${JOURNAL_LIMIT_ENABLED,,}" == "no" || "${JOURNAL_LIMIT_ENABLED,,}" == "off" ]]; then
+    rm -f "${JOURNALD_DROPIN_PATH}"
+    systemctl restart systemd-journald >/dev/null 2>&1 || true
+    return 0
+  fi
+  mkdir -p "$(dirname "${JOURNALD_DROPIN_PATH}")"
+  cat >"${JOURNALD_DROPIN_PATH}" <<EOF
+[Journal]
+SystemMaxUse=${JOURNAL_SYSTEM_MAX_USE}
+MaxRetentionSec=${JOURNAL_MAX_RETENTION_SEC}
+EOF
+  systemctl restart systemd-journald >/dev/null 2>&1 || true
+  journalctl --vacuum-size="${JOURNAL_SYSTEM_MAX_USE}" >/dev/null 2>&1 || true
+  journalctl --vacuum-time="${JOURNAL_MAX_RETENTION_SEC}" >/dev/null 2>&1 || true
 }
 
 find_rendered_role_dir() {
@@ -1335,6 +1390,7 @@ fi
 if [[ -n "${WG_INTERFACE:-}" ]]; then
   apply_runtime_qdisc "${WG_INTERFACE}"
 fi
+configure_journald_limits
 systemctl daemon-reload
 cleanup_failed_rc_local
 disable_legacy_proxy_services

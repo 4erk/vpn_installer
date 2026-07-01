@@ -72,6 +72,11 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(env["SING_BOX_LOG_LEVEL"], "info")
         self.assertEqual(env["RU_SNIFF_TIMEOUT"], "250ms")
         self.assertEqual(env["TO_FOREIGN_CONNECT_TIMEOUT"], "")
+        self.assertEqual(env["TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT"], "2s")
+
+    def test_merge_env_with_defaults_preserves_empty_ip_literal_timeout_override(self) -> None:
+        env = config.merge_env_with_defaults({"TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT": ""}, "sample")
+        self.assertEqual(env["TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT"], "")
 
     def test_merge_env_with_defaults_migrates_old_sniff_timeout_default(self) -> None:
         env = config.merge_env_with_defaults({"RU_SNIFF_TIMEOUT": "1s"}, "sample")

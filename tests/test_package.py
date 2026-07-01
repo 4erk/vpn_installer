@@ -58,6 +58,12 @@ class PackageTests(unittest.TestCase):
         self.assertIn('HEALTH_RU_DIRECT_TARGET_PROBE_URLS="${HEALTH_RU_DIRECT_TARGET_PROBE_URLS:-https://api.ipify.org/ https://2ip.ru/}"', install_script)
         self.assertIn('HEALTH_TARGET_CONNECT_TIMEOUT_SECONDS="${HEALTH_TARGET_CONNECT_TIMEOUT_SECONDS:-2}"', install_script)
         self.assertIn('HEALTH_TARGET_MAX_TIME_SECONDS="${HEALTH_TARGET_MAX_TIME_SECONDS:-4}"', install_script)
+        self.assertIn('JOURNAL_LIMIT_ENABLED="${JOURNAL_LIMIT_ENABLED:-1}"', install_script)
+        self.assertIn('JOURNAL_SYSTEM_MAX_USE="${JOURNAL_SYSTEM_MAX_USE:-256M}"', install_script)
+        self.assertIn('JOURNAL_MAX_RETENTION_SEC="${JOURNAL_MAX_RETENTION_SEC:-14day}"', install_script)
+        self.assertIn('JOURNALD_DROPIN_PATH="/etc/systemd/journald.conf.d/90-vpn-stack.conf"', install_script)
+        self.assertIn("configure_journald_limits", install_script)
+        self.assertIn('journalctl --vacuum-size="${JOURNAL_SYSTEM_MAX_USE}"', install_script)
         self.assertIn('ADMIN_WEB_ENABLED="${ADMIN_WEB_ENABLED:-1}"', install_script)
         self.assertIn('ADMIN_WEB_BIND="${ADMIN_WEB_BIND:-0.0.0.0}"', install_script)
         self.assertIn('ADMIN_WEB_PORT="${ADMIN_WEB_PORT:-11333}"', install_script)
@@ -84,8 +90,10 @@ class PackageTests(unittest.TestCase):
         self.assertIn('SING_BOX_LOG_LEVEL="${SING_BOX_LOG_LEVEL:-info}"', install_script)
         self.assertIn('RU_SNIFF_TIMEOUT="${RU_SNIFF_TIMEOUT:-1s}"', install_script)
         self.assertIn('TO_FOREIGN_CONNECT_TIMEOUT="${TO_FOREIGN_CONNECT_TIMEOUT:-}"', install_script)
+        self.assertIn('TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT="${TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT-2s}"', install_script)
         self.assertIn('if [[ "${RU_LISTEN_PORT}" == "8443" ]]; then', install_script)
         self.assertIn('seen_ru_listen_port="0"', install_script)
+        self.assertIn('seen_ip_literal_timeout="0"', install_script)
         self.assertNotIn('seen_ru_compat_ports="0"', install_script)
         self.assertIn('APT_LOCK_TIMEOUT_SECONDS="${APT_LOCK_TIMEOUT_SECONDS:-900}"', install_script)
         self.assertIn('apt-get -o DPkg::Lock::Timeout="${APT_LOCK_TIMEOUT_SECONDS}" "$@"', install_script)
@@ -138,7 +146,7 @@ class PackageTests(unittest.TestCase):
 
     def test_package_exposes_version_via_getattr(self) -> None:
         package = importlib.import_module("vpn_installer")
-        self.assertEqual(package.__version__, "0.8.4")
+        self.assertEqual(package.__version__, "0.8.5")
         with self.assertRaises(AttributeError):
             package.__getattr__("nope")
 

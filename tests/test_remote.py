@@ -400,9 +400,10 @@ class RemoteTests(unittest.TestCase):
                     "reality_invalid_recent_count": "7",
                     "reality_invalid_recent_sources": "178.66.129.100=7",
                     "singbox_to_foreign_timeout_count": "11",
+                    "singbox_to_foreign_ip_literal_timeout_count": "4",
                     "singbox_direct_ru_timeout_count": "2",
                     "singbox_dns_timeout_count": "1",
-                    "singbox_recent_timeout_sample": "connection: open connection to [2001:db8::1]:443 using outbound/direct[to-foreign]: i/o timeout",
+                    "singbox_recent_timeout_sample": "connection: open connection to [2001:db8::1]:443 using outbound/direct[to-foreign-ip-literal]: i/o timeout",
                     "singbox_log_window_minutes": "30",
                     "singbox_recent_blocked_count": "22",
                     "singbox_recent_mux_closed_count": "36",
@@ -414,10 +415,13 @@ class RemoteTests(unittest.TestCase):
                     "singbox_recent_blocked_destinations": "[fdfd::1ad5:632a]:55517=6,172.19.0.2:853=1",
                     "singbox_recent_mux_sources": "91.193.149.187=36",
                     "singbox_recent_to_foreign_count": "44",
+                    "singbox_recent_to_foreign_ip_literal_count": "9",
                     "singbox_recent_direct_ru_count": "12",
                     "singbox_recent_to_foreign_destinations": "20.42.65.94:443=5,8.8.8.8:443=1",
+                    "singbox_recent_to_foreign_ip_literal_destinations": "91.108.56.103:443=4",
                     "singbox_recent_direct_ru_destinations": "142.251.143.131:80=2",
                     "singbox_recent_timeout_destinations": "[185.234.59.121]=2,ipv6.msftncsi.com=1",
+                    "singbox_recent_ip_literal_timeout_destinations": "91.108.56.103:443=4",
                     "singbox_recent_ipv6_literal_count": "7",
                     "singbox_recent_ipv6_literal_destinations": "[2400:52e0:1e00::722:1]:443=4,[fdfd::1ad5:632a]:55517=3",
                     "singbox_recent_inbound_destinations": "chatgpt.com:443=2,[2606:4700::6810:5c12]:443=1",
@@ -425,6 +429,7 @@ class RemoteTests(unittest.TestCase):
                     "xray_log_window_minutes": "30",
                     "xray_recent_error_count": "1",
                     "xray_recent_invalid_reality_count": "0",
+                    "xray_recent_disabled_invalid_count": "3",
                     "xray_recent_accepted_count": "55",
                     "xray_recent_sources": "178.66.131.179=44,213.109.48.231=11",
                     "xray_recent_accepted_destinations": "chatgpt.com:443=10,8.8.8.8:53=5",
@@ -463,12 +468,14 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("invalid Reality sources: 178.66.129.100=7", output)
         self.assertIn("diagnosis: invalid Reality happens before routing", output)
         self.assertIn("sing-box to-foreign timeouts / 4h: 11", output)
+        self.assertIn("sing-box IP-literal to-foreign timeouts / 4h: 4", output)
         self.assertIn("sing-box direct-ru timeouts / 4h: 2", output)
         self.assertIn("sing-box DNS timeouts / 4h: 1", output)
+        self.assertIn("sing-box IP-literal timeout destinations / 4h: 91.108.56.103:443=4", output)
         self.assertIn("sing-box timeout destinations / 4h: [185.234.59.121]=2,ipv6.msftncsi.com=1", output)
         self.assertIn("sing-box last timeout sample: connection: open connection to [2001:db8::1]:443", output)
         self.assertIn("Xray front recent window (min): 30", output)
-        self.assertIn("Xray front recent: accepted=55, errors=1, invalid_reality=0, ipv6_literals=2", output)
+        self.assertIn("Xray front recent: accepted=55, errors=1, invalid_reality=0, disabled_invalid=3, ipv6_literals=2", output)
         self.assertIn("Xray front recent sources: 178.66.131.179=44,213.109.48.231=11", output)
         self.assertIn("Xray front recent destinations: chatgpt.com:443=10,8.8.8.8:53=5", output)
         self.assertIn("Xray front recent IPv6 literal destinations: [2001:4860:4860::8888]:443=2", output)
@@ -479,8 +486,9 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("sing-box recent blocked destinations: [fdfd::1ad5:632a]:55517=6,172.19.0.2:853=1", output)
         self.assertIn("sing-box recent mux sources: 91.193.149.187=36", output)
         self.assertIn("sing-box recent sample: connection: listen packet connection using outbound/block[blocked]: operation not permitted", output)
-        self.assertIn("sing-box recent routed: to_foreign=44, direct_ru=12, ipv6_literals=7", output)
+        self.assertIn("sing-box recent routed: to_foreign=44, to_foreign_ip_literal=9, direct_ru=12, ipv6_literals=7", output)
         self.assertIn("sing-box recent to-foreign destinations: 20.42.65.94:443=5,8.8.8.8:443=1", output)
+        self.assertIn("sing-box recent IP-literal to-foreign destinations: 91.108.56.103:443=4", output)
         self.assertIn("sing-box recent direct-ru destinations: 142.251.143.131:80=2", output)
         self.assertIn("sing-box recent IPv6 literal destinations: [2400:52e0:1e00::722:1]:443=4,[fdfd::1ad5:632a]:55517=3", output)
         self.assertIn("diagnosis: sing-box router received bare IPv6 destinations", output)

@@ -128,6 +128,7 @@ def render_ru_singbox(env: dict[str, str]) -> str:
     log_level = env.get("SING_BOX_LOG_LEVEL", "info").strip() or "info"
     sniff_timeout = env.get("RU_SNIFF_TIMEOUT", "1s").strip() or "1s"
     to_foreign_connect_timeout = env.get("TO_FOREIGN_CONNECT_TIMEOUT", "").strip()
+    to_foreign_ip_literal_connect_timeout = env.get("TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT", "2s").strip()
     block_quic = env.get("RU_BLOCK_QUIC", "0").strip().lower() not in {"0", "false", "no", "off"}
     direct_domains = env_list(env, "RU_FORCE_DIRECT_DOMAIN")
     direct_domain_suffixes = env_list(env, "RU_FORCE_DIRECT_DOMAIN_SUFFIX")
@@ -175,7 +176,7 @@ def render_ru_singbox(env: dict[str, str]) -> str:
     route_rules.append(ipv6_rule)
     if geoip_direct:
         route_rules.append({"rule_set": ["ru-geoip"], "action": "route", "outbound": "direct-ru"})
-    route_rules.append({"ip_cidr": ["0.0.0.0/0"], "action": "route", "outbound": "to-foreign"})
+    route_rules.append({"ip_cidr": ["0.0.0.0/0"], "action": "route", "outbound": "to-foreign-ip-literal"})
     route_rules.append({"action": "resolve", "server": "dns-global", "strategy": "ipv4_only"})
     route_rules.append({"ip_is_private": True, "action": "route", "outbound": "blocked"})
     if geoip_direct:
@@ -190,6 +191,15 @@ def render_ru_singbox(env: dict[str, str]) -> str:
     }
     if to_foreign_connect_timeout:
         to_foreign_outbound["connect_timeout"] = to_foreign_connect_timeout
+    to_foreign_ip_literal_outbound: dict[str, Any] = {
+        "type": "direct",
+        "tag": "to-foreign-ip-literal",
+        "bind_interface": env["WG_INTERFACE"],
+        "routing_mark": env_int(env, "APP_ROUTE_MARK"),
+        "domain_resolver": {"server": "dns-global", "strategy": "ipv4_only"},
+    }
+    if to_foreign_ip_literal_connect_timeout:
+        to_foreign_ip_literal_outbound["connect_timeout"] = to_foreign_ip_literal_connect_timeout
 
     payload = {
         "log": {"level": log_level, "timestamp": True},
@@ -214,6 +224,7 @@ def render_ru_singbox(env: dict[str, str]) -> str:
         "outbounds": [
             {"type": "direct", "tag": "direct-ru", "domain_resolver": {"server": "dns-ru-direct", "strategy": "ipv4_only"}},
             to_foreign_outbound,
+            to_foreign_ip_literal_outbound,
             {"type": "block", "tag": "blocked"},
         ],
         "route": {
@@ -723,10 +734,19 @@ def render_health_script(env: dict[str, str], role: str) -> str:
         else "\n".join(
             [
                 'probe_wireguard_path() {',
-                '  ping -4 -I "${WG_INTERFACE}" -c 1 -W 2 "${WG_RU_ADDRESS_HOST}" >/dev/null 2>&1',
+                '  ping -4 -I "${WG_INTERFACE}" -c 1 -W 2 "${WG_RU_ADDRESS_HOST}" >/dev/null 2>&1 ||',
+                '    ping -4 -I "${WG_INTERFACE}" -c 1 -W 2 "${WG_RU_ADDRESS_HOST}" >/dev/null 2>&1',
                 '}',
                 "",
                 "append_wireguard_path_reason() {",
+                '  local previous_path_ok="" previous_age="" previous_grace=""',
+                '  previous_path_ok="$(state_value PROFILE_WG_PATH_OK)"',
+                '  previous_age="$(state_value PROFILE_HANDSHAKE_AGE_S)"',
+                '  previous_grace="$(state_value PROFILE_HANDSHAKE_GRACE_S)"',
+                '  if [[ "${previous_path_ok}" == "1" && "${previous_age}" =~ ^[0-9]+$ && "${previous_grace}" =~ ^[0-9]+$ && "${previous_age}" -le "${previous_grace}" ]]; then',
+                '    log "foreign WireGuard probe missed once, but previous live profile is fresh"',
+                "    return 0",
+                "  fi",
                 '  reasons+=("foreign_wg_peer_unreachable")',
                 "}",
             ]
