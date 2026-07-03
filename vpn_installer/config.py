@@ -257,8 +257,8 @@ def generate_default_env(deploy_name: str) -> dict[str, str]:
         "WG_PRESHARED_KEY": base64_std(os.urandom(32)),
         "RU_DIRECT_DNS_SERVER": "77.88.8.8",
         "RU_DIRECT_DNS_PORT": "53",
-        "GLOBAL_DOH_SERVER": "1.1.1.1",
-        "GLOBAL_DOH_SERVER_NAME": "cloudflare-dns.com",
+        "GLOBAL_DOH_SERVER": "8.8.8.8",
+        "GLOBAL_DOH_SERVER_NAME": "dns.google",
         "GLOBAL_DOH_PATH": "/dns-query",
         "RU_FORCE_DIRECT_DOMAIN": "api.oneme.ru,mtalk.google.com,calls.okcdn.ru,gosuslugi.ru,api.ok.ru,ifconfig.me,ifconfig.co,checkip.amazonaws.com,ipapi.co,ipinfo.io,ident.me,tnedi.me,icanhazip.com,ip.mail.ru,ipv4-internet.yandex.net,ipv6-internet.yandex.net,2ip.ru",
         "RU_FORCE_DIRECT_DOMAIN_SUFFIX": ".gstatic.com,.gosuslugi.ru,.ipify.org,.ipinfo.io,.ident.me,.tnedi.me,.icanhazip.com",
@@ -410,6 +410,11 @@ def merge_env_with_defaults(existing: dict[str, str], deploy_name: str) -> dict[
         merged["RU_SNIFF_TIMEOUT"] = defaults["RU_SNIFF_TIMEOUT"]
     if merged.get("TO_FOREIGN_CONNECT_TIMEOUT") in {"1s", "2s"}:
         merged["TO_FOREIGN_CONNECT_TIMEOUT"] = defaults["TO_FOREIGN_CONNECT_TIMEOUT"]
+    if merged.get("SING_BOX_LOG_LEVEL") == "warn":
+        merged["SING_BOX_LOG_LEVEL"] = defaults["SING_BOX_LOG_LEVEL"]
+    if merged.get("GLOBAL_DOH_SERVER") == "1.1.1.1" and merged.get("GLOBAL_DOH_SERVER_NAME") == "cloudflare-dns.com":
+        merged["GLOBAL_DOH_SERVER"] = defaults["GLOBAL_DOH_SERVER"]
+        merged["GLOBAL_DOH_SERVER_NAME"] = defaults["GLOBAL_DOH_SERVER_NAME"]
     if (
         existing.get("ADMIN_WEB_BIND") in {"127.0.0.1", "localhost"}
         and merged.get("ADMIN_WEB_ACTIVE_CLIENT_REQUIRED", "1").strip().lower() in {"1", "true", "yes", "on"}

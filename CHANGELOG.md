@@ -6,6 +6,22 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.8.7] - 2026-07-03
+
+### Fixed
+
+- Глобальный DoH resolver для российского `sing-box` переведён с `1.1.1.1/cloudflare-dns.com` на `8.8.8.8/dns.google`: live-пробы показали периодические `dns: lookup failed ... context deadline exceeded` на текущем Cloudflare DoH path, из-за чего часть сайтов открывалась с 10-секундными DNS подвисаниями.
+- Старый server-authoritative env с `GLOBAL_DOH_SERVER=1.1.1.1` и `GLOBAL_DOH_SERVER_NAME=cloudflare-dns.com` мигрирует на новый resolver при штатном reinstall.
+- `status` теперь печатает текущий global DoH рядом с DNS timeout counters, чтобы следующий DNS-сбой был привязан к конкретному upstream resolver.
+
+## [0.8.6] - 2026-07-03
+
+### Fixed
+
+- `sing-box` на российском сервере снова использует `info` как дефолтный уровень логов, а промежуточный плохой default `warn` мигрирует обратно в `info`: routed diagnostics в `status`/`diagnose path` завязаны на connection log и не должны тихо слепнуть.
+- Убран runtime override `SING_BOX_LOG_LEVEL` поверх server-authoritative deployment env. Штатная установка снова берёт конфигурацию из синхронизированного deployment env без скрытой подмены.
+- `status` теперь предупреждает, если на `ru-gateway` вручную выставлен `SING_BOX_LOG_LEVEL` выше `info`, потому в таком режиме top routed destinations будут неполными.
+
 ## [0.8.5] - 2026-07-01
 
 ### Fixed

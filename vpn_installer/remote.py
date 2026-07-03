@@ -453,10 +453,16 @@ deployment_name=""
 role=""
 installed_at=""
 configured_wan_interface=""
+singbox_configured_log_level=""
+global_doh_server=""
+global_doh_server_name=""
 if [[ -r /etc/vpn-stack/deployment.env ]]; then
   installed="1"
   deployment_name="$(grep -E '^DEPLOY_NAME=' /etc/vpn-stack/deployment.env | head -n1 | cut -d= -f2- | sed 's/^"//; s/"$//')"
   configured_wan_interface="$(grep -E '^WAN_INTERFACE=' /etc/vpn-stack/deployment.env | head -n1 | cut -d= -f2- | sed 's/^"//; s/"$//')"
+  singbox_configured_log_level="$(grep -E '^SING_BOX_LOG_LEVEL=' /etc/vpn-stack/deployment.env | head -n1 | cut -d= -f2- | sed 's/^"//; s/"$//')"
+  global_doh_server="$(grep -E '^GLOBAL_DOH_SERVER=' /etc/vpn-stack/deployment.env | head -n1 | cut -d= -f2- | sed 's/^"//; s/"$//')"
+  global_doh_server_name="$(grep -E '^GLOBAL_DOH_SERVER_NAME=' /etc/vpn-stack/deployment.env | head -n1 | cut -d= -f2- | sed 's/^"//; s/"$//')"
 fi
 if [[ -r /etc/vpn-stack/role ]]; then role="$(tr -d '\\r\\n' </etc/vpn-stack/role)"; fi
 if [[ -r /etc/vpn-stack/installed_at ]]; then installed_at="$(tr -d '\\r\\n' </etc/vpn-stack/installed_at)"; fi
@@ -843,6 +849,9 @@ printf 'os_version=%s\\n' "${{os_version}}"
 printf 'hostname=%s\\n' "${{hostname_value}}"
 printf 'default_iface=%s\\n' "${{default_iface}}"
 printf 'configured_wan_interface=%s\\n' "${{configured_wan_interface}}"
+printf 'singbox_configured_log_level=%s\\n' "${{singbox_configured_log_level}}"
+printf 'global_doh_server=%s\\n' "${{global_doh_server}}"
+printf 'global_doh_server_name=%s\\n' "${{global_doh_server_name}}"
 printf 'wan_mtu=%s\\n' "${{wan_mtu}}"
 printf 'default_qdisc=%s\\n' "${{default_qdisc}}"
 printf 'wan_offload_gro=%s\\n' "${{wan_offload_gro}}"
@@ -972,6 +981,12 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
     print(f"os: {preflight.get('os_id', '-')} {preflight.get('os_version', '-')}")
     print(f"default iface: {preflight.get('default_iface', '-')}")
     print(f"configured WAN iface: {preflight.get('configured_wan_interface', '-')}")
+    singbox_log_level = preflight.get("singbox_configured_log_level", "").strip().lower()
+    if preflight.get("role") == "ru-gateway" and singbox_log_level and singbox_log_level != "info":
+        print(
+            "warning: sing-box log level is "
+            f"{singbox_log_level}; routed diagnostics need info-level connection logs."
+        )
     print(f"wan mtu: {preflight.get('wan_mtu', '-')}")
     print(f"qdisc: {preflight.get('default_qdisc', '-')}")
     print(
@@ -1045,6 +1060,12 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
         print(f"sing-box IP-literal to-foreign timeouts / 4h: {preflight.get('singbox_to_foreign_ip_literal_timeout_count', '0')}")
         print(f"sing-box direct-ru timeouts / 4h: {preflight.get('singbox_direct_ru_timeout_count', '0')}")
         print(f"sing-box DNS timeouts / 4h: {preflight.get('singbox_dns_timeout_count', '0')}")
+        if preflight.get("global_doh_server") or preflight.get("global_doh_server_name"):
+            print(
+                "sing-box global DoH: "
+                f"{preflight.get('global_doh_server', '-')}/"
+                f"{preflight.get('global_doh_server_name', '-')}"
+            )
         if preflight.get("singbox_recent_ip_literal_timeout_destinations"):
             print(f"sing-box IP-literal timeout destinations / 4h: {preflight.get('singbox_recent_ip_literal_timeout_destinations')}")
         if preflight.get("singbox_recent_timeout_destinations"):
@@ -1124,7 +1145,7 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
             print(f"sing-box recent direct-ru destinations: {preflight.get('singbox_recent_direct_ru_destinations')}")
         if preflight.get("singbox_recent_ipv6_literal_destinations"):
             print(f"sing-box recent IPv6 literal destinations: {preflight.get('singbox_recent_ipv6_literal_destinations')}")
-            print("diagnosis: sing-box router received bare IPv6 destinations; with Xray front this points to an old service path, a bypassed front, or non-SNI traffic.")
+            print("diagnosis: sing-box router received IPv6 literal destinations from clients; default RU IPv6 policy fast-fails them, so treat this as client traffic unless errors or health degradation also appear.")
         if preflight.get("singbox_recent_inbound_destinations"):
             print(f"sing-box recent inbound destinations: {preflight.get('singbox_recent_inbound_destinations')}")
     if preflight.get("guard_last_run"):

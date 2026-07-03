@@ -67,12 +67,14 @@ class ConfigTests(unittest.TestCase):
         env = config.generate_default_env("sample")
         self.assertEqual(env["UTLS_FINGERPRINT"], "chrome")
 
-    def test_default_sing_box_log_level_keeps_server_diagnostics_visible(self) -> None:
+    def test_default_sing_box_log_level_keeps_route_diagnostics_visible(self) -> None:
         env = config.generate_default_env("sample")
         self.assertEqual(env["SING_BOX_LOG_LEVEL"], "info")
         self.assertEqual(env["RU_SNIFF_TIMEOUT"], "250ms")
         self.assertEqual(env["TO_FOREIGN_CONNECT_TIMEOUT"], "")
         self.assertEqual(env["TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT"], "2s")
+        self.assertEqual(env["GLOBAL_DOH_SERVER"], "8.8.8.8")
+        self.assertEqual(env["GLOBAL_DOH_SERVER_NAME"], "dns.google")
 
     def test_merge_env_with_defaults_preserves_empty_ip_literal_timeout_override(self) -> None:
         env = config.merge_env_with_defaults({"TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT": ""}, "sample")
@@ -87,6 +89,18 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(env["TO_FOREIGN_CONNECT_TIMEOUT"], "")
         env = config.merge_env_with_defaults({"TO_FOREIGN_CONNECT_TIMEOUT": "2s"}, "sample")
         self.assertEqual(env["TO_FOREIGN_CONNECT_TIMEOUT"], "")
+
+    def test_merge_env_with_defaults_migrates_bad_warn_log_default(self) -> None:
+        env = config.merge_env_with_defaults({"SING_BOX_LOG_LEVEL": "warn"}, "sample")
+        self.assertEqual(env["SING_BOX_LOG_LEVEL"], "info")
+
+    def test_merge_env_with_defaults_migrates_unstable_cloudflare_doh_default(self) -> None:
+        env = config.merge_env_with_defaults(
+            {"GLOBAL_DOH_SERVER": "1.1.1.1", "GLOBAL_DOH_SERVER_NAME": "cloudflare-dns.com"},
+            "sample",
+        )
+        self.assertEqual(env["GLOBAL_DOH_SERVER"], "8.8.8.8")
+        self.assertEqual(env["GLOBAL_DOH_SERVER_NAME"], "dns.google")
 
     def test_merge_env_with_defaults_migrates_legacy_admin_loopback_bind_to_active_client_gate(self) -> None:
         env = config.merge_env_with_defaults({"ADMIN_WEB_BIND": "127.0.0.1", "ADMIN_WEB_ALLOW_WG": "0", "ADMIN_WEB_ALLOWED_CIDR": ""}, "sample")
