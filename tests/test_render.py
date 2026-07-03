@@ -201,7 +201,7 @@ class RenderTests(unittest.TestCase):
         self.assertIn('SYNC_DOWNLOAD_MAX_TIME="${SYNC_DOWNLOAD_MAX_TIME:-20}"', script)
         self.assertIn('curl -fsSL --connect-timeout "$SYNC_DOWNLOAD_CONNECT_TIMEOUT" --max-time "$SYNC_DOWNLOAD_MAX_TIME"', script)
 
-    def test_ru_server_fast_fails_ipv6_literals_before_direct_routes_by_default(self) -> None:
+    def test_ru_server_routes_ipv6_literals_to_dedicated_foreign_outbound_by_default(self) -> None:
         env = self.make_env()
         payload = json.loads(render.render_ru_singbox(env))
         route_rules = payload["route"]["rules"]
@@ -214,7 +214,7 @@ class RenderTests(unittest.TestCase):
         first_direct_route_index = next(index for index, rule in enumerate(route_rules) if rule.get("outbound") == "direct-ru")
         self.assertEqual(sniff_rule, {"inbound": ["router-in"], "action": "sniff", "timeout": "250ms"})
         self.assertFalse(any(rule.get("network") == "udp" and rule.get("port") == 443 for rule in route_rules))
-        self.assertEqual(ipv6_rules, [{"ip_version": 6, "action": "reject"}])
+        self.assertEqual(ipv6_rules, [{"ip_version": 6, "action": "route", "outbound": "to-foreign-ip-literal"}])
         self.assertEqual(payload["route"]["final"], "to-foreign")
         self.assertLess(first_direct_route_index, ipv6_index)
         self.assertLess(ipv6_index, ipv4_literal_index)
@@ -314,14 +314,14 @@ class RenderTests(unittest.TestCase):
         self.assertLess(direct_domain_resolve_index, direct_domain_route_index)
         self.assertLess(ru_geosite_resolve_index, ru_geosite_route_index)
 
-    def test_ru_server_can_route_ipv6_literals_to_foreign_when_explicitly_enabled(self) -> None:
+    def test_ru_server_can_route_ipv6_literals_to_foreign_fail_fast_when_explicitly_enabled(self) -> None:
         env = self.make_env()
         env["RU_IPV6_POLICY"] = "to-foreign"
         payload = json.loads(render.render_ru_singbox(env))
         ipv6_rules = [rule for rule in payload["route"]["rules"] if rule.get("ip_version") == 6]
-        self.assertEqual(ipv6_rules, [{"ip_version": 6, "action": "route", "outbound": "to-foreign"}])
+        self.assertEqual(ipv6_rules, [{"ip_version": 6, "action": "route", "outbound": "to-foreign-ip-literal"}])
 
-    def test_ru_server_blocks_ipv6_literals_quickly_when_explicitly_requested(self) -> None:
+    def test_ru_server_blocks_ipv6_literals_when_explicitly_requested(self) -> None:
         env = self.make_env()
         env["RU_IPV6_POLICY"] = "block"
         payload = json.loads(render.render_ru_singbox(env))

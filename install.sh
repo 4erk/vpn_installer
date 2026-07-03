@@ -131,7 +131,7 @@ RU_REALITY_ACCEPT_EMPTY_SHORT_ID="${RU_REALITY_ACCEPT_EMPTY_SHORT_ID:-1}"
 RU_REALITY_MAX_TIME_DIFFERENCE="${RU_REALITY_MAX_TIME_DIFFERENCE:-24h}"
 UTLS_FINGERPRINT="${UTLS_FINGERPRINT:-chrome}"
 SING_BOX_LOG_LEVEL="${SING_BOX_LOG_LEVEL:-info}"
-RU_SNIFF_TIMEOUT="${RU_SNIFF_TIMEOUT:-1s}"
+RU_SNIFF_TIMEOUT="${RU_SNIFF_TIMEOUT:-250ms}"
 TO_FOREIGN_CONNECT_TIMEOUT="${TO_FOREIGN_CONNECT_TIMEOUT:-}"
 TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT="${TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT-2s}"
 if [[ "${RU_LISTEN_PORT}" == "8443" ]]; then
@@ -154,21 +154,21 @@ RUNTIME_QDISC="${RUNTIME_QDISC:-fq}"
 
 RU_DIRECT_DNS_SERVER="${RU_DIRECT_DNS_SERVER:-77.88.8.8}"
 RU_DIRECT_DNS_PORT="${RU_DIRECT_DNS_PORT:-53}"
-GLOBAL_DOH_SERVER="${GLOBAL_DOH_SERVER:-1.1.1.1}"
-GLOBAL_DOH_SERVER_NAME="${GLOBAL_DOH_SERVER_NAME:-cloudflare-dns.com}"
+GLOBAL_DOH_SERVER="${GLOBAL_DOH_SERVER:-8.8.8.8}"
+GLOBAL_DOH_SERVER_NAME="${GLOBAL_DOH_SERVER_NAME:-dns.google}"
 GLOBAL_DOH_PATH="${GLOBAL_DOH_PATH:-/dns-query}"
 RU_FORCE_DIRECT_DOMAIN="${RU_FORCE_DIRECT_DOMAIN:-api.oneme.ru,mtalk.google.com,calls.okcdn.ru,gosuslugi.ru,api.ok.ru,ifconfig.me,ifconfig.co,checkip.amazonaws.com,ipapi.co,ipinfo.io,ident.me,tnedi.me,icanhazip.com,ip.mail.ru,ipv4-internet.yandex.net,ipv6-internet.yandex.net,2ip.ru}"
 RU_FORCE_DIRECT_DOMAIN_SUFFIX="${RU_FORCE_DIRECT_DOMAIN_SUFFIX:-.gstatic.com,.gosuslugi.ru,.ipify.org,.ipinfo.io,.ident.me,.tnedi.me,.icanhazip.com}"
 RU_FORCE_DIRECT_IP_CIDR="${RU_FORCE_DIRECT_IP_CIDR:-}"
 RU_BLOCK_IP_CIDR="${RU_BLOCK_IP_CIDR:-}"
-RU_IPV6_POLICY="${RU_IPV6_POLICY:-fast-fail}"
+RU_IPV6_POLICY="${RU_IPV6_POLICY:-to-foreign}"
 RU_BLOCK_QUIC="${RU_BLOCK_QUIC:-0}"
 RU_GEOIP_DIRECT="${RU_GEOIP_DIRECT:-0}"
 if [[ "${RU_BLOCK_IP_CIDR}" == "91.108.56.0/22" ]]; then
   RU_BLOCK_IP_CIDR=""
 fi
-if [[ "${RU_IPV6_POLICY}" == "block" || "${RU_IPV6_POLICY}" == "to-foreign" ]]; then
-  RU_IPV6_POLICY="fast-fail"
+if [[ "${RU_IPV6_POLICY}" == "fast-fail" ]]; then
+  RU_IPV6_POLICY="to-foreign"
 fi
 if [[ "${TO_FOREIGN_CONNECT_TIMEOUT}" == "1s" || "${TO_FOREIGN_CONNECT_TIMEOUT}" == "2s" ]]; then
   TO_FOREIGN_CONNECT_TIMEOUT=""

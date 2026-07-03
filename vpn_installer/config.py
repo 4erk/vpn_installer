@@ -264,7 +264,7 @@ def generate_default_env(deploy_name: str) -> dict[str, str]:
         "RU_FORCE_DIRECT_DOMAIN_SUFFIX": ".gstatic.com,.gosuslugi.ru,.ipify.org,.ipinfo.io,.ident.me,.tnedi.me,.icanhazip.com",
         "RU_FORCE_DIRECT_IP_CIDR": "",
         "RU_BLOCK_IP_CIDR": "",
-        "RU_IPV6_POLICY": "fast-fail",
+        "RU_IPV6_POLICY": "to-foreign",
         "RU_BLOCK_QUIC": "0",
         "RU_GEOIP_DIRECT": "0",
         "RULESET_DIR": "/var/lib/vpn-stack/rules",
@@ -404,7 +404,7 @@ def merge_env_with_defaults(existing: dict[str, str], deploy_name: str) -> dict[
         merged["HEALTH_DEEP_PROBE_INTERVAL_MINUTES"] = defaults["HEALTH_DEEP_PROBE_INTERVAL_MINUTES"]
     if merged.get("RU_BLOCK_IP_CIDR") == "91.108.56.0/22":
         merged["RU_BLOCK_IP_CIDR"] = defaults["RU_BLOCK_IP_CIDR"]
-    if merged.get("RU_IPV6_POLICY") in {"block", "to-foreign"}:
+    if merged.get("RU_IPV6_POLICY") == "fast-fail":
         merged["RU_IPV6_POLICY"] = defaults["RU_IPV6_POLICY"]
     if merged.get("RU_SNIFF_TIMEOUT") == "1s":
         merged["RU_SNIFF_TIMEOUT"] = defaults["RU_SNIFF_TIMEOUT"]

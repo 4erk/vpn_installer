@@ -496,7 +496,7 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("sing-box recent IP-literal to-foreign destinations: 91.108.56.103:443=4", output)
         self.assertIn("sing-box recent direct-ru destinations: 142.251.143.131:80=2", output)
         self.assertIn("sing-box recent IPv6 literal destinations: [2400:52e0:1e00::722:1]:443=4,[fdfd::1ad5:632a]:55517=3", output)
-        self.assertIn("diagnosis: sing-box router received IPv6 literal destinations from clients", output)
+        self.assertIn("diagnosis: sing-box router received IPv6 literal destinations from clients; default RU IPv6 policy routes them through the fail-fast IP-literal foreign outbound.", output)
         self.assertIn("sing-box recent inbound destinations: chatgpt.com:443=2,[2606:4700::6810:5c12]:443=1", output)
 
     def test_ensure_remote_privilege_paths(self) -> None:

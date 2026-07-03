@@ -6,6 +6,14 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.8.8] - 2026-07-03
+
+### Fixed
+
+- IPv6 literal destinations на российском `sing-box` больше не блокируются дефолтным `RU_IPV6_POLICY=fast-fail`: live-проверка отдельным `sing-box` на `wg0` с `routing_mark=48` подтвердила рабочий foreign IPv6 path, поэтому дефолт возвращён к `RU_IPV6_POLICY=to-foreign`.
+- IPv6 literal трафик идёт не через обычный доменный `to-foreign`, а через `to-foreign-ip-literal` с коротким `TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT=2s`, чтобы рабочие IPv6 endpoints открывались, а битые literals не подвешивали сайты.
+- `install.sh` снова синхронизирован с Python defaults: `GLOBAL_DOH_SERVER=8.8.8.8`, `GLOBAL_DOH_SERVER_NAME=dns.google`, `RU_SNIFF_TIMEOUT=250ms`, `RU_IPV6_POLICY=to-foreign`.
+
 ## [0.8.7] - 2026-07-03
 
 ### Fixed

@@ -202,7 +202,7 @@ class ConfigTests(unittest.TestCase):
         self.assertIn(".ipify.org", env["RU_FORCE_DIRECT_DOMAIN_SUFFIX"])
         self.assertIn(".ipinfo.io", env["RU_FORCE_DIRECT_DOMAIN_SUFFIX"])
         self.assertEqual(env["RU_BLOCK_IP_CIDR"], "")
-        self.assertEqual(env["RU_IPV6_POLICY"], "fast-fail")
+        self.assertEqual(env["RU_IPV6_POLICY"], "to-foreign")
         self.assertEqual(env["RU_BLOCK_QUIC"], "0")
         self.assertEqual(env["RU_GEOIP_DIRECT"], "0")
         self.assertEqual(env["CLIENT_ENABLE_IPV6"], "0")
@@ -262,11 +262,11 @@ class ConfigTests(unittest.TestCase):
             },
             "sample",
         )
-        to_foreign_merged = config.merge_env_with_defaults({"RU_IPV6_POLICY": "to-foreign"}, "sample")
+        fast_fail_merged = config.merge_env_with_defaults({"RU_IPV6_POLICY": "fast-fail"}, "sample")
         self.assertEqual(block_merged["RU_BLOCK_IP_CIDR"], "")
-        self.assertEqual(block_merged["RU_IPV6_POLICY"], "fast-fail")
+        self.assertEqual(block_merged["RU_IPV6_POLICY"], "block")
         self.assertEqual(block_merged["GUARD_REALITY_BLOCK_ENABLED"], "1")
-        self.assertEqual(to_foreign_merged["RU_IPV6_POLICY"], "fast-fail")
+        self.assertEqual(fast_fail_merged["RU_IPV6_POLICY"], "to-foreign")
 
     def test_merge_env_with_defaults_appends_new_asset_sources(self) -> None:
         merged = config.merge_env_with_defaults({"RU_GEOSITE_URL": "https://legacy.example/geosite.srs"}, "sample")

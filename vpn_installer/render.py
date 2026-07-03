@@ -139,7 +139,7 @@ def render_ru_singbox(env: dict[str, str]) -> str:
         if ru_public_cidr not in direct_ip_cidrs:
             direct_ip_cidrs.append(ru_public_cidr)
     block_ip_cidrs = env_list(env, "RU_BLOCK_IP_CIDR")
-    ipv6_policy = env.get("RU_IPV6_POLICY", "fast-fail").strip().lower()
+    ipv6_policy = env.get("RU_IPV6_POLICY", "to-foreign").strip().lower()
     geoip_direct = env.get("RU_GEOIP_DIRECT", "0").strip().lower() in {"1", "true", "yes", "on"}
     dns_rules: list[dict[str, Any]] = [{"query_type": ["AAAA"], "action": "reject"}]
     if direct_domains:
@@ -149,7 +149,7 @@ def render_ru_singbox(env: dict[str, str]) -> str:
     dns_rules.append({"rule_set": ["ru-geosite"], "action": "route", "server": "dns-ru-direct", "strategy": "ipv4_only"})
 
     ipv6_rule = (
-        {"ip_version": 6, "action": "route", "outbound": "to-foreign"}
+        {"ip_version": 6, "action": "route", "outbound": "to-foreign-ip-literal"}
         if ipv6_policy in {"to-foreign", "foreign", "proxy"}
         else {"ip_version": 6, "action": "reject"}
     )

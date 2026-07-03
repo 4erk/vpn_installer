@@ -1145,7 +1145,7 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
             print(f"sing-box recent direct-ru destinations: {preflight.get('singbox_recent_direct_ru_destinations')}")
         if preflight.get("singbox_recent_ipv6_literal_destinations"):
             print(f"sing-box recent IPv6 literal destinations: {preflight.get('singbox_recent_ipv6_literal_destinations')}")
-            print("diagnosis: sing-box router received IPv6 literal destinations from clients; default RU IPv6 policy fast-fails them, so treat this as client traffic unless errors or health degradation also appear.")
+            print("diagnosis: sing-box router received IPv6 literal destinations from clients; default RU IPv6 policy routes them through the fail-fast IP-literal foreign outbound.")
         if preflight.get("singbox_recent_inbound_destinations"):
             print(f"sing-box recent inbound destinations: {preflight.get('singbox_recent_inbound_destinations')}")
     if preflight.get("guard_last_run"):
