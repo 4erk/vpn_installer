@@ -129,6 +129,7 @@ def render_ru_singbox(env: dict[str, str]) -> str:
     sniff_timeout = env.get("RU_SNIFF_TIMEOUT", "1s").strip() or "1s"
     to_foreign_connect_timeout = env.get("TO_FOREIGN_CONNECT_TIMEOUT", "").strip()
     to_foreign_ip_literal_connect_timeout = env.get("TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT", "2s").strip()
+    to_foreign_ipv6_literal_connect_timeout = env.get("TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT", "3s").strip()
     block_quic = env.get("RU_BLOCK_QUIC", "0").strip().lower() not in {"0", "false", "no", "off"}
     direct_domains = env_list(env, "RU_FORCE_DIRECT_DOMAIN")
     direct_domain_suffixes = env_list(env, "RU_FORCE_DIRECT_DOMAIN_SUFFIX")
@@ -149,7 +150,7 @@ def render_ru_singbox(env: dict[str, str]) -> str:
     dns_rules.append({"rule_set": ["ru-geosite"], "action": "route", "server": "dns-ru-direct", "strategy": "ipv4_only"})
 
     ipv6_rule = (
-        {"ip_version": 6, "action": "route", "outbound": "to-foreign-ip-literal"}
+        {"ip_version": 6, "action": "route", "outbound": "to-foreign-ipv6-literal"}
         if ipv6_policy in {"to-foreign", "foreign", "proxy"}
         else {"ip_version": 6, "action": "reject"}
     )
@@ -200,6 +201,15 @@ def render_ru_singbox(env: dict[str, str]) -> str:
     }
     if to_foreign_ip_literal_connect_timeout:
         to_foreign_ip_literal_outbound["connect_timeout"] = to_foreign_ip_literal_connect_timeout
+    to_foreign_ipv6_literal_outbound: dict[str, Any] = {
+        "type": "direct",
+        "tag": "to-foreign-ipv6-literal",
+        "bind_interface": env["WG_INTERFACE"],
+        "routing_mark": env_int(env, "APP_ROUTE_MARK"),
+        "domain_resolver": {"server": "dns-global", "strategy": "ipv4_only"},
+    }
+    if to_foreign_ipv6_literal_connect_timeout:
+        to_foreign_ipv6_literal_outbound["connect_timeout"] = to_foreign_ipv6_literal_connect_timeout
 
     payload = {
         "log": {"level": log_level, "timestamp": True},
@@ -225,6 +235,7 @@ def render_ru_singbox(env: dict[str, str]) -> str:
             {"type": "direct", "tag": "direct-ru", "domain_resolver": {"server": "dns-ru-direct", "strategy": "ipv4_only"}},
             to_foreign_outbound,
             to_foreign_ip_literal_outbound,
+            to_foreign_ipv6_literal_outbound,
             {"type": "block", "tag": "blocked"},
         ],
         "route": {

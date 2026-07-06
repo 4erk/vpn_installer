@@ -134,6 +134,7 @@ SING_BOX_LOG_LEVEL="${SING_BOX_LOG_LEVEL:-info}"
 RU_SNIFF_TIMEOUT="${RU_SNIFF_TIMEOUT:-250ms}"
 TO_FOREIGN_CONNECT_TIMEOUT="${TO_FOREIGN_CONNECT_TIMEOUT:-}"
 TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT="${TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT-2s}"
+TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT="${TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT-3s}"
 if [[ "${RU_LISTEN_PORT}" == "8443" ]]; then
   RU_LISTEN_PORT="443"
 fi
@@ -736,6 +737,7 @@ record_install_metadata() {
       local seen_reality_empty_short_id="0"
       local seen_reality_time="0"
       local seen_ip_literal_timeout="0"
+      local seen_ipv6_literal_timeout="0"
       local seen_journal_limit_enabled="0"
       local seen_journal_system_max_use="0"
       local seen_journal_max_retention_sec="0"
@@ -760,6 +762,10 @@ record_install_metadata() {
           TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT=*)
             printf 'TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT="%s"\n' "${TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT}"
             seen_ip_literal_timeout="1"
+            ;;
+          TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT=*)
+            printf 'TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT="%s"\n' "${TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT}"
+            seen_ipv6_literal_timeout="1"
             ;;
           JOURNAL_LIMIT_ENABLED=*)
             printf 'JOURNAL_LIMIT_ENABLED="%s"\n' "${JOURNAL_LIMIT_ENABLED}"
@@ -789,6 +795,9 @@ record_install_metadata() {
       fi
       if [[ "${seen_ip_literal_timeout}" != "1" ]]; then
         printf 'TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT="%s"\n' "${TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT}"
+      fi
+      if [[ "${seen_ipv6_literal_timeout}" != "1" ]]; then
+        printf 'TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT="%s"\n' "${TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT}"
       fi
       if [[ "${seen_journal_limit_enabled}" != "1" ]]; then
         printf 'JOURNAL_LIMIT_ENABLED="%s"\n' "${JOURNAL_LIMIT_ENABLED}"

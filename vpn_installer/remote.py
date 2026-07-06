@@ -549,6 +549,7 @@ guard_ssh_blocked_count="$(guard_state_value GUARD_SSH_BLOCKED_COUNT)"
 guard_reality_blocked_count="$(guard_state_value GUARD_REALITY_BLOCKED_COUNT)"
 singbox_to_foreign_timeout_count="0"
 singbox_to_foreign_ip_literal_timeout_count="0"
+singbox_to_foreign_ipv6_literal_timeout_count="0"
 singbox_direct_ru_timeout_count="0"
 singbox_dns_timeout_count="0"
 singbox_recent_timeout_sample=""
@@ -563,9 +564,11 @@ singbox_recent_sources=""
 singbox_recent_blocked_destinations=""
 singbox_recent_to_foreign_count="0"
 singbox_recent_to_foreign_ip_literal_count="0"
+singbox_recent_to_foreign_ipv6_literal_count="0"
 singbox_recent_direct_ru_count="0"
 singbox_recent_to_foreign_destinations=""
 singbox_recent_to_foreign_ip_literal_destinations=""
+singbox_recent_to_foreign_ipv6_literal_destinations=""
 singbox_recent_direct_ru_destinations=""
 singbox_recent_timeout_destinations=""
 singbox_recent_ip_literal_timeout_destinations=""
@@ -637,6 +640,7 @@ if [[ "${{role}}" == "ru-gateway" ]] && command -v journalctl >/dev/null 2>&1; t
   if [[ -n "${{singbox_recent_timeouts}}" ]]; then
     singbox_to_foreign_timeout_count="$(grep -c 'outbound/direct\\[to-foreign\\].*i/o timeout' <<<"${{singbox_recent_timeouts}}" || true)"
     singbox_to_foreign_ip_literal_timeout_count="$(grep -c 'outbound/direct\\[to-foreign-ip-literal\\].*i/o timeout' <<<"${{singbox_recent_timeouts}}" || true)"
+    singbox_to_foreign_ipv6_literal_timeout_count="$(grep -c 'outbound/direct\\[to-foreign-ipv6-literal\\].*i/o timeout' <<<"${{singbox_recent_timeouts}}" || true)"
     singbox_direct_ru_timeout_count="$(grep -c 'outbound/direct\\[direct-ru\\].*i/o timeout' <<<"${{singbox_recent_timeouts}}" || true)"
     singbox_dns_timeout_count="$(grep -c 'dns: lookup failed' <<<"${{singbox_recent_timeouts}}" || true)"
     singbox_recent_timeout_sample="$(tail -n1 <<<"${{singbox_recent_timeouts}}" | tr -d '\\r' | cut -c1-240)"
@@ -651,7 +655,7 @@ if [[ "${{role}}" == "ru-gateway" ]] && command -v journalctl >/dev/null 2>&1; t
     )"
     singbox_recent_ip_literal_timeout_destinations="$(
       printf '%s\n' "${{singbox_recent_timeouts}}" |
-        sed -n 's/.*open connection to \\([^ ]*\\) using outbound\\/direct\\[to-foreign-ip-literal\\].*/\\1/p' |
+        sed -n 's/.*open connection to \\([^ ]*\\) using outbound\\/direct\\[to-foreign-ip-literal\\].*/\\1/p; s/.*open connection to \\([^ ]*\\) using outbound\\/direct\\[to-foreign-ipv6-literal\\].*/\\1/p' |
         sort |
         uniq -c |
         sort -nr |
@@ -687,6 +691,7 @@ if [[ "${{role}}" == "ru-gateway" ]] && command -v journalctl >/dev/null 2>&1; t
     )"
     singbox_recent_to_foreign_count="$(grep -c 'outbound/direct\\[to-foreign\\]: outbound connection to' <<<"${{singbox_recent_log}}" || true)"
     singbox_recent_to_foreign_ip_literal_count="$(grep -c 'outbound/direct\\[to-foreign-ip-literal\\]: outbound connection to' <<<"${{singbox_recent_log}}" || true)"
+    singbox_recent_to_foreign_ipv6_literal_count="$(grep -c 'outbound/direct\\[to-foreign-ipv6-literal\\]: outbound connection to' <<<"${{singbox_recent_log}}" || true)"
     singbox_recent_direct_ru_count="$(grep -c 'outbound/direct\\[direct-ru\\]: outbound connection to' <<<"${{singbox_recent_log}}" || true)"
     singbox_recent_to_foreign_destinations="$(
       printf '%s\n' "${{singbox_recent_log}}" |
@@ -709,6 +714,15 @@ if [[ "${{role}}" == "ru-gateway" ]] && command -v journalctl >/dev/null 2>&1; t
     singbox_recent_to_foreign_ip_literal_destinations="$(
       printf '%s\n' "${{singbox_recent_log}}" |
         sed -n 's/.*outbound\\/direct\\[to-foreign-ip-literal\\]: outbound connection to \\([^ ]*\\).*/\\1/p' |
+        sort |
+        uniq -c |
+        sort -nr |
+        head -n 8 |
+        awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
+    )"
+    singbox_recent_to_foreign_ipv6_literal_destinations="$(
+      printf '%s\n' "${{singbox_recent_log}}" |
+        sed -n 's/.*outbound\\/direct\\[to-foreign-ipv6-literal\\]: outbound connection to \\([^ ]*\\).*/\\1/p' |
         sort |
         uniq -c |
         sort -nr |
@@ -914,6 +928,7 @@ printf 'reality_invalid_recent_count=%s\\n' "${{reality_invalid_recent_count}}"
 printf 'reality_invalid_recent_sources=%s\\n' "${{reality_invalid_recent_sources}}"
 printf 'singbox_to_foreign_timeout_count=%s\\n' "${{singbox_to_foreign_timeout_count}}"
 printf 'singbox_to_foreign_ip_literal_timeout_count=%s\\n' "${{singbox_to_foreign_ip_literal_timeout_count}}"
+printf 'singbox_to_foreign_ipv6_literal_timeout_count=%s\\n' "${{singbox_to_foreign_ipv6_literal_timeout_count}}"
 printf 'singbox_direct_ru_timeout_count=%s\\n' "${{singbox_direct_ru_timeout_count}}"
 printf 'singbox_dns_timeout_count=%s\\n' "${{singbox_dns_timeout_count}}"
 printf 'singbox_recent_timeout_sample=%s\\n' "${{singbox_recent_timeout_sample}}"
@@ -928,9 +943,11 @@ printf 'singbox_recent_sources=%s\\n' "${{singbox_recent_sources}}"
 printf 'singbox_recent_blocked_destinations=%s\\n' "${{singbox_recent_blocked_destinations}}"
 printf 'singbox_recent_to_foreign_count=%s\\n' "${{singbox_recent_to_foreign_count}}"
 printf 'singbox_recent_to_foreign_ip_literal_count=%s\\n' "${{singbox_recent_to_foreign_ip_literal_count}}"
+printf 'singbox_recent_to_foreign_ipv6_literal_count=%s\\n' "${{singbox_recent_to_foreign_ipv6_literal_count}}"
 printf 'singbox_recent_direct_ru_count=%s\\n' "${{singbox_recent_direct_ru_count}}"
 printf 'singbox_recent_to_foreign_destinations=%s\\n' "${{singbox_recent_to_foreign_destinations}}"
 printf 'singbox_recent_to_foreign_ip_literal_destinations=%s\\n' "${{singbox_recent_to_foreign_ip_literal_destinations}}"
+printf 'singbox_recent_to_foreign_ipv6_literal_destinations=%s\\n' "${{singbox_recent_to_foreign_ipv6_literal_destinations}}"
 printf 'singbox_recent_direct_ru_destinations=%s\\n' "${{singbox_recent_direct_ru_destinations}}"
 printf 'singbox_recent_timeout_destinations=%s\\n' "${{singbox_recent_timeout_destinations}}"
 printf 'singbox_recent_ip_literal_timeout_destinations=%s\\n' "${{singbox_recent_ip_literal_timeout_destinations}}"
@@ -1055,9 +1072,10 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
         print(f"recent invalid Reality handshakes: {preflight.get('reality_invalid_recent_count', '-')}")
         print(f"invalid Reality sources: {preflight.get('reality_invalid_recent_sources', '-')}")
         print("diagnosis: invalid Reality happens before routing; if this is your IP, at least one active client/profile does not match current generated credentials.")
-    if any(preflight.get(key) not in {"", None, "0"} for key in ("singbox_to_foreign_timeout_count", "singbox_to_foreign_ip_literal_timeout_count", "singbox_direct_ru_timeout_count", "singbox_dns_timeout_count")):
+    if any(preflight.get(key) not in {"", None, "0"} for key in ("singbox_to_foreign_timeout_count", "singbox_to_foreign_ip_literal_timeout_count", "singbox_to_foreign_ipv6_literal_timeout_count", "singbox_direct_ru_timeout_count", "singbox_dns_timeout_count")):
         print(f"sing-box to-foreign timeouts / 4h: {preflight.get('singbox_to_foreign_timeout_count', '0')}")
-        print(f"sing-box IP-literal to-foreign timeouts / 4h: {preflight.get('singbox_to_foreign_ip_literal_timeout_count', '0')}")
+        print(f"sing-box IPv4-literal to-foreign timeouts / 4h: {preflight.get('singbox_to_foreign_ip_literal_timeout_count', '0')}")
+        print(f"sing-box IPv6-literal to-foreign timeouts / 4h: {preflight.get('singbox_to_foreign_ipv6_literal_timeout_count', '0')}")
         print(f"sing-box direct-ru timeouts / 4h: {preflight.get('singbox_direct_ru_timeout_count', '0')}")
         print(f"sing-box DNS timeouts / 4h: {preflight.get('singbox_dns_timeout_count', '0')}")
         if preflight.get("global_doh_server") or preflight.get("global_doh_server_name"):
@@ -1126,6 +1144,7 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
     recent_route_keys = (
         "singbox_recent_to_foreign_count",
         "singbox_recent_to_foreign_ip_literal_count",
+        "singbox_recent_to_foreign_ipv6_literal_count",
         "singbox_recent_direct_ru_count",
         "singbox_recent_ipv6_literal_count",
     )
@@ -1134,18 +1153,21 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
             "sing-box recent routed: "
             f"to_foreign={preflight.get('singbox_recent_to_foreign_count', '0')}, "
             f"to_foreign_ip_literal={preflight.get('singbox_recent_to_foreign_ip_literal_count', '0')}, "
+            f"to_foreign_ipv6_literal={preflight.get('singbox_recent_to_foreign_ipv6_literal_count', '0')}, "
             f"direct_ru={preflight.get('singbox_recent_direct_ru_count', '0')}, "
             f"ipv6_literals={preflight.get('singbox_recent_ipv6_literal_count', '0')}"
         )
         if preflight.get("singbox_recent_to_foreign_destinations"):
             print(f"sing-box recent to-foreign destinations: {preflight.get('singbox_recent_to_foreign_destinations')}")
         if preflight.get("singbox_recent_to_foreign_ip_literal_destinations"):
-            print(f"sing-box recent IP-literal to-foreign destinations: {preflight.get('singbox_recent_to_foreign_ip_literal_destinations')}")
+            print(f"sing-box recent IPv4-literal to-foreign destinations: {preflight.get('singbox_recent_to_foreign_ip_literal_destinations')}")
+        if preflight.get("singbox_recent_to_foreign_ipv6_literal_destinations"):
+            print(f"sing-box recent IPv6-literal to-foreign destinations: {preflight.get('singbox_recent_to_foreign_ipv6_literal_destinations')}")
         if preflight.get("singbox_recent_direct_ru_destinations"):
             print(f"sing-box recent direct-ru destinations: {preflight.get('singbox_recent_direct_ru_destinations')}")
         if preflight.get("singbox_recent_ipv6_literal_destinations"):
             print(f"sing-box recent IPv6 literal destinations: {preflight.get('singbox_recent_ipv6_literal_destinations')}")
-            print("diagnosis: sing-box router received IPv6 literal destinations from clients; default RU IPv6 policy routes them through the fail-fast IP-literal foreign outbound.")
+            print("diagnosis: sing-box router received IPv6 literal destinations from clients; default RU IPv6 policy routes them through the dedicated IPv6-literal foreign outbound.")
         if preflight.get("singbox_recent_inbound_destinations"):
             print(f"sing-box recent inbound destinations: {preflight.get('singbox_recent_inbound_destinations')}")
     if preflight.get("guard_last_run"):

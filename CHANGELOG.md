@@ -6,6 +6,14 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.8.9] - 2026-07-06
+
+### Fixed
+
+- IPv6 literal traffic на российском `sing-box` вынесен в отдельный outbound `to-foreign-ipv6-literal` с новым публичным env `TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT=3s`. Live-проверка 6 июля показала, что часть IPv6 endpoints через foreign открывается примерно за `2.1s`, поэтому общий `2s` timeout из `to-foreign-ip-literal` резал живые подключения и давал зависания сайтов.
+- IPv4 literal traffic остаётся на `to-foreign-ip-literal` с прежним `TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT=2s`, чтобы не возвращать длинные подвисы на реально недоступных IPv4 literals.
+- `status` и `diagnose path` теперь разделяют IPv4-literal и IPv6-literal outbound counters/destinations, чтобы следующий инцидент не смешивал разные классы timeout'ов.
+
 ## [0.8.8] - 2026-07-03
 
 ### Fixed

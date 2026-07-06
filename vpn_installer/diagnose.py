@@ -208,6 +208,7 @@ if [[ "${{role}}" == "ru-gateway" ]]; then
     awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
   printf '\nto_foreign=%s\n' "$(grep -c 'outbound/direct\\[to-foreign\\]: outbound connection to' <<<"${{singbox_log}}" || true)"
   printf 'to_foreign_ip_literal=%s\n' "$(grep -c 'outbound/direct\\[to-foreign-ip-literal\\]: outbound connection to' <<<"${{singbox_log}}" || true)"
+  printf 'to_foreign_ipv6_literal=%s\n' "$(grep -c 'outbound/direct\\[to-foreign-ipv6-literal\\]: outbound connection to' <<<"${{singbox_log}}" || true)"
   printf 'direct_ru=%s\n' "$(grep -c 'outbound/direct\\[direct-ru\\]: outbound connection to' <<<"${{singbox_log}}" || true)"
   printf 'ipv6_literals=%s\n' "$(grep -Ec 'inbound connection to \\[[0-9A-Fa-f:.]+\\]:' <<<"${{singbox_log}}" || true)"
   printf 'to_foreign_destinations='
@@ -218,6 +219,11 @@ if [[ "${{role}}" == "ru-gateway" ]]; then
   printf '\nto_foreign_ip_literal_destinations='
   printf '%s\n' "${{singbox_log}}" |
     sed -n 's/.*outbound\\/direct\\[to-foreign-ip-literal\\]: outbound connection to \\([^ ]*\\).*/\\1/p' |
+    sort | uniq -c | sort -nr | head -n 12 |
+    awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
+  printf '\nto_foreign_ipv6_literal_destinations='
+  printf '%s\n' "${{singbox_log}}" |
+    sed -n 's/.*outbound\\/direct\\[to-foreign-ipv6-literal\\]: outbound connection to \\([^ ]*\\).*/\\1/p' |
     sort | uniq -c | sort -nr | head -n 12 |
     awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
   printf '\ndirect_ru_destinations='
@@ -232,7 +238,7 @@ if [[ "${{role}}" == "ru-gateway" ]]; then
     awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
   printf '\nip_literal_timeout_destinations='
   printf '%s\n' "${{singbox_log}}" |
-    sed -n 's/.*open connection to \\([^ ]*\\) using outbound\\/direct\\[to-foreign-ip-literal\\].*/\\1/p' |
+    sed -n 's/.*open connection to \\([^ ]*\\) using outbound\\/direct\\[to-foreign-ip-literal\\].*/\\1/p; s/.*open connection to \\([^ ]*\\) using outbound\\/direct\\[to-foreign-ipv6-literal\\].*/\\1/p' |
     sort | uniq -c | sort -nr | head -n 12 |
     awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
   printf '\nipv6_literal_destinations='

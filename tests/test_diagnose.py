@@ -22,6 +22,7 @@ class DiagnoseTests(unittest.TestCase):
         self.assertIn("accepted_destinations=", script)
         self.assertIn("disabled_invalid=", script)
         self.assertIn("to_foreign_ip_literal=", script)
+        self.assertIn("to_foreign_ipv6_literal=", script)
         self.assertIn("timeout_destinations=", script)
         self.assertIn("ip_literal_timeout_destinations=", script)
 
