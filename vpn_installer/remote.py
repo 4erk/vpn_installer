@@ -17,6 +17,8 @@ SSH_AUTH_TIMEOUT = 45
 SSH_COMMAND_TIMEOUT = 1800
 SSH_PASSWORD_AUTH_RETRIES = 3
 SSH_PASSWORD_AUTH_RETRY_DELAY = 1.0
+SSH_BANNER_RETRIES = 3
+SSH_BANNER_RETRY_DELAY = 1.0
 _PARAMIKO_LOGGER_CONFIGURED = False
 
 
@@ -93,7 +95,7 @@ def paramiko_connect(target: RemoteTarget):
             connect_kwargs["key_filename"] = target.identity_path
     auth_exception_type = getattr(getattr(paramiko, "ssh_exception", None), "AuthenticationException", Exception)
     last_exc: Exception | None = None
-    attempts = SSH_PASSWORD_AUTH_RETRIES if target.auth_mode == "password" else 1
+    attempts = max(SSH_PASSWORD_AUTH_RETRIES if target.auth_mode == "password" else 1, SSH_BANNER_RETRIES)
     for attempt in range(1, attempts + 1):
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -113,11 +115,18 @@ def paramiko_connect(target: RemoteTarget):
                 time.sleep(SSH_PASSWORD_AUTH_RETRY_DELAY * attempt)
                 continue
             banner_timeout = "error reading ssh protocol banner" in str(exc).lower()
+            if banner_timeout and attempt < attempts:
+                time.sleep(SSH_BANNER_RETRY_DELAY * attempt)
+                continue
             if banner_timeout:
                 raise AppError(
                     f"SSH connection failed для {target.ssh_user}@{target.ssh_host}:{target.ssh_port}: {exc}\n"
                     "Сервер не отдал SSH banner вовремя. Обычно это означает перегруженный или подвисший SSH на хосте, сетевой фильтр перед ним или только что перезагружающийся сервер."
                 ) from exc
+            connection_reset = "forcibly closed" in str(exc).lower() or "connection reset" in str(exc).lower()
+            if connection_reset and attempt < attempts:
+                time.sleep(SSH_BANNER_RETRY_DELAY * attempt)
+                continue
             if target.auth_mode == "password" and isinstance(exc, auth_exception_type) and "timeout" in str(exc).lower():
                 raise AppError(
                     f"SSH connection failed для {target.ssh_user}@{target.ssh_host}:{target.ssh_port}: {exc}\n"
@@ -456,6 +465,15 @@ configured_wan_interface=""
 singbox_configured_log_level=""
 global_doh_server=""
 global_doh_server_name=""
+ru_literal_policy=""
+ru_ipv6_literal_policy=""
+deprecated_routing_overrides=""
+installed_env_sha256=""
+installed_singbox_sha256=""
+installed_singbox_base_sha256=""
+render_manifest_policy_version=""
+render_manifest_singbox_sha256=""
+drift="unknown"
 if [[ -r /etc/vpn-stack/deployment.env ]]; then
   installed="1"
   deployment_name="$(grep -E '^DEPLOY_NAME=' /etc/vpn-stack/deployment.env | head -n1 | cut -d= -f2- | sed 's/^"//; s/"$//')"
@@ -463,9 +481,39 @@ if [[ -r /etc/vpn-stack/deployment.env ]]; then
   singbox_configured_log_level="$(grep -E '^SING_BOX_LOG_LEVEL=' /etc/vpn-stack/deployment.env | head -n1 | cut -d= -f2- | sed 's/^"//; s/"$//')"
   global_doh_server="$(grep -E '^GLOBAL_DOH_SERVER=' /etc/vpn-stack/deployment.env | head -n1 | cut -d= -f2- | sed 's/^"//; s/"$//')"
   global_doh_server_name="$(grep -E '^GLOBAL_DOH_SERVER_NAME=' /etc/vpn-stack/deployment.env | head -n1 | cut -d= -f2- | sed 's/^"//; s/"$//')"
+  ru_literal_policy="$(env_value RU_LITERAL_POLICY)"
+  ru_ipv6_literal_policy="$(env_value RU_IPV6_LITERAL_POLICY)"
+  if [[ "$(env_value TO_FOREIGN_CONNECT_TIMEOUT)" != "" ]]; then deprecated_routing_overrides="${{deprecated_routing_overrides}},TO_FOREIGN_CONNECT_TIMEOUT"; fi
+  if [[ "$(env_value TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT)" != "2s" ]]; then deprecated_routing_overrides="${{deprecated_routing_overrides}},TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT"; fi
+  if [[ "$(env_value TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT)" != "3s" ]]; then deprecated_routing_overrides="${{deprecated_routing_overrides}},TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT"; fi
+  deprecated_routing_overrides="${{deprecated_routing_overrides#,}}"
 fi
 if [[ -r /etc/vpn-stack/role ]]; then role="$(tr -d '\\r\\n' </etc/vpn-stack/role)"; fi
 if [[ -r /etc/vpn-stack/installed_at ]]; then installed_at="$(tr -d '\\r\\n' </etc/vpn-stack/installed_at)"; fi
+if command -v sha256sum >/dev/null 2>&1; then
+  if [[ -r /etc/vpn-stack/deployment.env ]]; then
+    installed_env_sha256="$(sha256sum /etc/vpn-stack/deployment.env 2>/dev/null | awk '{{print $1}}' || true)"
+  fi
+  if [[ -r /etc/sing-box/config.json ]]; then
+    installed_singbox_sha256="$(sha256sum /etc/sing-box/config.json 2>/dev/null | awk '{{print $1}}' || true)"
+  fi
+  if [[ -r /etc/vpn-stack/sing-box.base.json ]]; then
+    installed_singbox_base_sha256="$(sha256sum /etc/vpn-stack/sing-box.base.json 2>/dev/null | awk '{{print $1}}' || true)"
+  fi
+fi
+if [[ -r /etc/vpn-stack/render-manifest.json ]]; then
+  render_manifest_policy_version="$(sed -n 's/.*"policy_version"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p' /etc/vpn-stack/render-manifest.json | head -n1)"
+  render_manifest_singbox_sha256="$(sed -n 's/.*"config_sha256"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p' /etc/vpn-stack/render-manifest.json | head -n1)"
+  if [[ -n "${{render_manifest_singbox_sha256}}" ]]; then
+    if [[ -n "${{installed_singbox_base_sha256}}" && "${{render_manifest_singbox_sha256}}" == "${{installed_singbox_base_sha256}}" ]]; then
+      drift="none"
+    elif [[ -n "${{installed_singbox_sha256}}" && "${{render_manifest_singbox_sha256}}" == "${{installed_singbox_sha256}}" ]]; then
+      drift="none"
+    else
+      drift="server-mutated"
+    fi
+  fi
+fi
 
 default_iface="$(ip route show default 2>/dev/null | awk '/default/ {{print $5; exit}}')"
 hostname_value="$(hostname -f 2>/dev/null || hostname)"
@@ -639,8 +687,8 @@ if [[ "${{role}}" == "ru-gateway" ]] && command -v journalctl >/dev/null 2>&1; t
   singbox_recent_timeouts="$(journalctl -u sing-box --since '4 hours ago' --no-pager 2>/dev/null | grep -E 'i/o timeout|lookup failed|context deadline exceeded' || true)"
   if [[ -n "${{singbox_recent_timeouts}}" ]]; then
     singbox_to_foreign_timeout_count="$(grep -c 'outbound/direct\\[to-foreign\\].*i/o timeout' <<<"${{singbox_recent_timeouts}}" || true)"
-    singbox_to_foreign_ip_literal_timeout_count="$(grep -c 'outbound/direct\\[to-foreign-ip-literal\\].*i/o timeout' <<<"${{singbox_recent_timeouts}}" || true)"
-    singbox_to_foreign_ipv6_literal_timeout_count="$(grep -c 'outbound/direct\\[to-foreign-ipv6-literal\\].*i/o timeout' <<<"${{singbox_recent_timeouts}}" || true)"
+    singbox_to_foreign_ip_literal_timeout_count="$(printf '%s\n' "${{singbox_recent_timeouts}}" | grep -E 'outbound/direct\\[to-foreign-ip-literal\\].*i/o timeout' | grep -Ev 'open connection to \\[[0-9A-Fa-f:.]+\\]' | grep -c . || true)"
+    singbox_to_foreign_ipv6_literal_timeout_count="$(printf '%s\n' "${{singbox_recent_timeouts}}" | grep -E 'outbound/direct\\[to-foreign-ipv6-literal\\].*i/o timeout|open connection to \\[[0-9A-Fa-f:.]+\\].*outbound/direct\\[to-foreign-ip-literal\\].*i/o timeout' | grep -c . || true)"
     singbox_direct_ru_timeout_count="$(grep -c 'outbound/direct\\[direct-ru\\].*i/o timeout' <<<"${{singbox_recent_timeouts}}" || true)"
     singbox_dns_timeout_count="$(grep -c 'dns: lookup failed' <<<"${{singbox_recent_timeouts}}" || true)"
     singbox_recent_timeout_sample="$(tail -n1 <<<"${{singbox_recent_timeouts}}" | tr -d '\\r' | cut -c1-240)"
@@ -655,7 +703,8 @@ if [[ "${{role}}" == "ru-gateway" ]] && command -v journalctl >/dev/null 2>&1; t
     )"
     singbox_recent_ip_literal_timeout_destinations="$(
       printf '%s\n' "${{singbox_recent_timeouts}}" |
-        sed -n 's/.*open connection to \\([^ ]*\\) using outbound\\/direct\\[to-foreign-ip-literal\\].*/\\1/p; s/.*open connection to \\([^ ]*\\) using outbound\\/direct\\[to-foreign-ipv6-literal\\].*/\\1/p' |
+        grep -Ev 'open connection to \\[[0-9A-Fa-f:.]+\\]' |
+        sed -n 's/.*open connection to \\([^ ]*\\) using outbound\\/direct\\[to-foreign-ip-literal\\].*/\\1/p' |
         sort |
         uniq -c |
         sort -nr |
@@ -866,6 +915,9 @@ printf 'configured_wan_interface=%s\\n' "${{configured_wan_interface}}"
 printf 'singbox_configured_log_level=%s\\n' "${{singbox_configured_log_level}}"
 printf 'global_doh_server=%s\\n' "${{global_doh_server}}"
 printf 'global_doh_server_name=%s\\n' "${{global_doh_server_name}}"
+printf 'ru_literal_policy=%s\\n' "${{ru_literal_policy}}"
+printf 'ru_ipv6_literal_policy=%s\\n' "${{ru_ipv6_literal_policy}}"
+printf 'deprecated_routing_overrides=%s\\n' "${{deprecated_routing_overrides}}"
 printf 'wan_mtu=%s\\n' "${{wan_mtu}}"
 printf 'default_qdisc=%s\\n' "${{default_qdisc}}"
 printf 'wan_offload_gro=%s\\n' "${{wan_offload_gro}}"
@@ -973,6 +1025,12 @@ printf 'installed=%s\\n' "${{installed}}"
 printf 'deployment_name=%s\\n' "${{deployment_name}}"
 printf 'role=%s\\n' "${{role}}"
 printf 'installed_at=%s\\n' "${{installed_at}}"
+printf 'installed_env_sha256=%s\\n' "${{installed_env_sha256}}"
+printf 'installed_singbox_sha256=%s\\n' "${{installed_singbox_sha256}}"
+printf 'installed_singbox_base_sha256=%s\\n' "${{installed_singbox_base_sha256}}"
+printf 'render_manifest_policy_version=%s\\n' "${{render_manifest_policy_version}}"
+printf 'render_manifest_singbox_sha256=%s\\n' "${{render_manifest_singbox_sha256}}"
+printf 'drift=%s\\n' "${{drift}}"
 printf 'sing_box=%s\\n' "$(service_state sing-box)"
 printf 'xray=%s\\n' "$(service_state vpn-stack-xray.service)"
 printf 'nftables=%s\\n' "$(service_state nftables)"
@@ -1021,6 +1079,18 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
     print(f"installed: {preflight.get('installed', '0')}")
     print(f"role: {preflight.get('role', '-')}")
     print(f"deployment: {preflight.get('deployment_name', '-')}")
+    if preflight.get("drift"):
+        print(f"drift: {preflight.get('drift', '-')}")
+    if preflight.get("render_manifest_policy_version"):
+        print(f"routing policy version: {preflight.get('render_manifest_policy_version', '-')}")
+    if preflight.get("ru_literal_policy") or preflight.get("ru_ipv6_literal_policy"):
+        print(
+            "literal policy: "
+            f"ipv4={preflight.get('ru_literal_policy', '-')}, "
+            f"ipv6={preflight.get('ru_ipv6_literal_policy', '-')}"
+        )
+    if preflight.get("deprecated_routing_overrides"):
+        print(f"deprecated routing overrides: {preflight.get('deprecated_routing_overrides')}")
     print(f"sing-box: {preflight.get('sing_box', '-')}")
     print(f"xray: {preflight.get('xray', '-')}")
     print(f"nftables: {preflight.get('nftables', '-')}")

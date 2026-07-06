@@ -309,8 +309,13 @@ def test_remote_action_role(runner: AuditRunner, action: str) -> dict[str, str]:
         runner.docker_exec(
             container,
             textwrap.dedent(
-                """\
+                f"""\
                 set -euo pipefail
+                mkdir -p /work/out/{env_path.stem}/assets
+                echo dummy >/work/out/{env_path.stem}/assets/geosite-ru.srs
+                echo dummy >/work/out/{env_path.stem}/assets/geoip-ru.srs
+                echo 203.0.113.0/24 >/work/out/{env_path.stem}/assets/ru-ipv4.zone
+                echo 2001:db8::/32 >/work/out/{env_path.stem}/assets/ru-ipv6.zone
                 chmod +x /work/fakebin/ssh /work/fakebin/scp
                 : > /work/calls.log
                 PATH=/work/fakebin:$PATH PYTHONPATH=/work python3 /work/driver.py >/work/driver.out

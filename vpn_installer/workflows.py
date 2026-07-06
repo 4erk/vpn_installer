@@ -24,6 +24,7 @@ from .config import (
     require_env,
     ensure_deployment_env,
 )
+from .diagnostics import DiagnosticsSnapshot
 from .error_logging import log_exception
 from .localnet import assert_server_route_not_self_tunneled, local_route_to_server, route_uses_self_tunnel
 from .models import AppError, ROLE_FOREIGN, ROLE_META, ROLE_RU, RemoteTarget, UserCancelled
@@ -1001,6 +1002,79 @@ def status_workflow(deployment: str | None, role: str, *, non_interactive: bool 
         ensure_deployment_health(env, targets, auto_repair=False)
     print(f"Deployment env: {env_path}")
     return 0
+
+
+def _probe_has_broken_result(raw_value: str) -> bool:
+    if not raw_value:
+        return False
+    return any(part.split("|", 1)[0].endswith("broken") or "|broken|" in part for part in raw_value.split(","))
+
+
+def _verify_snapshot(snapshot: DiagnosticsSnapshot) -> DiagnosticsSnapshot:
+    hard_failures: list[str] = []
+    degradations: list[str] = []
+    for service_name, state in snapshot.services.items():
+        required_services = {"wireguard", "nftables"}
+        if snapshot.role == ROLE_RU:
+            required_services.add("sing-box")
+        if service_name in required_services and state and state != "active":
+            hard_failures.append(f"{service_name}={state}")
+    if snapshot.role == ROLE_RU and snapshot.services.get("xray") not in {"", "active"}:
+        hard_failures.append(f"xray={snapshot.services.get('xray')}")
+    if snapshot.drift == "server-mutated":
+        hard_failures.append("installed config hash differs from render manifest")
+    elif snapshot.drift == "unknown":
+        degradations.append("render manifest is missing or incomplete")
+    if _probe_has_broken_result(snapshot.route_probes.get("direct", "")):
+        degradations.append("direct route probe has broken targets")
+    if snapshot.role == ROLE_RU and _probe_has_broken_result(snapshot.route_probes.get("wg", "")):
+        degradations.append("wg route probe has broken targets")
+    if hard_failures:
+        snapshot.verdict = "failed"
+        snapshot.reasons = hard_failures + degradations
+    elif degradations:
+        snapshot.verdict = "degraded"
+        snapshot.reasons = degradations
+    elif snapshot.services:
+        snapshot.verdict = "verified"
+        snapshot.reasons = []
+    else:
+        snapshot.verdict = "inconclusive"
+        snapshot.reasons = ["no service data collected"]
+    return snapshot
+
+
+def verify_live_workflow(deployment: str | None, *, non_interactive: bool = False) -> int:
+    print_header("Live verification")
+    roles = requested_roles("all")
+    deployment_name, env_path, env, _state, targets, _preflights = prepare_remote_session(
+        deployment,
+        roles=roles,
+        require_privilege=False,
+        validate_os=False,
+        allow_create=False,
+        persist_local=False,
+        confirm_existing_connections=False,
+        non_interactive=non_interactive,
+    )
+    print_summary(deployment_name, env, targets)
+    snapshots: list[DiagnosticsSnapshot] = []
+    worst = "verified"
+    rank = {"verified": 0, "degraded": 1, "inconclusive": 2, "failed": 3}
+    for target in targets:
+        preflight = remote_preflight(target, current_wg_interface(env))
+        print_preflight(target, preflight)
+        snapshot = _verify_snapshot(DiagnosticsSnapshot.from_preflight(preflight, deployment=deployment_name))
+        snapshots.append(snapshot)
+        if rank[snapshot.verdict] > rank[worst]:
+            worst = snapshot.verdict
+    print_header("Live verification result")
+    print(f"verify verdict: {worst}")
+    for snapshot in snapshots:
+        reason_text = "; ".join(snapshot.reasons) if snapshot.reasons else "fresh probes and installed manifest are consistent"
+        print(f"{snapshot.role or 'unknown'}: {snapshot.verdict} - {reason_text}")
+    print(f"Deployment env: {env_path}")
+    return 0 if worst == "verified" else 1
 
 
 def remote_action_workflow(deployment: str | None, role: str, action: str, *, non_interactive: bool = False, yes: bool = False) -> int:

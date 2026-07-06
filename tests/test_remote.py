@@ -184,7 +184,7 @@ class RemoteTests(unittest.TestCase):
             ssh_exception=SimpleNamespace(AuthenticationException=Exception),
         )
         target = RemoteTarget(role=ROLE_RU, ssh_host="203.0.113.10", ssh_port=22, ssh_user="root")
-        with patch("vpn_installer.remote.ensure_paramiko_installed", return_value=fake_paramiko), patch("vpn_installer.remote.configure_paramiko_logging"):
+        with patch("vpn_installer.remote.ensure_paramiko_installed", return_value=fake_paramiko), patch("vpn_installer.remote.configure_paramiko_logging"), patch("vpn_installer.remote.time.sleep"):
             with self.assertRaises(AppError) as ctx:
                 paramiko_connect(target)
         self.assertIn("Сервер не отдал SSH banner вовремя", str(ctx.exception))

@@ -6,6 +6,19 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.9.0] - 2026-07-06
+
+### Changed
+
+- RU `sing-box` теперь строится из единой Python-модели `RoutingPolicy`: классы `ru_direct_domain`, `ru_direct_ip`, `private_or_fake`, `dns_global`, `domain_foreign`, `ipv4_literal_foreign`, `ipv6_literal_foreign`, `blocked` описывают outbound, resolver, timeout policy, log bucket и fallback в одном месте.
+- Публичная политика IP literal сведена к high-level полям `RU_LITERAL_POLICY=fail-fast|route|reject` и `RU_IPV6_LITERAL_POLICY=route-with-budget|reject`; старые `TO_FOREIGN_*CONNECT_TIMEOUT` сохранены как deprecated operator override и показываются в диагностике.
+- Каждый install теперь переносит `/etc/vpn-stack/render-manifest.json` с version, env/config hash, policy version и artifact hashes; `status` показывает drift `none|server-mutated|unknown`.
+
+### Added
+
+- Добавлен структурный диагностический слой `DiagnosticsSnapshot` и отдельный `log_classifier.py` с взаимоисключающими bucket'ами: `dns_failed`, `domain_to_foreign_timeout`, `ipv4_literal_timeout`, `ipv6_literal_timeout`, `blocked_private_fake`, `client_reset_eof`, `invalid_reality`, `disabled_invalid`.
+- Добавлена штатная команда `vpn verify live --deployment <name>` для acceptance-проверки installed config, manifest drift, сервисов, WireGuard/probe состояния и свежих логовых bucket'ов после reinstall.
+
 ## [0.8.9] - 2026-07-06
 
 ### Fixed

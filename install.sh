@@ -132,6 +132,8 @@ RU_REALITY_MAX_TIME_DIFFERENCE="${RU_REALITY_MAX_TIME_DIFFERENCE:-24h}"
 UTLS_FINGERPRINT="${UTLS_FINGERPRINT:-chrome}"
 SING_BOX_LOG_LEVEL="${SING_BOX_LOG_LEVEL:-info}"
 RU_SNIFF_TIMEOUT="${RU_SNIFF_TIMEOUT:-250ms}"
+RU_LITERAL_POLICY="${RU_LITERAL_POLICY:-fail-fast}"
+RU_IPV6_LITERAL_POLICY="${RU_IPV6_LITERAL_POLICY:-route-with-budget}"
 TO_FOREIGN_CONNECT_TIMEOUT="${TO_FOREIGN_CONNECT_TIMEOUT:-}"
 TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT="${TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT-2s}"
 TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT="${TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT-3s}"
@@ -171,6 +173,14 @@ fi
 if [[ "${RU_IPV6_POLICY}" == "fast-fail" ]]; then
   RU_IPV6_POLICY="to-foreign"
 fi
+case "${RU_LITERAL_POLICY}" in
+  fail-fast|route|reject) ;;
+  *) RU_LITERAL_POLICY="fail-fast" ;;
+esac
+case "${RU_IPV6_LITERAL_POLICY}" in
+  route-with-budget|reject) ;;
+  *) RU_IPV6_LITERAL_POLICY="route-with-budget" ;;
+esac
 if [[ "${TO_FOREIGN_CONNECT_TIMEOUT}" == "1s" || "${TO_FOREIGN_CONNECT_TIMEOUT}" == "2s" ]]; then
   TO_FOREIGN_CONNECT_TIMEOUT=""
 fi
@@ -249,6 +259,7 @@ VPNSTACK_ROLE_FILE="${VPNSTACK_ROOT}/role"
 VPNSTACK_DEPLOYMENT_FILE="${VPNSTACK_ROOT}/deployment.env"
 VPNSTACK_INSTALLED_AT_FILE="${VPNSTACK_ROOT}/installed_at"
 VPNSTACK_REMOVED_AT_FILE="${VPNSTACK_ROOT}/removed_at"
+VPNSTACK_RENDER_MANIFEST_FILE="${VPNSTACK_ROOT}/render-manifest.json"
 VPNSTACK_BASELINE_DIR="${VPNSTACK_BACKUP_DIR}/baseline"
 VPNSTACK_SNAPSHOT_DIR="${VPNSTACK_BACKUP_DIR}/snapshots"
 CURRENT_ROLLBACK_DIR=""
@@ -736,6 +747,8 @@ record_install_metadata() {
       local seen_ru_listen_port="0"
       local seen_reality_empty_short_id="0"
       local seen_reality_time="0"
+      local seen_literal_policy="0"
+      local seen_ipv6_literal_policy="0"
       local seen_ip_literal_timeout="0"
       local seen_ipv6_literal_timeout="0"
       local seen_journal_limit_enabled="0"
@@ -758,6 +771,14 @@ record_install_metadata() {
           RU_REALITY_ACCEPT_EMPTY_SHORT_ID=*)
             printf 'RU_REALITY_ACCEPT_EMPTY_SHORT_ID="%s"\n' "${RU_REALITY_ACCEPT_EMPTY_SHORT_ID}"
             seen_reality_empty_short_id="1"
+            ;;
+          RU_LITERAL_POLICY=*)
+            printf 'RU_LITERAL_POLICY="%s"\n' "${RU_LITERAL_POLICY}"
+            seen_literal_policy="1"
+            ;;
+          RU_IPV6_LITERAL_POLICY=*)
+            printf 'RU_IPV6_LITERAL_POLICY="%s"\n' "${RU_IPV6_LITERAL_POLICY}"
+            seen_ipv6_literal_policy="1"
             ;;
           TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT=*)
             printf 'TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT="%s"\n' "${TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT}"
@@ -792,6 +813,12 @@ record_install_metadata() {
       fi
       if [[ "${seen_reality_time}" != "1" && -n "${RU_REALITY_MAX_TIME_DIFFERENCE}" ]]; then
         printf 'RU_REALITY_MAX_TIME_DIFFERENCE="%s"\n' "${RU_REALITY_MAX_TIME_DIFFERENCE}"
+      fi
+      if [[ "${seen_literal_policy}" != "1" ]]; then
+        printf 'RU_LITERAL_POLICY="%s"\n' "${RU_LITERAL_POLICY}"
+      fi
+      if [[ "${seen_ipv6_literal_policy}" != "1" ]]; then
+        printf 'RU_IPV6_LITERAL_POLICY="%s"\n' "${RU_IPV6_LITERAL_POLICY}"
       fi
       if [[ "${seen_ip_literal_timeout}" != "1" ]]; then
         printf 'TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT="%s"\n' "${TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT}"
@@ -1123,6 +1150,7 @@ copy_role_artifacts() {
   local source_dir="$1"
   copy_if_present "${source_dir}/sing-box.json" "${SINGBOX_CONFIG_PATH}" || { echo "Missing sing-box.json in ${source_dir}" >&2; exit 1; }
   copy_if_present "${source_dir}/sing-box.json" "${SINGBOX_BASE_CONFIG_PATH}" || { echo "Missing sing-box.json in ${source_dir}" >&2; exit 1; }
+  copy_if_present "${source_dir}/render-manifest.json" "${VPNSTACK_RENDER_MANIFEST_FILE}" || { echo "Missing render-manifest.json in ${source_dir}" >&2; exit 1; }
   if [[ "$ROLE" == "ru-gateway" ]]; then
     mkdir -p "$(dirname "${XRAY_CONFIG_PATH}")"
     copy_if_present "${source_dir}/xray.json" "${XRAY_CONFIG_PATH}" || { echo "Missing xray.json in ${source_dir}" >&2; exit 1; }

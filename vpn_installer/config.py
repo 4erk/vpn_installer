@@ -51,6 +51,8 @@ REMOTE_ENV_CRITICAL_KEYS = {
     "RU_REALITY_ACCEPT_EMPTY_SHORT_ID",
     "SING_BOX_LOG_LEVEL",
     "RU_SNIFF_TIMEOUT",
+    "RU_LITERAL_POLICY",
+    "RU_IPV6_LITERAL_POLICY",
     "TO_FOREIGN_CONNECT_TIMEOUT",
     "TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT",
     "TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT",
@@ -237,6 +239,8 @@ def generate_default_env(deploy_name: str) -> dict[str, str]:
         "UTLS_FINGERPRINT": "chrome",
         "SING_BOX_LOG_LEVEL": "info",
         "RU_SNIFF_TIMEOUT": "250ms",
+        "RU_LITERAL_POLICY": "fail-fast",
+        "RU_IPV6_LITERAL_POLICY": "route-with-budget",
         "TO_FOREIGN_CONNECT_TIMEOUT": "",
         "TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT": "2s",
         "TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT": "3s",
@@ -408,6 +412,12 @@ def merge_env_with_defaults(existing: dict[str, str], deploy_name: str) -> dict[
         merged["RU_BLOCK_IP_CIDR"] = defaults["RU_BLOCK_IP_CIDR"]
     if merged.get("RU_IPV6_POLICY") == "fast-fail":
         merged["RU_IPV6_POLICY"] = defaults["RU_IPV6_POLICY"]
+    if merged.get("RU_LITERAL_POLICY") not in {"fail-fast", "route", "reject"}:
+        merged["RU_LITERAL_POLICY"] = defaults["RU_LITERAL_POLICY"]
+    if not existing.get("RU_IPV6_LITERAL_POLICY"):
+        merged["RU_IPV6_LITERAL_POLICY"] = "reject" if merged.get("RU_IPV6_POLICY") in {"block", "reject"} else defaults["RU_IPV6_LITERAL_POLICY"]
+    elif merged.get("RU_IPV6_LITERAL_POLICY") not in {"route-with-budget", "reject"}:
+        merged["RU_IPV6_LITERAL_POLICY"] = defaults["RU_IPV6_LITERAL_POLICY"]
     if merged.get("RU_SNIFF_TIMEOUT") == "1s":
         merged["RU_SNIFF_TIMEOUT"] = defaults["RU_SNIFF_TIMEOUT"]
     if merged.get("TO_FOREIGN_CONNECT_TIMEOUT") in {"1s", "2s"}:

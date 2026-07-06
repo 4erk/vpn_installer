@@ -61,6 +61,11 @@ class CliTests(unittest.TestCase):
             self.assertEqual(cli.main(["diagnose", "path", "--deployment", "demo", "--role", "all", "--iperf", "--non-interactive"]), 0)
         mocked.assert_called_once_with("demo", "all", iperf=True, non_interactive=True)
 
+    def test_verify_live_dispatch(self) -> None:
+        with patch("vpn_installer.cli.verify_live_workflow", return_value=0) as mocked:
+            self.assertEqual(cli.main(["verify", "live", "--deployment", "demo", "--non-interactive"]), 0)
+        mocked.assert_called_once_with("demo", non_interactive=True)
+
 
 if __name__ == "__main__":
     unittest.main()

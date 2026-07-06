@@ -6,7 +6,7 @@ import sys
 from .android import DEFAULT_HIDDIFY_PACKAGE, android_diagnose
 from .diagnose import diagnose_path_workflow
 from .models import AppError, ROLE_FOREIGN, ROLE_RU, UserCancelled
-from .workflows import cleanup_local_workflow, client_check_workflow, install_workflow, menu_workflow, remote_action_workflow, status_workflow
+from .workflows import cleanup_local_workflow, client_check_workflow, install_workflow, menu_workflow, remote_action_workflow, status_workflow, verify_live_workflow
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -71,6 +71,13 @@ def build_parser() -> argparse.ArgumentParser:
     path.add_argument("--iperf", action="store_true", help="Временно открыть wg0-only iperf smoke и удалить правила после теста.")
     path.add_argument("--non-interactive", action="store_true", help="Не задавать вопросы; брать подключение из state/env.")
     path.set_defaults(func=lambda args: diagnose_path_workflow(args.deployment, args.role, iperf=args.iperf, non_interactive=args.non_interactive))
+
+    verify = subparsers.add_parser("verify", help="Проверить live dataplane после установки.")
+    verify_subparsers = verify.add_subparsers(dest="verify_command", required=True)
+    live = verify_subparsers.add_parser("live", help="Свежая live-проверка installed config, маршрутов и логов.")
+    live.add_argument("--deployment", help="Имя deployment.")
+    live.add_argument("--non-interactive", action="store_true", help="Не задавать вопросы; брать подключение из state/env.")
+    live.set_defaults(func=lambda args: verify_live_workflow(args.deployment, non_interactive=args.non_interactive))
 
     return parser
 
