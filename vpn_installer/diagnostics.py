@@ -25,6 +25,7 @@ class DiagnosticsSnapshot:
     drift: str = "unknown"
     wg_state: dict[str, str] = field(default_factory=dict)
     route_probes: dict[str, str] = field(default_factory=dict)
+    dataplane_cache: dict[str, str] = field(default_factory=dict)
     log_buckets: dict[str, int] = field(default_factory=dict)
     top_destinations: dict[str, str] = field(default_factory=dict)
     fresh_window_minutes: int = 30
@@ -85,6 +86,20 @@ class DiagnosticsSnapshot:
                 "wg": preflight.get("target_probe_wg", ""),
                 "observed_ipv4": preflight.get("observed_ipv4", ""),
                 "wg_observed_ipv4": preflight.get("wg_observed_ipv4", ""),
+            },
+            dataplane_cache={
+                "good_wg_path_at": preflight.get("good_wg_path_at", ""),
+                "good_wg_path_age_s": preflight.get("good_wg_path_age_s", ""),
+                "good_wg_path_source": preflight.get("good_wg_path_source", ""),
+                "good_wg_path_handshake_age_s": preflight.get("good_wg_path_handshake_age_s", ""),
+                "good_cache_ttl_seconds": preflight.get("good_cache_ttl_seconds", ""),
+                "route_fail_cache_ttl_seconds": preflight.get("route_fail_cache_ttl_seconds", ""),
+                "route_fail_ipv4_literal_count": preflight.get("route_fail_ipv4_literal_count", ""),
+                "route_fail_ipv4_literal_top_dest": preflight.get("route_fail_ipv4_literal_top_dest", ""),
+                "route_fail_ipv4_literal_age_s": preflight.get("route_fail_ipv4_literal_age_s", ""),
+                "route_fail_ipv6_literal_count": preflight.get("route_fail_ipv6_literal_count", ""),
+                "route_fail_ipv6_literal_top_dest": preflight.get("route_fail_ipv6_literal_top_dest", ""),
+                "route_fail_ipv6_literal_age_s": preflight.get("route_fail_ipv6_literal_age_s", ""),
             },
             log_buckets=log_buckets,
             top_destinations={key: value for key, value in top_destinations.items() if value},

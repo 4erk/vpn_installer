@@ -4,7 +4,7 @@ import textwrap
 from dataclasses import dataclass, field
 from typing import Any
 
-POLICY_VERSION = "0.9.0"
+POLICY_VERSION = "0.9.1"
 
 TRAFFIC_CLASSES = (
     "ru_direct_domain",

@@ -221,6 +221,9 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("https://2ip.ru/", env["HEALTH_RU_DIRECT_TARGET_PROBE_URLS"])
         self.assertEqual(env["HEALTH_TARGET_CONNECT_TIMEOUT_SECONDS"], "2")
         self.assertEqual(env["HEALTH_TARGET_MAX_TIME_SECONDS"], "4")
+        self.assertEqual(env["HEALTH_GOOD_CACHE_TTL_SECONDS"], "900")
+        self.assertEqual(env["HEALTH_ROUTE_FAIL_CACHE_TTL_SECONDS"], "300")
+        self.assertEqual(env["HEALTH_ROUTE_FAIL_THRESHOLD"], "3")
 
     def test_render_env_roundtrip(self) -> None:
         env = config.generate_default_env("sample")

@@ -395,11 +395,24 @@ class RemoteTests(unittest.TestCase):
                     "profile_wg_path_ok": "1",
                     "profile_fast_ping_loss_pct": "25",
                     "profile_stale_handshake_live_path_s": "130",
+                    "good_wg_path_at": "2026-06-17T19:01:00+00:00",
+                    "good_wg_path_age_s": "45",
+                    "good_wg_path_source": "health-hard-probe",
+                    "good_wg_path_handshake_age_s": "12",
+                    "good_cache_ttl_seconds": "900",
+                    "route_fail_cache_ttl_seconds": "300",
+                    "route_fail_ipv4_literal_count": "4",
+                    "route_fail_ipv4_literal_top_dest": "91.108.56.103:443=4",
+                    "route_fail_ipv4_literal_age_s": "20",
+                    "route_fail_ipv6_literal_count": "5",
+                    "route_fail_ipv6_literal_top_dest": "[2001:db8::1]:443=5",
+                    "route_fail_ipv6_literal_age_s": "30",
                     "self_heal_last_reason": "soft:wireguard_path",
                     "self_heal_consecutive": "2",
                     "self_heal_last_action": "restart-wireguard",
                     "self_heal_last_action_result": "scheduled",
                     "self_heal_last_action_reason": "soft:wireguard_path",
+                    "self_heal_last_action_age_s": "3600",
                     "reality_invalid_recent_count": "7",
                     "reality_invalid_recent_sources": "178.66.129.100=7",
                     "singbox_to_foreign_timeout_count": "11",
@@ -470,7 +483,9 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("profile handshake age/grace (s): 130/200", output)
         self.assertIn("profile wg path ok: 1", output)
         self.assertIn("profile stale handshake with live path (s): 130", output)
-        self.assertIn("self-heal last action: restart-wireguard/scheduled", output)
+        self.assertIn("dataplane cache good WG path: age=45s/ttl=900s, source=health-hard-probe, handshake_age=12s", output)
+        self.assertIn("dataplane route-fail cache: ttl=300s, ipv4_literal=4@20s 91.108.56.103:443=4, ipv6_literal=5@30s [2001:db8::1]:443=5", output)
+        self.assertIn("self-heal last action: restart-wireguard/scheduled age=3600s", output)
         self.assertIn("recent invalid Reality handshakes: 7", output)
         self.assertIn("invalid Reality sources: 178.66.129.100=7", output)
         self.assertIn("diagnosis: invalid Reality happens before routing", output)

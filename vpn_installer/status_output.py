@@ -17,6 +17,10 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
     if snapshot.top_destinations:
         destinations = ", ".join(f"{key}: {value}" for key, value in sorted(snapshot.top_destinations.items()))
         lines.append(f"top destinations: {destinations}")
+    if snapshot.dataplane_cache:
+        cache = ", ".join(f"{key}={value}" for key, value in sorted(snapshot.dataplane_cache.items()) if value)
+        if cache:
+            lines.append(f"dataplane cache: {cache}")
     if snapshot.reasons:
         lines.append("reasons: " + "; ".join(snapshot.reasons))
     return lines

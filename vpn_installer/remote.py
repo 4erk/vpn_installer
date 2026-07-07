@@ -332,6 +332,24 @@ state_value() {{
   fi
 }}
 
+cache_value() {{
+  local key="$1"
+  if [[ -r /var/lib/vpn-stack/dataplane-cache.env ]]; then
+    awk -F= -v key="${{key}}" '$1 == key {{ sub(/^[^=]*=/, ""); gsub(/^"/, ""); gsub(/"$/, ""); print; exit }}' /var/lib/vpn-stack/dataplane-cache.env
+  fi
+}}
+
+age_from_epoch() {{
+  local epoch="$1"
+  local now=""
+  now="$(date +%s)"
+  if [[ "${{epoch}}" =~ ^[0-9]+$ && "${{now}}" =~ ^[0-9]+$ && "${{now}}" -ge "${{epoch}}" ]]; then
+    printf '%s' "$((now - epoch))"
+  else
+    printf -- '-1'
+  fi
+}}
+
 guard_state_value() {{
   local key="$1"
   if [[ -r /var/lib/vpn-stack/guard-state.env ]]; then
@@ -584,12 +602,30 @@ self_heal_last_action="$(state_value SELF_HEAL_LAST_ACTION)"
 self_heal_last_action_reason="$(state_value SELF_HEAL_LAST_ACTION_REASON)"
 self_heal_last_action_result="$(state_value SELF_HEAL_LAST_ACTION_RESULT)"
 self_heal_last_action_epoch="$(state_value SELF_HEAL_LAST_ACTION_EPOCH)"
+self_heal_last_action_age_s="$(age_from_epoch "${{self_heal_last_action_epoch}}")"
 profile_updated_at="$(state_value PROFILE_UPDATED_AT)"
 profile_handshake_age_s="$(state_value PROFILE_HANDSHAKE_AGE_S)"
 profile_handshake_grace_s="$(state_value PROFILE_HANDSHAKE_GRACE_S)"
 profile_wg_path_ok="$(state_value PROFILE_WG_PATH_OK)"
 profile_fast_ping_loss_pct="$(state_value PROFILE_FAST_PING_LOSS_PCT)"
 profile_stale_handshake_live_path_s="$(state_value PROFILE_STALE_HANDSHAKE_WITH_LIVE_PATH_S)"
+good_wg_path_at="$(cache_value GOOD_WG_PATH_AT)"
+good_wg_path_at_epoch="$(cache_value GOOD_WG_PATH_AT_EPOCH)"
+good_wg_path_age_s="$(age_from_epoch "${{good_wg_path_at_epoch}}")"
+good_wg_path_source="$(cache_value GOOD_WG_PATH_SOURCE)"
+good_wg_path_handshake_age_s="$(cache_value GOOD_WG_PATH_HANDSHAKE_AGE_S)"
+good_cache_ttl_seconds="$(cache_value GOOD_CACHE_TTL_SECONDS)"
+route_fail_cache_ttl_seconds="$(cache_value ROUTE_FAIL_CACHE_TTL_SECONDS)"
+route_fail_ipv4_literal_count="$(cache_value ROUTE_FAIL_IPV4_LITERAL_COUNT)"
+route_fail_ipv4_literal_top_dest="$(cache_value ROUTE_FAIL_IPV4_LITERAL_TOP_DEST)"
+route_fail_ipv4_literal_last_at="$(cache_value ROUTE_FAIL_IPV4_LITERAL_LAST_AT)"
+route_fail_ipv4_literal_last_epoch="$(cache_value ROUTE_FAIL_IPV4_LITERAL_LAST_EPOCH)"
+route_fail_ipv4_literal_age_s="$(age_from_epoch "${{route_fail_ipv4_literal_last_epoch}}")"
+route_fail_ipv6_literal_count="$(cache_value ROUTE_FAIL_IPV6_LITERAL_COUNT)"
+route_fail_ipv6_literal_top_dest="$(cache_value ROUTE_FAIL_IPV6_LITERAL_TOP_DEST)"
+route_fail_ipv6_literal_last_at="$(cache_value ROUTE_FAIL_IPV6_LITERAL_LAST_AT)"
+route_fail_ipv6_literal_last_epoch="$(cache_value ROUTE_FAIL_IPV6_LITERAL_LAST_EPOCH)"
+route_fail_ipv6_literal_age_s="$(age_from_epoch "${{route_fail_ipv6_literal_last_epoch}}")"
 reality_invalid_recent_count="0"
 reality_invalid_recent_sources=""
 guard_last_run="$(guard_state_value GUARD_LAST_RUN_AT)"
@@ -970,12 +1006,27 @@ printf 'self_heal_last_action=%s\\n' "${{self_heal_last_action}}"
 printf 'self_heal_last_action_reason=%s\\n' "${{self_heal_last_action_reason}}"
 printf 'self_heal_last_action_result=%s\\n' "${{self_heal_last_action_result}}"
 printf 'self_heal_last_action_epoch=%s\\n' "${{self_heal_last_action_epoch}}"
+printf 'self_heal_last_action_age_s=%s\\n' "${{self_heal_last_action_age_s}}"
 printf 'profile_updated_at=%s\\n' "${{profile_updated_at}}"
 printf 'profile_handshake_age_s=%s\\n' "${{profile_handshake_age_s}}"
 printf 'profile_handshake_grace_s=%s\\n' "${{profile_handshake_grace_s}}"
 printf 'profile_wg_path_ok=%s\\n' "${{profile_wg_path_ok}}"
 printf 'profile_fast_ping_loss_pct=%s\\n' "${{profile_fast_ping_loss_pct}}"
 printf 'profile_stale_handshake_live_path_s=%s\\n' "${{profile_stale_handshake_live_path_s}}"
+printf 'good_wg_path_at=%s\\n' "${{good_wg_path_at}}"
+printf 'good_wg_path_age_s=%s\\n' "${{good_wg_path_age_s}}"
+printf 'good_wg_path_source=%s\\n' "${{good_wg_path_source}}"
+printf 'good_wg_path_handshake_age_s=%s\\n' "${{good_wg_path_handshake_age_s}}"
+printf 'good_cache_ttl_seconds=%s\\n' "${{good_cache_ttl_seconds}}"
+printf 'route_fail_cache_ttl_seconds=%s\\n' "${{route_fail_cache_ttl_seconds}}"
+printf 'route_fail_ipv4_literal_count=%s\\n' "${{route_fail_ipv4_literal_count}}"
+printf 'route_fail_ipv4_literal_top_dest=%s\\n' "${{route_fail_ipv4_literal_top_dest}}"
+printf 'route_fail_ipv4_literal_last_at=%s\\n' "${{route_fail_ipv4_literal_last_at}}"
+printf 'route_fail_ipv4_literal_age_s=%s\\n' "${{route_fail_ipv4_literal_age_s}}"
+printf 'route_fail_ipv6_literal_count=%s\\n' "${{route_fail_ipv6_literal_count}}"
+printf 'route_fail_ipv6_literal_top_dest=%s\\n' "${{route_fail_ipv6_literal_top_dest}}"
+printf 'route_fail_ipv6_literal_last_at=%s\\n' "${{route_fail_ipv6_literal_last_at}}"
+printf 'route_fail_ipv6_literal_age_s=%s\\n' "${{route_fail_ipv6_literal_age_s}}"
 printf 'reality_invalid_recent_count=%s\\n' "${{reality_invalid_recent_count}}"
 printf 'reality_invalid_recent_sources=%s\\n' "${{reality_invalid_recent_sources}}"
 printf 'singbox_to_foreign_timeout_count=%s\\n' "${{singbox_to_foreign_timeout_count}}"
@@ -1129,6 +1180,29 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
         print(f"profile fast ping loss (%): {preflight.get('profile_fast_ping_loss_pct', '-')}")
         if preflight.get("profile_stale_handshake_live_path_s"):
             print(f"profile stale handshake with live path (s): {preflight.get('profile_stale_handshake_live_path_s', '-')}")
+    if preflight.get("good_wg_path_at"):
+        print(
+            "dataplane cache good WG path: "
+            f"age={preflight.get('good_wg_path_age_s', '-')}s/"
+            f"ttl={preflight.get('good_cache_ttl_seconds', '-')}s, "
+            f"source={preflight.get('good_wg_path_source', '-')}, "
+            f"handshake_age={preflight.get('good_wg_path_handshake_age_s', '-')}s"
+        )
+    route_cache_keys = (
+        "route_fail_ipv4_literal_count",
+        "route_fail_ipv6_literal_count",
+    )
+    if any(preflight.get(key) not in {"", None, "0"} for key in route_cache_keys):
+        print(
+            "dataplane route-fail cache: "
+            f"ttl={preflight.get('route_fail_cache_ttl_seconds', '-')}s, "
+            f"ipv4_literal={preflight.get('route_fail_ipv4_literal_count', '0')}"
+            f"@{preflight.get('route_fail_ipv4_literal_age_s', '-')}s "
+            f"{preflight.get('route_fail_ipv4_literal_top_dest', '')}, "
+            f"ipv6_literal={preflight.get('route_fail_ipv6_literal_count', '0')}"
+            f"@{preflight.get('route_fail_ipv6_literal_age_s', '-')}s "
+            f"{preflight.get('route_fail_ipv6_literal_top_dest', '')}"
+        )
     if preflight.get("self_heal_last_action") or preflight.get("self_heal_last_reason"):
         print(f"self-heal last reason: {preflight.get('self_heal_last_reason', '-')}")
         print(f"self-heal consecutive: {preflight.get('self_heal_consecutive', '-')}")
@@ -1136,6 +1210,7 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
             "self-heal last action: "
             f"{preflight.get('self_heal_last_action', '-')}/"
             f"{preflight.get('self_heal_last_action_result', '-')}"
+            f" age={preflight.get('self_heal_last_action_age_s', '-')}s"
         )
         print(f"self-heal last action reason: {preflight.get('self_heal_last_action_reason', '-')}")
     if preflight.get("reality_invalid_recent_count") not in {"", None, "0"}:

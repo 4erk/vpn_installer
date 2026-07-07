@@ -646,6 +646,10 @@ def render_health_script(env: dict[str, str], role: str) -> str:
                 '  route_to_foreign_wg_ok && probe_http_ipv4 "${WG_INTERFACE}"',
                 '}',
                 "",
+                "wireguard_cache_can_suppress_failure() {",
+                '  route_to_foreign_wg_ok && cached_good_path_fresh "WG_PATH"',
+                "}",
+                "",
                 "append_wireguard_path_reason() {",
                 '  if ! route_to_foreign_wg_ok; then',
                 '    reasons+=("ru_wg_peer_route_missing")',
@@ -663,15 +667,11 @@ def render_health_script(env: dict[str, str], role: str) -> str:
                 '    ping -4 -I "${WG_INTERFACE}" -c 1 -W 2 "${WG_RU_ADDRESS_HOST}" >/dev/null 2>&1',
                 '}',
                 "",
+                "wireguard_cache_can_suppress_failure() {",
+                '  cached_good_path_fresh "WG_PATH"',
+                "}",
+                "",
                 "append_wireguard_path_reason() {",
-                '  local previous_path_ok="" previous_age="" previous_grace=""',
-                '  previous_path_ok="$(state_value PROFILE_WG_PATH_OK)"',
-                '  previous_age="$(state_value PROFILE_HANDSHAKE_AGE_S)"',
-                '  previous_grace="$(state_value PROFILE_HANDSHAKE_GRACE_S)"',
-                '  if [[ "${previous_path_ok}" == "1" && "${previous_age}" =~ ^[0-9]+$ && "${previous_grace}" =~ ^[0-9]+$ && "${previous_age}" -le "${previous_grace}" ]]; then',
-                '    log "foreign WireGuard probe missed once, but previous live profile is fresh"',
-                "    return 0",
-                "  fi",
                 '  reasons+=("foreign_wg_peer_unreachable")',
                 "}",
             ]
@@ -724,6 +724,10 @@ def render_health_script(env: dict[str, str], role: str) -> str:
         SELF_HEAL_MAX_ACTIONS_PER_HOUR="{env.get('HEALTH_SELF_HEAL_MAX_ACTIONS_PER_HOUR', '2')}"
         SELF_HEAL_CONFIRMATIONS="{env.get('HEALTH_SELF_HEAL_CONFIRMATIONS', '2')}"
         HEALTH_STATE_PATH="/var/lib/vpn-stack/health-state.env"
+        DATAPLANE_CACHE_PATH="/var/lib/vpn-stack/dataplane-cache.env"
+        GOOD_CACHE_TTL_SECONDS="{env.get('HEALTH_GOOD_CACHE_TTL_SECONDS', '900')}"
+        ROUTE_FAIL_CACHE_TTL_SECONDS="{env.get('HEALTH_ROUTE_FAIL_CACHE_TTL_SECONDS', '300')}"
+        ROUTE_FAIL_THRESHOLD="{env.get('HEALTH_ROUTE_FAIL_THRESHOLD', '3')}"
 
         log() {{
           echo "vpn-stack-health[$ROLE]: $*" >&2
@@ -754,6 +758,9 @@ def render_health_script(env: dict[str, str], role: str) -> str:
         SELF_HEAL_COOLDOWN_MINUTES="$(number_or_default "${{SELF_HEAL_COOLDOWN_MINUTES}}" 15)"
         SELF_HEAL_MAX_ACTIONS_PER_HOUR="$(number_or_default "${{SELF_HEAL_MAX_ACTIONS_PER_HOUR}}" 2)"
         SELF_HEAL_CONFIRMATIONS="$(number_or_default "${{SELF_HEAL_CONFIRMATIONS}}" 2)"
+        GOOD_CACHE_TTL_SECONDS="$(number_or_default "${{GOOD_CACHE_TTL_SECONDS}}" 900)"
+        ROUTE_FAIL_CACHE_TTL_SECONDS="$(number_or_default "${{ROUTE_FAIL_CACHE_TTL_SECONDS}}" 300)"
+        ROUTE_FAIL_THRESHOLD="$(number_or_default "${{ROUTE_FAIL_THRESHOLD}}" 3)"
         HANDSHAKE_EFFECTIVE_GRACE="$((WG_KEEPALIVE * HANDSHAKE_GRACE_MULTIPLIER))"
         if [[ "${{HANDSHAKE_EFFECTIVE_GRACE}}" -lt "${{HANDSHAKE_MIN_GRACE}}" ]]; then
           HANDSHAKE_EFFECTIVE_GRACE="${{HANDSHAKE_MIN_GRACE}}"
@@ -841,6 +848,13 @@ def render_health_script(env: dict[str, str], role: str) -> str:
           fi
         }}
 
+        cache_value() {{
+          local key="$1"
+          if [[ -r "${{DATAPLANE_CACHE_PATH}}" ]]; then
+            awk -F= -v key="${{key}}" '$1 == key {{ sub(/^[^=]*=/, ""); gsub(/^"/, ""); gsub(/"$/, ""); print; exit }}' "${{DATAPLANE_CACHE_PATH}}"
+          fi
+        }}
+
         state_escape() {{
           sed 's/\\\\/\\\\\\\\/g; s/"/\\\\"/g' <<<"$1"
         }}
@@ -858,6 +872,74 @@ def render_health_script(env: dict[str, str], role: str) -> str:
           fi
           printf '%s="%s"\\n' "${{key}}" "$(state_escape "${{value}}")" >> "${{tmp}}"
           mv "${{tmp}}" "${{HEALTH_STATE_PATH}}"
+        }}
+
+        set_cache_value() {{
+          local key="$1"
+          local value="$2"
+          local tmp=""
+          mkdir -p "$(dirname "${{DATAPLANE_CACHE_PATH}}")"
+          tmp="${{DATAPLANE_CACHE_PATH}}.tmp.$$"
+          if [[ -r "${{DATAPLANE_CACHE_PATH}}" ]]; then
+            awk -F= -v key="${{key}}" '$1 != key {{ print }}' "${{DATAPLANE_CACHE_PATH}}" > "${{tmp}}"
+          else
+            : > "${{tmp}}"
+          fi
+          printf '%s="%s"\\n' "${{key}}" "$(state_escape "${{value}}")" >> "${{tmp}}"
+          mv "${{tmp}}" "${{DATAPLANE_CACHE_PATH}}"
+        }}
+
+        cache_age_s() {{
+          local epoch="$1"
+          local now=""
+          now="$(date +%s)"
+          if [[ "${{epoch}}" =~ ^[0-9]+$ && "${{now}}" =~ ^[0-9]+$ && "${{now}}" -ge "${{epoch}}" ]]; then
+            printf '%s' "$((now - epoch))"
+          else
+            printf '999999'
+          fi
+        }}
+
+        cached_good_path_fresh() {{
+          local name="$1"
+          local epoch="" age=""
+          epoch="$(cache_value "GOOD_${{name}}_AT_EPOCH")"
+          age="$(cache_age_s "${{epoch}}")"
+          [[ "${{age}}" =~ ^[0-9]+$ ]] && [[ "${{GOOD_CACHE_TTL_SECONDS}}" =~ ^[0-9]+$ ]] && (( age <= GOOD_CACHE_TTL_SECONDS ))
+        }}
+
+        mark_good_path() {{
+          local name="$1"
+          local source="$2"
+          local handshake_age="$3"
+          local now=""
+          now="$(date +%s)"
+          set_cache_value "GOOD_${{name}}_AT_EPOCH" "${{now}}"
+          set_cache_value "GOOD_${{name}}_AT" "$(date -Is)"
+          set_cache_value "GOOD_${{name}}_SOURCE" "${{source}}"
+          set_cache_value "GOOD_${{name}}_HANDSHAKE_AGE_S" "${{handshake_age}}"
+          set_cache_value "GOOD_CACHE_TTL_SECONDS" "${{GOOD_CACHE_TTL_SECONDS}}"
+        }}
+
+        reset_route_fail_bucket() {{
+          local bucket="$1"
+          set_cache_value "ROUTE_FAIL_${{bucket}}_COUNT" "0"
+          set_cache_value "ROUTE_FAIL_${{bucket}}_TOP_DEST" ""
+          set_cache_value "ROUTE_FAIL_${{bucket}}_LAST_EPOCH" ""
+          set_cache_value "ROUTE_FAIL_${{bucket}}_LAST_AT" ""
+        }}
+
+        mark_route_fail_bucket() {{
+          local bucket="$1"
+          local count="$2"
+          local top_dest="$3"
+          local now=""
+          now="$(date +%s)"
+          set_cache_value "ROUTE_FAIL_${{bucket}}_COUNT" "${{count}}"
+          set_cache_value "ROUTE_FAIL_${{bucket}}_TOP_DEST" "${{top_dest}}"
+          set_cache_value "ROUTE_FAIL_${{bucket}}_LAST_EPOCH" "${{now}}"
+          set_cache_value "ROUTE_FAIL_${{bucket}}_LAST_AT" "$(date -Is)"
+          set_cache_value "ROUTE_FAIL_CACHE_TTL_SECONDS" "${{ROUTE_FAIL_CACHE_TTL_SECONDS}}"
         }}
 
         reset_self_heal_observation() {{
@@ -1246,6 +1328,8 @@ EOF
           fi
           if probe_wireguard_path; then
             wireguard_path_ok="1"
+          elif wireguard_cache_can_suppress_failure; then
+            log "WireGuard probe missed once, but cached-good WG path is still fresh"
           else
             append_wireguard_path_reason
           fi
@@ -1254,6 +1338,9 @@ EOF
           set_state_value PROFILE_HANDSHAKE_AGE_S "${{age}}"
           set_state_value PROFILE_HANDSHAKE_GRACE_S "${{HANDSHAKE_EFFECTIVE_GRACE}}"
           set_state_value PROFILE_WG_PATH_OK "${{wireguard_path_ok}}"
+          if [[ "${{wireguard_path_ok}}" == "1" ]]; then
+            mark_good_path "WG_PATH" "health-hard-probe" "${{age}}"
+          fi
           if [[ "${{age}}" =~ ^[0-9]+$ && "${{age}}" -gt "${{HANDSHAKE_EFFECTIVE_GRACE}}" ]]; then
             if [[ "${{wireguard_path_ok}}" == "1" ]]; then
               set_state_value PROFILE_STALE_HANDSHAKE_WITH_LIVE_PATH_S "${{age}}"
@@ -1293,6 +1380,37 @@ EOF
           fi
           if [[ "${{#deep_reasons[@]}}" -gt 0 ]]; then
             printf '%s\\n' "${{deep_reasons[@]}}"
+          fi
+          collect_route_fail_reasons
+        }}
+
+        collect_route_fail_reasons() {{
+          [[ "${{ROLE}}" == "ru-gateway" ]] || return 0
+          command -v journalctl >/dev/null 2>&1 || return 0
+          local recent_log="" ipv4_count="0" ipv6_count="0" ipv4_top="" ipv6_top=""
+          set +o pipefail
+          recent_log="$(journalctl -u sing-box --since "-${{ROUTE_FAIL_CACHE_TTL_SECONDS}} seconds" --no-pager -o cat 2>/dev/null | grep -E 'outbound/direct\\[to-foreign-ip-literal\\].*i/o timeout|outbound/direct\\[to-foreign-ipv6-literal\\].*i/o timeout' || true)"
+          set -o pipefail
+          if [[ -z "${{recent_log}}" ]]; then
+            reset_route_fail_bucket "IPV4_LITERAL"
+            reset_route_fail_bucket "IPV6_LITERAL"
+            return 0
+          fi
+          ipv4_count="$(printf '%s\\n' "${{recent_log}}" | grep 'outbound/direct\\[to-foreign-ip-literal\\]' | grep -Ev 'open connection to \\[[0-9A-Fa-f:.]+\\]' | grep -c . || true)"
+          ipv6_count="$(printf '%s\\n' "${{recent_log}}" | grep -E 'outbound/direct\\[to-foreign-ipv6-literal\\]|open connection to \\[[0-9A-Fa-f:.]+\\].*outbound/direct\\[to-foreign-ip-literal\\]' | grep -c . || true)"
+          ipv4_top="$(printf '%s\\n' "${{recent_log}}" | grep 'outbound/direct\\[to-foreign-ip-literal\\]' | grep -Ev 'open connection to \\[[0-9A-Fa-f:.]+\\]' | sed -n 's/.*open connection to \\([^ ]*\\) using outbound\\/direct\\[to-foreign-ip-literal\\].*/\\1/p' | sort | uniq -c | sort -nr | head -n1 | awk '{{print $2 "=" $1}}' || true)"
+          ipv6_top="$(printf '%s\\n' "${{recent_log}}" | grep -E 'outbound/direct\\[to-foreign-ipv6-literal\\]|open connection to \\[[0-9A-Fa-f:.]+\\].*outbound/direct\\[to-foreign-ip-literal\\]' | sed -n 's/.*open connection to \\(\\[[0-9A-Fa-f:.]*\\]:[0-9][0-9]*\\) using outbound\\/direct\\[[^]]*\\].*/\\1/p' | sort | uniq -c | sort -nr | head -n1 | awk '{{print $2 "=" $1}}' || true)"
+          if [[ "${{ipv4_count}}" =~ ^[0-9]+$ && "${{ipv4_count}}" -ge "${{ROUTE_FAIL_THRESHOLD}}" ]]; then
+            mark_route_fail_bucket "IPV4_LITERAL" "${{ipv4_count}}" "${{ipv4_top}}"
+            printf 'ipv4_literal_timeout_recent=%s:%s\\n' "${{ipv4_count}}" "${{ipv4_top}}"
+          elif [[ "${{ipv4_count}}" == "0" ]]; then
+            reset_route_fail_bucket "IPV4_LITERAL"
+          fi
+          if [[ "${{ipv6_count}}" =~ ^[0-9]+$ && "${{ipv6_count}}" -ge "${{ROUTE_FAIL_THRESHOLD}}" ]]; then
+            mark_route_fail_bucket "IPV6_LITERAL" "${{ipv6_count}}" "${{ipv6_top}}"
+            printf 'ipv6_literal_timeout_recent=%s:%s\\n' "${{ipv6_count}}" "${{ipv6_top}}"
+          elif [[ "${{ipv6_count}}" == "0" ]]; then
+            reset_route_fail_bucket "IPV6_LITERAL"
           fi
         }}
 

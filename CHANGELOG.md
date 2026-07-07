@@ -6,6 +6,14 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.9.1] - 2026-07-08
+
+### Fixed
+
+- Health-check получил отдельный `/var/lib/vpn-stack/dataplane-cache.env`: свежий подтверждённый `WireGuard` path теперь хранится с TTL и подавляет hard self-heal при одиночном probe miss, но не скрывает реальную потерю маршрута.
+- RU route diagnostics пишет soft buckets для повторяющихся IPv4/IPv6 literal timeout'ов с top destination и TTL. Эти destination failures больше не смешиваются с отказом всего VPN path и не запускают restart loop.
+- `status`, `preflight`, `DiagnosticsSnapshot` и `verify live` теперь показывают dataplane cache: возраст последнего рабочего WG path, TTL, источник probe и route-fail cache по literal-классам.
+
 ## [0.9.0] - 2026-07-06
 
 ### Changed
