@@ -61,6 +61,16 @@ class CliTests(unittest.TestCase):
             self.assertEqual(cli.main(["diagnose", "path", "--deployment", "demo", "--role", "all", "--iperf", "--non-interactive"]), 0)
         mocked.assert_called_once_with("demo", "all", iperf=True, non_interactive=True)
 
+    def test_client_log_diagnose_dispatch(self) -> None:
+        with patch("vpn_installer.cli.diagnose_client_log_workflow", return_value=1) as mocked:
+            self.assertEqual(cli.main(["diagnose", "client-log", "--path", "client.log", "--deployment", "demo", "--role", "ru-gateway"]), 1)
+        mocked.assert_called_once_with("client.log", deployment="demo", role="ru-gateway")
+
+    def test_front_diagnose_dispatch(self) -> None:
+        with patch("vpn_installer.cli.diagnose_front_workflow", return_value=1) as mocked:
+            self.assertEqual(cli.main(["diagnose", "front", "--deployment", "demo", "--source-ip", "203.0.113.44", "--minutes", "60", "--non-interactive"]), 1)
+        mocked.assert_called_once_with("demo", source_ip="203.0.113.44", minutes=60, non_interactive=True)
+
     def test_verify_live_dispatch(self) -> None:
         with patch("vpn_installer.cli.verify_live_workflow", return_value=0) as mocked:
             self.assertEqual(cli.main(["verify", "live", "--deployment", "demo", "--non-interactive"]), 0)

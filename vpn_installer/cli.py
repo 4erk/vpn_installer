@@ -4,7 +4,7 @@ import argparse
 import sys
 
 from .android import DEFAULT_HIDDIFY_PACKAGE, android_diagnose
-from .diagnose import diagnose_path_workflow
+from .diagnose import diagnose_client_log_workflow, diagnose_front_workflow, diagnose_path_workflow
 from .models import AppError, ROLE_FOREIGN, ROLE_RU, UserCancelled
 from .workflows import cleanup_local_workflow, client_check_workflow, install_workflow, menu_workflow, remote_action_workflow, status_workflow, verify_live_workflow
 
@@ -71,6 +71,17 @@ def build_parser() -> argparse.ArgumentParser:
     path.add_argument("--iperf", action="store_true", help="Временно открыть wg0-only iperf smoke и удалить правила после теста.")
     path.add_argument("--non-interactive", action="store_true", help="Не задавать вопросы; брать подключение из state/env.")
     path.set_defaults(func=lambda args: diagnose_path_workflow(args.deployment, args.role, iperf=args.iperf, non_interactive=args.non_interactive))
+    client_log = diagnose_subparsers.add_parser("client-log", help="Разобрать локальный sing-box/Hiddify log и проверить route self-tunnel.")
+    client_log.add_argument("--path", required=True, help="Путь к текстовому client log.")
+    client_log.add_argument("--deployment", help="Имя deployment для проверки маршрута до серверов.")
+    client_log.add_argument("--role", choices=["all", ROLE_RU, ROLE_FOREIGN], default="all", help="Какую роль проверять в локальном route check.")
+    client_log.set_defaults(func=lambda args: diagnose_client_log_workflow(args.path, deployment=args.deployment, role=args.role))
+    front = diagnose_subparsers.add_parser("front", help="Проверить публичный RU:443 front и source IP конкретного клиента.")
+    front.add_argument("--deployment", help="Имя deployment.")
+    front.add_argument("--source-ip", help="Публичный IP проблемного устройства/сети, если известен.")
+    front.add_argument("--minutes", type=int, default=120, help="Окно journalctl/nft анализа, 5..1440 минут.")
+    front.add_argument("--non-interactive", action="store_true", help="Не задавать вопросы; брать подключение из state/env.")
+    front.set_defaults(func=lambda args: diagnose_front_workflow(args.deployment, source_ip=args.source_ip, minutes=args.minutes, non_interactive=args.non_interactive))
 
     verify = subparsers.add_parser("verify", help="Проверить live dataplane после установки.")
     verify_subparsers = verify.add_subparsers(dest="verify_command", required=True)

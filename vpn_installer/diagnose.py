@@ -2,11 +2,21 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+import re
 
 from .common import OUT_DIR, print_header, warn, write_text
+from .config import load_existing_deployment_env
+from .log_classifier import BUCKETS, summarize_lines
+from .localnet import local_route_to_server, route_uses_self_tunnel
 from .models import ROLE_FOREIGN, ROLE_RU, AppError, RemoteTarget
+from .prompts import select_existing_deployment
 from .remote import ssh_capture
+from .state import load_state
+from .client_artifacts import client_artifact_paths
 from .workflows import current_wg_interface, prepare_remote_session, requested_roles
+from .workflows import build_target
+
+_SOURCE_IP_RE = re.compile(r"^[0-9A-Fa-f:.]+$")
 
 
 def _diagnostic_run_dir(deployment_name: str) -> Path:
@@ -270,6 +280,172 @@ journalctl -u sing-box --since '-30 minutes' --no-pager 2>/dev/null | tail -n 24
 """
 
 
+def _front_script(source_ip: str | None, minutes: int) -> str:
+    source = source_ip or ""
+    return f"""\
+set +e
+export LC_ALL=C
+SOURCE_IP={source!r}
+MINUTES={minutes}
+LISTEN_PORT="$(awk -F= '$1 == "RU_LISTEN_PORT" {{ gsub(/^"/, "", $2); gsub(/"$/, "", $2); print $2; exit }}' /etc/vpn-stack/deployment.env 2>/dev/null)"
+if [[ -z "${{LISTEN_PORT}}" ]]; then LISTEN_PORT="443"; fi
+xray_log="$(journalctl -u vpn-stack-xray.service --since "-${{MINUTES}} minutes" --no-pager -o cat 2>/dev/null | sed -r 's/\\x1B\\[[0-9;]*[mK]//g' || true)"
+guard_log="$(journalctl -u vpn-stack-guard.service --since "-${{MINUTES}} minutes" --no-pager -o cat 2>/dev/null | sed -r 's/\\x1B\\[[0-9;]*[mK]//g' || true)"
+abuse_set="$(nft list set inet vpnstack abuse_ipv4 2>/dev/null || true)"
+ss_front="$(ss -Htan "sport = :${{LISTEN_PORT}}" 2>/dev/null || true)"
+nft_chain="$(nft -a list chain inet vpnstack input 2>/dev/null || true)"
+nft_port_packets() {{
+  local verdict="$1"
+  printf '%s\\n' "${{nft_chain}}" |
+    grep -F "tcp dport ${{LISTEN_PORT}} " |
+    grep -F " ${{verdict}}" |
+    grep -F " counter " |
+    sed -n 's/.* counter packets \\([0-9][0-9]*\\) bytes .*/\\1/p' |
+    head -n1 || true
+}}
+
+printf 'window_minutes=%s\\n' "${{MINUTES}}"
+printf 'listen_port=%s\\n' "${{LISTEN_PORT}}"
+printf 'xray_active=%s\\n' "$(systemctl is-active vpn-stack-xray.service 2>/dev/null || true)"
+printf 'nftables_active=%s\\n' "$(systemctl is-active nftables 2>/dev/null || true)"
+printf 'accepted_total=%s\\n' "$(grep -c 'accepted tcp:' <<<"${{xray_log}}" || true)"
+printf 'invalid_reality_total=%s\\n' "$(grep -c 'REALITY: processed invalid connection' <<<"${{xray_log}}" || true)"
+printf 'disabled_invalid_total=%s\\n' "$(grep -c 'accepted tcp:disabled[.]invalid' <<<"${{xray_log}}" || true)"
+printf 'sources='
+printf '%s\\n' "${{xray_log}}" |
+  sed -n 's/.*from \\([^: ]*\\):[0-9][0-9]* accepted tcp:.*/\\1/p; s/.*REALITY: processed invalid connection from \\([^: ]*\\):.*/\\1/p' |
+  sort | uniq -c | sort -nr | head -n 20 |
+  awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
+printf '\\n'
+printf 'accepted_destinations='
+printf '%s\\n' "${{xray_log}}" |
+  sed -n 's/.*accepted tcp:\\([^ ]*\\).*/\\1/p' |
+  sort | uniq -c | sort -nr | head -n 20 |
+  awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
+printf '\\n'
+printf 'front_socket_states='
+printf '%s\\n' "${{ss_front}}" |
+  awk '{{print $1}}' |
+  sort | uniq -c | sort -nr |
+  awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
+printf '\\n'
+printf 'nft_vless_accept_packets=%s\\n' "$(nft_port_packets accept)"
+printf 'nft_vless_drop_packets=%s\\n' "$(nft_port_packets drop)"
+
+if [[ -n "${{SOURCE_IP}}" ]]; then
+  printf 'source_ip=%s\\n' "${{SOURCE_IP}}"
+  printf 'accepted_from_source=%s\\n' "$(grep -F "from ${{SOURCE_IP}}:" <<<"${{xray_log}}" | grep -c 'accepted tcp:' || true)"
+  printf 'invalid_from_source=%s\\n' "$(grep -F "from ${{SOURCE_IP}}:" <<<"${{xray_log}}" | grep -c 'REALITY: processed invalid connection' || true)"
+  printf 'disabled_invalid_from_source=%s\\n' "$(grep -F "from ${{SOURCE_IP}}:" <<<"${{xray_log}}" | grep -c 'accepted tcp:disabled.invalid' || true)"
+  printf 'guard_blocks_from_source=%s\\n' "$(grep -F "temporary block ${{SOURCE_IP}}" <<<"${{guard_log}}" | wc -l | tr -d ' ')"
+  printf 'abuse_set_contains_source=%s\\n' "$(grep -F "${{SOURCE_IP}}" <<<"${{abuse_set}}" >/dev/null && echo 1 || echo 0)"
+  printf 'socket_rows_from_source=%s\\n' "$(grep -F "${{SOURCE_IP}}:" <<<"${{ss_front}}" | wc -l | tr -d ' ')"
+  printf 'source_recent='
+  grep -F "from ${{SOURCE_IP}}:" <<<"${{xray_log}}" | tail -n 8 | tr '\\n' '|' | cut -c1-1200
+  printf '\\n'
+fi
+"""
+
+
+def _parse_kv_lines(text: str) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for line in text.splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        result[key.strip()] = value.strip()
+    return result
+
+
+def _int_value(payload: dict[str, str], key: str) -> int:
+    try:
+        return int(payload.get(key, "0") or "0")
+    except ValueError:
+        return 0
+
+
+def _front_verdict(payload: dict[str, str]) -> str:
+    if not payload.get("source_ip"):
+        return "inconclusive"
+    if _int_value(payload, "abuse_set_contains_source") > 0 or _int_value(payload, "guard_blocks_from_source") > 0:
+        return "blocked_by_guard"
+    if _int_value(payload, "accepted_from_source") > 0:
+        return "reached_xray"
+    if _int_value(payload, "invalid_from_source") > 0 or _int_value(payload, "disabled_invalid_from_source") > 0:
+        return "rejected_by_front"
+    if _int_value(payload, "socket_rows_from_source") > 0:
+        return "tcp_reached_no_xray_accept"
+    return "not_seen_on_server"
+
+
+def diagnose_front_workflow(deployment: str | None, *, source_ip: str | None = None, minutes: int = 120, non_interactive: bool = False) -> int:
+    if source_ip and not _SOURCE_IP_RE.match(source_ip):
+        raise AppError(f"Некорректный source IP: {source_ip}")
+    if minutes < 5 or minutes > 1440:
+        raise AppError("--minutes должен быть в диапазоне 5..1440")
+    deployment_name, _env_path, _env, _state, targets, _preflights = prepare_remote_session(
+        deployment,
+        roles=[ROLE_RU],
+        require_privilege=True,
+        validate_os=False,
+        allow_create=False,
+        persist_local=False,
+        confirm_existing_connections=False,
+        non_interactive=non_interactive,
+    )
+    target = targets[0]
+    report = ssh_capture(target, _front_script(source_ip, minutes), as_root=True)
+    output_dir = _diagnostic_run_dir(deployment_name)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    report_path = output_dir / "front-ru-gateway.txt"
+    write_text(report_path, report)
+    payload = _parse_kv_lines(report)
+    verdict = _front_verdict(payload)
+
+    print_header("Front diagnostics")
+    print(f"deployment: {deployment_name}")
+    print(f"server: {target.ssh_host}:{payload.get('listen_port', '443')}")
+    print(f"window_minutes: {payload.get('window_minutes', minutes)}")
+    print(f"xray/nftables: {payload.get('xray_active', '-')}/{payload.get('nftables_active', '-')}")
+    print(
+        "xray totals: "
+        f"accepted={payload.get('accepted_total', '0')}, "
+        f"invalid_reality={payload.get('invalid_reality_total', '0')}, "
+        f"disabled_invalid={payload.get('disabled_invalid_total', '0')}"
+    )
+    print(f"front socket states: {payload.get('front_socket_states', '-') or '-'}")
+    print(f"nft VLESS accept/drop packets: {payload.get('nft_vless_accept_packets', '-') or '-'}/{payload.get('nft_vless_drop_packets', '-') or '0'}")
+    print(f"sources: {payload.get('sources', '-') or '-'}")
+    if source_ip:
+        print(f"source_ip: {source_ip}")
+        print(
+            "source counters: "
+            f"accepted={payload.get('accepted_from_source', '0')}, "
+            f"invalid={payload.get('invalid_from_source', '0')}, "
+            f"disabled_invalid={payload.get('disabled_invalid_from_source', '0')}, "
+            f"guard_blocks={payload.get('guard_blocks_from_source', '0')}, "
+            f"abuse_set={payload.get('abuse_set_contains_source', '0')}, "
+            f"sockets={payload.get('socket_rows_from_source', '0')}"
+        )
+        if payload.get("source_recent"):
+            print(f"source recent: {payload.get('source_recent')}")
+    print(f"verdict: {verdict}")
+    if verdict == "reached_xray":
+        print("diagnosis: это устройство доходило до Xray и было принято; если сайты не открываются, проблема после front: routing/DNS/egress/client mode.")
+    elif verdict == "rejected_by_front":
+        print("diagnosis: устройство дошло до front, но Xray отверг handshake; проверяй актуальность UUID/publicKey/shortId/SNI/fingerprint.")
+    elif verdict == "blocked_by_guard":
+        print("diagnosis: source IP попал в guard/nft abuse set; это серверный front-block.")
+    elif verdict == "tcp_reached_no_xray_accept":
+        print("diagnosis: TCP до 443 виден, но Xray accept не появился; это зона listener/backlog/handshake до application accept.")
+    elif verdict == "not_seen_on_server":
+        print("diagnosis: за окно source IP не виден на RU front; сервер не может принять соединение, которое до него не дошло.")
+    else:
+        print("diagnosis: без source IP конкретного устройства front-gate не может доказать reached/not_seen; показаны общие источники.")
+    print(f"report: {report_path}")
+    return 1 if verdict in {"blocked_by_guard", "rejected_by_front", "tcp_reached_no_xray_accept", "not_seen_on_server"} else 0
+
+
 def _cleanup_iperf_rules(foreign: RemoteTarget) -> None:
     ssh_capture(
         foreign,
@@ -357,3 +533,74 @@ def diagnose_path_workflow(deployment: str | None, role: str, *, iperf: bool = F
         raise AppError("Диагностика не собрала ни одного файла.")
     print(f"Диагностика сохранена: {output_dir}")
     return 0
+
+
+def _print_nonzero_bucket_summary(summary: dict[str, object]) -> None:
+    counts = summary["counts"]
+    top_destinations = summary["top_destinations"]
+    samples = summary["samples"]
+    assert isinstance(counts, dict)
+    assert isinstance(top_destinations, dict)
+    assert isinstance(samples, dict)
+    for bucket in BUCKETS:
+        count = int(counts.get(bucket, 0))
+        if count <= 0:
+            continue
+        print(f"{bucket}: {count}")
+        destinations = top_destinations.get(bucket)
+        if destinations:
+            rendered = ", ".join(f"{destination}={value}" for destination, value in dict(destinations).items())
+            print(f"  top: {rendered}")
+        sample = samples.get(bucket)
+        if sample:
+            print(f"  sample: {sample}")
+
+
+def diagnose_client_log_workflow(log_path: str, deployment: str | None = None, role: str = "all") -> int:
+    path = Path(log_path)
+    if not path.is_file():
+        raise AppError(f"Файл лога не найден: {path}")
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    summary = summarize_lines(lines)
+    print_header("Client log diagnostics")
+    print(f"log: {path}")
+    print(f"lines: {len(lines)}")
+    _print_nonzero_bucket_summary(summary)
+
+    counts = summary["counts"]
+    assert isinstance(counts, dict)
+    if int(counts.get("client_front_connect_failed", 0)) > 0:
+        print(
+            "diagnosis: клиент не смог подключиться к public VPN endpoint до входа в Xray; "
+            "DNS и сайты после этого могут падать вторично."
+        )
+
+    if deployment is None:
+        return 0
+
+    deployment_name = select_existing_deployment(deployment)
+    env_path, env = load_existing_deployment_env(deployment_name)
+    state = load_state(deployment_name)
+    route_failed = False
+    print_header("Client route diagnostics")
+    for selected_role in requested_roles(role):
+        target = build_target(selected_role, env, state)
+        route_info = local_route_to_server(target)
+        public_ip = target.public_ip or target.ssh_host or "-"
+        if route_info is None:
+            print(f"{target.label}: route check unavailable; ip={public_ip}")
+            continue
+        self_tunnel = route_uses_self_tunnel(route_info, client_tun_name=env.get("CLIENT_TUN_NAME", ""))
+        verdict = "BAD: self-tunnel" if self_tunnel else "OK"
+        print(
+            f"{target.label}: {verdict}; ip={route_info.target_ip}; "
+            f"iface={route_info.interface_alias or '-'}; source={route_info.source_address or '-'}; next-hop={route_info.next_hop or '-'}"
+        )
+        route_failed = route_failed or self_tunnel
+    if route_failed:
+        paths = client_artifact_paths(env)
+        print("diagnosis: IP сервера уходит через VPN-интерфейс; это ломает Reality/VLESS connect до входа на сервер.")
+        print(f"Windows bypass helper: {paths['windows_route_bypass']}")
+        print(f"Route-safe JSON: {paths['hiddify_json']}")
+    print(f"Deployment env: {env_path}")
+    return 1 if route_failed or int(counts.get("client_front_connect_failed", 0)) > 0 else 0

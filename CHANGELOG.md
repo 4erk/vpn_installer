@@ -6,6 +6,18 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.9.3] - 2026-07-08
+
+### Added
+
+- Добавлена команда `vpn diagnose front --deployment <name> [--source-ip <ip>]`: она проверяет публичный RU `VLESS/Reality` front, Xray, nftables/guard, socket-state и source-specific counters, чтобы отличать `reached_xray`, `rejected_by_front`, `blocked_by_guard`, `tcp_reached_no_xray_accept` и `not_seen_on_server`.
+- Добавлена команда `vpn diagnose client-log --path <log> [--deployment <name>]`: клиентские `sing-box`/Hiddify/v2rayN логи теперь отдельно классифицируют `client_front_connect_failed`, когда клиент не может подключиться к public VPN endpoint до входа в Xray, и не смешивают это с серверным DNS/routing.
+
+### Fixed
+
+- `status`/`diagnose path` больше не остаются единственным источником истины для кейса "одно устройство подключается, другое нет": теперь есть отдельный front-gate, который требует source IP конкретного устройства и честно возвращает `inconclusive`, если такого идентификатора нет.
+- Основной клиентский контракт `out/<deployment>/client/vless-uri.txt` не изменён; JSON-профили остаются fallback-артефактами, а диагностика проверяет именно public `RU:443` вход для URI-клиентов.
+
 ## [0.9.2] - 2026-07-08
 
 ### Fixed

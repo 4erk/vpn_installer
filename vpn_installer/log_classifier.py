@@ -5,6 +5,7 @@ from collections import Counter
 from dataclasses import dataclass
 
 BUCKETS = (
+    "client_front_connect_failed",
     "dns_failed",
     "domain_to_foreign_timeout",
     "ipv4_literal_timeout",
@@ -29,9 +30,15 @@ _ACCEPTED_RE = re.compile(r"accepted tcp:(?P<dst>\[[^\]]+\]:\d+|[^ ]+)")
 _SOURCE_RE = re.compile(r"(?:from|process connection from) (?P<src>\[[^\]]+\]|[^: ]+):\d+")
 _DNS_LOOKUP_FAILED_RE = re.compile(r"dns: lookup failed for (?P<dst>[^: ]+):")
 _DNS_EXCHANGE_FAILED_RE = re.compile(r"dns: exchange failed for (?P<dst>[^ ]+)\. IN (?P<qtype>[A-Z0-9]+):")
+_PROXY_DIAL_FAILED_RE = re.compile(r"using outbound/vless\[[^\]]+\]: dial tcp (?P<dst>\[[^\]]+\]:\d+|[^: ]+:\d+): i/o timeout")
+_PROXY_READ_FAILED_RE = re.compile(r"using outbound/vless\[[^\]]+\]: read tcp [^ ]+->(?P<dst>\[[^\]]+\]:\d+|[^: ]+:\d+):")
 
 
 def _destination(line: str) -> str:
+    for pattern in (_PROXY_DIAL_FAILED_RE, _PROXY_READ_FAILED_RE):
+        match = pattern.search(line)
+        if match:
+            return match.group("dst")
     for pattern in (_OPEN_CONNECTION_RE, _OUTBOUND_CONNECTION_RE, _ACCEPTED_RE):
         match = pattern.search(line)
         if match:
@@ -59,6 +66,8 @@ def classify_line(line: str) -> ClassifiedLogLine | None:
         return ClassifiedLogLine("disabled_invalid", _destination(line), _source(line))
     if "REALITY: processed invalid connection" in line:
         return ClassifiedLogLine("invalid_reality", _destination(line), _source(line))
+    if "using outbound/vless[" in line and ("dial tcp" in line or "wsarecv" in line or "connected host has failed to respond" in line):
+        return ClassifiedLogLine("client_front_connect_failed", _destination(line), _source(line))
     if "dns: lookup failed" in line or "lookup failed for " in line or "dns: exchange failed" in line or "exchange failed for " in line:
         return ClassifiedLogLine("dns_failed", _destination(line), _source(line))
     if "outbound/block[blocked]" in line or "using outbound/block[blocked]" in line:
