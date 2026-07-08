@@ -6,6 +6,14 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.9.2] - 2026-07-08
+
+### Fixed
+
+- RU `RoutingPolicy` получил явные классы `connectivity_check` и `connectivity_check_ipv6_only`: `www.msftconnecttest.com`/`www.msftncsi.com` теперь резолвятся через быстрый `dns-ru-direct` и маршрутизируются через `direct-ru` до global DoH, а IPv6-only probe-домены `ipv6.msftconnecttest.com`/`ipv6.msftncsi.com` reject'ятся до DNS lookup. Это убирает 10-30 секундные DNS подвисы и быстрый `empty result` шум на IPv4-only серверной DNS policy.
+- `log_classifier.py`, `preflight` и `diagnose path` теперь распознают не только `dns: lookup failed`, но и `dns: exchange failed ... IN A/AAAA`, сохраняют query type в top destinations и не смешивают DNS deadline с IP-literal/domain-route timeout.
+- DNS policy для устойчивых probe-доменов вынесена в общий модуль без новых публичных timeout/env-параметров; старый клиентский контракт `out/<deployment>/client/vless-uri.txt` не меняется.
+
 ## [0.9.1] - 2026-07-08
 
 ### Fixed

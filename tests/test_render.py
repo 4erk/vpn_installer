@@ -380,7 +380,7 @@ class RenderTests(unittest.TestCase):
         dns_rules = payload["dns"]["rules"]
         route_rules = payload["route"]["rules"]
 
-        direct_domain_dns_rule = next(rule for rule in dns_rules if "domain" in rule)
+        direct_domain_dns_rule = next(rule for rule in dns_rules if rule.get("action") == "route" and rule.get("server") == "dns-ru-direct" and "domain" in rule)
         self.assertIn("api.oneme.ru", direct_domain_dns_rule["domain"])
         self.assertIn("api.ok.ru", direct_domain_dns_rule["domain"])
         self.assertIn("checkip.amazonaws.com", direct_domain_dns_rule["domain"])
@@ -389,6 +389,9 @@ class RenderTests(unittest.TestCase):
         self.assertIn("ipv4-internet.yandex.net", direct_domain_dns_rule["domain"])
         self.assertIn("ipv6-internet.yandex.net", direct_domain_dns_rule["domain"])
         self.assertIn("2ip.ru", direct_domain_dns_rule["domain"])
+        self.assertIn("www.msftconnecttest.com", direct_domain_dns_rule["domain"])
+        ipv6_msft_reject_rule = next(rule for rule in dns_rules if rule.get("domain") == ["ipv6.msftconnecttest.com", "ipv6.msftncsi.com"])
+        self.assertEqual(ipv6_msft_reject_rule["action"], "reject")
 
         direct_suffix_dns_rule = next(rule for rule in dns_rules if "domain_suffix" in rule)
         self.assertIn(".gstatic.com", direct_suffix_dns_rule["domain_suffix"])
@@ -398,6 +401,7 @@ class RenderTests(unittest.TestCase):
         direct_domain_route_rule = next(rule for rule in route_rules if rule.get("outbound") == "direct-ru" and "domain" in rule)
         self.assertIn("gosuslugi.ru", direct_domain_route_rule["domain"])
         self.assertIn("ipapi.co", direct_domain_route_rule["domain"])
+        self.assertIn("www.msftncsi.com", direct_domain_route_rule["domain"])
         self.assertIn("icanhazip.com", direct_domain_route_rule["domain"])
         self.assertIn("ip.mail.ru", direct_domain_route_rule["domain"])
         self.assertIn("ipv4-internet.yandex.net", direct_domain_route_rule["domain"])
@@ -1003,7 +1007,7 @@ class RenderTests(unittest.TestCase):
         self.assertIn(".ipify.org", direct_suffix_rule["domain_suffix"])
         cidr_rule = next(rule for rule in route_rules if rule.get("outbound") == "direct-ru" and "ip_cidr" in rule)
         self.assertEqual(cidr_rule["ip_cidr"], ["203.0.113.0/24", "203.0.113.10/32"])
-        dns_direct_rule = next(rule for rule in dns_rules if "domain" in rule)
+        dns_direct_rule = next(rule for rule in dns_rules if rule.get("action") == "route" and rule.get("server") == "dns-ru-direct" and "domain" in rule)
         self.assertIn("api.oneme.ru", dns_direct_rule["domain"])
         self.assertIn("ip.mail.ru", dns_direct_rule["domain"])
         self.assertNotIn("detour", servers["dns-ru-direct"])

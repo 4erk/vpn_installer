@@ -51,6 +51,8 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("nft_vless_drop_packets", script)
         self.assertIn('nft_vless_drop_packets="0"', script)
         self.assertIn("head -n1 || true", script)
+        self.assertIn("dns: (lookup|exchange) failed", script)
+        self.assertIn("exchange failed for", script)
 
     def test_target_probe_uses_header_probe_with_short_range_fallback(self) -> None:
         script = preflight_script("wg-test")
@@ -439,7 +441,7 @@ class RemoteTests(unittest.TestCase):
                     "singbox_recent_to_foreign_ip_literal_destinations": "91.108.56.103:443=4",
                     "singbox_recent_to_foreign_ipv6_literal_destinations": "[2400:52e0:1e00::722:1]:443=4",
                     "singbox_recent_direct_ru_destinations": "142.251.143.131:80=2",
-                    "singbox_recent_timeout_destinations": "[185.234.59.121]=2,ipv6.msftncsi.com=1",
+                    "singbox_recent_timeout_destinations": "[185.234.59.121]=2,ipv6.msftncsi.com:AAAA=1",
                     "singbox_recent_ip_literal_timeout_destinations": "91.108.56.103:443=4",
                     "singbox_recent_ipv6_literal_count": "7",
                     "singbox_recent_ipv6_literal_destinations": "[2400:52e0:1e00::722:1]:443=4,[fdfd::1ad5:632a]:55517=3",
@@ -496,7 +498,7 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("sing-box DNS timeouts / 4h: 1", output)
         self.assertIn("sing-box global DoH: 8.8.8.8/dns.google", output)
         self.assertIn("sing-box IP-literal timeout destinations / 4h: 91.108.56.103:443=4", output)
-        self.assertIn("sing-box timeout destinations / 4h: [185.234.59.121]=2,ipv6.msftncsi.com=1", output)
+        self.assertIn("sing-box timeout destinations / 4h: [185.234.59.121]=2,ipv6.msftncsi.com:AAAA=1", output)
         self.assertIn("sing-box last timeout sample: connection: open connection to [2001:db8::1]:443", output)
         self.assertIn("Xray front recent window (min): 30", output)
         self.assertIn("Xray front recent: accepted=55, errors=1, invalid_reality=0, disabled_invalid=3, ipv6_literals=2", output)

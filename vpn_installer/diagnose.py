@@ -193,7 +193,7 @@ if [[ "${{role}}" == "ru-gateway" ]]; then
   printf 'blocked=%s\n' "$(grep -c 'outbound/block\\[blocked\\]' <<<"${{singbox_log}}" || true)"
   printf 'mux_closed=%s\n' "$(grep -c 'mux connection closed' <<<"${{singbox_log}}" || true)"
   printf 'eof=%s\n' "$(grep -c 'EOF' <<<"${{singbox_log}}" || true)"
-  printf 'dns_failed=%s\n' "$(grep -c 'dns: lookup failed' <<<"${{singbox_log}}" || true)"
+  printf 'dns_failed=%s\n' "$(grep -Ec 'dns: (lookup|exchange) failed' <<<"${{singbox_log}}" || true)"
   printf 'timeout=%s\n' "$(grep -Ec 'i/o timeout|context deadline exceeded' <<<"${{singbox_log}}" || true)"
   printf 'invalid_reality=%s\n' "$(grep -c 'REALITY: processed invalid connection' <<<"${{singbox_log}}" || true)"
   printf 'sources='
@@ -233,7 +233,7 @@ if [[ "${{role}}" == "ru-gateway" ]]; then
     awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
   printf '\ntimeout_destinations='
   printf '%s\n' "${{singbox_log}}" |
-    sed -n 's/.*open connection to \\([^ ]*\\) using outbound\\/direct\\[[^]]*\\].*/\\1/p; s/.*lookup failed for \\([^: ]*\\):.*/\\1/p' |
+    sed -n 's/.*open connection to \\([^ ]*\\) using outbound\\/direct\\[[^]]*\\].*/\\1/p; s/.*lookup failed for \\([^: ]*\\):.*/\\1/p; s/.*exchange failed for \\([^ ]*\\)\\. IN \\([A-Z0-9][A-Z0-9]*\\):.*/\\1:\\2/p' |
     sort | uniq -c | sort -nr | head -n 12 |
     awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
   printf '\nip_literal_timeout_destinations='
@@ -258,7 +258,7 @@ if [[ "${{role}}" == "ru-gateway" ]]; then
     awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
   printf '\nlast_error_sample='
   printf '%s\n' "${{singbox_log}}" |
-    (grep -E 'outbound/block\\[blocked\\]|mux connection closed|dns: lookup failed|i/o timeout|context deadline exceeded|REALITY: processed invalid connection|FATAL|ERROR|EOF' || true) |
+    (grep -E 'outbound/block\\[blocked\\]|mux connection closed|dns: (lookup|exchange) failed|i/o timeout|context deadline exceeded|REALITY: processed invalid connection|FATAL|ERROR|EOF' || true) |
     tail -n1 |
     tr -d '\r' |
     cut -c1-240

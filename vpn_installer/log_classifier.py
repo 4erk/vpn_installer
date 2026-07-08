@@ -27,6 +27,8 @@ _OPEN_CONNECTION_RE = re.compile(r"open connection to (?P<dst>\[[^\]]+\]:\d+|[^ 
 _OUTBOUND_CONNECTION_RE = re.compile(r"outbound/(?:direct|block)\[(?P<tag>[^\]]+)\]: outbound connection to (?P<dst>\[[^\]]+\]:\d+|[^ ]+)")
 _ACCEPTED_RE = re.compile(r"accepted tcp:(?P<dst>\[[^\]]+\]:\d+|[^ ]+)")
 _SOURCE_RE = re.compile(r"(?:from|process connection from) (?P<src>\[[^\]]+\]|[^: ]+):\d+")
+_DNS_LOOKUP_FAILED_RE = re.compile(r"dns: lookup failed for (?P<dst>[^: ]+):")
+_DNS_EXCHANGE_FAILED_RE = re.compile(r"dns: exchange failed for (?P<dst>[^ ]+)\. IN (?P<qtype>[A-Z0-9]+):")
 
 
 def _destination(line: str) -> str:
@@ -34,9 +36,12 @@ def _destination(line: str) -> str:
         match = pattern.search(line)
         if match:
             return match.group("dst")
-    dns_match = re.search(r"lookup failed for ([^: ]+):", line)
-    if dns_match:
-        return dns_match.group(1)
+    dns_lookup_match = _DNS_LOOKUP_FAILED_RE.search(line)
+    if dns_lookup_match:
+        return dns_lookup_match.group("dst")
+    dns_exchange_match = _DNS_EXCHANGE_FAILED_RE.search(line)
+    if dns_exchange_match:
+        return f"{dns_exchange_match.group('dst')}:{dns_exchange_match.group('qtype')}"
     return ""
 
 
@@ -54,7 +59,7 @@ def classify_line(line: str) -> ClassifiedLogLine | None:
         return ClassifiedLogLine("disabled_invalid", _destination(line), _source(line))
     if "REALITY: processed invalid connection" in line:
         return ClassifiedLogLine("invalid_reality", _destination(line), _source(line))
-    if "dns: lookup failed" in line or "lookup failed for " in line:
+    if "dns: lookup failed" in line or "lookup failed for " in line or "dns: exchange failed" in line or "exchange failed for " in line:
         return ClassifiedLogLine("dns_failed", _destination(line), _source(line))
     if "outbound/block[blocked]" in line or "using outbound/block[blocked]" in line:
         return ClassifiedLogLine("blocked_private_fake", _destination(line), _source(line))

@@ -4,12 +4,16 @@ import textwrap
 from dataclasses import dataclass, field
 from typing import Any
 
-POLICY_VERSION = "0.9.1"
+from .dns_policy import CONNECTIVITY_CHECK_DIRECT_DOMAINS, CONNECTIVITY_CHECK_IPV6_ONLY_DOMAINS, merged_domains
+
+POLICY_VERSION = "0.9.2"
 
 TRAFFIC_CLASSES = (
     "ru_direct_domain",
     "ru_direct_ip",
     "private_or_fake",
+    "connectivity_check",
+    "connectivity_check_ipv6_only",
     "dns_global",
     "domain_foreign",
     "ipv4_literal_foreign",
@@ -121,8 +125,10 @@ def build_ru_routing_policy(env: dict[str, str]) -> RoutingPolicy:
     geoip_direct = _enabled(env.get("RU_GEOIP_DIRECT", "0"))
 
     dns_rules: list[dict[str, Any]] = [{"query_type": ["AAAA"], "action": "reject"}]
-    if direct_domains:
-        dns_rules.append({"domain": direct_domains, "action": "route", "server": "dns-ru-direct", "strategy": "ipv4_only"})
+    dns_rules.append({"domain": list(CONNECTIVITY_CHECK_IPV6_ONLY_DOMAINS), "action": "reject"})
+    direct_dns_domains = merged_domains(CONNECTIVITY_CHECK_DIRECT_DOMAINS, direct_domains)
+    if direct_dns_domains:
+        dns_rules.append({"domain": direct_dns_domains, "action": "route", "server": "dns-ru-direct", "strategy": "ipv4_only"})
     if direct_domain_suffixes:
         dns_rules.append({"domain_suffix": direct_domain_suffixes, "action": "route", "server": "dns-ru-direct", "strategy": "ipv4_only"})
     dns_rules.append({"rule_set": ["ru-geosite"], "action": "route", "server": "dns-ru-direct", "strategy": "ipv4_only"})
@@ -134,9 +140,10 @@ def build_ru_routing_policy(env: dict[str, str]) -> RoutingPolicy:
     ]
     if block_quic:
         route_rules.append({"network": "udp", "port": 443, "action": "reject"})
-    if direct_domains:
-        route_rules.append({"domain": direct_domains, "action": "resolve", "server": "dns-ru-direct", "strategy": "ipv4_only"})
-        route_rules.append({"domain": direct_domains, "action": "route", "outbound": "direct-ru"})
+    route_rules.append({"domain": list(CONNECTIVITY_CHECK_IPV6_ONLY_DOMAINS), "action": "reject"})
+    if direct_dns_domains:
+        route_rules.append({"domain": direct_dns_domains, "action": "resolve", "server": "dns-ru-direct", "strategy": "ipv4_only"})
+        route_rules.append({"domain": direct_dns_domains, "action": "route", "outbound": "direct-ru"})
     if direct_domain_suffixes:
         route_rules.append({"domain_suffix": direct_domain_suffixes, "action": "resolve", "server": "dns-ru-direct", "strategy": "ipv4_only"})
         route_rules.append({"domain_suffix": direct_domain_suffixes, "action": "route", "outbound": "direct-ru"})
@@ -191,6 +198,8 @@ def build_ru_routing_policy(env: dict[str, str]) -> RoutingPolicy:
         "ru_direct_domain": RouteClass("ru_direct_domain", "direct-ru", "dns-ru-direct", "none", "direct_ru", "blocked"),
         "ru_direct_ip": RouteClass("ru_direct_ip", "direct-ru", "dns-ru-direct", "none", "direct_ru", "blocked"),
         "private_or_fake": RouteClass("private_or_fake", "blocked", "none", "none", "blocked_private_fake", "none"),
+        "connectivity_check": RouteClass("connectivity_check", "direct-ru", "dns-ru-direct", "none", "direct_ru", "dns-global"),
+        "connectivity_check_ipv6_only": RouteClass("connectivity_check_ipv6_only", "blocked", "none", "none", "blocked_private_fake", "none"),
         "dns_global": RouteClass("dns_global", "to-foreign", "dns-global", "domain_foreign", "dns_failed", "dns-ru-direct"),
         "domain_foreign": RouteClass("domain_foreign", "to-foreign", "dns-global", "operator_override", "domain_to_foreign_timeout", "none"),
         "ipv4_literal_foreign": RouteClass("ipv4_literal_foreign", "to-foreign-ip-literal", "dns-global", literal_policy, "ipv4_literal_timeout", "reject"),

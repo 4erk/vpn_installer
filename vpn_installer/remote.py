@@ -720,17 +720,17 @@ if [[ "${{role}}" == "ru-gateway" ]] && command -v journalctl >/dev/null 2>&1; t
         cut -c1-240
     )"
   fi
-  singbox_recent_timeouts="$(journalctl -u sing-box --since '4 hours ago' --no-pager 2>/dev/null | grep -E 'i/o timeout|lookup failed|context deadline exceeded' || true)"
+  singbox_recent_timeouts="$(journalctl -u sing-box --since '4 hours ago' --no-pager 2>/dev/null | grep -E 'i/o timeout|dns: (lookup|exchange) failed|context deadline exceeded' || true)"
   if [[ -n "${{singbox_recent_timeouts}}" ]]; then
     singbox_to_foreign_timeout_count="$(grep -c 'outbound/direct\\[to-foreign\\].*i/o timeout' <<<"${{singbox_recent_timeouts}}" || true)"
     singbox_to_foreign_ip_literal_timeout_count="$(printf '%s\n' "${{singbox_recent_timeouts}}" | grep -E 'outbound/direct\\[to-foreign-ip-literal\\].*i/o timeout' | grep -Ev 'open connection to \\[[0-9A-Fa-f:.]+\\]' | grep -c . || true)"
     singbox_to_foreign_ipv6_literal_timeout_count="$(printf '%s\n' "${{singbox_recent_timeouts}}" | grep -E 'outbound/direct\\[to-foreign-ipv6-literal\\].*i/o timeout|open connection to \\[[0-9A-Fa-f:.]+\\].*outbound/direct\\[to-foreign-ip-literal\\].*i/o timeout' | grep -c . || true)"
     singbox_direct_ru_timeout_count="$(grep -c 'outbound/direct\\[direct-ru\\].*i/o timeout' <<<"${{singbox_recent_timeouts}}" || true)"
-    singbox_dns_timeout_count="$(grep -c 'dns: lookup failed' <<<"${{singbox_recent_timeouts}}" || true)"
+    singbox_dns_timeout_count="$(grep -Ec 'dns: (lookup|exchange) failed' <<<"${{singbox_recent_timeouts}}" || true)"
     singbox_recent_timeout_sample="$(tail -n1 <<<"${{singbox_recent_timeouts}}" | tr -d '\\r' | cut -c1-240)"
     singbox_recent_timeout_destinations="$(
       printf '%s\n' "${{singbox_recent_timeouts}}" |
-        sed -n 's/.*open connection to \\([^ ]*\\) using outbound\\/direct\\[[^]]*\\].*/\\1/p; s/.*lookup failed for \\([^: ]*\\):.*/\\1/p' |
+        sed -n 's/.*open connection to \\([^ ]*\\) using outbound\\/direct\\[[^]]*\\].*/\\1/p; s/.*lookup failed for \\([^: ]*\\):.*/\\1/p; s/.*exchange failed for \\([^ ]*\\)\\. IN \\([A-Z0-9][A-Z0-9]*\\):.*/\\1:\\2/p' |
         sort |
         uniq -c |
         sort -nr |
@@ -753,7 +753,7 @@ if [[ "${{role}}" == "ru-gateway" ]] && command -v journalctl >/dev/null 2>&1; t
     singbox_recent_blocked_count="$(grep -c 'outbound/block\\[blocked\\]' <<<"${{singbox_recent_log}}" || true)"
     singbox_recent_mux_closed_count="$(grep -c 'mux connection closed' <<<"${{singbox_recent_log}}" || true)"
     singbox_recent_eof_count="$(grep -c 'EOF' <<<"${{singbox_recent_log}}" || true)"
-    singbox_recent_dns_failed_count="$(grep -c 'dns: lookup failed' <<<"${{singbox_recent_log}}" || true)"
+    singbox_recent_dns_failed_count="$(grep -Ec 'dns: (lookup|exchange) failed' <<<"${{singbox_recent_log}}" || true)"
     singbox_recent_timeout_count="$(grep -Ec 'i/o timeout|context deadline exceeded' <<<"${{singbox_recent_log}}" || true)"
     singbox_recent_invalid_reality_count="$(grep -c 'REALITY: processed invalid connection' <<<"${{singbox_recent_log}}" || true)"
     singbox_recent_sources="$(
@@ -844,7 +844,7 @@ if [[ "${{role}}" == "ru-gateway" ]] && command -v journalctl >/dev/null 2>&1; t
     )"
     singbox_recent_error_sample="$(
       printf '%s\n' "${{singbox_recent_log}}" |
-        (grep -E 'outbound/block\\[blocked\\]|mux connection closed|dns: lookup failed|i/o timeout|context deadline exceeded|REALITY: processed invalid connection|FATAL|ERROR|EOF' || true) |
+        (grep -E 'outbound/block\\[blocked\\]|mux connection closed|dns: (lookup|exchange) failed|i/o timeout|context deadline exceeded|REALITY: processed invalid connection|FATAL|ERROR|EOF' || true) |
         tail -n1 |
         tr -d '\\r' |
         cut -c1-240

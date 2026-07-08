@@ -19,6 +19,35 @@ class RoutingPolicyTests(unittest.TestCase):
         self.assertEqual(policy.classes["ipv4_literal_foreign"].outbound, "to-foreign-ip-literal")
         self.assertEqual(policy.classes["ipv6_literal_foreign"].outbound, "to-foreign-ipv6-literal")
         self.assertEqual(policy.classes["domain_foreign"].outbound, "to-foreign")
+        self.assertEqual(policy.classes["connectivity_check"].outbound, "direct-ru")
+        self.assertEqual(policy.classes["connectivity_check_ipv6_only"].outbound, "blocked")
+
+    def test_connectivity_checks_are_direct_without_operator_knobs(self) -> None:
+        parts = build_ru_routing_policy(self.make_env()).singbox_parts()
+        dns_rule = next(rule for rule in parts["dns_rules"] if rule.get("action") == "route" and rule.get("server") == "dns-ru-direct" and "domain" in rule)
+        direct_resolve_index = next(
+            index
+            for index, rule in enumerate(parts["route_rules"])
+            if rule.get("domain") and "www.msftconnecttest.com" in rule["domain"] and rule.get("action") == "resolve"
+        )
+        direct_route_index = next(
+            index
+            for index, rule in enumerate(parts["route_rules"])
+            if rule.get("domain") and "www.msftconnecttest.com" in rule["domain"] and rule.get("outbound") == "direct-ru"
+        )
+        global_resolve_index = next(index for index, rule in enumerate(parts["route_rules"]) if rule.get("server") == "dns-global")
+
+        self.assertIn("www.msftconnecttest.com", dns_rule["domain"])
+        dns_reject_rule = next(rule for rule in parts["dns_rules"] if rule.get("domain") == ["ipv6.msftconnecttest.com", "ipv6.msftncsi.com"])
+        route_reject_index = next(
+            index
+            for index, rule in enumerate(parts["route_rules"])
+            if rule.get("domain") == ["ipv6.msftconnecttest.com", "ipv6.msftncsi.com"] and rule.get("action") == "reject"
+        )
+        self.assertEqual(dns_reject_rule["action"], "reject")
+        self.assertLess(direct_resolve_index, direct_route_index)
+        self.assertLess(route_reject_index, direct_resolve_index)
+        self.assertLess(direct_route_index, global_resolve_index)
 
     def test_policy_renders_stable_literal_order_and_outbounds(self) -> None:
         parts = build_ru_routing_policy(self.make_env()).singbox_parts()
