@@ -1,16 +1,18 @@
 from __future__ import annotations
 
+import ipaddress
 import textwrap
 from dataclasses import dataclass, field
 from typing import Any
 
 from .dns_policy import CONNECTIVITY_CHECK_DIRECT_DOMAINS, CONNECTIVITY_CHECK_IPV6_ONLY_DOMAINS, merged_domains
 
-POLICY_VERSION = "0.9.2"
+POLICY_VERSION = "0.9.3"
 
 TRAFFIC_CLASSES = (
     "ru_direct_domain",
     "ru_direct_ip",
+    "private_dot_recovery",
     "private_or_fake",
     "connectivity_check",
     "connectivity_check_ipv6_only",
@@ -58,6 +60,16 @@ def _normalize_ipv6_literal_policy(env: dict[str, str]) -> str:
     if policy in IPV6_LITERAL_POLICIES:
         return policy
     return "route-with-budget"
+
+
+def _client_tun_v4_networks(env: dict[str, str]) -> list[str]:
+    raw_value = env.get("CLIENT_TUN_ADDRESS_V4", "").strip()
+    if not raw_value:
+        return []
+    try:
+        return [str(ipaddress.ip_network(raw_value, strict=False))]
+    except ValueError:
+        return [raw_value]
 
 
 @dataclass(frozen=True)
@@ -115,6 +127,7 @@ def build_ru_routing_policy(env: dict[str, str]) -> RoutingPolicy:
     direct_domains = _env_list(env, "RU_FORCE_DIRECT_DOMAIN")
     direct_domain_suffixes = _env_list(env, "RU_FORCE_DIRECT_DOMAIN_SUFFIX")
     direct_ip_cidrs = _env_list(env, "RU_FORCE_DIRECT_IP_CIDR")
+    client_tun_v4_networks = _client_tun_v4_networks(env)
     ru_public_ip = env.get("RU_PUBLIC_IP", "").strip()
     if ru_public_ip:
         ru_public_cidr = f"{ru_public_ip}/32"
@@ -153,6 +166,17 @@ def build_ru_routing_policy(env: dict[str, str]) -> RoutingPolicy:
         route_rules.append({"ip_cidr": direct_ip_cidrs, "action": "route", "outbound": "direct-ru"})
     if block_ip_cidrs:
         route_rules.append({"ip_cidr": block_ip_cidrs, "action": "route", "outbound": "blocked"})
+    if client_tun_v4_networks:
+        route_rules.append(
+            {
+                "ip_cidr": client_tun_v4_networks,
+                "port": 853,
+                "action": "route",
+                "outbound": "to-foreign",
+                "override_address": env["GLOBAL_DOH_SERVER"],
+                "override_port": 853,
+            }
+        )
     route_rules.append({"ip_is_private": True, "action": "route", "outbound": "blocked"})
     if ipv6_literal_policy == "reject":
         route_rules.append({"ip_version": 6, "action": "reject"})
@@ -197,6 +221,7 @@ def build_ru_routing_policy(env: dict[str, str]) -> RoutingPolicy:
     classes = {
         "ru_direct_domain": RouteClass("ru_direct_domain", "direct-ru", "dns-ru-direct", "none", "direct_ru", "blocked"),
         "ru_direct_ip": RouteClass("ru_direct_ip", "direct-ru", "dns-ru-direct", "none", "direct_ru", "blocked"),
+        "private_dot_recovery": RouteClass("private_dot_recovery", "to-foreign", "dns-global", "domain_foreign", "dns_failed", "blocked"),
         "private_or_fake": RouteClass("private_or_fake", "blocked", "none", "none", "blocked_private_fake", "none"),
         "connectivity_check": RouteClass("connectivity_check", "direct-ru", "dns-ru-direct", "none", "direct_ru", "dns-global"),
         "connectivity_check_ipv6_only": RouteClass("connectivity_check_ipv6_only", "blocked", "none", "none", "blocked_private_fake", "none"),

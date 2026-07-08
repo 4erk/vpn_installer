@@ -288,6 +288,26 @@ class RenderTests(unittest.TestCase):
         self.assertLess(private_indexes[0], ipv4_literal_index)
         self.assertLess(ipv4_literal_index, global_resolve_index)
 
+    def test_ru_server_recovers_client_tun_dot_before_private_block(self) -> None:
+        env = self.make_env()
+        payload = json.loads(render.render_ru_singbox(env))
+        route_rules = payload["route"]["rules"]
+        dot_index = next(index for index, rule in enumerate(route_rules) if rule.get("ip_cidr") == ["172.19.0.0/30"] and rule.get("port") == 853)
+        private_index = next(index for index, rule in enumerate(route_rules) if rule.get("ip_is_private") is True)
+
+        self.assertLess(dot_index, private_index)
+        self.assertEqual(
+            route_rules[dot_index],
+            {
+                "ip_cidr": ["172.19.0.0/30"],
+                "port": 853,
+                "action": "route",
+                "outbound": "to-foreign",
+                "override_address": "8.8.8.8",
+                "override_port": 853,
+            },
+        )
+
     def test_ru_server_routes_own_public_ip_direct_before_foreign_catchall(self) -> None:
         env = self.make_env()
         payload = json.loads(render.render_ru_singbox(env))
