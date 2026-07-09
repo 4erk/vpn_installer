@@ -60,6 +60,7 @@ class RoutingPolicyTests(unittest.TestCase):
 
         self.assertLess(ipv6_index, ipv4_index)
         self.assertLess(ipv4_index, resolve_index)
+        self.assertEqual(route_rules[ipv6_index], {"ip_version": 6, "action": "reject"})
         self.assertEqual(route_rules[ipv4_index]["outbound"], "to-foreign-ip-literal")
         self.assertNotIn("connect_timeout", outbounds["to-foreign"])
         self.assertEqual(outbounds["to-foreign-ip-literal"]["connect_timeout"], "2s")

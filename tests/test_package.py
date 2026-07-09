@@ -81,7 +81,7 @@ class PackageTests(unittest.TestCase):
         self.assertIn('RU_BLOCK_IP_CIDR="${RU_BLOCK_IP_CIDR:-}"', install_script)
         self.assertIn('RU_IPV6_POLICY="${RU_IPV6_POLICY:-to-foreign}"', install_script)
         self.assertIn('RU_LITERAL_POLICY="${RU_LITERAL_POLICY:-fail-fast}"', install_script)
-        self.assertIn('RU_IPV6_LITERAL_POLICY="${RU_IPV6_LITERAL_POLICY:-route-with-budget}"', install_script)
+        self.assertIn('RU_IPV6_LITERAL_POLICY="${RU_IPV6_LITERAL_POLICY:-reject}"', install_script)
         self.assertIn('RU_BLOCK_QUIC="${RU_BLOCK_QUIC:-0}"', install_script)
         self.assertIn('RU_GEOIP_DIRECT="${RU_GEOIP_DIRECT:-0}"', install_script)
         self.assertIn('if [[ "${RU_BLOCK_IP_CIDR}" == "91.108.56.0/22" ]]; then', install_script)
@@ -95,7 +95,7 @@ class PackageTests(unittest.TestCase):
         self.assertIn('SING_BOX_LOG_LEVEL="${SING_BOX_LOG_LEVEL:-info}"', install_script)
         self.assertIn('RU_SNIFF_TIMEOUT="${RU_SNIFF_TIMEOUT:-250ms}"', install_script)
         self.assertIn('RU_LITERAL_POLICY="${RU_LITERAL_POLICY:-fail-fast}"', install_script)
-        self.assertIn('RU_IPV6_LITERAL_POLICY="${RU_IPV6_LITERAL_POLICY:-route-with-budget}"', install_script)
+        self.assertIn('RU_IPV6_LITERAL_POLICY="${RU_IPV6_LITERAL_POLICY:-reject}"', install_script)
         self.assertIn('TO_FOREIGN_CONNECT_TIMEOUT="${TO_FOREIGN_CONNECT_TIMEOUT:-}"', install_script)
         self.assertIn('TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT="${TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT-2s}"', install_script)
         self.assertIn('TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT="${TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT-3s}"', install_script)
@@ -158,7 +158,7 @@ class PackageTests(unittest.TestCase):
 
     def test_package_exposes_version_via_getattr(self) -> None:
         package = importlib.import_module("vpn_installer")
-        self.assertEqual(package.__version__, "0.9.4")
+        self.assertEqual(package.__version__, "0.9.5")
         with self.assertRaises(AttributeError):
             package.__getattr__("nope")
 

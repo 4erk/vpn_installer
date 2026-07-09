@@ -6,6 +6,13 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.9.5] - 2026-07-09
+
+### Fixed
+
+- RU `sing-box` больше не маршрутизирует клиентские IPv6 literal destinations через `to-foreign-ipv6-literal` по умолчанию. Live-логи 9 июля показали свежие массовые `3.0s` timeout'ы на IPv6 literals после успешного VLESS/Reality входа, что давало поведение "VPN подключён, но сайты открываются через раз".
+- Default `RU_IPV6_LITERAL_POLICY` изменён на `reject`; старый default `route-with-budget` при merge/reinstall мигрирует в `reject`. IPv4/domain маршруты и основной `out/1/client/vless-uri.txt` не меняются.
+
 ## [0.9.4] - 2026-07-08
 
 ### Fixed

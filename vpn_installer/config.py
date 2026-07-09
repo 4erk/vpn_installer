@@ -243,7 +243,7 @@ def generate_default_env(deploy_name: str) -> dict[str, str]:
         "SING_BOX_LOG_LEVEL": "info",
         "RU_SNIFF_TIMEOUT": "250ms",
         "RU_LITERAL_POLICY": "fail-fast",
-        "RU_IPV6_LITERAL_POLICY": "route-with-budget",
+        "RU_IPV6_LITERAL_POLICY": "reject",
         "TO_FOREIGN_CONNECT_TIMEOUT": "",
         "TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT": "2s",
         "TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT": "3s",
@@ -422,6 +422,8 @@ def merge_env_with_defaults(existing: dict[str, str], deploy_name: str) -> dict[
         merged["RU_LITERAL_POLICY"] = defaults["RU_LITERAL_POLICY"]
     if not existing.get("RU_IPV6_LITERAL_POLICY"):
         merged["RU_IPV6_LITERAL_POLICY"] = "reject" if merged.get("RU_IPV6_POLICY") in {"block", "reject"} else defaults["RU_IPV6_LITERAL_POLICY"]
+    elif merged.get("RU_IPV6_LITERAL_POLICY") == "route-with-budget":
+        merged["RU_IPV6_LITERAL_POLICY"] = defaults["RU_IPV6_LITERAL_POLICY"]
     elif merged.get("RU_IPV6_LITERAL_POLICY") not in {"route-with-budget", "reject"}:
         merged["RU_IPV6_LITERAL_POLICY"] = defaults["RU_IPV6_LITERAL_POLICY"]
     if merged.get("RU_SNIFF_TIMEOUT") == "1s":
