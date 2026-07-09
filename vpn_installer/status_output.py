@@ -14,6 +14,9 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
     if snapshot.log_buckets:
         fresh = ", ".join(f"{key}={value}" for key, value in sorted(snapshot.log_buckets.items()))
         lines.append(f"log buckets: {fresh}")
+    if snapshot.historical_log_buckets:
+        historical = ", ".join(f"{key}={value}" for key, value in sorted(snapshot.historical_log_buckets.items()))
+        lines.append(f"historical log buckets: {historical}")
     if snapshot.top_destinations:
         destinations = ", ".join(f"{key}: {value}" for key, value in sorted(snapshot.top_destinations.items()))
         lines.append(f"top destinations: {destinations}")

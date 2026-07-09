@@ -432,12 +432,17 @@ class RemoteTests(unittest.TestCase):
                     "singbox_dns_timeout_count": "1",
                     "singbox_recent_timeout_sample": "connection: open connection to [2001:db8::1]:443 using outbound/direct[to-foreign-ip-literal]: i/o timeout",
                     "singbox_log_window_minutes": "30",
+                    "singbox_recent_effective_since": "@1783600000",
                     "singbox_recent_blocked_count": "22",
                     "singbox_recent_mux_closed_count": "36",
                     "singbox_recent_eof_count": "38",
                     "singbox_recent_dns_failed_count": "1",
                     "singbox_recent_timeout_count": "0",
                     "singbox_recent_invalid_reality_count": "3",
+                    "singbox_recent_to_foreign_timeout_count": "2",
+                    "singbox_recent_to_foreign_ip_literal_timeout_count": "4",
+                    "singbox_recent_to_foreign_ipv6_literal_timeout_count": "5",
+                    "singbox_recent_direct_ru_timeout_count": "1",
                     "singbox_recent_sources": "91.193.149.187=36,193.46.56.226=2",
                     "singbox_recent_blocked_destinations": "[fdfd::1ad5:632a]:55517=6,172.19.0.2:853=1",
                     "singbox_recent_mux_sources": "91.193.149.187=36",
@@ -451,11 +456,13 @@ class RemoteTests(unittest.TestCase):
                     "singbox_recent_direct_ru_destinations": "142.251.143.131:80=2",
                     "singbox_recent_timeout_destinations": "[185.234.59.121]=2,ipv6.msftncsi.com:AAAA=1",
                     "singbox_recent_ip_literal_timeout_destinations": "91.108.56.103:443=4",
+                    "singbox_fresh_timeout_destinations": "ipv6.msftconnecttest.com:AAAA=2",
                     "singbox_recent_ipv6_literal_count": "7",
                     "singbox_recent_ipv6_literal_destinations": "[2400:52e0:1e00::722:1]:443=4,[fdfd::1ad5:632a]:55517=3",
                     "singbox_recent_inbound_destinations": "chatgpt.com:443=2,[2606:4700::6810:5c12]:443=1",
                     "singbox_recent_error_sample": "connection: listen packet connection using outbound/block[blocked]: operation not permitted",
                     "xray_log_window_minutes": "30",
+                    "xray_recent_effective_since": "@1783600000",
                     "xray_recent_error_count": "1",
                     "xray_recent_invalid_reality_count": "0",
                     "xray_recent_disabled_invalid_count": "3",
@@ -510,13 +517,17 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("sing-box timeout destinations / 4h: [185.234.59.121]=2,ipv6.msftncsi.com:AAAA=1", output)
         self.assertIn("sing-box last timeout sample: connection: open connection to [2001:db8::1]:443", output)
         self.assertIn("Xray front recent window (min): 30", output)
+        self.assertIn("Xray front recent since: @1783600000", output)
         self.assertIn("Xray front recent: accepted=55, errors=1, invalid_reality=0, disabled_invalid=3, ipv6_literals=2", output)
         self.assertIn("Xray front recent sources: 178.66.131.179=44,213.109.48.231=11", output)
         self.assertIn("Xray front recent destinations: chatgpt.com:443=10,8.8.8.8:53=5", output)
         self.assertIn("Xray front recent IPv6 literal destinations: [2001:4860:4860::8888]:443=2", output)
         self.assertIn("Xray front recent sample: REALITY: processed invalid connection from 203.0.113.20:12345", output)
         self.assertIn("sing-box recent window (min): 30", output)
+        self.assertIn("sing-box recent since: @1783600000", output)
         self.assertIn("sing-box recent grouped errors: blocked=22, mux_closed=36, eof=38, dns_failed=1, timeout=0, invalid_reality=3", output)
+        self.assertIn("sing-box recent timeout classes: domain_to_foreign=2, ipv4_literal=4, ipv6_literal=5, direct_ru=1", output)
+        self.assertIn("sing-box recent timeout destinations: ipv6.msftconnecttest.com:AAAA=2", output)
         self.assertIn("sing-box recent sources: 91.193.149.187=36,193.46.56.226=2", output)
         self.assertIn("sing-box recent blocked destinations: [fdfd::1ad5:632a]:55517=6,172.19.0.2:853=1", output)
         self.assertIn("sing-box recent mux sources: 91.193.149.187=36", output)

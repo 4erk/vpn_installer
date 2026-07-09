@@ -232,9 +232,12 @@ def preflight_int_any(preflight: dict[str, str], keys: list[str], default: int =
         if not value:
             continue
         try:
-            return int(value)
+            parsed = int(value)
         except ValueError:
             continue
+        if parsed < 0:
+            continue
+        return parsed
     return default
 
 
@@ -287,8 +290,8 @@ def deployment_health_snapshot(env: dict[str, str], preflights: dict[str, dict[s
     ru_handshake_age = handshake_age_seconds(ru)
     foreign_handshake_age = handshake_age_seconds(foreign)
     max_age = handshake_grace_seconds(env)
-    foreign_download_bps = preflight_int_any(foreign, ["deep_foreign_direct_download_min_bps", "direct_download_bps"])
-    ru_wg_download_bps = preflight_int_any(ru, ["deep_ru_wg_download_min_bps", "wg_download_bps"])
+    foreign_download_bps = preflight_int_any(foreign, ["direct_download_bps", "deep_foreign_direct_download_min_bps"])
+    ru_wg_download_bps = preflight_int_any(ru, ["wg_download_bps", "deep_ru_wg_download_min_bps"])
     foreign_upload_bps = preflight_int_any(foreign, ["deep_foreign_direct_upload_bps"])
     ru_wg_upload_bps = preflight_int_any(ru, ["deep_ru_wg_upload_bps"])
     foreign_gateway_ping_loss_pct = preflight_int_any(foreign, ["deep_foreign_gateway_ping_loss_pct"])
@@ -1019,6 +1022,13 @@ def _probe_has_broken_result(raw_value: str) -> bool:
     return False
 
 
+def _positive_int(raw_value: Any) -> int:
+    try:
+        return int(str(raw_value or "0"))
+    except ValueError:
+        return 0
+
+
 def _verify_snapshot(snapshot: DiagnosticsSnapshot) -> DiagnosticsSnapshot:
     hard_failures: list[str] = []
     degradations: list[str] = []
@@ -1038,8 +1048,21 @@ def _verify_snapshot(snapshot: DiagnosticsSnapshot) -> DiagnosticsSnapshot:
         degradations.append("direct route probe has broken targets")
     if snapshot.role == ROLE_RU and _probe_has_broken_result(snapshot.route_probes.get("wg", "")):
         degradations.append("wg route probe has broken targets")
-    if snapshot.role == ROLE_RU and _probe_has_broken_result(snapshot.route_probes.get("ipv6_literal_tcp", "")):
-        degradations.append("IPv6 literal TCP route probe has broken targets")
+    if snapshot.role == ROLE_RU:
+        ipv6_probe = snapshot.route_probes.get("ipv6_literal_tcp", "")
+        if not ipv6_probe:
+            degradations.append("IPv6 literal TCP route probe did not run")
+        elif _probe_has_broken_result(ipv6_probe):
+            degradations.append("IPv6 literal TCP route probe has broken targets")
+    for bucket in ("dns_failed", "domain_to_foreign_timeout", "ipv4_literal_timeout", "ipv6_literal_timeout", "invalid_reality"):
+        count = _positive_int(snapshot.log_buckets.get(bucket, 0))
+        if count > 0:
+            degradations.append(f"fresh {bucket}={count}")
+    deep_verdict = snapshot.route_probes.get("deep_probe_verdict", "")
+    if deep_verdict and deep_verdict != "ok":
+        deep_reasons = snapshot.route_probes.get("deep_probe_reasons", "")
+        detail = f": {deep_reasons}" if deep_reasons else ""
+        degradations.append(f"deep probe {deep_verdict}{detail}")
     if hard_failures:
         snapshot.verdict = "failed"
         snapshot.reasons = hard_failures + degradations
@@ -1070,20 +1093,33 @@ def verify_live_workflow(deployment: str | None, *, non_interactive: bool = Fals
     )
     print_summary(deployment_name, env, targets)
     snapshots: list[DiagnosticsSnapshot] = []
+    preflights_by_role: dict[str, dict[str, str]] = {}
     worst = "verified"
     rank = {"verified": 0, "degraded": 1, "inconclusive": 2, "failed": 3}
     for target in targets:
         preflight = remote_preflight(target, current_wg_interface(env))
+        preflights_by_role[target.role] = preflight
         print_preflight(target, preflight)
         snapshot = _verify_snapshot(DiagnosticsSnapshot.from_preflight(preflight, deployment=deployment_name))
         snapshots.append(snapshot)
         if rank[snapshot.verdict] > rank[worst]:
             worst = snapshot.verdict
+    health_reason = ""
+    if {ROLE_RU, ROLE_FOREIGN}.issubset(preflights_by_role):
+        health = deployment_health_snapshot(env, preflights_by_role)
+        print_deployment_health(health)
+        if health["health_verdict"] != "ok":
+            health_verdict = "failed" if is_hard_health_verdict(health["health_verdict"]) else "degraded"
+            health_reason = health_failure_message(health)
+            if rank[health_verdict] > rank[worst]:
+                worst = health_verdict
     print_header("Live verification result")
     print(f"verify verdict: {worst}")
     for snapshot in snapshots:
         reason_text = "; ".join(snapshot.reasons) if snapshot.reasons else "fresh probes and installed manifest are consistent"
         print(f"{snapshot.role or 'unknown'}: {snapshot.verdict} - {reason_text}")
+    if health_reason:
+        print(f"deployment-health: {health_reason}")
     print(f"Deployment env: {env_path}")
     return 0 if worst == "verified" else 1
 

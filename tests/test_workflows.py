@@ -360,10 +360,30 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(dynamic_grace["health_verdict"], "ok")
         self.assertEqual(dynamic_grace["handshake_grace_s"], "320")
 
-        degraded = workflows.deployment_health_snapshot(
+        stale_deep_ignored = workflows.deployment_health_snapshot(
             env,
             {
                 ROLE_RU: {"wg_observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "20", "wg_download_bps": "900000", "deep_ru_wg_download_min_bps": "120000"},
+                ROLE_FOREIGN: {"observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "15", "direct_download_bps": "900000", "deep_foreign_direct_download_min_bps": "900000"},
+            },
+        )
+        self.assertEqual(stale_deep_ignored["health_verdict"], "ok")
+        self.assertEqual(stale_deep_ignored["ru_wg_download_bps"], "900000")
+
+        missing_current_falls_back_to_deep = workflows.deployment_health_snapshot(
+            env,
+            {
+                ROLE_RU: {"wg_observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "20", "wg_download_bps": "-1", "deep_ru_wg_download_min_bps": "900000"},
+                ROLE_FOREIGN: {"observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "15", "direct_download_bps": "-1", "deep_foreign_direct_download_min_bps": "900000"},
+            },
+        )
+        self.assertEqual(missing_current_falls_back_to_deep["health_verdict"], "ok")
+        self.assertEqual(missing_current_falls_back_to_deep["ru_wg_download_bps"], "900000")
+
+        degraded = workflows.deployment_health_snapshot(
+            env,
+            {
+                ROLE_RU: {"wg_observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "20", "wg_download_bps": "120000", "deep_ru_wg_download_min_bps": "900000"},
                 ROLE_FOREIGN: {"observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "15", "direct_download_bps": "900000", "deep_foreign_direct_download_min_bps": "900000"},
             },
         )

@@ -566,6 +566,9 @@ installed_singbox_base_sha256=""
 render_manifest_policy_version=""
 render_manifest_singbox_sha256=""
 drift="unknown"
+singbox_runtime_overlay="none"
+admin_routing_rules_count="0"
+admin_routing_rules_summary=""
 if [[ -r /etc/vpn-stack/deployment.env ]]; then
   installed="1"
   deployment_name="$(grep -E '^DEPLOY_NAME=' /etc/vpn-stack/deployment.env | head -n1 | cut -d= -f2- | sed 's/^"//; s/"$//')"
@@ -605,6 +608,36 @@ if [[ -r /etc/vpn-stack/render-manifest.json ]]; then
       drift="server-mutated"
     fi
   fi
+fi
+if [[ -n "${{installed_singbox_base_sha256}}" && -n "${{installed_singbox_sha256}}" && "${{installed_singbox_base_sha256}}" != "${{installed_singbox_sha256}}" ]]; then
+  singbox_runtime_overlay="active"
+fi
+if [[ -r /etc/vpn-stack/admin-routing-rules.json ]] && command -v python3 >/dev/null 2>&1; then
+  admin_rules_payload="$(python3 - <<'PY' 2>/dev/null || true
+import json
+from pathlib import Path
+
+path = Path("/etc/vpn-stack/admin-routing-rules.json")
+try:
+    payload = json.loads(path.read_text())
+except Exception:
+    raise SystemExit(0)
+rules = [rule for rule in payload.get("rules", []) if isinstance(rule, dict) and rule.get("enabled", True)]
+print("count=" + str(len(rules)))
+summary = []
+for rule in rules[:8]:
+    value = str(rule.get("value", "")).strip()
+    outbound = str(rule.get("outbound", "")).strip()
+    rule_type = str(rule.get("type", "")).strip() or "rule"
+    if value or outbound:
+        summary.append(f"{{rule_type}}:{{value}}->{{outbound}}")
+print("summary=" + ",".join(summary))
+PY
+)"
+  admin_routing_rules_count="$(printf '%s\n' "${{admin_rules_payload}}" | awk -F= '$1 == "count" {{print $2; exit}}')"
+  admin_routing_rules_summary="$(printf '%s\n' "${{admin_rules_payload}}" | awk -F= '$1 == "summary" {{sub(/^[^=]*=/, ""); print; exit}}')"
+  if [[ -z "${{admin_routing_rules_count}}" ]]; then admin_routing_rules_count="0"; fi
+  if [[ "${{admin_routing_rules_count}}" != "0" ]]; then singbox_runtime_overlay="admin-rules"; fi
 fi
 
 default_iface="$(ip route show default 2>/dev/null | awk '/default/ {{print $5; exit}}')"
@@ -719,6 +752,10 @@ singbox_recent_eof_count="0"
 singbox_recent_dns_failed_count="0"
 singbox_recent_timeout_count="0"
 singbox_recent_invalid_reality_count="0"
+singbox_recent_to_foreign_timeout_count="0"
+singbox_recent_to_foreign_ip_literal_timeout_count="0"
+singbox_recent_to_foreign_ipv6_literal_timeout_count="0"
+singbox_recent_direct_ru_timeout_count="0"
 singbox_recent_sources=""
 singbox_recent_blocked_destinations=""
 singbox_recent_to_foreign_count="0"
@@ -731,12 +768,18 @@ singbox_recent_to_foreign_ipv6_literal_destinations=""
 singbox_recent_direct_ru_destinations=""
 singbox_recent_timeout_destinations=""
 singbox_recent_ip_literal_timeout_destinations=""
+singbox_fresh_timeout_destinations=""
+singbox_fresh_domain_timeout_destinations=""
+singbox_fresh_ip_literal_timeout_destinations=""
+singbox_fresh_ipv6_literal_timeout_destinations=""
 singbox_recent_ipv6_literal_count="0"
 singbox_recent_ipv6_literal_destinations=""
 singbox_recent_mux_sources=""
 singbox_recent_inbound_destinations=""
 singbox_recent_error_sample=""
 xray_log_window_minutes="30"
+singbox_recent_effective_since="-${{singbox_log_window_minutes}} minutes"
+xray_recent_effective_since="-${{xray_log_window_minutes}} minutes"
 xray_recent_error_count="0"
 xray_recent_invalid_reality_count="0"
 xray_recent_disabled_invalid_count="0"
@@ -747,9 +790,20 @@ xray_recent_ipv6_literal_count="0"
 xray_recent_ipv6_literal_destinations=""
 xray_recent_error_sample=""
 
+if command -v date >/dev/null 2>&1 && [[ -n "${{installed_at}}" ]]; then
+  now_epoch="$(date +%s 2>/dev/null || true)"
+  installed_epoch="$(date -d "${{installed_at}}" +%s 2>/dev/null || true)"
+  if [[ "${{now_epoch}}" =~ ^[0-9]+$ && "${{installed_epoch}}" =~ ^[0-9]+$ ]]; then
+    singbox_window_epoch=$((now_epoch - singbox_log_window_minutes * 60))
+    xray_window_epoch=$((now_epoch - xray_log_window_minutes * 60))
+    if (( installed_epoch > singbox_window_epoch )); then singbox_recent_effective_since="@${{installed_epoch}}"; fi
+    if (( installed_epoch > xray_window_epoch )); then xray_recent_effective_since="@${{installed_epoch}}"; fi
+  fi
+fi
+
 if [[ "${{role}}" == "ru-gateway" ]] && command -v journalctl >/dev/null 2>&1; then
   set +o pipefail
-  xray_recent_log="$(journalctl -u vpn-stack-xray.service --since "-${{xray_log_window_minutes}} minutes" --no-pager -o cat 2>/dev/null | sed -r 's/\\x1B\\[[0-9;]*[mK]//g' || true)"
+  xray_recent_log="$(journalctl -u vpn-stack-xray.service --since "${{xray_recent_effective_since}}" --no-pager -o cat 2>/dev/null | sed -r 's/\\x1B\\[[0-9;]*[mK]//g' || true)"
   if [[ -n "${{xray_recent_log}}" ]]; then
     xray_recent_error_count="$(
       printf '%s\n' "${{xray_recent_log}}" |
@@ -823,7 +877,7 @@ if [[ "${{role}}" == "ru-gateway" ]] && command -v journalctl >/dev/null 2>&1; t
         awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
     )"
   fi
-  singbox_recent_log="$(journalctl -u sing-box --since "-${{singbox_log_window_minutes}} minutes" --no-pager -o cat 2>/dev/null | sed -r 's/\\x1B\\[[0-9;]*[mK]//g' || true)"
+  singbox_recent_log="$(journalctl -u sing-box --since "${{singbox_recent_effective_since}}" --no-pager -o cat 2>/dev/null | sed -r 's/\\x1B\\[[0-9;]*[mK]//g' || true)"
   if [[ -n "${{singbox_recent_log}}" ]]; then
     singbox_recent_blocked_count="$(grep -c 'outbound/block\\[blocked\\]' <<<"${{singbox_recent_log}}" || true)"
     singbox_recent_mux_closed_count="$(grep -c 'mux connection closed' <<<"${{singbox_recent_log}}" || true)"
@@ -831,6 +885,10 @@ if [[ "${{role}}" == "ru-gateway" ]] && command -v journalctl >/dev/null 2>&1; t
     singbox_recent_dns_failed_count="$(grep -Ec 'dns: (lookup|exchange) failed' <<<"${{singbox_recent_log}}" || true)"
     singbox_recent_timeout_count="$(grep -Ec 'i/o timeout|context deadline exceeded' <<<"${{singbox_recent_log}}" || true)"
     singbox_recent_invalid_reality_count="$(grep -c 'REALITY: processed invalid connection' <<<"${{singbox_recent_log}}" || true)"
+    singbox_recent_to_foreign_timeout_count="$(grep -c 'outbound/direct\\[to-foreign\\].*i/o timeout' <<<"${{singbox_recent_log}}" || true)"
+    singbox_recent_to_foreign_ip_literal_timeout_count="$(printf '%s\n' "${{singbox_recent_log}}" | grep -E 'outbound/direct\\[to-foreign-ip-literal\\].*i/o timeout' | grep -Ev 'open connection to \\[[0-9A-Fa-f:.]+\\]' | grep -c . || true)"
+    singbox_recent_to_foreign_ipv6_literal_timeout_count="$(printf '%s\n' "${{singbox_recent_log}}" | grep -E 'outbound/direct\\[to-foreign-ipv6-literal\\].*i/o timeout|open connection to \\[[0-9A-Fa-f:.]+\\].*outbound/direct\\[to-foreign-ip-literal\\].*i/o timeout' | grep -c . || true)"
+    singbox_recent_direct_ru_timeout_count="$(grep -c 'outbound/direct\\[direct-ru\\].*i/o timeout' <<<"${{singbox_recent_log}}" || true)"
     singbox_recent_sources="$(
       printf '%s\n' "${{singbox_recent_log}}" |
         sed -n 's/.*process connection from \\([^: ]*\\):.*/\\1/p; s/.*REALITY: processed invalid connection from \\([^: ]*\\):.*/\\1/p' |
@@ -911,6 +969,47 @@ if [[ "${{role}}" == "ru-gateway" ]] && command -v journalctl >/dev/null 2>&1; t
     singbox_recent_inbound_destinations="$(
       printf '%s\n' "${{singbox_recent_log}}" |
         sed -n 's/.*inbound packet connection to \\([^ ]*\\).*/\\1/p; s/.*inbound connection to \\([^ ]*\\).*/\\1/p' |
+        sort |
+        uniq -c |
+        sort -nr |
+        head -n 12 |
+        awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
+    )"
+    singbox_fresh_timeout_destinations="$(
+      printf '%s\n' "${{singbox_recent_log}}" |
+        grep -E 'i/o timeout|context deadline exceeded|dns: (lookup|exchange) failed' |
+        sed -n 's/.*open connection to \\([^ ]*\\) using outbound\\/direct\\[[^]]*\\].*/\\1/p; s/.*lookup failed for \\([^: ]*\\):.*/\\1/p; s/.*exchange failed for \\([^ ]*\\)\\. IN \\([A-Z0-9][A-Z0-9]*\\):.*/\\1:\\2/p' |
+        sort |
+        uniq -c |
+        sort -nr |
+        head -n 12 |
+        awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
+    )"
+    singbox_fresh_domain_timeout_destinations="$(
+      printf '%s\n' "${{singbox_recent_log}}" |
+        grep 'outbound/direct\\[to-foreign\\].*i/o timeout' |
+        sed -n 's/.*open connection to \\([^ ]*\\) using outbound\\/direct\\[to-foreign\\].*/\\1/p' |
+        sort |
+        uniq -c |
+        sort -nr |
+        head -n 12 |
+        awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
+    )"
+    singbox_fresh_ip_literal_timeout_destinations="$(
+      printf '%s\n' "${{singbox_recent_log}}" |
+        grep -E 'outbound/direct\\[to-foreign-ip-literal\\].*i/o timeout' |
+        grep -Ev 'open connection to \\[[0-9A-Fa-f:.]+\\]' |
+        sed -n 's/.*open connection to \\([^ ]*\\) using outbound\\/direct\\[to-foreign-ip-literal\\].*/\\1/p' |
+        sort |
+        uniq -c |
+        sort -nr |
+        head -n 12 |
+        awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
+    )"
+    singbox_fresh_ipv6_literal_timeout_destinations="$(
+      printf '%s\n' "${{singbox_recent_log}}" |
+        grep -E 'outbound/direct\\[to-foreign-ipv6-literal\\].*i/o timeout|open connection to \\[[0-9A-Fa-f:.]+\\].*outbound/direct\\[to-foreign-ip-literal\\].*i/o timeout' |
+        sed -n 's/.*open connection to \\(\\[[0-9A-Fa-f:.]*\\]:[0-9][0-9]*\\) using outbound\\/direct\\[[^]]*\\].*/\\1/p' |
         sort |
         uniq -c |
         sort -nr |
@@ -1113,12 +1212,17 @@ printf 'singbox_direct_ru_timeout_count=%s\\n' "${{singbox_direct_ru_timeout_cou
 printf 'singbox_dns_timeout_count=%s\\n' "${{singbox_dns_timeout_count}}"
 printf 'singbox_recent_timeout_sample=%s\\n' "${{singbox_recent_timeout_sample}}"
 printf 'singbox_log_window_minutes=%s\\n' "${{singbox_log_window_minutes}}"
+printf 'singbox_recent_effective_since=%s\\n' "${{singbox_recent_effective_since}}"
 printf 'singbox_recent_blocked_count=%s\\n' "${{singbox_recent_blocked_count}}"
 printf 'singbox_recent_mux_closed_count=%s\\n' "${{singbox_recent_mux_closed_count}}"
 printf 'singbox_recent_eof_count=%s\\n' "${{singbox_recent_eof_count}}"
 printf 'singbox_recent_dns_failed_count=%s\\n' "${{singbox_recent_dns_failed_count}}"
 printf 'singbox_recent_timeout_count=%s\\n' "${{singbox_recent_timeout_count}}"
 printf 'singbox_recent_invalid_reality_count=%s\\n' "${{singbox_recent_invalid_reality_count}}"
+printf 'singbox_recent_to_foreign_timeout_count=%s\\n' "${{singbox_recent_to_foreign_timeout_count}}"
+printf 'singbox_recent_to_foreign_ip_literal_timeout_count=%s\\n' "${{singbox_recent_to_foreign_ip_literal_timeout_count}}"
+printf 'singbox_recent_to_foreign_ipv6_literal_timeout_count=%s\\n' "${{singbox_recent_to_foreign_ipv6_literal_timeout_count}}"
+printf 'singbox_recent_direct_ru_timeout_count=%s\\n' "${{singbox_recent_direct_ru_timeout_count}}"
 printf 'singbox_recent_sources=%s\\n' "${{singbox_recent_sources}}"
 printf 'singbox_recent_blocked_destinations=%s\\n' "${{singbox_recent_blocked_destinations}}"
 printf 'singbox_recent_to_foreign_count=%s\\n' "${{singbox_recent_to_foreign_count}}"
@@ -1131,12 +1235,17 @@ printf 'singbox_recent_to_foreign_ipv6_literal_destinations=%s\\n' "${{singbox_r
 printf 'singbox_recent_direct_ru_destinations=%s\\n' "${{singbox_recent_direct_ru_destinations}}"
 printf 'singbox_recent_timeout_destinations=%s\\n' "${{singbox_recent_timeout_destinations}}"
 printf 'singbox_recent_ip_literal_timeout_destinations=%s\\n' "${{singbox_recent_ip_literal_timeout_destinations}}"
+printf 'singbox_fresh_timeout_destinations=%s\\n' "${{singbox_fresh_timeout_destinations}}"
+printf 'singbox_fresh_domain_timeout_destinations=%s\\n' "${{singbox_fresh_domain_timeout_destinations}}"
+printf 'singbox_fresh_ip_literal_timeout_destinations=%s\\n' "${{singbox_fresh_ip_literal_timeout_destinations}}"
+printf 'singbox_fresh_ipv6_literal_timeout_destinations=%s\\n' "${{singbox_fresh_ipv6_literal_timeout_destinations}}"
 printf 'singbox_recent_ipv6_literal_count=%s\\n' "${{singbox_recent_ipv6_literal_count}}"
 printf 'singbox_recent_ipv6_literal_destinations=%s\\n' "${{singbox_recent_ipv6_literal_destinations}}"
 printf 'singbox_recent_mux_sources=%s\\n' "${{singbox_recent_mux_sources}}"
 printf 'singbox_recent_inbound_destinations=%s\\n' "${{singbox_recent_inbound_destinations}}"
 printf 'singbox_recent_error_sample=%s\\n' "${{singbox_recent_error_sample}}"
 printf 'xray_log_window_minutes=%s\\n' "${{xray_log_window_minutes}}"
+printf 'xray_recent_effective_since=%s\\n' "${{xray_recent_effective_since}}"
 printf 'xray_recent_error_count=%s\\n' "${{xray_recent_error_count}}"
 printf 'xray_recent_invalid_reality_count=%s\\n' "${{xray_recent_invalid_reality_count}}"
 printf 'xray_recent_disabled_invalid_count=%s\\n' "${{xray_recent_disabled_invalid_count}}"
@@ -1159,6 +1268,9 @@ printf 'installed_singbox_base_sha256=%s\\n' "${{installed_singbox_base_sha256}}
 printf 'render_manifest_policy_version=%s\\n' "${{render_manifest_policy_version}}"
 printf 'render_manifest_singbox_sha256=%s\\n' "${{render_manifest_singbox_sha256}}"
 printf 'drift=%s\\n' "${{drift}}"
+printf 'singbox_runtime_overlay=%s\\n' "${{singbox_runtime_overlay}}"
+printf 'admin_routing_rules_count=%s\\n' "${{admin_routing_rules_count}}"
+printf 'admin_routing_rules_summary=%s\\n' "${{admin_routing_rules_summary}}"
 printf 'sing_box=%s\\n' "$(service_state sing-box)"
 printf 'xray=%s\\n' "$(service_state vpn-stack-xray.service)"
 printf 'nftables=%s\\n' "$(service_state nftables)"
@@ -1209,6 +1321,13 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
     print(f"deployment: {preflight.get('deployment_name', '-')}")
     if preflight.get("drift"):
         print(f"drift: {preflight.get('drift', '-')}")
+    if preflight.get("singbox_runtime_overlay") not in {"", None, "none"}:
+        overlay = preflight.get("singbox_runtime_overlay", "-")
+        count = preflight.get("admin_routing_rules_count", "0")
+        summary = preflight.get("admin_routing_rules_summary", "")
+        print(f"sing-box runtime overlay: {overlay}, admin rules={count}")
+        if summary:
+            print(f"admin route rules: {summary}")
     if preflight.get("render_manifest_policy_version"):
         print(f"routing policy version: {preflight.get('render_manifest_policy_version', '-')}")
     if preflight.get("ru_literal_policy") or preflight.get("ru_ipv6_literal_policy"):
@@ -1322,6 +1441,8 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
     )
     if any(preflight.get(key) not in {"", None, "0"} for key in xray_keys):
         print(f"Xray front recent window (min): {preflight.get('xray_log_window_minutes', '-')}")
+        if preflight.get("xray_recent_effective_since"):
+            print(f"Xray front recent since: {preflight.get('xray_recent_effective_since', '-')}")
         print(
             "Xray front recent: "
             f"accepted={preflight.get('xray_recent_accepted_count', '0')}, "
@@ -1348,6 +1469,8 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
     )
     if any(preflight.get(key) not in {"", None, "0"} for key in recent_singbox_keys):
         print(f"sing-box recent window (min): {preflight.get('singbox_log_window_minutes', '-')}")
+        if preflight.get("singbox_recent_effective_since"):
+            print(f"sing-box recent since: {preflight.get('singbox_recent_effective_since', '-')}")
         print(
             "sing-box recent grouped errors: "
             f"blocked={preflight.get('singbox_recent_blocked_count', '0')}, "
@@ -1357,6 +1480,24 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
             f"timeout={preflight.get('singbox_recent_timeout_count', '0')}, "
             f"invalid_reality={preflight.get('singbox_recent_invalid_reality_count', '0')}"
         )
+        if any(
+            preflight.get(key) not in {"", None, "0"}
+            for key in (
+                "singbox_recent_to_foreign_timeout_count",
+                "singbox_recent_to_foreign_ip_literal_timeout_count",
+                "singbox_recent_to_foreign_ipv6_literal_timeout_count",
+                "singbox_recent_direct_ru_timeout_count",
+            )
+        ):
+            print(
+                "sing-box recent timeout classes: "
+                f"domain_to_foreign={preflight.get('singbox_recent_to_foreign_timeout_count', '0')}, "
+                f"ipv4_literal={preflight.get('singbox_recent_to_foreign_ip_literal_timeout_count', '0')}, "
+                f"ipv6_literal={preflight.get('singbox_recent_to_foreign_ipv6_literal_timeout_count', '0')}, "
+                f"direct_ru={preflight.get('singbox_recent_direct_ru_timeout_count', '0')}"
+            )
+        if preflight.get("singbox_fresh_timeout_destinations"):
+            print(f"sing-box recent timeout destinations: {preflight.get('singbox_fresh_timeout_destinations')}")
         if preflight.get("singbox_recent_sources"):
             print(f"sing-box recent sources: {preflight.get('singbox_recent_sources')}")
         if preflight.get("singbox_recent_blocked_destinations"):

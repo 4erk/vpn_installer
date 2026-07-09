@@ -6,6 +6,16 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.9.7] - 2026-07-10
+
+### Fixed
+
+- `vpn verify live` больше не может завершиться `verified`, если свежие post-install логи RU `sing-box` содержат DNS/domain/IPv4-literal/IPv6-literal timeout buckets или `invalid_reality`: такие события теперь переводят live verification в `degraded` и возвращают ненулевой код.
+- Свежий runtime-window для Xray/sing-box теперь считается от последнего reinstall, если reinstall был позднее стандартного 30-минутного окна. Старые ошибки остаются в отдельном 4h historical block и больше не маскируются под свежие post-install failures.
+- `DiagnosticsSnapshot` разделяет `log_buckets` и `historical_log_buckets`, а top destinations для IPv6 literal timeout берутся из fresh timeout destinations, а не из общего routed traffic списка.
+- Live verification учитывает общий deployment health verdict: soft degradation по packet loss/download/target probes теперь попадает в итоговый `degraded`, hard failure остаётся `failed`.
+- `status`/`preflight` показывают runtime overlay для `/etc/sing-box/config.json` и активные admin routing rules отдельно от manifest drift, чтобы runtime-mutated config не выглядел как чистый штатный render.
+
 ## [0.9.6] - 2026-07-09
 
 ### Fixed
