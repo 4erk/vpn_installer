@@ -19,6 +19,7 @@ SSH_PASSWORD_AUTH_RETRIES = 3
 SSH_PASSWORD_AUTH_RETRY_DELAY = 1.0
 SSH_BANNER_RETRIES = 3
 SSH_BANNER_RETRY_DELAY = 1.0
+SSH_CONNECT_RETRY_DELAY = 1.0
 _PARAMIKO_LOGGER_CONFIGURED = False
 
 
@@ -114,7 +115,8 @@ def paramiko_connect(target: RemoteTarget):
             if retryable_auth_timeout:
                 time.sleep(SSH_PASSWORD_AUTH_RETRY_DELAY * attempt)
                 continue
-            banner_timeout = "error reading ssh protocol banner" in str(exc).lower()
+            error_text = str(exc).lower()
+            banner_timeout = "error reading ssh protocol banner" in error_text
             if banner_timeout and attempt < attempts:
                 time.sleep(SSH_BANNER_RETRY_DELAY * attempt)
                 continue
@@ -123,15 +125,24 @@ def paramiko_connect(target: RemoteTarget):
                     f"SSH connection failed для {target.ssh_user}@{target.ssh_host}:{target.ssh_port}: {exc}\n"
                     "Сервер не отдал SSH banner вовремя. Обычно это означает перегруженный или подвисший SSH на хосте, сетевой фильтр перед ним или только что перезагружающийся сервер."
                 ) from exc
-            connection_reset = "forcibly closed" in str(exc).lower() or "connection reset" in str(exc).lower()
-            if connection_reset and attempt < attempts:
-                time.sleep(SSH_BANNER_RETRY_DELAY * attempt)
-                continue
-            if target.auth_mode == "password" and isinstance(exc, auth_exception_type) and "timeout" in str(exc).lower():
+            if target.auth_mode == "password" and isinstance(exc, auth_exception_type) and "timeout" in error_text:
                 raise AppError(
                     f"SSH connection failed для {target.ssh_user}@{target.ssh_host}:{target.ssh_port}: {exc}\n"
                     "Сервер слишком долго отвечает на password-аутентификацию. Повтори попытку; если проблема повторяется, проверь пароль или SSH policy хоста."
                 ) from exc
+            connect_timeout = isinstance(exc, TimeoutError) or "timed out" in error_text or "timeout" in error_text
+            if connect_timeout and attempt < attempts:
+                time.sleep(SSH_CONNECT_RETRY_DELAY * attempt)
+                continue
+            if connect_timeout:
+                raise AppError(
+                    f"SSH connection failed для {target.ssh_user}@{target.ssh_host}:{target.ssh_port}: {exc}\n"
+                    "TCP/SSH connect timed out после повторных попыток. Это проблема control-plane доступа к серверу, а не доказательство поломки VLESS dataplane."
+                ) from exc
+            connection_reset = "forcibly closed" in error_text or "connection reset" in error_text
+            if connection_reset and attempt < attempts:
+                time.sleep(SSH_BANNER_RETRY_DELAY * attempt)
+                continue
             raise AppError(f"SSH connection failed для {target.ssh_user}@{target.ssh_host}:{target.ssh_port}: {exc}") from exc
     raise AppError(f"SSH connection failed для {target.ssh_user}@{target.ssh_host}:{target.ssh_port}: {last_exc}")
 
@@ -580,7 +591,7 @@ if [[ -r /etc/vpn-stack/deployment.env ]]; then
   ru_ipv6_literal_policy="$(env_value RU_IPV6_LITERAL_POLICY)"
   if [[ "$(env_value TO_FOREIGN_CONNECT_TIMEOUT)" != "" ]]; then deprecated_routing_overrides="${{deprecated_routing_overrides}},TO_FOREIGN_CONNECT_TIMEOUT"; fi
   if [[ "$(env_value TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT)" != "2s" ]]; then deprecated_routing_overrides="${{deprecated_routing_overrides}},TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT"; fi
-  if [[ "$(env_value TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT)" != "3s" ]]; then deprecated_routing_overrides="${{deprecated_routing_overrides}},TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT"; fi
+  if [[ "$(env_value TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT)" != "2s" ]]; then deprecated_routing_overrides="${{deprecated_routing_overrides}},TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT"; fi
   deprecated_routing_overrides="${{deprecated_routing_overrides#,}}"
 fi
 if [[ -r /etc/vpn-stack/role ]]; then role="$(tr -d '\\r\\n' </etc/vpn-stack/role)"; fi
@@ -758,6 +769,8 @@ singbox_recent_to_foreign_ipv6_literal_timeout_count="0"
 singbox_recent_direct_ru_timeout_count="0"
 singbox_recent_sources=""
 singbox_recent_blocked_destinations=""
+singbox_recent_private_dns_leak_count="0"
+singbox_recent_private_dns_leak_destinations=""
 singbox_recent_to_foreign_count="0"
 singbox_recent_to_foreign_ip_literal_count="0"
 singbox_recent_to_foreign_ipv6_literal_count="0"
@@ -778,6 +791,7 @@ singbox_recent_mux_sources=""
 singbox_recent_inbound_destinations=""
 singbox_recent_error_sample=""
 xray_log_window_minutes="30"
+post_install_log_grace_seconds="10"
 singbox_recent_effective_since="-${{singbox_log_window_minutes}} minutes"
 xray_recent_effective_since="-${{xray_log_window_minutes}} minutes"
 xray_recent_error_count="0"
@@ -796,8 +810,9 @@ if command -v date >/dev/null 2>&1 && [[ -n "${{installed_at}}" ]]; then
   if [[ "${{now_epoch}}" =~ ^[0-9]+$ && "${{installed_epoch}}" =~ ^[0-9]+$ ]]; then
     singbox_window_epoch=$((now_epoch - singbox_log_window_minutes * 60))
     xray_window_epoch=$((now_epoch - xray_log_window_minutes * 60))
-    if (( installed_epoch > singbox_window_epoch )); then singbox_recent_effective_since="@${{installed_epoch}}"; fi
-    if (( installed_epoch > xray_window_epoch )); then xray_recent_effective_since="@${{installed_epoch}}"; fi
+    post_install_epoch=$((installed_epoch + post_install_log_grace_seconds))
+    if (( post_install_epoch > singbox_window_epoch )); then singbox_recent_effective_since="@${{post_install_epoch}}"; fi
+    if (( post_install_epoch > xray_window_epoch )); then xray_recent_effective_since="@${{post_install_epoch}}"; fi
   fi
 fi
 
@@ -901,6 +916,21 @@ if [[ "${{role}}" == "ru-gateway" ]] && command -v journalctl >/dev/null 2>&1; t
     singbox_recent_blocked_destinations="$(
         printf '%s\n' "${{singbox_recent_log}}" |
         sed -n 's/.*open connection to \\([^ ]*\\) using outbound\\/block.*/\\1/p; s/.*blocked packet connection to \\([^ ]*\\).*/\\1/p' |
+        sort |
+        uniq -c |
+        sort -nr |
+        head -n 8 |
+        awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
+    )"
+    singbox_recent_private_dns_leak_count="$(
+      printf '%s\n' "${{singbox_recent_log}}" |
+        sed -n 's/.*open connection to \\([^ ]*\\) using outbound\\/block.*/\\1/p; s/.*blocked packet connection to \\([^ ]*\\).*/\\1/p' |
+        grep -Ec '^(172\\.19\\.0\\.[0-9]+|\\[fdfd:[0-9A-Fa-f:]+\\]):853$' || true
+    )"
+    singbox_recent_private_dns_leak_destinations="$(
+      printf '%s\n' "${{singbox_recent_log}}" |
+        sed -n 's/.*open connection to \\([^ ]*\\) using outbound\\/block.*/\\1/p; s/.*blocked packet connection to \\([^ ]*\\).*/\\1/p' |
+        grep -E '^(172\\.19\\.0\\.[0-9]+|\\[fdfd:[0-9A-Fa-f:]+\\]):853$' |
         sort |
         uniq -c |
         sort -nr |
@@ -1225,6 +1255,8 @@ printf 'singbox_recent_to_foreign_ipv6_literal_timeout_count=%s\\n' "${{singbox_
 printf 'singbox_recent_direct_ru_timeout_count=%s\\n' "${{singbox_recent_direct_ru_timeout_count}}"
 printf 'singbox_recent_sources=%s\\n' "${{singbox_recent_sources}}"
 printf 'singbox_recent_blocked_destinations=%s\\n' "${{singbox_recent_blocked_destinations}}"
+printf 'singbox_recent_private_dns_leak_count=%s\\n' "${{singbox_recent_private_dns_leak_count}}"
+printf 'singbox_recent_private_dns_leak_destinations=%s\\n' "${{singbox_recent_private_dns_leak_destinations}}"
 printf 'singbox_recent_to_foreign_count=%s\\n' "${{singbox_recent_to_foreign_count}}"
 printf 'singbox_recent_to_foreign_ip_literal_count=%s\\n' "${{singbox_recent_to_foreign_ip_literal_count}}"
 printf 'singbox_recent_to_foreign_ipv6_literal_count=%s\\n' "${{singbox_recent_to_foreign_ipv6_literal_count}}"
@@ -1466,6 +1498,7 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
         "singbox_recent_dns_failed_count",
         "singbox_recent_timeout_count",
         "singbox_recent_invalid_reality_count",
+        "singbox_recent_private_dns_leak_count",
     )
     if any(preflight.get(key) not in {"", None, "0"} for key in recent_singbox_keys):
         print(f"sing-box recent window (min): {preflight.get('singbox_log_window_minutes', '-')}")
@@ -1478,7 +1511,8 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
             f"eof={preflight.get('singbox_recent_eof_count', '0')}, "
             f"dns_failed={preflight.get('singbox_recent_dns_failed_count', '0')}, "
             f"timeout={preflight.get('singbox_recent_timeout_count', '0')}, "
-            f"invalid_reality={preflight.get('singbox_recent_invalid_reality_count', '0')}"
+            f"invalid_reality={preflight.get('singbox_recent_invalid_reality_count', '0')}, "
+            f"private_dns_leak={preflight.get('singbox_recent_private_dns_leak_count', '0')}"
         )
         if any(
             preflight.get(key) not in {"", None, "0"}
@@ -1502,6 +1536,8 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
             print(f"sing-box recent sources: {preflight.get('singbox_recent_sources')}")
         if preflight.get("singbox_recent_blocked_destinations"):
             print(f"sing-box recent blocked destinations: {preflight.get('singbox_recent_blocked_destinations')}")
+        if preflight.get("singbox_recent_private_dns_leak_destinations"):
+            print(f"sing-box recent private DNS leaks: {preflight.get('singbox_recent_private_dns_leak_destinations')}")
         if preflight.get("singbox_recent_mux_sources"):
             print(f"sing-box recent mux sources: {preflight.get('singbox_recent_mux_sources')}")
         if preflight.get("singbox_recent_error_sample"):

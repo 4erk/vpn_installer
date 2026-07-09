@@ -61,6 +61,7 @@ class DiagnosticsSnapshot:
             "client_reset_eof": int(preflight.get("singbox_recent_eof_count") or 0) + int(preflight.get("singbox_recent_mux_closed_count") or 0),
             "invalid_reality": int(preflight.get("xray_recent_invalid_reality_count") or 0),
             "disabled_invalid": int(preflight.get("xray_recent_disabled_invalid_count") or 0),
+            "private_dns_leak": int(preflight.get("singbox_recent_private_dns_leak_count") or 0),
         }
         historical_log_buckets = {
             "dns_failed": int(preflight.get("singbox_dns_timeout_count") or 0),
@@ -74,6 +75,7 @@ class DiagnosticsSnapshot:
             "ipv4_literal_timeout": preflight.get("singbox_fresh_ip_literal_timeout_destinations", ""),
             "ipv6_literal_timeout": preflight.get("singbox_fresh_ipv6_literal_timeout_destinations", ""),
             "blocked_private_fake": preflight.get("singbox_recent_blocked_destinations", ""),
+            "private_dns_leak": preflight.get("singbox_recent_private_dns_leak_destinations", ""),
         }
         return cls(
             deployment=deployment or preflight.get("deployment_name", ""),

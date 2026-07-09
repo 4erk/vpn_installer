@@ -19,7 +19,7 @@ class RoutingPolicyTests(unittest.TestCase):
         self.assertEqual(policy.classes["ipv4_literal_foreign"].outbound, "to-foreign-ip-literal")
         self.assertEqual(policy.classes["ipv6_literal_foreign"].outbound, "to-foreign-ipv6-literal")
         self.assertEqual(policy.classes["domain_foreign"].outbound, "to-foreign")
-        self.assertEqual(policy.classes["private_dot_recovery"].outbound, "to-foreign")
+        self.assertEqual(policy.classes["client_dns_dot"].outbound, "direct-ru")
         self.assertEqual(policy.classes["connectivity_check"].outbound, "direct-ru")
         self.assertEqual(policy.classes["connectivity_check_ipv6_only"].outbound, "blocked")
 
@@ -64,26 +64,20 @@ class RoutingPolicyTests(unittest.TestCase):
         self.assertEqual(route_rules[ipv4_index]["outbound"], "to-foreign-ip-literal")
         self.assertNotIn("connect_timeout", outbounds["to-foreign"])
         self.assertEqual(outbounds["to-foreign-ip-literal"]["connect_timeout"], "2s")
-        self.assertEqual(outbounds["to-foreign-ipv6-literal"]["connect_timeout"], "3s")
+        self.assertEqual(outbounds["to-foreign-ipv6-literal"]["connect_timeout"], "2s")
 
-    def test_client_tun_dot_leak_is_recovered_before_private_block(self) -> None:
+    def test_client_tun_dot_uses_direct_ru_not_foreign_path(self) -> None:
         parts = build_ru_routing_policy(self.make_env()).singbox_parts()
         route_rules = parts["route_rules"]
-        dot_index = next(index for index, rule in enumerate(route_rules) if rule.get("ip_cidr") == ["172.19.0.0/30"] and rule.get("port") == 853)
+        dot_index = next(index for index, rule in enumerate(route_rules) if rule.get("port") == 853 and rule.get("override_address") == "8.8.8.8")
         private_index = next(index for index, rule in enumerate(route_rules) if rule.get("ip_is_private") is True)
 
         self.assertLess(dot_index, private_index)
-        self.assertEqual(
-            route_rules[dot_index],
-            {
-                "ip_cidr": ["172.19.0.0/30"],
-                "port": 853,
-                "action": "route",
-                "outbound": "to-foreign",
-                "override_address": "8.8.8.8",
-                "override_port": 853,
-            },
-        )
+        self.assertEqual(route_rules[dot_index]["outbound"], "direct-ru")
+        self.assertIn("172.19.0.0/30", route_rules[dot_index]["ip_cidr"])
+        self.assertIn("198.18.0.0/15", route_rules[dot_index]["ip_cidr"])
+        self.assertIn("fd00::/8", route_rules[dot_index]["ip_cidr"])
+        self.assertIn({"ip_is_private": True, "action": "route", "outbound": "blocked"}, route_rules)
 
     def test_high_level_literal_policies_change_routes_without_new_timeout_knobs(self) -> None:
         env = self.make_env()

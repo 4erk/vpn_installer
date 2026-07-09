@@ -161,6 +161,23 @@ class RemoteTests(unittest.TestCase):
         first_client.close.assert_called_once()
         sleep_mock.assert_called_once()
 
+    def test_paramiko_connect_retries_tcp_connect_timeout(self) -> None:
+        first_client = Mock()
+        first_client.connect.side_effect = TimeoutError("timed out")
+        second_client = Mock()
+        ssh_client_factory = Mock(side_effect=[first_client, second_client])
+        fake_paramiko = SimpleNamespace(
+            SSHClient=ssh_client_factory,
+            AutoAddPolicy=Mock(return_value="policy"),
+            ssh_exception=SimpleNamespace(AuthenticationException=Exception),
+        )
+        target = RemoteTarget(role=ROLE_RU, ssh_host="203.0.113.10", ssh_port=22, ssh_user="root")
+        with patch("vpn_installer.remote.ensure_paramiko_installed", return_value=fake_paramiko), patch("vpn_installer.remote.time.sleep") as sleep_mock:
+            client = paramiko_connect(target)
+        self.assertIs(client, second_client)
+        first_client.close.assert_called_once()
+        sleep_mock.assert_called_once()
+
     def test_configure_paramiko_logging_installs_null_handler(self) -> None:
         logger = logging.getLogger("paramiko")
         original_handlers = list(logger.handlers)
@@ -439,6 +456,8 @@ class RemoteTests(unittest.TestCase):
                     "singbox_recent_dns_failed_count": "1",
                     "singbox_recent_timeout_count": "0",
                     "singbox_recent_invalid_reality_count": "3",
+                    "singbox_recent_private_dns_leak_count": "1",
+                    "singbox_recent_private_dns_leak_destinations": "172.19.0.2:853=1",
                     "singbox_recent_to_foreign_timeout_count": "2",
                     "singbox_recent_to_foreign_ip_literal_timeout_count": "4",
                     "singbox_recent_to_foreign_ipv6_literal_timeout_count": "5",
@@ -525,11 +544,12 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("Xray front recent sample: REALITY: processed invalid connection from 203.0.113.20:12345", output)
         self.assertIn("sing-box recent window (min): 30", output)
         self.assertIn("sing-box recent since: @1783600000", output)
-        self.assertIn("sing-box recent grouped errors: blocked=22, mux_closed=36, eof=38, dns_failed=1, timeout=0, invalid_reality=3", output)
+        self.assertIn("sing-box recent grouped errors: blocked=22, mux_closed=36, eof=38, dns_failed=1, timeout=0, invalid_reality=3, private_dns_leak=1", output)
         self.assertIn("sing-box recent timeout classes: domain_to_foreign=2, ipv4_literal=4, ipv6_literal=5, direct_ru=1", output)
         self.assertIn("sing-box recent timeout destinations: ipv6.msftconnecttest.com:AAAA=2", output)
         self.assertIn("sing-box recent sources: 91.193.149.187=36,193.46.56.226=2", output)
         self.assertIn("sing-box recent blocked destinations: [fdfd::1ad5:632a]:55517=6,172.19.0.2:853=1", output)
+        self.assertIn("sing-box recent private DNS leaks: 172.19.0.2:853=1", output)
         self.assertIn("sing-box recent mux sources: 91.193.149.187=36", output)
         self.assertIn("sing-box recent sample: connection: listen packet connection using outbound/block[blocked]: operation not permitted", output)
         self.assertIn("sing-box recent routed: to_foreign=44, to_foreign_ip_literal=9, to_foreign_ipv6_literal=7, direct_ru=12, ipv6_literals=7", output)

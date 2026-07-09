@@ -34,6 +34,8 @@ class DiagnosticsTests(unittest.TestCase):
                 "singbox_recent_to_foreign_ip_literal_timeout_count": "2",
                 "singbox_to_foreign_ip_literal_timeout_count": "4",
                 "singbox_fresh_ipv6_literal_timeout_destinations": "[2606:4700:4700::1111]:443=1",
+                "singbox_recent_private_dns_leak_count": "3",
+                "singbox_recent_private_dns_leak_destinations": "172.19.0.2:853=3",
                 "ipv6_literal_tcp_probe": "cloudflare_v6:reachable:200:0:2606:4700:4700::1111:0.08",
                 "xray_recent_disabled_invalid_count": "3",
                 "drift": "none",
@@ -44,7 +46,9 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual(snapshot.log_buckets["ipv4_literal_timeout"], 2)
         self.assertEqual(snapshot.historical_log_buckets["ipv4_literal_timeout"], 4)
         self.assertEqual(snapshot.log_buckets["disabled_invalid"], 3)
+        self.assertEqual(snapshot.log_buckets["private_dns_leak"], 3)
         self.assertEqual(snapshot.top_destinations["ipv6_literal_timeout"], "[2606:4700:4700::1111]:443=1")
+        self.assertEqual(snapshot.top_destinations["private_dns_leak"], "172.19.0.2:853=3")
         self.assertEqual(snapshot.route_probes["ipv6_literal_tcp"], "cloudflare_v6:reachable:200:0:2606:4700:4700::1111:0.08")
 
 

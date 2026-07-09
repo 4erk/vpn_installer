@@ -6,6 +6,17 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.9.8] - 2026-07-10
+
+### Fixed
+
+- IPv6 literal traffic остаётся маршрутизируемым, но его internal fail-fast budget снижен с `3s` до `2s`: live-проверка показала, что часть внешних Meta IPv6 literal endpoints timeout'ится уже на foreign-provider path, и держать пользовательский поток 3 секунды для таких literal destinations нельзя. Старый default `TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT=3s` мигрирует в новый `2s`, явный пустой override по-прежнему сохраняется.
+- `deployment_health_snapshot` теперь берёт fresh `FAST_FOREIGN_RU_PING_LOSS_PCT` перед deep-cache `DEEP_FOREIGN_RU_PING_LOSS_PCT`, чтобы старый deep snapshot не давал ложный `foreign_ru_ping_loss_degraded` после свежего восстановления пути.
+- `verify live` больше не валит роль только по устаревшему `deep_probe_verdict=degraded`: deep metrics учитываются через общий deployment health, где есть fresh download/ping probes и fallback logic.
+- IPv6 literal TCP probe теперь считает весь IPv6-literal path сломанным только если нет ни одного reachable/http результата. Один проблемный внешний IPv6 target больше не приравнивается к поломке всего VPN, но свежие runtime timeout buckets остаются видимыми отдельно.
+- SSH control-plane для install/status/verify больше не падает от первого TCP connect timeout: Paramiko повторяет такие подключения и явно отделяет SSH timeout от VLESS dataplane failure. Default `sshd` лимиты подняты с `MaxStartups 5:30:20`/`PerSourceMaxStartups 2` до `10:30:60`/`6`, старые default-значения мигрируют при reinstall.
+- Исправлен ошибочный `private_dot_recovery`: клиентский private/TUN DNS-over-TLS (`172.19.0.x:853`/`fd00::/8:853`) больше не уходит через `to-foreign`, потому что live-проверка показала timeout DoT на RU->wg0->foreign path. Для этого класса введён явный `client_dns_dot` route через `direct-ru` с override на `GLOBAL_DOH_SERVER:853`; заблокированные private DoT leaks остаются отдельным `private_dns_leak` и переводят `verify live` в `degraded`.
+
 ## [0.9.7] - 2026-07-10
 
 ### Fixed

@@ -210,8 +210,8 @@ def generate_default_env(deploy_name: str) -> dict[str, str]:
         "SSH_PORT": "22",
         "SSH_LOGIN_GRACE_TIME": "20",
         "SSH_MAX_AUTH_TRIES": "3",
-        "SSH_MAX_STARTUPS": "5:30:20",
-        "SSH_PER_SOURCE_MAX_STARTUPS": "2",
+        "SSH_MAX_STARTUPS": "10:30:60",
+        "SSH_PER_SOURCE_MAX_STARTUPS": "6",
         "SSH_PER_SOURCE_NETBLOCK_SIZE": "24:64",
         "SSH_INPUT_RATE": "6/minute",
         "SSH_INPUT_BURST": "3",
@@ -246,7 +246,7 @@ def generate_default_env(deploy_name: str) -> dict[str, str]:
         "RU_IPV6_LITERAL_POLICY": "route-with-budget",
         "TO_FOREIGN_CONNECT_TIMEOUT": "",
         "TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT": "2s",
-        "TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT": "3s",
+        "TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT": "2s",
         "WG_INTERFACE": "wg0",
         "WG_PORT": "51820",
         "WG_MTU": "1360",
@@ -406,6 +406,10 @@ def merge_env_with_defaults(existing: dict[str, str], deploy_name: str) -> dict[
         merged["SSH_INPUT_RATE"] = defaults["SSH_INPUT_RATE"]
     if merged.get("SSH_INPUT_BURST") == "6":
         merged["SSH_INPUT_BURST"] = defaults["SSH_INPUT_BURST"]
+    if merged.get("SSH_MAX_STARTUPS") == "5:30:20":
+        merged["SSH_MAX_STARTUPS"] = defaults["SSH_MAX_STARTUPS"]
+    if merged.get("SSH_PER_SOURCE_MAX_STARTUPS") == "2":
+        merged["SSH_PER_SOURCE_MAX_STARTUPS"] = defaults["SSH_PER_SOURCE_MAX_STARTUPS"]
     if merged.get("WG_MTU") == "1380":
         merged["WG_MTU"] = defaults["WG_MTU"]
     if merged.get("RUNTIME_QDISC", "") == "":
@@ -430,6 +434,8 @@ def merge_env_with_defaults(existing: dict[str, str], deploy_name: str) -> dict[
         merged["RU_SNIFF_TIMEOUT"] = defaults["RU_SNIFF_TIMEOUT"]
     if merged.get("TO_FOREIGN_CONNECT_TIMEOUT") in {"1s", "2s"}:
         merged["TO_FOREIGN_CONNECT_TIMEOUT"] = defaults["TO_FOREIGN_CONNECT_TIMEOUT"]
+    if merged.get("TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT") == "3s":
+        merged["TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT"] = defaults["TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT"]
     if merged.get("SING_BOX_LOG_LEVEL") == "warn":
         merged["SING_BOX_LOG_LEVEL"] = defaults["SING_BOX_LOG_LEVEL"]
     if merged.get("GLOBAL_DOH_SERVER") == "1.1.1.1" and merged.get("GLOBAL_DOH_SERVER_NAME") == "cloudflare-dns.com":

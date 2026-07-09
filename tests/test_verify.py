@@ -47,6 +47,26 @@ class VerifyTests(unittest.TestCase):
         self.assertEqual(verified.verdict, "degraded")
         self.assertIn("IPv6 literal TCP route probe has broken targets", verified.reasons)
 
+    def test_verify_snapshot_allows_partial_ipv6_literal_probe_failure(self) -> None:
+        snapshot = DiagnosticsSnapshot(
+            role=ROLE_RU,
+            services={"sing-box": "active", "xray": "active", "wireguard": "active", "nftables": "active"},
+            drift="none",
+            route_probes={"ipv6_literal_tcp": "cloudflare_v6:reachable:200:0:2606:4700:4700::1111:0.08;meta_v6:broken:000:28:-:2.0"},
+        )
+        verified = _verify_snapshot(snapshot)
+        self.assertEqual(verified.verdict, "verified")
+
+    def test_verify_snapshot_ignores_deep_probe_verdict_without_fresh_failure(self) -> None:
+        snapshot = DiagnosticsSnapshot(
+            role=ROLE_FOREIGN,
+            services={"wireguard": "active", "nftables": "active"},
+            drift="none",
+            route_probes={"deep_probe_verdict": "degraded", "deep_probe_reasons": "foreign_ru_ping_loss=10"},
+        )
+        verified = _verify_snapshot(snapshot)
+        self.assertEqual(verified.verdict, "verified")
+
     def test_verify_snapshot_degrades_when_ipv6_literal_probe_is_missing(self) -> None:
         snapshot = DiagnosticsSnapshot(
             role=ROLE_RU,
@@ -68,6 +88,19 @@ class VerifyTests(unittest.TestCase):
         verified = _verify_snapshot(snapshot)
         self.assertEqual(verified.verdict, "degraded")
         self.assertIn("fresh dns_failed=2", verified.reasons)
+
+    def test_verify_snapshot_degrades_on_private_dns_leak(self) -> None:
+        snapshot = DiagnosticsSnapshot(
+            role=ROLE_RU,
+            services={"sing-box": "active", "xray": "active", "wireguard": "active", "nftables": "active"},
+            drift="none",
+            route_probes={"ipv6_literal_tcp": "cloudflare_v6:reachable:200:0:2606:4700:4700::1111:0.08"},
+            log_buckets={"private_dns_leak": 7},
+            top_destinations={"private_dns_leak": "172.19.0.2:853=7"},
+        )
+        verified = _verify_snapshot(snapshot)
+        self.assertEqual(verified.verdict, "degraded")
+        self.assertIn("fresh private_dns_leak=7", verified.reasons)
 
     def test_verify_live_workflow_returns_nonzero_on_server_mutated_drift(self) -> None:
         targets = [

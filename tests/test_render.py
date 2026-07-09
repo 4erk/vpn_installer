@@ -221,7 +221,7 @@ class RenderTests(unittest.TestCase):
         self.assertLess(ipv4_literal_index, global_resolve_index)
         self.assertNotIn("connect_timeout", outbounds["to-foreign"])
         self.assertEqual(outbounds["to-foreign-ip-literal"]["connect_timeout"], "2s")
-        self.assertEqual(outbounds["to-foreign-ipv6-literal"]["connect_timeout"], "3s")
+        self.assertEqual(outbounds["to-foreign-ipv6-literal"]["connect_timeout"], "2s")
         self.assertFalse(any(rule.get("outbound") == "blocked" and "ip_cidr" in rule for rule in route_rules))
 
     def test_ru_server_allows_configurable_sniff_timeout(self) -> None:
@@ -288,25 +288,19 @@ class RenderTests(unittest.TestCase):
         self.assertLess(private_indexes[0], ipv4_literal_index)
         self.assertLess(ipv4_literal_index, global_resolve_index)
 
-    def test_ru_server_recovers_client_tun_dot_before_private_block(self) -> None:
+    def test_ru_server_routes_client_tun_dot_direct_not_foreign(self) -> None:
         env = self.make_env()
         payload = json.loads(render.render_ru_singbox(env))
         route_rules = payload["route"]["rules"]
-        dot_index = next(index for index, rule in enumerate(route_rules) if rule.get("ip_cidr") == ["172.19.0.0/30"] and rule.get("port") == 853)
+        dot_index = next(index for index, rule in enumerate(route_rules) if rule.get("port") == 853 and rule.get("override_address") == "8.8.8.8")
         private_index = next(index for index, rule in enumerate(route_rules) if rule.get("ip_is_private") is True)
 
         self.assertLess(dot_index, private_index)
-        self.assertEqual(
-            route_rules[dot_index],
-            {
-                "ip_cidr": ["172.19.0.0/30"],
-                "port": 853,
-                "action": "route",
-                "outbound": "to-foreign",
-                "override_address": "8.8.8.8",
-                "override_port": 853,
-            },
-        )
+        self.assertEqual(route_rules[dot_index]["outbound"], "direct-ru")
+        self.assertIn("172.19.0.0/30", route_rules[dot_index]["ip_cidr"])
+        self.assertIn("198.18.0.0/15", route_rules[dot_index]["ip_cidr"])
+        self.assertIn("fd00::/8", route_rules[dot_index]["ip_cidr"])
+        self.assertIn({"ip_is_private": True, "action": "route", "outbound": "blocked"}, route_rules)
 
     def test_ru_server_routes_own_public_ip_direct_before_foreign_catchall(self) -> None:
         env = self.make_env()
@@ -863,8 +857,8 @@ class RenderTests(unittest.TestCase):
         config = render.render_sshd_hardening(env)
         self.assertIn("LoginGraceTime 20", config)
         self.assertIn("MaxAuthTries 3", config)
-        self.assertIn("MaxStartups 5:30:20", config)
-        self.assertIn("PerSourceMaxStartups 2", config)
+        self.assertIn("MaxStartups 10:30:60", config)
+        self.assertIn("PerSourceMaxStartups 6", config)
 
     def test_render_ru_nftables_rate_limits_ssh_but_not_vless_reality(self) -> None:
         env = self.make_env()

@@ -407,6 +407,24 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(loss_profile_only["health_verdict"], "foreign_ru_ping_loss_degraded")
         self.assertEqual(loss_profile_only["foreign_ru_ping_loss_pct"], "12")
 
+        fast_loss_overrides_stale_deep = workflows.deployment_health_snapshot(
+            env,
+            {
+                ROLE_RU: {"wg_observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "20", "deep_ru_wg_download_min_bps": "900000"},
+                ROLE_FOREIGN: {
+                    "observed_ipv4": "198.51.100.20",
+                    "wg_latest_handshake_age_s": "15",
+                    "deep_foreign_direct_download_min_bps": "900000",
+                    "deep_foreign_direct_upload_bps": "1400000",
+                    "fast_foreign_ru_ping_loss_pct": "0",
+                    "deep_foreign_ru_ping_loss_pct": "12",
+                    "deep_foreign_internet_ping_loss_pct": "0",
+                },
+            },
+        )
+        self.assertEqual(fast_loss_overrides_stale_deep["health_verdict"], "ok")
+        self.assertEqual(fast_loss_overrides_stale_deep["foreign_ru_ping_loss_pct"], "0")
+
         gateway_loss_profile_only = workflows.deployment_health_snapshot(
             env,
             {

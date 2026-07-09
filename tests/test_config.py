@@ -75,9 +75,11 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(env["RU_IPV6_LITERAL_POLICY"], "route-with-budget")
         self.assertEqual(env["TO_FOREIGN_CONNECT_TIMEOUT"], "")
         self.assertEqual(env["TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT"], "2s")
-        self.assertEqual(env["TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT"], "3s")
+        self.assertEqual(env["TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT"], "2s")
         self.assertEqual(env["GLOBAL_DOH_SERVER"], "8.8.8.8")
         self.assertEqual(env["GLOBAL_DOH_SERVER_NAME"], "dns.google")
+        self.assertEqual(env["SSH_MAX_STARTUPS"], "10:30:60")
+        self.assertEqual(env["SSH_PER_SOURCE_MAX_STARTUPS"], "6")
 
     def test_merge_env_with_defaults_preserves_empty_ip_literal_timeout_override(self) -> None:
         env = config.merge_env_with_defaults(
@@ -96,6 +98,8 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(env["TO_FOREIGN_CONNECT_TIMEOUT"], "")
         env = config.merge_env_with_defaults({"TO_FOREIGN_CONNECT_TIMEOUT": "2s"}, "sample")
         self.assertEqual(env["TO_FOREIGN_CONNECT_TIMEOUT"], "")
+        env = config.merge_env_with_defaults({"TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT": "3s"}, "sample")
+        self.assertEqual(env["TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT"], "2s")
 
     def test_merge_env_with_defaults_migrates_bad_warn_log_default(self) -> None:
         env = config.merge_env_with_defaults({"SING_BOX_LOG_LEVEL": "warn"}, "sample")
@@ -134,9 +138,14 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(env["RU_REALITY_HANDSHAKE_SERVER"], "www.bing.com")
 
     def test_merge_env_with_defaults_migrates_legacy_ssh_rate_limit(self) -> None:
-        env = config.merge_env_with_defaults({"SSH_INPUT_RATE": "12/minute", "SSH_INPUT_BURST": "6"}, "sample")
+        env = config.merge_env_with_defaults(
+            {"SSH_INPUT_RATE": "12/minute", "SSH_INPUT_BURST": "6", "SSH_MAX_STARTUPS": "5:30:20", "SSH_PER_SOURCE_MAX_STARTUPS": "2"},
+            "sample",
+        )
         self.assertEqual(env["SSH_INPUT_RATE"], "6/minute")
         self.assertEqual(env["SSH_INPUT_BURST"], "3")
+        self.assertEqual(env["SSH_MAX_STARTUPS"], "10:30:60")
+        self.assertEqual(env["SSH_PER_SOURCE_MAX_STARTUPS"], "6")
 
     def test_default_runtime_network_tuning_uses_fq_and_lower_wireguard_mtu(self) -> None:
         env = config.generate_default_env("sample")

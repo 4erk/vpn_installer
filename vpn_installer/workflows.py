@@ -295,7 +295,7 @@ def deployment_health_snapshot(env: dict[str, str], preflights: dict[str, dict[s
     foreign_upload_bps = preflight_int_any(foreign, ["deep_foreign_direct_upload_bps"])
     ru_wg_upload_bps = preflight_int_any(ru, ["deep_ru_wg_upload_bps"])
     foreign_gateway_ping_loss_pct = preflight_int_any(foreign, ["deep_foreign_gateway_ping_loss_pct"])
-    foreign_ru_ping_loss_pct = preflight_int_any(foreign, ["deep_foreign_ru_ping_loss_pct"])
+    foreign_ru_ping_loss_pct = preflight_int_any(foreign, ["fast_foreign_ru_ping_loss_pct", "deep_foreign_ru_ping_loss_pct"])
     foreign_internet_ping_loss_pct = preflight_int_any(foreign, ["deep_foreign_internet_ping_loss_pct"])
     foreign_target_probe = foreign.get("target_probe_direct", "").strip()
     ru_wg_target_probe = ru.get("target_probe_wg", "").strip()
@@ -1022,6 +1022,19 @@ def _probe_has_broken_result(raw_value: str) -> bool:
     return False
 
 
+def _probe_has_any_reachable_result(raw_value: str) -> bool:
+    if not raw_value:
+        return False
+    for part in raw_value.replace(",", ";").split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        fields = part.split(":")
+        if len(fields) > 1 and fields[1] in {"reachable", "http_400", "http_403", "http_404"}:
+            return True
+    return False
+
+
 def _positive_int(raw_value: Any) -> int:
     try:
         return int(str(raw_value or "0"))
@@ -1052,17 +1065,12 @@ def _verify_snapshot(snapshot: DiagnosticsSnapshot) -> DiagnosticsSnapshot:
         ipv6_probe = snapshot.route_probes.get("ipv6_literal_tcp", "")
         if not ipv6_probe:
             degradations.append("IPv6 literal TCP route probe did not run")
-        elif _probe_has_broken_result(ipv6_probe):
+        elif _probe_has_broken_result(ipv6_probe) and not _probe_has_any_reachable_result(ipv6_probe):
             degradations.append("IPv6 literal TCP route probe has broken targets")
-    for bucket in ("dns_failed", "domain_to_foreign_timeout", "ipv4_literal_timeout", "ipv6_literal_timeout", "invalid_reality"):
+    for bucket in ("dns_failed", "domain_to_foreign_timeout", "ipv4_literal_timeout", "ipv6_literal_timeout", "invalid_reality", "private_dns_leak"):
         count = _positive_int(snapshot.log_buckets.get(bucket, 0))
         if count > 0:
             degradations.append(f"fresh {bucket}={count}")
-    deep_verdict = snapshot.route_probes.get("deep_probe_verdict", "")
-    if deep_verdict and deep_verdict != "ok":
-        deep_reasons = snapshot.route_probes.get("deep_probe_reasons", "")
-        detail = f": {deep_reasons}" if deep_reasons else ""
-        degradations.append(f"deep probe {deep_verdict}{detail}")
     if hard_failures:
         snapshot.verdict = "failed"
         snapshot.reasons = hard_failures + degradations
