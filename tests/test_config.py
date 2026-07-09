@@ -72,7 +72,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(env["SING_BOX_LOG_LEVEL"], "info")
         self.assertEqual(env["RU_SNIFF_TIMEOUT"], "250ms")
         self.assertEqual(env["RU_LITERAL_POLICY"], "fail-fast")
-        self.assertEqual(env["RU_IPV6_LITERAL_POLICY"], "reject")
+        self.assertEqual(env["RU_IPV6_LITERAL_POLICY"], "route-with-budget")
         self.assertEqual(env["TO_FOREIGN_CONNECT_TIMEOUT"], "")
         self.assertEqual(env["TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT"], "2s")
         self.assertEqual(env["TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT"], "3s")
@@ -211,7 +211,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(env["RU_BLOCK_IP_CIDR"], "")
         self.assertEqual(env["RU_IPV6_POLICY"], "to-foreign")
         self.assertEqual(env["RU_LITERAL_POLICY"], "fail-fast")
-        self.assertEqual(env["RU_IPV6_LITERAL_POLICY"], "reject")
+        self.assertEqual(env["RU_IPV6_LITERAL_POLICY"], "route-with-budget")
         self.assertEqual(env["RU_BLOCK_QUIC"], "0")
         self.assertEqual(env["RU_GEOIP_DIRECT"], "0")
         self.assertEqual(env["CLIENT_ENABLE_IPV6"], "0")
@@ -280,9 +280,15 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(block_merged["GUARD_REALITY_BLOCK_ENABLED"], "1")
         self.assertEqual(fast_fail_merged["RU_IPV6_POLICY"], "to-foreign")
 
-    def test_merge_env_with_defaults_migrates_ipv6_literal_route_budget_default(self) -> None:
+    def test_merge_env_with_defaults_preserves_ipv6_literal_route_budget_default(self) -> None:
         merged = config.merge_env_with_defaults({"RU_IPV6_LITERAL_POLICY": "route-with-budget"}, "sample")
-        self.assertEqual(merged["RU_IPV6_LITERAL_POLICY"], "reject")
+        self.assertEqual(merged["RU_IPV6_LITERAL_POLICY"], "route-with-budget")
+
+    def test_merge_env_with_defaults_migrates_legacy_ipv6_literal_reject_default(self) -> None:
+        merged = config.merge_env_with_defaults({"RU_IPV6_LITERAL_POLICY": "reject", "RU_IPV6_POLICY": "to-foreign"}, "sample")
+        self.assertEqual(merged["RU_IPV6_LITERAL_POLICY"], "route-with-budget")
+        blocked = config.merge_env_with_defaults({"RU_IPV6_LITERAL_POLICY": "reject", "RU_IPV6_POLICY": "block"}, "sample")
+        self.assertEqual(blocked["RU_IPV6_LITERAL_POLICY"], "reject")
 
     def test_merge_env_with_defaults_appends_new_asset_sources(self) -> None:
         merged = config.merge_env_with_defaults({"RU_GEOSITE_URL": "https://legacy.example/geosite.srs"}, "sample")

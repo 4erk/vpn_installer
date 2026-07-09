@@ -69,6 +69,12 @@ class RemoteTests(unittest.TestCase):
         self.assertIn('probe_target_urls "" "${target_probe_urls}" "${target_probe_connect_timeout}" "${target_probe_max_time}"', script)
         self.assertIn('probe_target_urls "" "${ru_direct_target_probe_urls}" "${target_probe_connect_timeout}" "${target_probe_max_time}"', script)
         self.assertIn('probe_target_urls "wg0" "${target_probe_urls}" "${target_probe_connect_timeout}" "${target_probe_max_time}"', script)
+        self.assertIn('ipv6_literal_tcp_probe="$(probe_ipv6_literal_tcp_path "wg0")"', script)
+        self.assertIn('"cloudflare_v6=https://[2606:4700:4700::1111]/cdn-cgi/trace"', script)
+        self.assertIn('route_mark="$(env_value APP_ROUTE_MARK)"', script)
+        self.assertIn('"routing_mark": ${route_mark}', script)
+        self.assertIn('curl -kLsS --proxy "socks5h://127.0.0.1:${port}"', script)
+        self.assertNotIn('curl -6kLsS --proxy "socks5h://127.0.0.1:${port}"', script)
         self.assertIn("target_probe_needs_body_fallback", script)
         self.assertIn('--connect-timeout "${connect_timeout}" --max-time "${max_time}"', script)
         self.assertNotIn("--connect-timeout 6 --max-time 10", script)
@@ -346,7 +352,7 @@ class RemoteTests(unittest.TestCase):
                     "singbox_configured_log_level": "warn",
                     "global_doh_server": "8.8.8.8",
                     "global_doh_server_name": "dns.google",
-                    "ru_ipv6_literal_policy": "reject",
+                    "ru_ipv6_literal_policy": "route-with-budget",
                     "wan_mtu": "1500",
                     "default_qdisc": "fq_codel",
                     "wan_offload_gro": "off",
@@ -381,6 +387,7 @@ class RemoteTests(unittest.TestCase):
                     "wg_download_bps": "700000",
                     "target_probe_direct": "chatgpt.com:reachable:403:0:172.64.0.1:0.1;github.com:reachable:200:0:140.82.0.1:0.2",
                     "target_probe_wg": "chatgpt.com:reachable:403:0:172.64.0.1:0.1;github.com:reachable:200:0:140.82.0.1:0.2",
+                    "ipv6_literal_tcp_probe": "cloudflare_v6:reachable:200:0:2606:4700:4700::1111:0.08;google_v6:reachable:204:0:2a00:1450:400f:807::200e:0.09",
                     "deep_probe_at": "2026-04-24T12:00:00+00:00",
                     "deep_probe_verdict": "degraded",
                     "deep_probe_reasons": "ru_wg_download=120000",
@@ -477,6 +484,7 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("RU over wg download B/s: 700000", output)
         self.assertIn("target probes direct: chatgpt.com:reachable:403:0", output)
         self.assertIn("target probes RU over wg: chatgpt.com:reachable:403:0", output)
+        self.assertIn("IPv6 literal TCP path: cloudflare_v6:reachable:200:0", output)
         self.assertIn("deep probe verdict: degraded", output)
         self.assertIn("foreign direct min download B/s: 300000", output)
         self.assertIn("RU over wg upload B/s: 800000", output)
@@ -519,7 +527,7 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("sing-box recent IPv6-literal to-foreign destinations: [2400:52e0:1e00::722:1]:443=4", output)
         self.assertIn("sing-box recent direct-ru destinations: 142.251.143.131:80=2", output)
         self.assertIn("sing-box recent IPv6 literal destinations: [2400:52e0:1e00::722:1]:443=4,[fdfd::1ad5:632a]:55517=3", output)
-        self.assertIn("diagnosis: clients sent IPv6 literal destinations; current RU IPv6 literal policy rejects new IPv6 literals fail-fast.", output)
+        self.assertIn("diagnosis: clients sent IPv6 literal destinations; current RU IPv6 literal policy routes them through the dedicated IPv6-literal foreign outbound.", output)
         self.assertIn("sing-box recent inbound destinations: chatgpt.com:443=2,[2606:4700::6810:5c12]:443=1", output)
 
     def test_ensure_remote_privilege_paths(self) -> None:

@@ -1007,7 +1007,16 @@ def status_workflow(deployment: str | None, role: str, *, non_interactive: bool 
 def _probe_has_broken_result(raw_value: str) -> bool:
     if not raw_value:
         return False
-    return any(part.split("|", 1)[0].endswith("broken") or "|broken|" in part for part in raw_value.split(","))
+    for part in raw_value.replace(",", ";").split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        if part.split("|", 1)[0].endswith("broken") or "|broken|" in part:
+            return True
+        fields = part.split(":")
+        if len(fields) > 1 and fields[1] == "broken":
+            return True
+    return False
 
 
 def _verify_snapshot(snapshot: DiagnosticsSnapshot) -> DiagnosticsSnapshot:
@@ -1029,6 +1038,8 @@ def _verify_snapshot(snapshot: DiagnosticsSnapshot) -> DiagnosticsSnapshot:
         degradations.append("direct route probe has broken targets")
     if snapshot.role == ROLE_RU and _probe_has_broken_result(snapshot.route_probes.get("wg", "")):
         degradations.append("wg route probe has broken targets")
+    if snapshot.role == ROLE_RU and _probe_has_broken_result(snapshot.route_probes.get("ipv6_literal_tcp", "")):
+        degradations.append("IPv6 literal TCP route probe has broken targets")
     if hard_failures:
         snapshot.verdict = "failed"
         snapshot.reasons = hard_failures + degradations

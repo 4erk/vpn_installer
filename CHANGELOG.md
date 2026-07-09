@@ -6,6 +6,15 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.9.6] - 2026-07-09
+
+### Fixed
+
+- Отменён ошибочный default `RU_IPV6_LITERAL_POLICY=reject` из `0.9.5`: live packet/TCP checks 9 июля подтвердили, что RU -> WireGuard -> foreign NAT66 path для IPv6 literals рабочий, поэтому IPv6 literal destinations снова маршрутизируются через выделенный `to-foreign-ipv6-literal` с отдельным бюджетом `TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT=3s`.
+- Reinstall/remote-env sync теперь мигрирует `RU_IPV6_LITERAL_POLICY=reject` обратно в `route-with-budget`, если общая `RU_IPV6_POLICY=to-foreign`; это убирает застрявший server-authoritative default из `0.9.5` без сохранения сломанного reject после переустановки.
+- `remote_preflight`, `DiagnosticsSnapshot` и `vpn verify live` теперь проверяют отдельный TCP IPv6 literal route probe через временный локальный `sing-box` с `bind_interface=wg0` и `routing_mark=48`. Если этот exact path сломан, live verification получает `degraded`, а не зелёный статус по одним service/audit checks.
+- Parser live-probe результатов теперь корректно распознаёт broken targets в `;`-разделённых probe строках и не теряет IPv6 literal TCP failures из-за формата вывода.
+
 ## [0.9.5] - 2026-07-09
 
 ### Fixed

@@ -32,6 +32,7 @@ class DiagnosticsTests(unittest.TestCase):
                 "nftables": "active",
                 "singbox_log_window_minutes": "30",
                 "singbox_to_foreign_ip_literal_timeout_count": "4",
+                "ipv6_literal_tcp_probe": "cloudflare_v6:reachable:200:0:2606:4700:4700::1111:0.08",
                 "xray_recent_disabled_invalid_count": "3",
                 "drift": "none",
             }
@@ -40,6 +41,7 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual(snapshot.historical_window_hours, 4)
         self.assertEqual(snapshot.log_buckets["ipv4_literal_timeout"], 4)
         self.assertEqual(snapshot.log_buckets["disabled_invalid"], 3)
+        self.assertEqual(snapshot.route_probes["ipv6_literal_tcp"], "cloudflare_v6:reachable:200:0:2606:4700:4700::1111:0.08")
 
 
 if __name__ == "__main__":

@@ -459,6 +459,80 @@ probe_target_urls() {{
   printf '%s' "${{joined}}"
 }}
 
+probe_ipv6_literal_tcp_path() {{
+  local bind_iface="$1"
+  local port="29080"
+  local route_mark=""
+  local config="" log="" pid="" target="" url="" label="" result="" code="" exit_code="" remote_ip="" time_total="" verdict="" joined="" started="0"
+  if ! command -v sing-box >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then
+    return 0
+  fi
+  if ! ip link show dev "${{bind_iface}}" >/dev/null 2>&1; then
+    return 0
+  fi
+  if command -v ss >/dev/null 2>&1; then
+    for candidate in 29080 29081 29082 29083 29084; do
+      if ! ss -ltn "sport = :${{candidate}}" 2>/dev/null | grep -q LISTEN; then
+        port="${{candidate}}"
+        break
+      fi
+    done
+  fi
+  route_mark="$(env_value APP_ROUTE_MARK)"
+  if ! [[ "${{route_mark}}" =~ ^[0-9]+$ ]]; then
+    route_mark="48"
+  fi
+  config="$(mktemp /tmp/vpn-ipv6-literal-probe.XXXXXX.json 2>/dev/null || true)"
+  log="$(mktemp /tmp/vpn-ipv6-literal-probe.XXXXXX.log 2>/dev/null || true)"
+  if [[ -z "${{config}}" || -z "${{log}}" ]]; then
+    rm -f "${{config}}" "${{log}}"
+    return 0
+  fi
+  cat >"${{config}}" <<JSON
+{{
+  "log": {{"level": "error", "timestamp": true}},
+  "inbounds": [{{"type": "mixed", "tag": "in", "listen": "127.0.0.1", "listen_port": ${{port}}}}],
+  "outbounds": [{{"type": "direct", "tag": "to-foreign-ipv6-literal-probe", "bind_interface": "${{bind_iface}}", "routing_mark": ${{route_mark}}, "connect_timeout": "4s"}}],
+  "route": {{"final": "to-foreign-ipv6-literal-probe"}}
+}}
+JSON
+  sing-box run -c "${{config}}" >"${{log}}" 2>&1 &
+  pid="$!"
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if ! kill -0 "${{pid}}" 2>/dev/null; then
+      break
+    fi
+    if command -v ss >/dev/null 2>&1 && ss -ltn "sport = :${{port}}" 2>/dev/null | grep -q LISTEN; then
+      started="1"
+      break
+    fi
+    sleep 0.1
+  done
+  if [[ "${{started}}" != "1" ]] && kill -0 "${{pid}}" 2>/dev/null; then
+    sleep 0.4
+  fi
+  for target in "cloudflare_v6=https://[2606:4700:4700::1111]/cdn-cgi/trace" "google_v6=https://[2a00:1450:400f:807::200e]/generate_204" "meta_v6=https://[2a02:ec80:600:ed1a::2:b]/"; do
+    label="${{target%%=*}}"
+    url="${{target#*=}}"
+    result="$(curl -kLsS --proxy "socks5h://127.0.0.1:${{port}}" --connect-timeout 4 --max-time 6 -o /dev/null -w '%{{http_code}}|%{{exitcode}}|%{{remote_ip}}|%{{time_total}}' "${{url}}" 2>/dev/null || printf '000|curl_failed||0')"
+    code="${{result%%|*}}"
+    result="${{result#*|}}"
+    exit_code="${{result%%|*}}"
+    result="${{result#*|}}"
+    remote_ip="${{result%%|*}}"
+    time_total="${{result#*|}}"
+    verdict="$(target_verdict "${{code}}" "${{exit_code}}")"
+    if [[ -n "${{joined}}" ]]; then joined="${{joined}};"; fi
+    joined="${{joined}}${{label}}:${{verdict}}:${{code}}:${{exit_code}}:${{remote_ip}}:${{time_total}}"
+  done
+  if [[ -n "${{pid}}" ]] && kill -0 "${{pid}}" 2>/dev/null; then
+    kill "${{pid}}" >/dev/null 2>&1 || true
+    wait "${{pid}}" >/dev/null 2>&1 || true
+  fi
+  rm -f "${{config}}" "${{log}}"
+  printf '%s' "${{joined}}"
+}}
+
 login_user="$(id -un)"
 uid="$(id -u)"
 is_root="0"
@@ -578,6 +652,7 @@ direct_download_bps="-1"
 wg_download_bps="-1"
 target_probe_direct=""
 target_probe_wg=""
+ipv6_literal_tcp_probe=""
 nft_ssh_accept_packets=""
 nft_ssh_drop_packets=""
 nft_vless_accept_packets=""
@@ -907,6 +982,7 @@ fi
 if [[ "${{installed}}" == "1" && "${{role}}" == "ru-gateway" ]] && ip link show dev {wg_interface} >/dev/null 2>&1; then
   wg_download_bps="$(probe_download_bps "{wg_interface}" "${{throughput_url}}")"
   target_probe_wg="$(probe_target_urls "{wg_interface}" "${{target_probe_urls}}" "${{target_probe_connect_timeout}}" "${{target_probe_max_time}}")"
+  ipv6_literal_tcp_probe="$(probe_ipv6_literal_tcp_path "{wg_interface}")"
 fi
 
 if command -v wg >/dev/null 2>&1; then
@@ -986,6 +1062,7 @@ printf 'target_probe_connect_timeout_seconds=%s\\n' "${{target_probe_connect_tim
 printf 'target_probe_max_time_seconds=%s\\n' "${{target_probe_max_time}}"
 printf 'target_probe_direct=%s\\n' "${{target_probe_direct}}"
 printf 'target_probe_wg=%s\\n' "${{target_probe_wg}}"
+printf 'ipv6_literal_tcp_probe=%s\\n' "${{ipv6_literal_tcp_probe}}"
 printf 'deep_probe_at=%s\\n' "${{deep_probe_at}}"
 printf 'deep_probe_verdict=%s\\n' "${{deep_probe_verdict}}"
 printf 'deep_probe_reasons=%s\\n' "${{deep_probe_reasons}}"
@@ -1159,6 +1236,8 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
     if preflight.get("target_probe_direct") or preflight.get("target_probe_wg"):
         print(f"target probes direct: {preflight.get('target_probe_direct', '-')}")
         print(f"target probes RU over wg: {preflight.get('target_probe_wg', '-')}")
+    if preflight.get("ipv6_literal_tcp_probe"):
+        print(f"IPv6 literal TCP path: {preflight.get('ipv6_literal_tcp_probe', '-')}")
     if preflight.get("deep_probe_at"):
         print(f"deep probe at: {preflight.get('deep_probe_at', '-')}")
         print(f"deep probe verdict: {preflight.get('deep_probe_verdict', '-')}")

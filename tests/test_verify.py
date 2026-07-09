@@ -35,6 +35,17 @@ class VerifyTests(unittest.TestCase):
         verified = _verify_snapshot(snapshot)
         self.assertEqual(verified.verdict, "verified")
 
+    def test_verify_snapshot_degrades_on_ipv6_literal_tcp_probe_failure(self) -> None:
+        snapshot = DiagnosticsSnapshot(
+            role=ROLE_RU,
+            services={"sing-box": "active", "xray": "active", "wireguard": "active", "nftables": "active"},
+            drift="none",
+            route_probes={"ipv6_literal_tcp": "cloudflare_v6:broken:000:28::6.0"},
+        )
+        verified = _verify_snapshot(snapshot)
+        self.assertEqual(verified.verdict, "degraded")
+        self.assertIn("IPv6 literal TCP route probe has broken targets", verified.reasons)
+
     def test_verify_live_workflow_returns_nonzero_on_server_mutated_drift(self) -> None:
         targets = [
             RemoteTarget(role=ROLE_RU, ssh_host="ru.example"),

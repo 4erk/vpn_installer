@@ -84,6 +84,7 @@ class DiagnosticsSnapshot:
             route_probes={
                 "direct": preflight.get("target_probe_direct", ""),
                 "wg": preflight.get("target_probe_wg", ""),
+                "ipv6_literal_tcp": preflight.get("ipv6_literal_tcp_probe", ""),
                 "observed_ipv4": preflight.get("observed_ipv4", ""),
                 "wg_observed_ipv4": preflight.get("wg_observed_ipv4", ""),
             },
