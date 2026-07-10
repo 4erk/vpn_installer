@@ -331,6 +331,7 @@ def commit_rules(new_rules: list[dict[str, Any]], old_rules: list[dict[str, Any]
     if not ok:
         save_rules(old_rules)
         return False, message
+    schedule_singbox_restart()
     return True, message
 
 
@@ -723,7 +724,6 @@ class Handler(BaseHTTPRequestHandler):
                 if not ok:
                     raise RuntimeError(message)
                 self.send_json({**routes_payload(), "message": "Правило сохранено и применено."})
-                schedule_singbox_restart()
             except Exception as exc:
                 self.send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
         elif path == "/settings":
@@ -784,7 +784,6 @@ class Handler(BaseHTTPRequestHandler):
             if not ok:
                 raise RuntimeError(message)
             self.send_json({**routes_payload(), "message": "Правило обновлено и применено."})
-            schedule_singbox_restart()
         except Exception as exc:
             self.send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
 
@@ -809,7 +808,6 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"error": message}, HTTPStatus.BAD_REQUEST)
             return
         self.send_json({**routes_payload(), "message": "Правило удалено и конфиг применён."})
-        schedule_singbox_restart()
 
 
 class StealthAdminServer(ThreadingHTTPServer):

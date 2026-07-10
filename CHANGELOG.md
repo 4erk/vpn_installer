@@ -6,6 +6,15 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.9.12] - 2026-07-10
+
+### Fixed
+
+- IPv4 literal fail-fast budget снижен с `2s` до `750ms`, а старый default `TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT=2s` мигрирует в `750ms`. Свежие live-логи после проверки клиента показали не доменную проблему YouTube, а повторяющиеся dead IPv4 literals разных приложений: `91.108.56.103:80/443` timeout'ится даже с foreign path, тогда как доменные `googlevideo`, `static.yani.tv`, `solodcdn`, `telegram.org` и `api.telegram.org` с foreign path отвечают. Доменный `to-foreign` по-прежнему без глобального connect timeout.
+- Диагностика deprecated routing overrides теперь считает `TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT=750ms` штатным значением, чтобы `status` не помечал новый default как ручное отклонение.
+- Admin web routing rules теперь планируют restart `sing-box` внутри успешного `commit_rules()`, а не после HTTP response, чтобы применённые правила не зависели от клиентского соединения с web UI.
+- Docker audit Xray/Reality interop больше не зависит от фиксированной подсети `172.31.240.0/24`: smoke использует Docker DNS aliases, явно ждёт готовность router listener и повторяет только холодный interop probe.
+
 ## [0.9.11] - 2026-07-10
 
 ### Fixed

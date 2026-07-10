@@ -590,7 +590,7 @@ if [[ -r /etc/vpn-stack/deployment.env ]]; then
   ru_literal_policy="$(env_value RU_LITERAL_POLICY)"
   ru_ipv6_literal_policy="$(env_value RU_IPV6_LITERAL_POLICY)"
   if [[ "$(env_value TO_FOREIGN_CONNECT_TIMEOUT)" != "" ]]; then deprecated_routing_overrides="${{deprecated_routing_overrides}},TO_FOREIGN_CONNECT_TIMEOUT"; fi
-  if [[ "$(env_value TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT)" != "2s" ]]; then deprecated_routing_overrides="${{deprecated_routing_overrides}},TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT"; fi
+  if [[ "$(env_value TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT)" != "750ms" ]]; then deprecated_routing_overrides="${{deprecated_routing_overrides}},TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT"; fi
   if [[ "$(env_value TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT)" != "2s" ]]; then deprecated_routing_overrides="${{deprecated_routing_overrides}},TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT"; fi
   deprecated_routing_overrides="${{deprecated_routing_overrides#,}}"
 fi

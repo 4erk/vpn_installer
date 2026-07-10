@@ -245,7 +245,7 @@ def generate_default_env(deploy_name: str) -> dict[str, str]:
         "RU_LITERAL_POLICY": "fail-fast",
         "RU_IPV6_LITERAL_POLICY": "reject",
         "TO_FOREIGN_CONNECT_TIMEOUT": "",
-        "TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT": "2s",
+        "TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT": "750ms",
         "TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT": "2s",
         "WG_INTERFACE": "wg0",
         "WG_PORT": "51820",
@@ -438,6 +438,8 @@ def merge_env_with_defaults(existing: dict[str, str], deploy_name: str) -> dict[
         merged["RU_SNIFF_TIMEOUT"] = defaults["RU_SNIFF_TIMEOUT"]
     if merged.get("TO_FOREIGN_CONNECT_TIMEOUT") in {"1s", "2s"}:
         merged["TO_FOREIGN_CONNECT_TIMEOUT"] = defaults["TO_FOREIGN_CONNECT_TIMEOUT"]
+    if merged.get("TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT") == "2s":
+        merged["TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT"] = defaults["TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT"]
     if merged.get("TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT") == "3s":
         merged["TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT"] = defaults["TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT"]
     if merged.get("SING_BOX_LOG_LEVEL") == "warn":

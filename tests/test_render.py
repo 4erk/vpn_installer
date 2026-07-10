@@ -225,7 +225,7 @@ class RenderTests(unittest.TestCase):
         self.assertLess(ipv6_index, ipv4_literal_index)
         self.assertLess(ipv4_literal_index, global_resolve_index)
         self.assertNotIn("connect_timeout", outbounds["to-foreign"])
-        self.assertEqual(outbounds["to-foreign-ip-literal"]["connect_timeout"], "2s")
+        self.assertEqual(outbounds["to-foreign-ip-literal"]["connect_timeout"], "750ms")
         self.assertEqual(outbounds["to-foreign-ipv6-literal"]["connect_timeout"], "2s")
         self.assertFalse(any(rule.get("outbound") == "blocked" and "ip_cidr" in rule for rule in route_rules))
 

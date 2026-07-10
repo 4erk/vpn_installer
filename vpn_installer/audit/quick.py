@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import tarfile
 import textwrap
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -486,12 +487,13 @@ def test_xray_reality_interop(runner: AuditRunner, out_dir: Path) -> dict[str, s
     xray_server_config["log"] = {"loglevel": "debug"}
     xray_server_config["inbounds"][0]["listen"] = "0.0.0.0"
     xray_server_config["inbounds"][0]["port"] = 443
-    xray_server_config["outbounds"][0]["settings"]["servers"][0]["address"] = "172.31.240.10"
+    xray_server_config["inbounds"][0]["streamSettings"]["realitySettings"]["dest"] = "singbox-router:443"
+    xray_server_config["outbounds"][0]["settings"]["servers"][0]["address"] = "singbox-router"
     xray_server_config["outbounds"][0]["settings"]["servers"][0]["port"] = router_config["inbounds"][0]["listen_port"]
 
     generated_client_config = json.loads((out_dir / "client" / "windows-xray.json").read_text(encoding="utf-8"))
     proxy_outbound = generated_client_config["outbounds"][0]
-    proxy_outbound["settings"]["vnext"][0]["address"] = "172.31.240.20"
+    proxy_outbound["settings"]["vnext"][0]["address"] = "xray-front"
     proxy_outbound["settings"]["vnext"][0]["port"] = 443
     client_config = {
         "log": {"loglevel": "debug"},
@@ -510,9 +512,9 @@ def test_xray_reality_interop(runner: AuditRunner, out_dir: Path) -> dict[str, s
     write_bytes(router_config_path, json.dumps(router_config, ensure_ascii=False, indent=2).encode("utf-8") + b"\n")
     write_bytes(xray_server_config_path, json.dumps(xray_server_config, ensure_ascii=False, indent=2).encode("utf-8") + b"\n")
     write_bytes(client_config_path, json.dumps(client_config, ensure_ascii=False, indent=2).encode("utf-8") + b"\n")
-    with runner.docker_network(network, "172.31.240.0/24", "172.31.240.1"):
+    with runner.docker_network(network):
         try:
-            with runner.docker_container(router, AUDIT_IMAGE, network=network, ip="172.31.240.10", extra_args=["--network-alias", "singbox-router"]):
+            with runner.docker_container(router, AUDIT_IMAGE, network=network, extra_args=["--network-alias", "singbox-router"]):
                 runner.docker_exec(router, "mkdir -p /work /var/lib/vpn-stack/rules")
                 for asset in ("geosite-ru.srs", "geoip-ru.srs"):
                     runner.docker_copy(router, out_dir / "assets" / asset, f"/var/lib/vpn-stack/rules/{asset}")
@@ -522,6 +524,7 @@ def test_xray_reality_interop(runner: AuditRunner, out_dir: Path) -> dict[str, s
                 runner.docker_exec(router, "openssl req -x509 -newkey rsa:2048 -nodes -keyout /tmp/example.key -out /tmp/example.crt -subj /CN=www.bing.com -days 1 >/tmp/openssl-gen.log 2>&1")
                 runner.docker_exec(router, "openssl s_server -quiet -accept 443 -cert /tmp/example.crt -key /tmp/example.key -www >/tmp/example-tls.log 2>&1 & sleep 1")
                 runner.docker_exec(router, "ENABLE_DEPRECATED_MISSING_DOMAIN_RESOLVER=true sing-box run -c /work/sing-box-router.json >/tmp/sing-box-router.log 2>&1 & sleep 1")
+                runner.docker_exec(router, "for i in $(seq 1 40); do ss -ltn 2>/dev/null | grep -q ':2080 ' && exit 0; sleep 0.25; done; cat /tmp/sing-box-router.log; exit 1")
                 runner.docker(
                     "run-xray-front-interop",
                     [
@@ -533,12 +536,8 @@ def test_xray_reality_interop(runner: AuditRunner, out_dir: Path) -> dict[str, s
                         "vpn-installer.audit=1",
                         "--network",
                         network,
-                        "--ip",
-                        "172.31.240.20",
                         "--network-alias",
                         "xray-front",
-                        "--add-host",
-                        "www.bing.com:172.31.240.10",
                         "-v",
                         f"{xray_server_config_path}:/etc/xray/config.json:ro",
                         "ghcr.io/xtls/xray-core:latest",
@@ -558,8 +557,6 @@ def test_xray_reality_interop(runner: AuditRunner, out_dir: Path) -> dict[str, s
                         "vpn-installer.audit=1",
                         "--network",
                         network,
-                        "--ip",
-                        "172.31.240.21",
                         "-v",
                         f"{client_config_path}:/etc/xray/config.json:ro",
                         "ghcr.io/xtls/xray-core:latest",
@@ -569,25 +566,33 @@ def test_xray_reality_interop(runner: AuditRunner, out_dir: Path) -> dict[str, s
                     ],
                 )
                 try:
-                    completed = runner.docker(
-                        "curl-xray-reality-interop",
-                        [
-                            "run",
-                            "--rm",
-                            "--network",
-                            network,
-                            "curlimages/curl:latest",
-                            "-k",
-                            "-fsS",
-                            "--max-time",
-                            "45",
-                            "-x",
-                            f"socks5://{xray_client}:10808",
-                            "--connect-to",
-                            "example.com:443:[2606:2800:220:1:248:1893:25c8:1946]:443",
-                            "https://example.com/",
-                        ],
-                    )
+                    completed = None
+                    for attempt in range(1, 4):
+                        try:
+                            completed = runner.docker(
+                                f"curl-xray-reality-interop-{attempt}",
+                                [
+                                    "run",
+                                    "--rm",
+                                    "--network",
+                                    network,
+                                    "curlimages/curl:latest",
+                                    "-k",
+                                    "-fsS",
+                                    "--max-time",
+                                    "45",
+                                    "-x",
+                                    f"socks5://{xray_client}:10808",
+                                    "--connect-to",
+                                    "example.com:443:[2606:2800:220:1:248:1893:25c8:1946]:443",
+                                    "https://example.com/",
+                                ],
+                            )
+                            break
+                        except Exception:
+                            if attempt == 3:
+                                raise
+                            time.sleep(1)
                 except Exception:
                     runner.docker_exec(router, "cat /tmp/sing-box-router.log", expected_codes={0, 1})
                     runner.docker_exec(router, "cat /tmp/example-tls.log", expected_codes={0, 1})
@@ -595,7 +600,7 @@ def test_xray_reality_interop(runner: AuditRunner, out_dir: Path) -> dict[str, s
                     runner.docker("logs-xray-front-interop", ["logs", xray_front], expected_codes={0, 1})
                     runner.docker("logs-xray-client-interop", ["logs", xray_client], expected_codes={0, 1})
                     raise
-                if not completed.stdout.strip():
+                if completed is None or not completed.stdout.strip():
                     raise AuditFailure("Xray Reality interop не вернул ответ от локального TLS probe")
         finally:
             if not runner.keep_docker:

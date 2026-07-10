@@ -74,7 +74,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(env["RU_LITERAL_POLICY"], "fail-fast")
         self.assertEqual(env["RU_IPV6_LITERAL_POLICY"], "reject")
         self.assertEqual(env["TO_FOREIGN_CONNECT_TIMEOUT"], "")
-        self.assertEqual(env["TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT"], "2s")
+        self.assertEqual(env["TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT"], "750ms")
         self.assertEqual(env["TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT"], "2s")
         self.assertEqual(env["GLOBAL_DOH_SERVER"], "8.8.8.8")
         self.assertEqual(env["GLOBAL_DOH_SERVER_NAME"], "dns.google")
@@ -98,6 +98,8 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(env["TO_FOREIGN_CONNECT_TIMEOUT"], "")
         env = config.merge_env_with_defaults({"TO_FOREIGN_CONNECT_TIMEOUT": "2s"}, "sample")
         self.assertEqual(env["TO_FOREIGN_CONNECT_TIMEOUT"], "")
+        env = config.merge_env_with_defaults({"TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT": "2s"}, "sample")
+        self.assertEqual(env["TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT"], "750ms")
         env = config.merge_env_with_defaults({"TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT": "3s"}, "sample")
         self.assertEqual(env["TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT"], "2s")
 

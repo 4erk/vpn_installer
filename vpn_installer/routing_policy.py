@@ -7,7 +7,7 @@ from typing import Any
 
 from .dns_policy import CONNECTIVITY_CHECK_DIRECT_DOMAINS, CONNECTIVITY_CHECK_IPV6_ONLY_DOMAINS, merged_domains
 
-POLICY_VERSION = "0.9.11"
+POLICY_VERSION = "0.9.12"
 
 TRAFFIC_CLASSES = (
     "ru_direct_domain",
@@ -82,14 +82,14 @@ def _client_dns_dot_networks(env: dict[str, str]) -> list[str]:
 @dataclass(frozen=True)
 class TrafficBudget:
     domain_foreign_connect_timeout: str = ""
-    ipv4_literal_connect_timeout: str = "2s"
+    ipv4_literal_connect_timeout: str = "750ms"
     ipv6_literal_connect_timeout: str = "2s"
 
     @classmethod
     def from_env(cls, env: dict[str, str]) -> "TrafficBudget":
         return cls(
             domain_foreign_connect_timeout=env.get("TO_FOREIGN_CONNECT_TIMEOUT", "").strip(),
-            ipv4_literal_connect_timeout=env.get("TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT", "2s").strip(),
+            ipv4_literal_connect_timeout=env.get("TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT", "750ms").strip(),
             ipv6_literal_connect_timeout=env.get("TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT", "2s").strip(),
         )
 
@@ -242,7 +242,7 @@ def build_ru_routing_policy(env: dict[str, str]) -> RoutingPolicy:
         key
         for key, default_value in (
             ("TO_FOREIGN_CONNECT_TIMEOUT", ""),
-            ("TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT", "2s"),
+            ("TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT", "750ms"),
             ("TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT", "2s"),
             ("RU_IPV6_POLICY", "to-foreign"),
         )

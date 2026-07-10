@@ -484,10 +484,16 @@ class AuditRunner:
         )
 
     @contextmanager
-    def docker_network(self, name: str, subnet: str, gateway: str):
+    def docker_network(self, name: str, subnet: str | None = None, gateway: str | None = None):
+        args = ["network", "create", "--label", "vpn-installer.audit=1", "--driver", "bridge"]
+        if subnet is not None:
+            args.extend(["--subnet", subnet])
+        if gateway is not None:
+            args.extend(["--gateway", gateway])
+        args.append(name)
         self.docker(
             f"network-create-{name}",
-            ["network", "create", "--label", "vpn-installer.audit=1", "--driver", "bridge", "--subnet", subnet, "--gateway", gateway, name],
+            args,
         )
         try:
             yield name
