@@ -6,6 +6,12 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.9.15] - 2026-07-11
+
+### Fixed
+
+- Убран остаточный legacy-read в `remote_preflight`: compatibility counters `reality_invalid_recent_count`/`reality_invalid_recent_sources` больше не читают Xray journal отдельным жёстким окном `-30 minutes`, а переиспользуют уже собранный `xray_recent_log` с post-install `xray_recent_effective_since`. Это закрывает ещё один путь, где старые pre-install invalid REALITY могли попасть в fresh status после reinstall.
+
 ## [0.9.14] - 2026-07-11
 
 ### Fixed

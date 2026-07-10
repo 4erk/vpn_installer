@@ -85,6 +85,13 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("set +o pipefail", script)
         self.assertIn("set -o pipefail\n\nprintf 'login_user=%s", script)
 
+    def test_preflight_reuses_effective_xray_window_for_invalid_reality_counter(self) -> None:
+        script = preflight_script("wg0")
+        self.assertIn('xray_recent_log="$(journalctl -u vpn-stack-xray.service --since "${xray_recent_effective_since}"', script)
+        self.assertIn('reality_invalid_lines="$(printf \'%s', script)
+        self.assertIn('"${xray_recent_log}" | grep \'REALITY: processed invalid connection\' || true)"', script)
+        self.assertNotIn("journalctl -u vpn-stack-xray.service --since '-30 minutes'", script)
+
     def test_password_mode_forces_python_backend(self) -> None:
         target = RemoteTarget(role=ROLE_RU, auth_mode="password")
         self.assertTrue(use_python_ssh_backend(target))

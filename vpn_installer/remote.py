@@ -1171,9 +1171,9 @@ if command -v wg >/dev/null 2>&1; then
   fi
 fi
 
-if [[ "${{installed}}" == "1" && "${{role}}" == "ru-gateway" ]] && command -v journalctl >/dev/null 2>&1; then
+if [[ "${{installed}}" == "1" && "${{role}}" == "ru-gateway" && -n "${{xray_recent_log}}" ]]; then
   set +o pipefail
-  reality_invalid_lines="$(journalctl -u vpn-stack-xray.service --since '-30 minutes' --no-pager 2>/dev/null | grep 'REALITY: processed invalid connection' || true)"
+  reality_invalid_lines="$(printf '%s\n' "${{xray_recent_log}}" | grep 'REALITY: processed invalid connection' || true)"
   if [[ -n "${{reality_invalid_lines}}" ]]; then
     reality_invalid_recent_count="$(printf '%s\n' "${{reality_invalid_lines}}" | grep -c . || true)"
     reality_invalid_recent_sources="$(
