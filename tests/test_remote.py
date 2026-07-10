@@ -476,6 +476,7 @@ class RemoteTests(unittest.TestCase):
                     "singbox_recent_timeout_destinations": "[185.234.59.121]=2,ipv6.msftncsi.com:AAAA=1",
                     "singbox_recent_ip_literal_timeout_destinations": "91.108.56.103:443=4",
                     "singbox_fresh_timeout_destinations": "ipv6.msftconnecttest.com:AAAA=2",
+                    "singbox_fresh_domain_timeout_context": "rr2---sn-aj5go5-5i.googlevideo.com:443->[173.194.160.162]=1",
                     "singbox_recent_ipv6_literal_count": "7",
                     "singbox_recent_ipv6_literal_destinations": "[2400:52e0:1e00::722:1]:443=4,[fdfd::1ad5:632a]:55517=3",
                     "singbox_recent_inbound_destinations": "chatgpt.com:443=2,[2606:4700::6810:5c12]:443=1",
@@ -547,6 +548,7 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("sing-box recent grouped errors: blocked=22, mux_closed=36, eof=38, dns_failed=1, timeout=0, invalid_reality=3, private_dns_leak=1", output)
         self.assertIn("sing-box recent timeout classes: domain_to_foreign=2, ipv4_literal=4, ipv6_literal=5, direct_ru=1", output)
         self.assertIn("sing-box recent timeout destinations: ipv6.msftconnecttest.com:AAAA=2", output)
+        self.assertIn("sing-box recent domain timeout context: rr2---sn-aj5go5-5i.googlevideo.com:443->[173.194.160.162]=1", output)
         self.assertIn("sing-box recent sources: 91.193.149.187=36,193.46.56.226=2", output)
         self.assertIn("sing-box recent blocked destinations: [fdfd::1ad5:632a]:55517=6,172.19.0.2:853=1", output)
         self.assertIn("sing-box recent private DNS leaks: 172.19.0.2:853=1", output)

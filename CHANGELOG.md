@@ -6,6 +6,13 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.9.13] - 2026-07-10
+
+### Fixed
+
+- Доменный foreign path получил внутренний connect budget `2s`: свежий сбой после `0.9.12` был не только IP-literal, а `rr2---sn-aj5go5-5i.googlevideo.com` -> `173.194.160.162`, где один resolved address повис на `5.0s` через RU->WG->foreign, хотя сам endpoint был жив при повторной проверке. `TO_FOREIGN_CONNECT_TIMEOUT` остаётся deprecated operator override; пустое env-значение больше не означает неограниченный domain connect.
+- `status` теперь коррелирует fresh domain timeouts по sing-box connection id и показывает исходный домен вместе с resolved IP, например `rr2---...googlevideo.com:443->[173.194.160.162]`, чтобы диагностика не прятала проблему за голым `[ip]`.
+
 ## [0.9.12] - 2026-07-10
 
 ### Fixed

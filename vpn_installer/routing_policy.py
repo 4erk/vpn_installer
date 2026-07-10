@@ -7,7 +7,7 @@ from typing import Any
 
 from .dns_policy import CONNECTIVITY_CHECK_DIRECT_DOMAINS, CONNECTIVITY_CHECK_IPV6_ONLY_DOMAINS, merged_domains
 
-POLICY_VERSION = "0.9.12"
+POLICY_VERSION = "0.9.13"
 
 TRAFFIC_CLASSES = (
     "ru_direct_domain",
@@ -81,14 +81,14 @@ def _client_dns_dot_networks(env: dict[str, str]) -> list[str]:
 
 @dataclass(frozen=True)
 class TrafficBudget:
-    domain_foreign_connect_timeout: str = ""
+    domain_foreign_connect_timeout: str = "2s"
     ipv4_literal_connect_timeout: str = "750ms"
     ipv6_literal_connect_timeout: str = "2s"
 
     @classmethod
     def from_env(cls, env: dict[str, str]) -> "TrafficBudget":
         return cls(
-            domain_foreign_connect_timeout=env.get("TO_FOREIGN_CONNECT_TIMEOUT", "").strip(),
+            domain_foreign_connect_timeout=env.get("TO_FOREIGN_CONNECT_TIMEOUT", "").strip() or "2s",
             ipv4_literal_connect_timeout=env.get("TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT", "750ms").strip(),
             ipv6_literal_connect_timeout=env.get("TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT", "2s").strip(),
         )

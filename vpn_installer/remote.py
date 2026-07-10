@@ -783,6 +783,7 @@ singbox_recent_timeout_destinations=""
 singbox_recent_ip_literal_timeout_destinations=""
 singbox_fresh_timeout_destinations=""
 singbox_fresh_domain_timeout_destinations=""
+singbox_fresh_domain_timeout_context=""
 singbox_fresh_ip_literal_timeout_destinations=""
 singbox_fresh_ipv6_literal_timeout_destinations=""
 singbox_recent_ipv6_literal_count="0"
@@ -1024,6 +1025,42 @@ if [[ "${{role}}" == "ru-gateway" ]] && command -v journalctl >/dev/null 2>&1; t
         sort -nr |
         head -n 12 |
         awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
+    )"
+    singbox_fresh_domain_timeout_context="$(
+      printf '%s\n' "${{singbox_recent_log}}" |
+        awk '
+          function conn_id(line, value) {{
+            value=line
+            sub(/^.*\\[/, "", value)
+            sub(/ .*/, "", value)
+            return value
+          }}
+          /inbound (packet )?connection to / {{
+            id=conn_id($0)
+            value=$0
+            sub(/^.*inbound (packet )?connection to /, "", value)
+            sub(/ .*/, "", value)
+            inbound[id]=value
+          }}
+          /open connection to .*outbound\\/direct\\[to-foreign\\].*i\\/o timeout/ {{
+            id=conn_id($0)
+            value=$0
+            sub(/^.*open connection to /, "", value)
+            sub(/ using outbound.*/, "", value)
+            if (id in inbound && inbound[id] != value) {{
+              key=inbound[id] "->" value
+            }} else {{
+              key=value
+            }}
+            count[key]++
+          }}
+          END {{
+            for (key in count) print count[key], key
+          }}
+        ' |
+        sort -nr |
+        head -n 12 |
+        awk 'BEGIN {{ sep="" }} {{ count=$1; $1=""; sub(/^ /, ""); printf "%s%s=%s", sep, $0, count; sep="," }}'
     )"
     singbox_fresh_ip_literal_timeout_destinations="$(
       printf '%s\n' "${{singbox_recent_log}}" |
@@ -1269,6 +1306,7 @@ printf 'singbox_recent_timeout_destinations=%s\\n' "${{singbox_recent_timeout_de
 printf 'singbox_recent_ip_literal_timeout_destinations=%s\\n' "${{singbox_recent_ip_literal_timeout_destinations}}"
 printf 'singbox_fresh_timeout_destinations=%s\\n' "${{singbox_fresh_timeout_destinations}}"
 printf 'singbox_fresh_domain_timeout_destinations=%s\\n' "${{singbox_fresh_domain_timeout_destinations}}"
+printf 'singbox_fresh_domain_timeout_context=%s\\n' "${{singbox_fresh_domain_timeout_context}}"
 printf 'singbox_fresh_ip_literal_timeout_destinations=%s\\n' "${{singbox_fresh_ip_literal_timeout_destinations}}"
 printf 'singbox_fresh_ipv6_literal_timeout_destinations=%s\\n' "${{singbox_fresh_ipv6_literal_timeout_destinations}}"
 printf 'singbox_recent_ipv6_literal_count=%s\\n' "${{singbox_recent_ipv6_literal_count}}"
@@ -1532,6 +1570,8 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
             )
         if preflight.get("singbox_fresh_timeout_destinations"):
             print(f"sing-box recent timeout destinations: {preflight.get('singbox_fresh_timeout_destinations')}")
+        if preflight.get("singbox_fresh_domain_timeout_context"):
+            print(f"sing-box recent domain timeout context: {preflight.get('singbox_fresh_domain_timeout_context')}")
         if preflight.get("singbox_recent_sources"):
             print(f"sing-box recent sources: {preflight.get('singbox_recent_sources')}")
         if preflight.get("singbox_recent_blocked_destinations"):
