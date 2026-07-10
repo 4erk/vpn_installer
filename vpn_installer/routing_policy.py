@@ -7,7 +7,7 @@ from typing import Any
 
 from .dns_policy import CONNECTIVITY_CHECK_DIRECT_DOMAINS, CONNECTIVITY_CHECK_IPV6_ONLY_DOMAINS, merged_domains
 
-POLICY_VERSION = "0.9.8"
+POLICY_VERSION = "0.9.9"
 
 TRAFFIC_CLASSES = (
     "ru_direct_domain",
@@ -187,7 +187,8 @@ def build_ru_routing_policy(env: dict[str, str]) -> RoutingPolicy:
     if ipv6_literal_policy == "reject":
         route_rules.append({"ip_version": 6, "action": "reject"})
     else:
-        route_rules.append({"ip_version": 6, "action": "route", "outbound": "to-foreign-ipv6-literal"})
+        route_rules.append({"ip_version": 6, "port": 443, "action": "route", "outbound": "to-foreign-ipv6-literal"})
+        route_rules.append({"ip_version": 6, "action": "reject"})
     if geoip_direct:
         route_rules.append({"rule_set": ["ru-geoip"], "action": "route", "outbound": "direct-ru"})
     if literal_policy == "reject":
