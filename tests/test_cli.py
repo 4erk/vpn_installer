@@ -27,6 +27,11 @@ class CliTests(unittest.TestCase):
             self.assertEqual(cli.main(["audit", "--json", "--keep-docker", "docker"]), 7)
         mocked.assert_called_once_with(["--json", "--keep-docker", "docker"])
 
+    def test_audit_interop_dispatch(self) -> None:
+        with patch("vpn_installer.audit.runner.main", return_value=0) as mocked:
+            self.assertEqual(cli.main(["audit", "interop"]), 0)
+        mocked.assert_called_once_with(["interop"])
+
     def test_cleanup_local_parser_flags(self) -> None:
         parser = cli.build_parser()
         args = parser.parse_args(["cleanup-local", "--deployment", "demo", "--drop-env", "--drop-runtime"])

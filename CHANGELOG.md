@@ -6,6 +6,18 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.9.14] - 2026-07-11
+
+### Fixed
+
+- Runtime route-fail cache больше не завязан только на literal-трафик: health теперь ведёт единый adaptive bucket по классам `domain_foreign`, `ipv4_literal` и `ipv6_literal`, сбрасывает их независимо при чистом окне и показывает каждый класс в `status`/`DiagnosticsSnapshot`. Это убирает старый перекос, где доменные подвисания попадали в логи, но не становились частью runtime-памяти системы.
+- `status` показывает cached деградацию доменного foreign route вместе с literal-бакетами, чтобы повторяющиеся сбои вроде resolved `googlevideo` IP были видны как отдельный класс, а не как очередной повод вручную крутить timeout/env.
+- Health route-fail collector теперь считает окно от `installed_at + 10s`, если reinstall был свежее обычного TTL, поэтому старые `sing-box` ошибки больше не попадают в новый post-install runtime cache и не создают ложный `degraded`.
+- `diagnose path` стал bounded и быстрее: RU/foreign отчёты собираются параллельно, тяжёлые `ping`/`mtr`/`curl` пробы укорочены до representative samples, а зависший SSH capture сохраняет partial report с `diagnose_error` вместо молчаливого зависания диагностики.
+- `diagnose path` теперь использует то же post-install recent window, что и `status`: grouped Xray/sing-box sections и raw sing-box tail считаются от `installed_at + 10s`, если reinstall свежее 30-минутного окна, и печатают `window_since`.
+- Общий `ssh_capture` и `run_command` получили явный command timeout для обоих backend’ов (`Paramiko` и системный `ssh`), чтобы диагностика деградации сети не могла сама стать бесконечной операцией.
+- `vpn audit interop` добавлен как отдельный быстрый gate для Xray/Reality domain path: проверка больше не использует искусственный IPv6 `--connect-to`, а при сбое сохраняет логи router/front/client контейнеров.
+
 ## [0.9.13] - 2026-07-10
 
 ### Fixed

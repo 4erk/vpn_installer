@@ -52,7 +52,7 @@ def build_parser() -> argparse.ArgumentParser:
     cleanup.set_defaults(func=lambda args: cleanup_local_workflow(args.deployment, drop_env=args.drop_env, drop_runtime=args.drop_runtime))
 
     audit = subparsers.add_parser("audit", help="Запустить self-check.")
-    audit.add_argument("mode", nargs="?", choices=["quick", "docker", "lab", "all"], default="quick")
+    audit.add_argument("mode", nargs="?", choices=["quick", "docker", "lab", "interop", "all"], default="quick")
     audit.add_argument("--json", action="store_true", help="Печатать итоговую summary в JSON.")
     audit.add_argument("--keep-docker", action="store_true", help="Не удалять Docker-контейнеры и сети после тестов.")
     audit.set_defaults(func=lambda args: _run_audit(args.mode, json_output=args.json, keep_docker=args.keep_docker))

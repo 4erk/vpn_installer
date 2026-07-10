@@ -137,6 +137,8 @@ class AuditRunner:
                 docker_checks.run(self)
             elif self.mode == "lab":
                 lab_checks.run(self)
+            elif self.mode == "interop":
+                quick_checks.run_interop(self)
             elif self.mode == "all":
                 quick_checks.run(self)
                 docker_checks.run(self)
@@ -522,7 +524,7 @@ class AuditRunner:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Локальный аудит и Docker regression/lab для vpn-installer.")
-    parser.add_argument("mode", choices=["quick", "docker", "lab", "all"], help="Какой контур проверок запускать.")
+    parser.add_argument("mode", choices=["quick", "docker", "lab", "interop", "all"], help="Какой контур проверок запускать.")
     parser.add_argument("--json", action="store_true", help="Печатать итоговую summary в JSON.")
     parser.add_argument("--keep-docker", action="store_true", help="Не удалять Docker-контейнеры и сети после тестов.")
     return parser

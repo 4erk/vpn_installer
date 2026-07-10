@@ -63,6 +63,14 @@ class CommonTests(unittest.TestCase):
                 run_command(["demo"], capture_output=True)
         self.assertIn("код 3", str(ctx.exception))
 
+    def test_run_command_raises_on_timeout_with_partial_output(self) -> None:
+        error = subprocess.TimeoutExpired(["demo"], timeout=2, output="partial", stderr="")
+        with patch("vpn_installer.common.subprocess.run", side_effect=error):
+            with self.assertRaises(AppError) as ctx:
+                run_command(["demo"], capture_output=True, timeout=2)
+        self.assertIn("не завершилась за 2 сек", str(ctx.exception))
+        self.assertIn("partial", str(ctx.exception))
+
     def test_write_json_creates_parent_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "nested" / "data.json"

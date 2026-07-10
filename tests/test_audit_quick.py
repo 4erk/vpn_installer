@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import inspect
 import subprocess
 import unittest
 from pathlib import Path
@@ -93,6 +94,48 @@ class AuditQuickTests(unittest.TestCase):
             ready, reason = quick.docker_readiness()
         self.assertFalse(ready)
         self.assertIn("docker daemon недоступен", reason)
+
+    def test_interop_mode_runs_only_reality_interop(self) -> None:
+        class FakeRunner:
+            def __init__(self) -> None:
+                self.records: list[str] = []
+                self.skips: list[str] = []
+                self.run_dir = Path(tempfile.mkdtemp())
+                self.mode = "interop"
+
+            def ensure_quick_env(self):
+                return Path("demo.env"), Path("out/demo")
+
+            def seed_foreign_block_cache(self, _name: str) -> None:
+                return None
+
+            def ensure_audit_image(self) -> None:
+                self.records.append("ensure-audit-image")
+
+            def record(self, name, _fn):
+                self.records.append(name)
+
+            def skip(self, name, _reason):
+                self.skips.append(name)
+
+        fake_runner = FakeRunner()
+        docker_info = subprocess.CompletedProcess(["docker", "info"], 0, stdout="ok", stderr="")
+        with (
+            patch("vpn_installer.audit.quick.shutil.which", return_value="found"),
+            patch("vpn_installer.audit.quick.subprocess.run", return_value=docker_info),
+            patch("vpn_installer.audit.quick.load_env_file", return_value={"DEPLOY_NAME": "demo"}),
+            patch("vpn_installer.audit.quick.render_all_artifacts") as render_mock,
+        ):
+            quick.run_interop(fake_runner)  # type: ignore[arg-type]
+        self.assertEqual(fake_runner.records, ["ensure-audit-image", "quick-xray-reality-interop"])
+        self.assertEqual(fake_runner.skips, [])
+        render_mock.assert_called_once()
+
+    def test_reality_interop_uses_domain_probe_not_ipv6_connect_to(self) -> None:
+        source = inspect.getsource(quick.test_xray_reality_interop)
+        self.assertIn('"https://example.com/"', source)
+        self.assertNotIn("--connect-to", source)
+        self.assertNotIn("2606:2800:220:1:248:1893:25c8:1946", source)
 
 
 if __name__ == "__main__":

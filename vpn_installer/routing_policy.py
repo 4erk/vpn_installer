@@ -7,7 +7,7 @@ from typing import Any
 
 from .dns_policy import CONNECTIVITY_CHECK_DIRECT_DOMAINS, CONNECTIVITY_CHECK_IPV6_ONLY_DOMAINS, merged_domains
 
-POLICY_VERSION = "0.9.13"
+POLICY_VERSION = "0.9.14"
 
 TRAFFIC_CLASSES = (
     "ru_direct_domain",

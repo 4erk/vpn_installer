@@ -22,6 +22,7 @@ from .common import INSTALL_SCRIPT_PATH, OUT_DIR, ROOT_DIR, ensure_file_parent, 
 from .config import apply_ru_direct_overlays, download_asset, parse_env_text, render_env_text, require_env, split_asset_sources
 from .manifest import render_manifest
 from .models import DEFAULT_ASSET_TIMEOUT, REQUIRED_ENV_VARS, ROLE_FOREIGN, ROLE_RU
+from .adaptive import render_route_fail_collector_shell
 from .routing_policy import build_ru_routing_policy
 
 
@@ -1392,35 +1393,7 @@ EOF
           collect_route_fail_reasons
         }}
 
-        collect_route_fail_reasons() {{
-          [[ "${{ROLE}}" == "ru-gateway" ]] || return 0
-          command -v journalctl >/dev/null 2>&1 || return 0
-          local recent_log="" ipv4_count="0" ipv6_count="0" ipv4_top="" ipv6_top=""
-          set +o pipefail
-          recent_log="$(journalctl -u sing-box --since "-${{ROUTE_FAIL_CACHE_TTL_SECONDS}} seconds" --no-pager -o cat 2>/dev/null | grep -E 'outbound/direct\\[to-foreign-ip-literal\\].*i/o timeout|outbound/direct\\[to-foreign-ipv6-literal\\].*i/o timeout' || true)"
-          set -o pipefail
-          if [[ -z "${{recent_log}}" ]]; then
-            reset_route_fail_bucket "IPV4_LITERAL"
-            reset_route_fail_bucket "IPV6_LITERAL"
-            return 0
-          fi
-          ipv4_count="$(printf '%s\\n' "${{recent_log}}" | grep 'outbound/direct\\[to-foreign-ip-literal\\]' | grep -Ev 'open connection to \\[[0-9A-Fa-f:.]+\\]' | grep -c . || true)"
-          ipv6_count="$(printf '%s\\n' "${{recent_log}}" | grep -E 'outbound/direct\\[to-foreign-ipv6-literal\\]|open connection to \\[[0-9A-Fa-f:.]+\\].*outbound/direct\\[to-foreign-ip-literal\\]' | grep -c . || true)"
-          ipv4_top="$(printf '%s\\n' "${{recent_log}}" | grep 'outbound/direct\\[to-foreign-ip-literal\\]' | grep -Ev 'open connection to \\[[0-9A-Fa-f:.]+\\]' | sed -n 's/.*open connection to \\([^ ]*\\) using outbound\\/direct\\[to-foreign-ip-literal\\].*/\\1/p' | sort | uniq -c | sort -nr | head -n1 | awk '{{print $2 "=" $1}}' || true)"
-          ipv6_top="$(printf '%s\\n' "${{recent_log}}" | grep -E 'outbound/direct\\[to-foreign-ipv6-literal\\]|open connection to \\[[0-9A-Fa-f:.]+\\].*outbound/direct\\[to-foreign-ip-literal\\]' | sed -n 's/.*open connection to \\(\\[[0-9A-Fa-f:.]*\\]:[0-9][0-9]*\\) using outbound\\/direct\\[[^]]*\\].*/\\1/p' | sort | uniq -c | sort -nr | head -n1 | awk '{{print $2 "=" $1}}' || true)"
-          if [[ "${{ipv4_count}}" =~ ^[0-9]+$ && "${{ipv4_count}}" -ge "${{ROUTE_FAIL_THRESHOLD}}" ]]; then
-            mark_route_fail_bucket "IPV4_LITERAL" "${{ipv4_count}}" "${{ipv4_top}}"
-            printf 'ipv4_literal_timeout_recent=%s:%s\\n' "${{ipv4_count}}" "${{ipv4_top}}"
-          elif [[ "${{ipv4_count}}" == "0" ]]; then
-            reset_route_fail_bucket "IPV4_LITERAL"
-          fi
-          if [[ "${{ipv6_count}}" =~ ^[0-9]+$ && "${{ipv6_count}}" -ge "${{ROUTE_FAIL_THRESHOLD}}" ]]; then
-            mark_route_fail_bucket "IPV6_LITERAL" "${{ipv6_count}}" "${{ipv6_top}}"
-            printf 'ipv6_literal_timeout_recent=%s:%s\\n' "${{ipv6_count}}" "${{ipv6_top}}"
-          elif [[ "${{ipv6_count}}" == "0" ]]; then
-            reset_route_fail_bucket "IPV6_LITERAL"
-          fi
-        }}
+{textwrap.indent(render_route_fail_collector_shell(), '        ')}
 
         harden_runtime
         mapfile -t hard_reasons < <(collect_hard_reasons)

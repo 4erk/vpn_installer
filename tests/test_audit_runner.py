@@ -29,6 +29,7 @@ class AuditRunnerTests(unittest.TestCase):
         self.assertEqual(args.mode, "all")
         self.assertTrue(args.json)
         self.assertTrue(args.keep_docker)
+        self.assertEqual(parser.parse_args(["interop"]).mode, "interop")
 
     def test_runner_record_success_and_failure(self) -> None:
         runner = self.make_runner()
@@ -51,6 +52,17 @@ class AuditRunnerTests(unittest.TestCase):
         fake_quick.run.assert_called_once_with(runner)
         fake_docker.run.assert_called_once_with(runner)
         fake_lab.run.assert_called_once_with(runner)
+
+        interop_runner = self.make_runner("interop")
+        fake_quick = types.SimpleNamespace(run=MagicMock(), run_interop=MagicMock())
+        fake_docker = types.SimpleNamespace(run=MagicMock())
+        fake_lab = types.SimpleNamespace(run=MagicMock())
+        with patch.dict(sys.modules, {"vpn_installer.audit.quick": fake_quick, "vpn_installer.audit.docker": fake_docker, "vpn_installer.audit.lab": fake_lab}):
+            rc = interop_runner.run()
+        self.assertEqual(rc, 0)
+        fake_quick.run_interop.assert_called_once_with(interop_runner)
+        fake_docker.run.assert_not_called()
+        fake_lab.run.assert_not_called()
 
     def test_runner_run_invalid_mode_fails(self) -> None:
         runner = self.make_runner("nope")

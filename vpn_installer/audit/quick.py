@@ -185,6 +185,19 @@ def run(runner: AuditRunner) -> None:
         runner.skip("quick-linux-launcher-python", "dev-only: Linux launcher regression выполняется только в полном аудите")
 
 
+def run_interop(runner: AuditRunner) -> None:
+    docker_available, docker_skip_reason = docker_readiness()
+    if not docker_available:
+        runner.skip("quick-xray-reality-interop", f"{docker_skip_reason}, Xray Reality interop check пропущен")
+        return
+    runner.ensure_audit_image()
+    env_path, out_dir = runner.ensure_quick_env()
+    env = load_env_file(env_path)
+    runner.seed_foreign_block_cache(out_dir.name)
+    render_all_artifacts(env_path, env)
+    runner.record("quick-xray-reality-interop", lambda: test_xray_reality_interop(runner, out_dir))
+
+
 def test_unittest_modules(runner: AuditRunner) -> dict[str, str]:
     driver = runner.run_dir / "unittest_driver.py"
     driver.write_text(unittest_driver_text(), encoding="utf-8")
@@ -565,6 +578,21 @@ def test_xray_reality_interop(runner: AuditRunner, out_dir: Path) -> dict[str, s
                         "/etc/xray/config.json",
                     ],
                 )
+                def dump_interop_logs() -> None:
+                    runner.docker(
+                        "interop-router-singbox-log",
+                        ["exec", router, "bash", "-lc", "cat /tmp/sing-box-router.log 2>/dev/null || true"],
+                        expected_codes={0, 1},
+                    )
+                    runner.docker(
+                        "interop-router-tls-log",
+                        ["exec", router, "bash", "-lc", "cat /tmp/example-tls.log 2>/dev/null || true"],
+                        expected_codes={0, 1},
+                    )
+                    runner.docker("interop-router-container-log", ["logs", router], expected_codes={0, 1})
+                    runner.docker("interop-xray-front-log", ["logs", xray_front], expected_codes={0, 1})
+                    runner.docker("interop-xray-client-log", ["logs", xray_client], expected_codes={0, 1})
+
                 try:
                     completed = None
                     for attempt in range(1, 4):
@@ -583,22 +611,17 @@ def test_xray_reality_interop(runner: AuditRunner, out_dir: Path) -> dict[str, s
                                     "45",
                                     "-x",
                                     f"socks5://{xray_client}:10808",
-                                    "--connect-to",
-                                    "example.com:443:[2606:2800:220:1:248:1893:25c8:1946]:443",
                                     "https://example.com/",
                                 ],
                             )
                             break
                         except Exception:
+                            dump_interop_logs()
                             if attempt == 3:
                                 raise
                             time.sleep(1)
                 except Exception:
-                    runner.docker_exec(router, "cat /tmp/sing-box-router.log", expected_codes={0, 1})
-                    runner.docker_exec(router, "cat /tmp/example-tls.log", expected_codes={0, 1})
-                    runner.docker("logs-singbox-router-interop", ["logs", router], expected_codes={0, 1})
-                    runner.docker("logs-xray-front-interop", ["logs", xray_front], expected_codes={0, 1})
-                    runner.docker("logs-xray-client-interop", ["logs", xray_client], expected_codes={0, 1})
+                    dump_interop_logs()
                     raise
                 if completed is None or not completed.stdout.strip():
                     raise AuditFailure("Xray Reality interop не вернул ответ от локального TLS probe")

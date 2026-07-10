@@ -6,6 +6,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from .adaptive import route_fail_cache_fields
+
 
 def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -106,13 +108,7 @@ class DiagnosticsSnapshot:
                 "good_wg_path_source": preflight.get("good_wg_path_source", ""),
                 "good_wg_path_handshake_age_s": preflight.get("good_wg_path_handshake_age_s", ""),
                 "good_cache_ttl_seconds": preflight.get("good_cache_ttl_seconds", ""),
-                "route_fail_cache_ttl_seconds": preflight.get("route_fail_cache_ttl_seconds", ""),
-                "route_fail_ipv4_literal_count": preflight.get("route_fail_ipv4_literal_count", ""),
-                "route_fail_ipv4_literal_top_dest": preflight.get("route_fail_ipv4_literal_top_dest", ""),
-                "route_fail_ipv4_literal_age_s": preflight.get("route_fail_ipv4_literal_age_s", ""),
-                "route_fail_ipv6_literal_count": preflight.get("route_fail_ipv6_literal_count", ""),
-                "route_fail_ipv6_literal_top_dest": preflight.get("route_fail_ipv6_literal_top_dest", ""),
-                "route_fail_ipv6_literal_age_s": preflight.get("route_fail_ipv6_literal_age_s", ""),
+                **route_fail_cache_fields(preflight),
                 "singbox_runtime_overlay": preflight.get("singbox_runtime_overlay", ""),
                 "admin_routing_rules_count": preflight.get("admin_routing_rules_count", ""),
                 "admin_routing_rules_summary": preflight.get("admin_routing_rules_summary", ""),

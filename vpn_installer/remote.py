@@ -7,6 +7,12 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .adaptive import (
+    format_route_fail_cache,
+    render_route_fail_cache_printf_shell,
+    render_route_fail_cache_read_shell,
+    route_fail_cache_has_data,
+)
 from .common import command_exists, fail, run_command
 from .models import AppError, RemoteTarget
 from .runtime_deps import ensure_python_package
@@ -268,15 +274,26 @@ def paramiko_upload(target: RemoteTarget, local_path: Path, remote_path: str) ->
         client.close()
 
 
-def ssh_capture(target: RemoteTarget, command_body: str, *, as_root: bool = False) -> str:
+def ssh_capture(target: RemoteTarget, command_body: str, *, as_root: bool = False, command_timeout: int = SSH_COMMAND_TIMEOUT) -> str:
     remote_command, input_text = build_remote_command(command_body, target, as_root)
     if use_python_ssh_backend(target):
-        exit_status, stdout, stderr = paramiko_exec(target, remote_command, input_text=input_text, get_pty=bool(input_text))
+        exit_status, stdout, stderr = paramiko_exec(
+            target,
+            remote_command,
+            input_text=input_text,
+            get_pty=bool(input_text),
+            command_timeout=command_timeout,
+        )
         if exit_status != 0:
             detail = (stderr or stdout).strip()
             raise AppError(f"Удалённая команда завершилась с ошибкой на {target.label}.\n{detail or exit_status}")
         return stdout
-    completed = run_command(ssh_base_args(target) + [remote_command], capture_output=True, input_text=input_text)
+    completed = run_command(
+        ssh_base_args(target) + [remote_command],
+        capture_output=True,
+        input_text=input_text,
+        timeout=command_timeout if command_timeout > 0 else None,
+    )
     return completed.stdout
 
 
@@ -734,17 +751,7 @@ good_wg_path_age_s="$(age_from_epoch "${{good_wg_path_at_epoch}}")"
 good_wg_path_source="$(cache_value GOOD_WG_PATH_SOURCE)"
 good_wg_path_handshake_age_s="$(cache_value GOOD_WG_PATH_HANDSHAKE_AGE_S)"
 good_cache_ttl_seconds="$(cache_value GOOD_CACHE_TTL_SECONDS)"
-route_fail_cache_ttl_seconds="$(cache_value ROUTE_FAIL_CACHE_TTL_SECONDS)"
-route_fail_ipv4_literal_count="$(cache_value ROUTE_FAIL_IPV4_LITERAL_COUNT)"
-route_fail_ipv4_literal_top_dest="$(cache_value ROUTE_FAIL_IPV4_LITERAL_TOP_DEST)"
-route_fail_ipv4_literal_last_at="$(cache_value ROUTE_FAIL_IPV4_LITERAL_LAST_AT)"
-route_fail_ipv4_literal_last_epoch="$(cache_value ROUTE_FAIL_IPV4_LITERAL_LAST_EPOCH)"
-route_fail_ipv4_literal_age_s="$(age_from_epoch "${{route_fail_ipv4_literal_last_epoch}}")"
-route_fail_ipv6_literal_count="$(cache_value ROUTE_FAIL_IPV6_LITERAL_COUNT)"
-route_fail_ipv6_literal_top_dest="$(cache_value ROUTE_FAIL_IPV6_LITERAL_TOP_DEST)"
-route_fail_ipv6_literal_last_at="$(cache_value ROUTE_FAIL_IPV6_LITERAL_LAST_AT)"
-route_fail_ipv6_literal_last_epoch="$(cache_value ROUTE_FAIL_IPV6_LITERAL_LAST_EPOCH)"
-route_fail_ipv6_literal_age_s="$(age_from_epoch "${{route_fail_ipv6_literal_last_epoch}}")"
+{render_route_fail_cache_read_shell()}
 reality_invalid_recent_count="0"
 reality_invalid_recent_sources=""
 guard_last_run="$(guard_state_value GUARD_LAST_RUN_AT)"
@@ -1261,15 +1268,7 @@ printf 'good_wg_path_age_s=%s\\n' "${{good_wg_path_age_s}}"
 printf 'good_wg_path_source=%s\\n' "${{good_wg_path_source}}"
 printf 'good_wg_path_handshake_age_s=%s\\n' "${{good_wg_path_handshake_age_s}}"
 printf 'good_cache_ttl_seconds=%s\\n' "${{good_cache_ttl_seconds}}"
-printf 'route_fail_cache_ttl_seconds=%s\\n' "${{route_fail_cache_ttl_seconds}}"
-printf 'route_fail_ipv4_literal_count=%s\\n' "${{route_fail_ipv4_literal_count}}"
-printf 'route_fail_ipv4_literal_top_dest=%s\\n' "${{route_fail_ipv4_literal_top_dest}}"
-printf 'route_fail_ipv4_literal_last_at=%s\\n' "${{route_fail_ipv4_literal_last_at}}"
-printf 'route_fail_ipv4_literal_age_s=%s\\n' "${{route_fail_ipv4_literal_age_s}}"
-printf 'route_fail_ipv6_literal_count=%s\\n' "${{route_fail_ipv6_literal_count}}"
-printf 'route_fail_ipv6_literal_top_dest=%s\\n' "${{route_fail_ipv6_literal_top_dest}}"
-printf 'route_fail_ipv6_literal_last_at=%s\\n' "${{route_fail_ipv6_literal_last_at}}"
-printf 'route_fail_ipv6_literal_age_s=%s\\n' "${{route_fail_ipv6_literal_age_s}}"
+{render_route_fail_cache_printf_shell()}
 printf 'reality_invalid_recent_count=%s\\n' "${{reality_invalid_recent_count}}"
 printf 'reality_invalid_recent_sources=%s\\n' "${{reality_invalid_recent_sources}}"
 printf 'singbox_to_foreign_timeout_count=%s\\n' "${{singbox_to_foreign_timeout_count}}"
@@ -1456,21 +1455,8 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
             f"source={preflight.get('good_wg_path_source', '-')}, "
             f"handshake_age={preflight.get('good_wg_path_handshake_age_s', '-')}s"
         )
-    route_cache_keys = (
-        "route_fail_ipv4_literal_count",
-        "route_fail_ipv6_literal_count",
-    )
-    if any(preflight.get(key) not in {"", None, "0"} for key in route_cache_keys):
-        print(
-            "dataplane route-fail cache: "
-            f"ttl={preflight.get('route_fail_cache_ttl_seconds', '-')}s, "
-            f"ipv4_literal={preflight.get('route_fail_ipv4_literal_count', '0')}"
-            f"@{preflight.get('route_fail_ipv4_literal_age_s', '-')}s "
-            f"{preflight.get('route_fail_ipv4_literal_top_dest', '')}, "
-            f"ipv6_literal={preflight.get('route_fail_ipv6_literal_count', '0')}"
-            f"@{preflight.get('route_fail_ipv6_literal_age_s', '-')}s "
-            f"{preflight.get('route_fail_ipv6_literal_top_dest', '')}"
-        )
+    if route_fail_cache_has_data(preflight):
+        print(f"dataplane route-fail cache: {format_route_fail_cache(preflight)}")
     if preflight.get("self_heal_last_action") or preflight.get("self_heal_last_reason"):
         print(f"self-heal last reason: {preflight.get('self_heal_last_reason', '-')}")
         print(f"self-heal consecutive: {preflight.get('self_heal_consecutive', '-')}")

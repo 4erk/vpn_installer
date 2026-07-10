@@ -33,6 +33,9 @@ class DiagnosticsTests(unittest.TestCase):
                 "singbox_log_window_minutes": "30",
                 "singbox_recent_to_foreign_ip_literal_timeout_count": "2",
                 "singbox_to_foreign_ip_literal_timeout_count": "4",
+                "route_fail_domain_foreign_count": "3",
+                "route_fail_domain_foreign_top_dest": "[173.194.160.162]:443=3",
+                "route_fail_domain_foreign_age_s": "15",
                 "singbox_fresh_ipv6_literal_timeout_destinations": "[2606:4700:4700::1111]:443=1",
                 "singbox_recent_private_dns_leak_count": "3",
                 "singbox_recent_private_dns_leak_destinations": "172.19.0.2:853=3",
@@ -50,6 +53,8 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual(snapshot.top_destinations["ipv6_literal_timeout"], "[2606:4700:4700::1111]:443=1")
         self.assertEqual(snapshot.top_destinations["private_dns_leak"], "172.19.0.2:853=3")
         self.assertEqual(snapshot.route_probes["ipv6_literal_tcp"], "cloudflare_v6:reachable:200:0:2606:4700:4700::1111:0.08")
+        self.assertEqual(snapshot.dataplane_cache["route_fail_domain_foreign_count"], "3")
+        self.assertEqual(snapshot.dataplane_cache["route_fail_domain_foreign_top_dest"], "[173.194.160.162]:443=3")
 
 
 if __name__ == "__main__":

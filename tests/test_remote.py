@@ -115,6 +115,22 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("/tmp/id", ssh_base_args(target))
         self.assertIn("-P", scp_base_args(target))
 
+    def test_ssh_capture_passes_timeout_to_system_ssh_backend(self) -> None:
+        target = RemoteTarget(role=ROLE_RU, ssh_host="203.0.113.10", ssh_user="root", auth_mode="key")
+        completed = SimpleNamespace(stdout="ok")
+        with (
+            patch("vpn_installer.remote.command_exists", return_value=True),
+            patch("vpn_installer.remote.run_command", return_value=completed) as run_mock,
+        ):
+            self.assertEqual(ssh_capture(target, "echo ok", command_timeout=12), "ok")
+        self.assertEqual(run_mock.call_args.kwargs["timeout"], 12)
+
+    def test_ssh_capture_passes_timeout_to_paramiko_backend(self) -> None:
+        target = RemoteTarget(role=ROLE_RU, ssh_host="203.0.113.10", ssh_user="root", auth_mode="password")
+        with patch("vpn_installer.remote.paramiko_exec", return_value=(0, "ok", "")) as exec_mock:
+            self.assertEqual(ssh_capture(target, "echo ok", command_timeout=12), "ok")
+        self.assertEqual(exec_mock.call_args.kwargs["command_timeout"], 12)
+
     def test_build_remote_command_requires_privilege_confirmation(self) -> None:
         target = RemoteTarget(role=ROLE_RU, ssh_user="ubuntu", sudo_mode="unknown")
         with self.assertRaises(AppError):
@@ -428,6 +444,9 @@ class RemoteTests(unittest.TestCase):
                     "good_wg_path_handshake_age_s": "12",
                     "good_cache_ttl_seconds": "900",
                     "route_fail_cache_ttl_seconds": "300",
+                    "route_fail_domain_foreign_count": "3",
+                    "route_fail_domain_foreign_top_dest": "[173.194.160.162]:443=3",
+                    "route_fail_domain_foreign_age_s": "15",
                     "route_fail_ipv4_literal_count": "4",
                     "route_fail_ipv4_literal_top_dest": "91.108.56.103:443=4",
                     "route_fail_ipv4_literal_age_s": "20",
@@ -522,7 +541,10 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("profile wg path ok: 1", output)
         self.assertIn("profile stale handshake with live path (s): 130", output)
         self.assertIn("dataplane cache good WG path: age=45s/ttl=900s, source=health-hard-probe, handshake_age=12s", output)
-        self.assertIn("dataplane route-fail cache: ttl=300s, ipv4_literal=4@20s 91.108.56.103:443=4, ipv6_literal=5@30s [2001:db8::1]:443=5", output)
+        self.assertIn(
+            "dataplane route-fail cache: ttl=300s, domain_foreign=3@15s [173.194.160.162]:443=3, ipv4_literal=4@20s 91.108.56.103:443=4, ipv6_literal=5@30s [2001:db8::1]:443=5",
+            output,
+        )
         self.assertIn("self-heal last action: restart-wireguard/scheduled age=3600s", output)
         self.assertIn("recent invalid Reality handshakes: 7", output)
         self.assertIn("invalid Reality sources: 178.66.129.100=7", output)

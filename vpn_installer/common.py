@@ -95,6 +95,7 @@ def run_command(
     cwd: Path | None = None,
     env: dict[str, str] | None = None,
     check: bool = True,
+    timeout: int | float | None = None,
 ) -> subprocess.CompletedProcess[str]:
     try:
         completed = subprocess.run(
@@ -105,9 +106,18 @@ def run_command(
             cwd=str(cwd) if cwd else None,
             env=env,
             check=False,
+            timeout=timeout,
         )
     except FileNotFoundError as exc:
         raise AppError(f"Не найдена команда: {args[0]}") from exc
+    except subprocess.TimeoutExpired as exc:
+        detail = ""
+        if capture_output:
+            stdout = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+            stderr = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+            detail = (stderr or stdout or "").strip()
+        suffix = f"\n{detail}" if detail else ""
+        raise AppError(f"Команда не завершилась за {timeout} сек.: {' '.join(args)}{suffix}") from exc
     if check and completed.returncode != 0:
         detail = (completed.stderr or completed.stdout or "").strip() if capture_output else ""
         if detail:

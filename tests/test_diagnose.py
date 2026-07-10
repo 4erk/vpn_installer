@@ -14,7 +14,16 @@ class DiagnoseTests(unittest.TestCase):
     def test_path_script_collects_route_and_loss_diagnostics(self) -> None:
         script = diagnose._path_script(ROLE_RU, "wg0")
         self.assertIn("tc -s qdisc show dev", script)
-        self.assertIn("mtr -rwzc 20", script)
+        self.assertIn("mtr -rwzc 8", script)
+        self.assertIn("ping -4 -c 5 -W 1", script)
+        self.assertIn("--connect-timeout 3 --max-time 8", script)
+        self.assertIn("journal_since_with_install()", script)
+        self.assertIn("/etc/vpn-stack/installed_at", script)
+        self.assertIn('recent_since="$(journal_since_with_install 1800)"', script)
+        self.assertIn('journalctl -u sing-box --since "${recent_since}"', script)
+        self.assertIn('journalctl -u vpn-stack-xray.service --since "${recent_since}"', script)
+        self.assertIn("window_since=%s", script)
+        self.assertNotIn("journalctl -u sing-box --since '-30 minutes'", script)
         self.assertIn("curl -4kLsS", script)
         self.assertIn("peer_wg", script)
         self.assertIn("10.74.0.2", script)
@@ -49,6 +58,25 @@ class DiagnoseTests(unittest.TestCase):
 
         prepare_mock.assert_called_once()
         self.assertEqual(ssh_mock.call_count, 2)
+        for call in ssh_mock.call_args_list:
+            self.assertEqual(call.kwargs["command_timeout"], diagnose.PATH_DIAGNOSE_COMMAND_TIMEOUT)
+
+    def test_diagnose_path_writes_partial_report_when_target_times_out(self) -> None:
+        ru = RemoteTarget(role=ROLE_RU, ssh_host="ru.example", ssh_user="root")
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp) / "out"
+            with (
+                patch.object(diagnose, "OUT_DIR", out_dir),
+                patch.object(
+                    diagnose,
+                    "prepare_remote_session",
+                    return_value=("demo", Path("deployments/demo.env"), {"WG_INTERFACE": "wgx"}, {}, [ru], {}),
+                ),
+                patch.object(diagnose, "ssh_capture", side_effect=diagnose.AppError("timeout")),
+            ):
+                self.assertEqual(diagnose.diagnose_path_workflow("demo", "ru"), 0)
+                report = next(out_dir.glob("diagnostics/*/ru-gateway.txt"))
+                self.assertIn("diagnose_error=timeout", report.read_text(encoding="utf-8"))
 
     def test_diagnose_client_log_reports_front_failure_and_self_tunnel(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

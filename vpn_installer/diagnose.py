@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .common import OUT_DIR, print_header, warn, write_text
 from .config import load_existing_deployment_env
@@ -17,6 +18,7 @@ from .workflows import current_wg_interface, prepare_remote_session, requested_r
 from .workflows import build_target
 
 _SOURCE_IP_RE = re.compile(r"^[0-9A-Fa-f:.]+$")
+PATH_DIAGNOSE_COMMAND_TIMEOUT = 180
 
 
 def _diagnostic_run_dir(deployment_name: str) -> Path:
@@ -42,6 +44,25 @@ env_value() {{
   fi
 }}
 
+journal_since_with_install() {{
+  local lookback_seconds="$1"
+  local since="-${{lookback_seconds}} seconds"
+  local installed_at="" now_epoch="" installed_epoch="" lookback_epoch="" post_install_epoch=""
+  if [[ -r /etc/vpn-stack/installed_at ]] && command -v date >/dev/null 2>&1; then
+    installed_at="$(tr -d '\\r\\n' </etc/vpn-stack/installed_at)"
+    now_epoch="$(date +%s 2>/dev/null || true)"
+    installed_epoch="$(date -d "${{installed_at}}" +%s 2>/dev/null || true)"
+    if [[ "${{now_epoch}}" =~ ^[0-9]+$ && "${{installed_epoch}}" =~ ^[0-9]+$ ]]; then
+      lookback_epoch=$((now_epoch - lookback_seconds))
+      post_install_epoch=$((installed_epoch + 10))
+      if (( post_install_epoch > lookback_epoch )); then
+        since="@${{post_install_epoch}}"
+      fi
+    fi
+  fi
+  printf "%s\\n" "${{since}}"
+}}
+
 role="$(cat /etc/vpn-stack/role 2>/dev/null || true)"
 default_iface="$(ip route show default 2>/dev/null | awk '/default/ {{print $5; exit}}')"
 gateway="$(ip route show default 2>/dev/null | awk '/default/ {{print $3; exit}}')"
@@ -49,6 +70,7 @@ peer_public="$(env_value {peer_public_key})"
 health_urls="$(env_value HEALTH_THROUGHPUT_URLS)"
 health_url="${{health_urls%% *}}"
 if [[ -z "${{health_url}}" ]]; then health_url="https://cachefly.cachefly.net/1mb.test"; fi
+recent_since="$(journal_since_with_install 1800)"
 
 section identity
 printf 'date=%s\\n' "$(date -Is 2>/dev/null)"
@@ -107,7 +129,7 @@ ping_loss() {{
   local label="$2"
   [[ -n "${{host}}" ]] || return 0
   echo "--- $label $host"
-  timeout 15 ping -4 -c 10 -W 1 "${{host}}" 2>&1 | tail -n 4
+  timeout 8 ping -4 -c 5 -W 1 "${{host}}" 2>&1 | tail -n 4
 }}
 
 section ping
@@ -122,7 +144,7 @@ trace_host() {{
   [[ -n "${{host}}" ]] || return 0
   echo "--- $label $host"
   if command -v mtr >/dev/null 2>&1; then
-    timeout 35 mtr -rwzc 20 "${{host}}" 2>&1 | sed -n '1,35p'
+    timeout 15 mtr -rwzc 8 "${{host}}" 2>&1 | sed -n '1,35p'
   else
     echo "mtr_not_installed"
   fi
@@ -139,9 +161,9 @@ curl_probe() {{
   local url="$3"
   echo "--- $label $url"
   if [[ -n "${{bind_iface}}" ]]; then
-    timeout 15 curl -4kLsS --interface "${{bind_iface}}" --connect-timeout 5 --max-time 12 -o /dev/null -w 'code=%{{http_code}} exit=%{{exitcode}} ip=%{{remote_ip}} time=%{{time_total}} speed=%{{speed_download}}\\n' "${{url}}" 2>&1 || true
+    timeout 10 curl -4kLsS --interface "${{bind_iface}}" --connect-timeout 3 --max-time 8 -o /dev/null -w 'code=%{{http_code}} exit=%{{exitcode}} ip=%{{remote_ip}} time=%{{time_total}} speed=%{{speed_download}}\\n' "${{url}}" 2>&1 || true
   else
-    timeout 15 curl -4kLsS --connect-timeout 5 --max-time 12 -o /dev/null -w 'code=%{{http_code}} exit=%{{exitcode}} ip=%{{remote_ip}} time=%{{time_total}} speed=%{{speed_download}}\\n' "${{url}}" 2>&1 || true
+    timeout 10 curl -4kLsS --connect-timeout 3 --max-time 8 -o /dev/null -w 'code=%{{http_code}} exit=%{{exitcode}} ip=%{{remote_ip}} time=%{{time_total}} speed=%{{speed_download}}\\n' "${{url}}" 2>&1 || true
   fi
 }}
 
@@ -165,8 +187,9 @@ journalctl -u vpn-stack-guard.service --since '-6 hours' --no-pager 2>/dev/null 
 
 section recent_xray_grouped
 if [[ "${{role}}" == "ru-gateway" ]]; then
-  xray_log="$(journalctl -u vpn-stack-xray.service --since '-30 minutes' --no-pager -o cat 2>/dev/null | sed -r 's/\\x1B\\[[0-9;]*[mK]//g' || true)"
+  xray_log="$(journalctl -u vpn-stack-xray.service --since "${{recent_since}}" --no-pager -o cat 2>/dev/null | sed -r 's/\\x1B\\[[0-9;]*[mK]//g' || true)"
   printf 'window_minutes=30\n'
+  printf 'window_since=%s\n' "${{recent_since}}"
   printf 'accepted=%s\n' "$(grep -c 'accepted tcp:' <<<"${{xray_log}}" || true)"
   printf 'errors=%s\n' "$(printf '%s\n' "${{xray_log}}" | grep -Ev 'accepted tcp:disabled[.]invalid' | grep -Eic 'error|failed|timeout|refused|reset|EOF|panic|fatal|denied|processed invalid connection' || true)"
   printf 'invalid_reality=%s\n' "$(grep -c 'REALITY: processed invalid connection' <<<"${{xray_log}}" || true)"
@@ -198,8 +221,9 @@ fi
 
 section recent_singbox_grouped
 if [[ "${{role}}" == "ru-gateway" ]]; then
-  singbox_log="$(journalctl -u sing-box --since '-30 minutes' --no-pager -o cat 2>/dev/null | sed -r 's/\\x1B\\[[0-9;]*[mK]//g' || true)"
+  singbox_log="$(journalctl -u sing-box --since "${{recent_since}}" --no-pager -o cat 2>/dev/null | sed -r 's/\\x1B\\[[0-9;]*[mK]//g' || true)"
   printf 'window_minutes=30\n'
+  printf 'window_since=%s\n' "${{recent_since}}"
   printf 'blocked=%s\n' "$(grep -c 'outbound/block\\[blocked\\]' <<<"${{singbox_log}}" || true)"
   printf 'mux_closed=%s\n' "$(grep -c 'mux connection closed' <<<"${{singbox_log}}" || true)"
   printf 'eof=%s\n' "$(grep -c 'EOF' <<<"${{singbox_log}}" || true)"
@@ -276,7 +300,7 @@ if [[ "${{role}}" == "ru-gateway" ]]; then
 fi
 
 section recent_singbox_raw
-journalctl -u sing-box --since '-30 minutes' --no-pager 2>/dev/null | tail -n 240 || true
+journalctl -u sing-box --since "${{recent_since}}" --no-pager 2>/dev/null | tail -n 240 || true
 """
 
 
@@ -520,10 +544,27 @@ def diagnose_path_workflow(deployment: str | None, role: str, *, iperf: bool = F
     wg_interface = current_wg_interface(env)
 
     print_header("Path diagnostics")
-    for target in targets:
-        print(f"{target.label}: собираю диагностику")
-        report = ssh_capture(target, _path_script(target.role, wg_interface), as_root=True)
-        write_text(output_dir / f"{target.role}.txt", report)
+    with ThreadPoolExecutor(max_workers=max(1, len(targets))) as executor:
+        future_to_target = {}
+        for target in targets:
+            print(f"{target.label}: собираю диагностику")
+            future_to_target[
+                executor.submit(
+                    ssh_capture,
+                    target,
+                    _path_script(target.role, wg_interface),
+                    as_root=True,
+                    command_timeout=PATH_DIAGNOSE_COMMAND_TIMEOUT,
+                )
+            ] = target
+        for future in as_completed(future_to_target):
+            target = future_to_target[future]
+            try:
+                report = future.result()
+            except AppError as exc:
+                report = f"diagnose_error={exc}\n"
+                warn(f"{target.label}: диагностика завершилась неполно: {exc}")
+            write_text(output_dir / f"{target.role}.txt", report)
 
     if iperf:
         print("Запускаю bounded iperf smoke через wg0.")
