@@ -133,7 +133,7 @@ UTLS_FINGERPRINT="${UTLS_FINGERPRINT:-chrome}"
 SING_BOX_LOG_LEVEL="${SING_BOX_LOG_LEVEL:-info}"
 RU_SNIFF_TIMEOUT="${RU_SNIFF_TIMEOUT:-250ms}"
 RU_LITERAL_POLICY="${RU_LITERAL_POLICY:-fail-fast}"
-RU_IPV6_LITERAL_POLICY="${RU_IPV6_LITERAL_POLICY:-route-with-budget}"
+RU_IPV6_LITERAL_POLICY="${RU_IPV6_LITERAL_POLICY:-reject}"
 TO_FOREIGN_CONNECT_TIMEOUT="${TO_FOREIGN_CONNECT_TIMEOUT:-}"
 TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT="${TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT-2s}"
 TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT="${TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT-2s}"
@@ -165,7 +165,7 @@ RU_FORCE_DIRECT_DOMAIN_SUFFIX="${RU_FORCE_DIRECT_DOMAIN_SUFFIX:-.gstatic.com,.go
 RU_FORCE_DIRECT_IP_CIDR="${RU_FORCE_DIRECT_IP_CIDR:-}"
 RU_BLOCK_IP_CIDR="${RU_BLOCK_IP_CIDR:-}"
 RU_IPV6_POLICY="${RU_IPV6_POLICY:-to-foreign}"
-RU_BLOCK_QUIC="${RU_BLOCK_QUIC:-0}"
+RU_BLOCK_QUIC="${RU_BLOCK_QUIC:-1}"
 RU_GEOIP_DIRECT="${RU_GEOIP_DIRECT:-0}"
 if [[ "${RU_BLOCK_IP_CIDR}" == "91.108.56.0/22" ]]; then
   RU_BLOCK_IP_CIDR=""
@@ -179,7 +179,7 @@ case "${RU_LITERAL_POLICY}" in
 esac
 case "${RU_IPV6_LITERAL_POLICY}" in
   route-with-budget|reject) ;;
-  *) RU_IPV6_LITERAL_POLICY="route-with-budget" ;;
+  *) RU_IPV6_LITERAL_POLICY="reject" ;;
 esac
 if [[ "${TO_FOREIGN_CONNECT_TIMEOUT}" == "1s" || "${TO_FOREIGN_CONNECT_TIMEOUT}" == "2s" ]]; then
   TO_FOREIGN_CONNECT_TIMEOUT=""
@@ -227,7 +227,7 @@ ADMIN_WEB_ALLOWED_CIDR="${ADMIN_WEB_ALLOWED_CIDR:-}"
 ADMIN_WEB_ALLOW_WG="${ADMIN_WEB_ALLOW_WG:-0}"
 ADMIN_WEB_USERNAME="${ADMIN_WEB_USERNAME:-user}"
 ADMIN_WEB_PASSWORD="${ADMIN_WEB_PASSWORD:-password}"
-DISABLE_NIC_OFFLOADS="${DISABLE_NIC_OFFLOADS:-1}"
+DISABLE_NIC_OFFLOADS="${DISABLE_NIC_OFFLOADS:-0}"
 JOURNAL_LIMIT_ENABLED="${JOURNAL_LIMIT_ENABLED:-1}"
 JOURNAL_SYSTEM_MAX_USE="${JOURNAL_SYSTEM_MAX_USE:-256M}"
 JOURNAL_MAX_RETENTION_SEC="${JOURNAL_MAX_RETENTION_SEC:-14day}"
@@ -1077,23 +1077,29 @@ apply_runtime_qdisc() {
   esac
 }
 
-disable_interface_offloads() {
+configure_interface_offloads() {
   local iface="$1"
-  if [[ -z "${iface}" || "${DISABLE_NIC_OFFLOADS}" != "1" ]]; then
+  if [[ -z "${iface}" ]]; then
     return 0
   fi
   if ! command -v ethtool >/dev/null 2>&1; then
     return 0
   fi
-  ethtool -K "${iface}" gro off >/dev/null 2>&1 || true
-  ethtool -K "${iface}" gso off >/dev/null 2>&1 || true
-  ethtool -K "${iface}" tso off >/dev/null 2>&1 || true
+  if [[ "${DISABLE_NIC_OFFLOADS}" == "1" ]]; then
+    ethtool -K "${iface}" gro off >/dev/null 2>&1 || true
+    ethtool -K "${iface}" gso off >/dev/null 2>&1 || true
+    ethtool -K "${iface}" tso off >/dev/null 2>&1 || true
+  else
+    ethtool -K "${iface}" gro on >/dev/null 2>&1 || true
+    ethtool -K "${iface}" gso on >/dev/null 2>&1 || true
+    ethtool -K "${iface}" tso on >/dev/null 2>&1 || true
+  fi
 }
 
 apply_runtime_interface_tuning() {
   local iface="$1"
   apply_runtime_qdisc "${iface}"
-  disable_interface_offloads "${iface}"
+  configure_interface_offloads "${iface}"
 }
 
 configure_ssh_daemon_mode() {

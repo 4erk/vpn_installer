@@ -54,21 +54,27 @@ class RoutingPolicyTests(unittest.TestCase):
         parts = build_ru_routing_policy(self.make_env()).singbox_parts()
         route_rules = parts["route_rules"]
         outbounds = {outbound["tag"]: outbound for outbound in parts["outbounds"]}
-        ipv6_index = next(index for index, rule in enumerate(route_rules) if rule.get("ip_version") == 6 and rule.get("port") == 443)
         ipv6_reject_index = next(index for index, rule in enumerate(route_rules) if rule.get("ip_version") == 6 and rule.get("action") == "reject")
         ipv4_index = next(index for index, rule in enumerate(route_rules) if rule.get("ip_cidr") == ["0.0.0.0/0"])
         resolve_index = next(index for index, rule in enumerate(route_rules) if rule.get("server") == "dns-global")
 
-        self.assertLess(ipv6_index, ipv4_index)
-        self.assertLess(ipv6_index, ipv6_reject_index)
         self.assertLess(ipv6_reject_index, ipv4_index)
         self.assertLess(ipv4_index, resolve_index)
-        self.assertEqual(route_rules[ipv6_index], {"ip_version": 6, "port": 443, "action": "route", "outbound": "to-foreign-ipv6-literal"})
         self.assertEqual(route_rules[ipv6_reject_index], {"ip_version": 6, "action": "reject"})
         self.assertEqual(route_rules[ipv4_index]["outbound"], "to-foreign-ip-literal")
         self.assertNotIn("connect_timeout", outbounds["to-foreign"])
         self.assertEqual(outbounds["to-foreign-ip-literal"]["connect_timeout"], "2s")
         self.assertEqual(outbounds["to-foreign-ipv6-literal"]["connect_timeout"], "2s")
+
+    def test_ipv6_literal_route_budget_stays_explicit_operator_mode(self) -> None:
+        env = self.make_env()
+        env["RU_IPV6_LITERAL_POLICY"] = "route-with-budget"
+        rules = build_ru_routing_policy(env).route_rules
+        ipv6_index = next(index for index, rule in enumerate(rules) if rule.get("ip_version") == 6 and rule.get("port") == 443)
+        ipv6_reject_index = next(index for index, rule in enumerate(rules) if rule.get("ip_version") == 6 and rule.get("action") == "reject")
+
+        self.assertEqual(rules[ipv6_index], {"ip_version": 6, "port": 443, "action": "route", "outbound": "to-foreign-ipv6-literal"})
+        self.assertLess(ipv6_index, ipv6_reject_index)
 
     def test_client_tun_dot_uses_direct_ru_not_foreign_path(self) -> None:
         parts = build_ru_routing_policy(self.make_env()).singbox_parts()

@@ -800,21 +800,26 @@ def render_health_script(env: dict[str, str], role: str) -> str:
           esac
         }}
 
-        disable_offloads() {{
+        configure_offloads() {{
           local iface="$1"
           [[ -n "${{iface}}" ]] || return 0
-          [[ "${{DISABLE_NIC_OFFLOADS}}" == "1" ]] || return 0
           command -v ethtool >/dev/null 2>&1 || return 0
-          ethtool -K "${{iface}}" gro off >/dev/null 2>&1 || true
-          ethtool -K "${{iface}}" gso off >/dev/null 2>&1 || true
-          ethtool -K "${{iface}}" tso off >/dev/null 2>&1 || true
+          if [[ "${{DISABLE_NIC_OFFLOADS}}" == "1" ]]; then
+            ethtool -K "${{iface}}" gro off >/dev/null 2>&1 || true
+            ethtool -K "${{iface}}" gso off >/dev/null 2>&1 || true
+            ethtool -K "${{iface}}" tso off >/dev/null 2>&1 || true
+          else
+            ethtool -K "${{iface}}" gro on >/dev/null 2>&1 || true
+            ethtool -K "${{iface}}" gso on >/dev/null 2>&1 || true
+            ethtool -K "${{iface}}" tso on >/dev/null 2>&1 || true
+          fi
         }}
 
         harden_interface() {{
           local iface="$1"
           [[ -n "${{iface}}" ]] || return 0
           apply_qdisc "${{iface}}"
-          disable_offloads "${{iface}}"
+          configure_offloads "${{iface}}"
         }}
 
         harden_runtime() {{

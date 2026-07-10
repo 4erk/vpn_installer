@@ -6,6 +6,14 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.9.11] - 2026-07-10
+
+### Fixed
+
+- IPv6 literal traffic теперь fail-fast reject по умолчанию и старый `RU_IPV6_LITERAL_POLICY=route-with-budget` мигрирует в `reject`: live-логи после `0.9.10` снова показали десятки IPv6 literal destinations от клиента и свежие timeouts на `[2001:67c:4e8:f002::a]:443`, что ухудшало YouTube/Telegram/media path. Явный operator mode `route-with-budget` оставлен в routing model, но больше не является deployment default.
+- Клиентские sing-box/Hiddify JSON и Xray JSON теперь локально блокируют UDP/443, чтобы QUIC/HTTP3 не ехал через TCP-based VLESS path и быстрее переходил на HTTPS/TCP. Основной `vless-uri.txt` не меняется.
+- `DISABLE_NIC_OFFLOADS` теперь default `0`, старое default-значение `1` мигрирует в `0`, а install/health явно включает GRO/GSO/TSO в этом режиме: live A/B на текущих VPS показал, что включённые offloads дают стабильный RU-over-WG throughput около `17.8-18.4 MB/s` на Cloudflare без свежих `sing-box` ошибок.
+
 ## [0.9.10] - 2026-07-10
 
 ### Fixed

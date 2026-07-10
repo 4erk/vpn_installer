@@ -7,7 +7,7 @@ from typing import Any
 
 from .dns_policy import CONNECTIVITY_CHECK_DIRECT_DOMAINS, CONNECTIVITY_CHECK_IPV6_ONLY_DOMAINS, merged_domains
 
-POLICY_VERSION = "0.9.10"
+POLICY_VERSION = "0.9.11"
 
 TRAFFIC_CLASSES = (
     "ru_direct_domain",
@@ -66,7 +66,7 @@ def _normalize_ipv6_literal_policy(env: dict[str, str]) -> str:
     policy = env.get("RU_IPV6_LITERAL_POLICY", "").strip().lower()
     if policy in IPV6_LITERAL_POLICIES:
         return policy
-    return "route-with-budget"
+    return "reject"
 
 
 def _client_dns_dot_networks(env: dict[str, str]) -> list[str]:

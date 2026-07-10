@@ -98,6 +98,7 @@ def render_client_profile(env: dict[str, str], auto_redirect: bool, *, android_s
             "rules": [
                 {"inbound": ["tun-in"], "action": "sniff", "timeout": "1s"},
                 {"ip_version": 6, "action": "route", "outbound": "block"},
+                {"network": "udp", "port": 443, "action": "route", "outbound": "block"},
                 {"protocol": "dns", "action": "hijack-dns"},
                 {"ip_is_private": True, "action": "route", "outbound": "direct"},
                 {"domain_suffix": ["local"], "action": "route", "outbound": "direct"},
@@ -113,7 +114,10 @@ def render_client_profile(env: dict[str, str], auto_redirect: bool, *, android_s
 
 
 def render_xray_client_profile(env: dict[str, str]) -> str:
-    route_rules: list[dict[str, Any]] = [{"type": "field", "ip": ["::/0"], "outboundTag": "block"}]
+    route_rules: list[dict[str, Any]] = [
+        {"type": "field", "ip": ["::/0"], "outboundTag": "block"},
+        {"type": "field", "network": "udp", "port": 443, "outboundTag": "block"},
+    ]
     route_excludes = client_route_excludes(env)
     if route_excludes:
         route_rules.append({"type": "field", "ip": route_excludes, "outboundTag": "direct"})

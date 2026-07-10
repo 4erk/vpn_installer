@@ -225,7 +225,7 @@ def generate_default_env(deploy_name: str) -> dict[str, str]:
         "GUARD_REALITY_INVALID_THRESHOLD": "8",
         "GUARD_REALITY_BLOCK_ENABLED": "0",
         "WAN_INTERFACE": "",
-        "DISABLE_NIC_OFFLOADS": "1",
+        "DISABLE_NIC_OFFLOADS": "0",
         "RUNTIME_QDISC": "fq",
         "CLIENT_UUID": str(uuid.uuid4()),
         "CLIENT_FLOW": "xtls-rprx-vision",
@@ -243,7 +243,7 @@ def generate_default_env(deploy_name: str) -> dict[str, str]:
         "SING_BOX_LOG_LEVEL": "info",
         "RU_SNIFF_TIMEOUT": "250ms",
         "RU_LITERAL_POLICY": "fail-fast",
-        "RU_IPV6_LITERAL_POLICY": "route-with-budget",
+        "RU_IPV6_LITERAL_POLICY": "reject",
         "TO_FOREIGN_CONNECT_TIMEOUT": "",
         "TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT": "2s",
         "TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT": "2s",
@@ -414,6 +414,8 @@ def merge_env_with_defaults(existing: dict[str, str], deploy_name: str) -> dict[
         merged["WG_MTU"] = defaults["WG_MTU"]
     if merged.get("RUNTIME_QDISC", "") == "":
         merged["RUNTIME_QDISC"] = defaults["RUNTIME_QDISC"]
+    if merged.get("DISABLE_NIC_OFFLOADS") in {"", "1", "true", "yes", "on"}:
+        merged["DISABLE_NIC_OFFLOADS"] = defaults["DISABLE_NIC_OFFLOADS"]
     if merged.get("HEALTH_HANDSHAKE_GRACE_SECONDS") == "120":
         merged["HEALTH_HANDSHAKE_GRACE_SECONDS"] = defaults["HEALTH_HANDSHAKE_GRACE_SECONDS"]
     if merged.get("HEALTH_DEEP_PROBE_INTERVAL_MINUTES") == "30":
@@ -428,7 +430,7 @@ def merge_env_with_defaults(existing: dict[str, str], deploy_name: str) -> dict[
         merged["RU_LITERAL_POLICY"] = defaults["RU_LITERAL_POLICY"]
     if not existing.get("RU_IPV6_LITERAL_POLICY"):
         merged["RU_IPV6_LITERAL_POLICY"] = "reject" if merged.get("RU_IPV6_POLICY") in {"block", "reject"} else defaults["RU_IPV6_LITERAL_POLICY"]
-    elif merged.get("RU_IPV6_LITERAL_POLICY") == "reject" and merged.get("RU_IPV6_POLICY") not in {"block", "reject"}:
+    elif merged.get("RU_IPV6_LITERAL_POLICY") == "route-with-budget":
         merged["RU_IPV6_LITERAL_POLICY"] = defaults["RU_IPV6_LITERAL_POLICY"]
     elif merged.get("RU_IPV6_LITERAL_POLICY") not in {"route-with-budget", "reject"}:
         merged["RU_IPV6_LITERAL_POLICY"] = defaults["RU_IPV6_LITERAL_POLICY"]

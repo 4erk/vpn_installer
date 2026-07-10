@@ -68,6 +68,10 @@ class RenderTests(unittest.TestCase):
         )
         self.assertEqual(
             payload["routing"]["rules"][1],
+            {"type": "field", "network": "udp", "port": 443, "outboundTag": "block"},
+        )
+        self.assertEqual(
+            payload["routing"]["rules"][2],
             {"type": "field", "ip": [f"{env['RU_PUBLIC_IP']}/32", f"{env['FOREIGN_PUBLIC_IP']}/32"], "outboundTag": "direct"},
         )
 
@@ -82,6 +86,7 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(payload["route"]["default_domain_resolver"]["server"], "dns-remote")
         self.assertEqual(payload["route"]["rules"][0], {"inbound": ["tun-in"], "action": "sniff", "timeout": "1s"})
         self.assertEqual(payload["route"]["rules"][1]["ip_version"], 6)
+        self.assertEqual(payload["route"]["rules"][2], {"network": "udp", "port": 443, "action": "route", "outbound": "block"})
         self.assertEqual(payload["inbounds"][0]["address"], [env["CLIENT_TUN_ADDRESS_V4"]])
         self.assertNotIn("sniff", payload["inbounds"][0])
         self.assertNotIn("sniff_override_destination", payload["inbounds"][0])
@@ -201,7 +206,7 @@ class RenderTests(unittest.TestCase):
         self.assertIn('SYNC_DOWNLOAD_MAX_TIME="${SYNC_DOWNLOAD_MAX_TIME:-20}"', script)
         self.assertIn('curl -fsSL --connect-timeout "$SYNC_DOWNLOAD_CONNECT_TIMEOUT" --max-time "$SYNC_DOWNLOAD_MAX_TIME"', script)
 
-    def test_ru_server_routes_ipv6_literals_by_default(self) -> None:
+    def test_ru_server_rejects_ipv6_literals_by_default(self) -> None:
         env = self.make_env()
         payload = json.loads(render.render_ru_singbox(env))
         route_rules = payload["route"]["rules"]
@@ -214,7 +219,7 @@ class RenderTests(unittest.TestCase):
         first_direct_route_index = next(index for index, rule in enumerate(route_rules) if rule.get("outbound") == "direct-ru")
         self.assertEqual(sniff_rule, {"inbound": ["router-in"], "action": "sniff", "timeout": "250ms"})
         self.assertIn({"network": "udp", "port": 443, "action": "reject"}, route_rules)
-        self.assertEqual(ipv6_rules, [{"ip_version": 6, "port": 443, "action": "route", "outbound": "to-foreign-ipv6-literal"}, {"ip_version": 6, "action": "reject"}])
+        self.assertEqual(ipv6_rules, [{"ip_version": 6, "action": "reject"}])
         self.assertEqual(payload["route"]["final"], "to-foreign")
         self.assertLess(first_direct_route_index, ipv6_index)
         self.assertLess(ipv6_index, ipv4_literal_index)
@@ -708,7 +713,7 @@ class RenderTests(unittest.TestCase):
         env = self.make_env()
         script = render.render_health_script(env, render.ROLE_RU)
         self.assertIn('ROLE="ru-gateway"', script)
-        self.assertIn('DISABLE_NIC_OFFLOADS="1"', script)
+        self.assertIn('DISABLE_NIC_OFFLOADS="0"', script)
         self.assertIn('SELF_HEAL_ENABLED="1"', script)
         self.assertIn('SELF_HEAL_COOLDOWN_MINUTES="15"', script)
         self.assertIn('SELF_HEAL_MAX_ACTIONS_PER_HOUR="2"', script)
@@ -743,6 +748,9 @@ class RenderTests(unittest.TestCase):
         self.assertIn('ethtool -K "${iface}" gro off', script)
         self.assertIn('ethtool -K "${iface}" gso off', script)
         self.assertIn('ethtool -K "${iface}" tso off', script)
+        self.assertIn('ethtool -K "${iface}" gro on', script)
+        self.assertIn('ethtool -K "${iface}" gso on', script)
+        self.assertIn('ethtool -K "${iface}" tso on', script)
         self.assertIn("cloudflare.com/cdn-cgi/trace", script)
         self.assertIn("ssh_banner_ok", script)
         self.assertIn("collect_hard_reasons()", script)
