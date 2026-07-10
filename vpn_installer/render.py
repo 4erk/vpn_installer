@@ -331,8 +331,11 @@ def render_foreign_nftables(env: dict[str, str], wan_iface: str) -> str:
                 f'    iifname "{env["WG_INTERFACE"]}" oifname "{wan_iface}" ip6 daddr @ru_ipv6 drop',
             ]
         )
+    tcp_mss = max(env_int(env, "WG_MTU") - 40, 536)
     forward_rules.extend(
         [
+            f'    iifname "{env["WG_INTERFACE"]}" oifname "{wan_iface}" tcp flags syn tcp option maxseg size set {tcp_mss} accept',
+            f'    iifname "{wan_iface}" oifname "{env["WG_INTERFACE"]}" tcp flags syn tcp option maxseg size set {tcp_mss} accept',
             f'    iifname "{env["WG_INTERFACE"]}" oifname "{wan_iface}" accept',
             f'    iifname "{wan_iface}" oifname "{env["WG_INTERFACE"]}" ct state established,related accept',
             "  }",

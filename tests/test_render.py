@@ -213,7 +213,7 @@ class RenderTests(unittest.TestCase):
         ipv4_literal_index = next(index for index, rule in enumerate(route_rules) if rule.get("ip_cidr") == ["0.0.0.0/0"] and rule.get("outbound") == "to-foreign-ip-literal")
         first_direct_route_index = next(index for index, rule in enumerate(route_rules) if rule.get("outbound") == "direct-ru")
         self.assertEqual(sniff_rule, {"inbound": ["router-in"], "action": "sniff", "timeout": "250ms"})
-        self.assertFalse(any(rule.get("network") == "udp" and rule.get("port") == 443 for rule in route_rules))
+        self.assertIn({"network": "udp", "port": 443, "action": "reject"}, route_rules)
         self.assertEqual(ipv6_rules, [{"ip_version": 6, "port": 443, "action": "route", "outbound": "to-foreign-ipv6-literal"}, {"ip_version": 6, "action": "reject"}])
         self.assertEqual(payload["route"]["final"], "to-foreign")
         self.assertLess(first_direct_route_index, ipv6_index)
@@ -915,6 +915,8 @@ class RenderTests(unittest.TestCase):
         self.assertIn(f"limit rate {env['SSH_INPUT_RATE']} burst {env['SSH_INPUT_BURST']} packets", rules)
         self.assertIn(f"tcp dport {env['SSH_PORT']} counter drop", rules)
         self.assertIn(f"udp dport {env['WG_PORT']} accept", rules)
+        self.assertIn(f'iifname "{env["WG_INTERFACE"]}" oifname "eth0" tcp flags syn tcp option maxseg size set 1320 accept', rules)
+        self.assertIn(f'iifname "eth0" oifname "{env["WG_INTERFACE"]}" tcp flags syn tcp option maxseg size set 1320 accept', rules)
         self.assertIn("table ip6 nat", rules)
         self.assertIn(f'ip6 saddr {env["WG_IPV6_PREFIX"]} oifname "eth0" masquerade', rules)
 

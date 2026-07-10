@@ -6,6 +6,14 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.9.10] - 2026-07-10
+
+### Fixed
+
+- Стабилизирован performance path для TCP-based VLESS: `RU_BLOCK_QUIC` теперь по умолчанию и при миграции старого env равен `1`, чтобы браузеры/видео не пытались гонять QUIC/HTTP3 UDP/443 поверх VLESS TCP и быстро переходили на обычный HTTPS/TCP.
+- Foreign `nftables` теперь clamp'ит TCP MSS на forward между `wg0` и WAN до `WG_MTU - 40` (`1320` при текущем `WG_MTU=1360`), чтобы большие TCP-передачи не зависели от PMTUD/ICMP и не ловили MTU blackhole.
+- Install sysctl включает `net.netfilter.nf_conntrack_tcp_be_liberal=1`, чтобы `ct state invalid drop` не рвал живые TCP-потоки при packet reordering/loss на VPS-сети.
+
 ## [0.9.9] - 2026-07-10
 
 ### Fixed

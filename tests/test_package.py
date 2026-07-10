@@ -120,6 +120,7 @@ class PackageTests(unittest.TestCase):
         self.assertIn('net.ipv4.udp_rmem_min=16384', install_script)
         self.assertIn('net.ipv4.tcp_congestion_control=bbr', install_script)
         self.assertIn('net.ipv4.tcp_mtu_probing=1', install_script)
+        self.assertIn('net.netfilter.nf_conntrack_tcp_be_liberal=1', install_script)
         self.assertIn('net.ipv4.tcp_max_syn_backlog=2048', install_script)
         self.assertIn("ethtool", install_script)
         self.assertIn("iperf3", install_script)
@@ -158,7 +159,7 @@ class PackageTests(unittest.TestCase):
 
     def test_package_exposes_version_via_getattr(self) -> None:
         package = importlib.import_module("vpn_installer")
-        self.assertEqual(package.__version__, "0.9.9")
+        self.assertEqual(package.__version__, "0.9.10")
         with self.assertRaises(AttributeError):
             package.__getattr__("nope")
 

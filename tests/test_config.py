@@ -151,11 +151,16 @@ class ConfigTests(unittest.TestCase):
         env = config.generate_default_env("sample")
         self.assertEqual(env["RUNTIME_QDISC"], "fq")
         self.assertEqual(env["WG_MTU"], "1360")
+        self.assertEqual(env["RU_BLOCK_QUIC"], "1")
 
     def test_merge_env_with_defaults_migrates_legacy_wireguard_mtu(self) -> None:
         env = config.merge_env_with_defaults({"WG_MTU": "1380", "RUNTIME_QDISC": ""}, "sample")
         self.assertEqual(env["WG_MTU"], "1360")
         self.assertEqual(env["RUNTIME_QDISC"], "fq")
+
+    def test_merge_env_with_defaults_migrates_legacy_quic_allow(self) -> None:
+        env = config.merge_env_with_defaults({"RU_BLOCK_QUIC": "0"}, "sample")
+        self.assertEqual(env["RU_BLOCK_QUIC"], "1")
 
     def test_default_ru_listen_port_stays_public_443(self) -> None:
         env = config.generate_default_env("sample")
@@ -221,7 +226,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(env["RU_IPV6_POLICY"], "to-foreign")
         self.assertEqual(env["RU_LITERAL_POLICY"], "fail-fast")
         self.assertEqual(env["RU_IPV6_LITERAL_POLICY"], "route-with-budget")
-        self.assertEqual(env["RU_BLOCK_QUIC"], "0")
+        self.assertEqual(env["RU_BLOCK_QUIC"], "1")
         self.assertEqual(env["RU_GEOIP_DIRECT"], "0")
         self.assertEqual(env["CLIENT_ENABLE_IPV6"], "0")
         self.assertEqual(env["GUARD_REALITY_BLOCK_ENABLED"], "0")
