@@ -6,6 +6,14 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.9.21] - 2026-07-11
+
+### Fixed
+
+- Убран скрытый default `connect_timeout=2s` с обычного `to-foreign`: пустой `TO_FOREIGN_CONNECT_TIMEOUT` снова означает отсутствие глобального timeout для доменных foreign routes, как и заявлено в env-контракте.
+- Добавлен runtime adaptive overlay для IPv4 literals: если health видит повторяющиеся timeout'ы на `to-foreign-ip-literal`, он проверяет top destination напрямую через `wg0`; если endpoint живой, пишет TTL-rule в `/var/lib/vpn-stack/adaptive-routing-rules.json` и применяет checked `sing-box` config через существующий `admin_apply.py`.
+- `admin_apply.py` теперь объединяет ручные admin routing rules и adaptive runtime rules в один проверяемый `/etc/sing-box/config.json`, при этом expired/bad adaptive rules отбрасываются до применения.
+
 ## [0.9.20] - 2026-07-11
 
 ### Fixed

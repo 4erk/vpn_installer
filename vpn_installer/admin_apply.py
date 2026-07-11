@@ -9,16 +9,19 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
 BASE_CONFIG_PATH = Path("/etc/vpn-stack/sing-box.base.json")
 CONFIG_PATH = Path("/etc/sing-box/config.json")
 RULES_PATH = Path("/etc/vpn-stack/admin-routing-rules.json")
+ADAPTIVE_RULES_PATH = Path("/var/lib/vpn-stack/adaptive-routing-rules.json")
 
 DOMAIN_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 OUTBOUND_TO_DNS = {"direct-ru": "dns-ru-direct", "to-foreign": "dns-global"}
 OUTBOUND_LABELS = {"direct-ru": "российский сервер", "to-foreign": "зарубежный сервер"}
+ADAPTIVE_OUTBOUNDS = {"to-foreign", "to-foreign-ip-literal", "to-foreign-ipv6-literal", "blocked"}
 
 
 def read_json(path: Path, default: Any) -> Any:
@@ -103,6 +106,84 @@ def load_rules(path: Path = RULES_PATH) -> list[dict[str, Any]]:
     return normalized
 
 
+def normalize_adaptive_rule(raw_rule: dict[str, Any], *, now: int | None = None) -> dict[str, Any]:
+    now = now if now is not None else int(time.time())
+    value = str(raw_rule.get("value", "")).strip()
+    network = ipaddress.ip_network(value, strict=False)
+    outbound = str(raw_rule.get("outbound", "")).strip()
+    if outbound not in ADAPTIVE_OUTBOUNDS:
+        raise ValueError("Adaptive rule uses unsupported outbound")
+    expires_at = int(raw_rule.get("expires_at", 0) or 0)
+    if expires_at and expires_at <= now:
+        raise ValueError("Adaptive rule is expired")
+    return {
+        "id": str(raw_rule.get("id", "")),
+        "type": "cidr",
+        "value": str(network),
+        "outbound": outbound,
+        "reason": str(raw_rule.get("reason", ""))[:120],
+        "expires_at": expires_at,
+        "enabled": bool(raw_rule.get("enabled", True)),
+    }
+
+
+def load_adaptive_rules(path: Path = ADAPTIVE_RULES_PATH, *, now: int | None = None) -> list[dict[str, Any]]:
+    payload = read_json(path, {"rules": []})
+    raw_rules = payload.get("rules", []) if isinstance(payload, dict) else []
+    normalized: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for raw_rule in raw_rules:
+        if not isinstance(raw_rule, dict):
+            continue
+        try:
+            rule = normalize_adaptive_rule(raw_rule, now=now)
+        except (ValueError, TypeError):
+            continue
+        if not rule.get("enabled", True):
+            continue
+        key = (rule["value"], rule["outbound"])
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(rule)
+    return normalized
+
+
+def adaptive_rule_id(value: str, outbound: str) -> str:
+    safe_value = re.sub(r"[^A-Za-z0-9_.:-]+", "-", value).strip("-")
+    return f"adaptive-{outbound}-{safe_value}"
+
+
+def upsert_adaptive_rule(
+    value: str,
+    outbound: str,
+    reason: str,
+    ttl_seconds: int,
+    path: Path = ADAPTIVE_RULES_PATH,
+    *,
+    now: int | None = None,
+) -> list[dict[str, Any]]:
+    now = now if now is not None else int(time.time())
+    ttl_seconds = max(60, min(int(ttl_seconds), 7 * 24 * 60 * 60))
+    network = str(ipaddress.ip_network(value, strict=False))
+    rule = normalize_adaptive_rule(
+        {
+            "id": adaptive_rule_id(network, outbound),
+            "type": "cidr",
+            "value": network,
+            "outbound": outbound,
+            "reason": reason,
+            "expires_at": now + ttl_seconds,
+            "enabled": True,
+        },
+        now=now,
+    )
+    rules = [item for item in load_adaptive_rules(path, now=now) if item["value"] != rule["value"]]
+    rules.append(rule)
+    write_json_atomic(path, {"rules": rules, "updated_at": now})
+    return rules
+
+
 def route_insert_index(rules: list[dict[str, Any]]) -> int:
     index = 0
     for i, rule in enumerate(rules):
@@ -132,9 +213,10 @@ def rule_domains(rule: dict[str, Any]) -> tuple[list[str], list[str]]:
     return [value], [f".{value}"]
 
 
-def apply_admin_rules_to_config(base_config: dict[str, Any], rules: list[dict[str, Any]]) -> dict[str, Any]:
+def apply_admin_rules_to_config(base_config: dict[str, Any], rules: list[dict[str, Any]], adaptive_rules: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     config = json.loads(json.dumps(base_config))
     enabled = [rule for rule in rules if rule.get("enabled", True)]
+    adaptive_enabled = [rule for rule in adaptive_rules or [] if rule.get("enabled", True)]
     dns_rules = config.setdefault("dns", {}).setdefault("rules", [])
     route_rules = config.setdefault("route", {}).setdefault("rules", [])
     dns_inserts: list[dict[str, Any]] = []
@@ -160,15 +242,20 @@ def apply_admin_rules_to_config(base_config: dict[str, Any], rules: list[dict[st
     if route_inserts:
         index = route_insert_index(route_rules)
         route_rules[index:index] = route_inserts
+    adaptive_inserts = [{"ip_cidr": [rule["value"]], "action": "route", "outbound": rule["outbound"]} for rule in adaptive_enabled]
+    if adaptive_inserts:
+        index = route_insert_index(route_rules)
+        route_rules[index:index] = adaptive_inserts
     return config
 
 
-def apply_rules(base_path: Path = BASE_CONFIG_PATH, config_path: Path = CONFIG_PATH, rules_path: Path = RULES_PATH, *, restart: bool = True) -> None:
+def apply_rules(base_path: Path = BASE_CONFIG_PATH, config_path: Path = CONFIG_PATH, rules_path: Path = RULES_PATH, adaptive_rules_path: Path = ADAPTIVE_RULES_PATH, *, restart: bool = True) -> None:
     base_config = read_json(base_path, None)
     if not isinstance(base_config, dict):
         raise RuntimeError(f"Base sing-box config not found or invalid: {base_path}")
     rules = load_rules(rules_path)
-    config = apply_admin_rules_to_config(base_config, rules)
+    adaptive_rules = load_adaptive_rules(adaptive_rules_path)
+    config = apply_admin_rules_to_config(base_config, rules, adaptive_rules)
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, dir=str(config_path.parent), suffix=".json") as handle:
         json.dump(config, handle, ensure_ascii=False, indent=2)
         handle.write("\n")
@@ -191,9 +278,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--base", type=Path, default=BASE_CONFIG_PATH)
     parser.add_argument("--config", type=Path, default=CONFIG_PATH)
     parser.add_argument("--rules", type=Path, default=RULES_PATH)
+    parser.add_argument("--adaptive-rules", type=Path, default=ADAPTIVE_RULES_PATH)
+    parser.add_argument("--add-adaptive-cidr", default="")
+    parser.add_argument("--adaptive-outbound", default="to-foreign")
+    parser.add_argument("--adaptive-reason", default="runtime")
+    parser.add_argument("--adaptive-ttl", type=int, default=86400)
     parser.add_argument("--no-restart", action="store_true")
     args = parser.parse_args(argv)
-    apply_rules(args.base, args.config, args.rules, restart=not args.no_restart)
+    if args.add_adaptive_cidr:
+        upsert_adaptive_rule(
+            args.add_adaptive_cidr,
+            args.adaptive_outbound,
+            args.adaptive_reason,
+            args.adaptive_ttl,
+            args.adaptive_rules,
+        )
+    apply_rules(args.base, args.config, args.rules, args.adaptive_rules, restart=not args.no_restart)
     return 0
 
 

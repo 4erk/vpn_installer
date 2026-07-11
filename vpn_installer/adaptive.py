@@ -73,17 +73,19 @@ def render_route_fail_collector_shell() -> str:
         f'  {route_class.name}_top="$({_route_fail_pipeline(route_class)} | sed -n {_shell_single_quote(route_class.destination_sed)} | sort | uniq -c | sort -nr | head -n1 | awk \'{{print $2 "=" $1}}\' || true)"'
         for route_class in ROUTE_FAIL_CLASSES
     )
-    decision_lines = "\n".join(
-        [
+    decision_blocks: list[str] = []
+    for route_class in ROUTE_FAIL_CLASSES:
+        adapt_line = f'    maybe_adapt_ipv4_literal_route "${{{route_class.name}_top}}"\n' if route_class.name == "ipv4_literal" else ""
+        decision_blocks.append(
             f'  if [[ "${{{route_class.name}_count}}" =~ ^[0-9]+$ && "${{{route_class.name}_count}}" -ge "${{ROUTE_FAIL_THRESHOLD}}" ]]; then\n'
             f'    mark_route_fail_bucket "{route_class.cache_prefix}" "${{{route_class.name}_count}}" "${{{route_class.name}_top}}"\n'
             f"    printf '{route_class.name}_timeout_recent=%s:%s\\n' \"${{{route_class.name}_count}}\" \"${{{route_class.name}_top}}\"\n"
+            f"{adapt_line}"
             f'  elif [[ "${{{route_class.name}_count}}" == "0" ]]; then\n'
             f'    reset_route_fail_bucket "{route_class.cache_prefix}"\n'
             "  fi"
-            for route_class in ROUTE_FAIL_CLASSES
-        ]
-    )
+        )
+    decision_lines = "\n".join(decision_blocks)
     return "\n".join(
         [
             "route_fail_journal_since() {",
@@ -103,6 +105,54 @@ def render_route_fail_collector_shell() -> str:
             "    fi",
             "  fi",
             '  printf "%s\\n" "${since}"',
+            "}",
+            "adaptive_ipv4_from_top_dest() {",
+            '  local top_dest="$1"',
+            '  local endpoint="${top_dest%%=*}"',
+            '  local host="${endpoint%:*}"',
+            '  local port="${endpoint##*:}"',
+            '  if [[ "${host}" =~ ^([0-9]{1,3}\\.){3}[0-9]{1,3}$ && "${port}" =~ ^[0-9]+$ ]]; then',
+            '    printf "%s %s\\n" "${host}" "${port}"',
+            "  fi",
+            "}",
+            "adaptive_ipv4_literal_is_live() {",
+            '  local host="$1"',
+            '  local port="$2"',
+            '  local scheme="http"',
+            '  local rc="0"',
+            '  command -v curl >/dev/null 2>&1 || return 1',
+            '  if [[ "${port}" == "443" ]]; then scheme="https"; fi',
+            '  curl -4ksS --interface "${WG_INTERFACE}" --connect-timeout 2 --max-time 4 -o /dev/null "${scheme}://${host}:${port}/" >/dev/null 2>&1 || rc="$?"',
+            '  [[ "${rc}" == "0" || "${rc}" == "35" || "${rc}" == "52" ]]',
+            "}",
+            "write_adaptive_ipv4_literal_rule() {",
+            '  local host="$1"',
+            '  local reason="$2"',
+            "  if [[ -x /usr/bin/python3 && -r /usr/local/lib/vpn-stack/admin_apply.py ]]; then",
+            "    /usr/bin/python3 /usr/local/lib/vpn-stack/admin_apply.py --add-adaptive-cidr \"${host}/32\" --adaptive-outbound to-foreign --adaptive-reason \"${reason}\" --adaptive-ttl 86400 --no-restart >/dev/null 2>&1",
+            "    return $?",
+            "  fi",
+            "  return 1",
+            "}",
+            "apply_adaptive_routing_rules() {",
+            "  if [[ -x /usr/bin/python3 && -r /usr/local/lib/vpn-stack/admin_apply.py ]]; then",
+            "    /usr/bin/python3 /usr/local/lib/vpn-stack/admin_apply.py --no-restart >/dev/null 2>&1 || return 1",
+            "    systemctl restart sing-box >/dev/null 2>&1 || true",
+            "    return 0",
+            "  fi",
+            "  return 1",
+            "}",
+            "maybe_adapt_ipv4_literal_route() {",
+            '  local top_dest="$1"',
+            '  local parsed="" host="" port=""',
+            '  parsed="$(adaptive_ipv4_from_top_dest "${top_dest}")"',
+            '  [[ -n "${parsed}" ]] || return 0',
+            '  read -r host port <<<"${parsed}"',
+            '  if adaptive_ipv4_literal_is_live "${host}" "${port}"; then',
+            '    if write_adaptive_ipv4_literal_rule "${host}" "ipv4_literal_slow_live:${top_dest}" && apply_adaptive_routing_rules; then',
+            '      printf "ipv4_literal_adapted=%s:%s\\n" "${host}" "${port}"',
+            "    fi",
+            "  fi",
             "}",
             "collect_route_fail_reasons() {",
             '  [[ "${ROLE}" == "ru-gateway" ]] || return 0',

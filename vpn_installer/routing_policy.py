@@ -81,14 +81,14 @@ def _client_dns_dot_networks(env: dict[str, str]) -> list[str]:
 
 @dataclass(frozen=True)
 class TrafficBudget:
-    domain_foreign_connect_timeout: str = "2s"
+    domain_foreign_connect_timeout: str = ""
     ipv4_literal_connect_timeout: str = "750ms"
     ipv6_literal_connect_timeout: str = "2s"
 
     @classmethod
     def from_env(cls, env: dict[str, str]) -> "TrafficBudget":
         return cls(
-            domain_foreign_connect_timeout=env.get("TO_FOREIGN_CONNECT_TIMEOUT", "").strip() or "2s",
+            domain_foreign_connect_timeout=env.get("TO_FOREIGN_CONNECT_TIMEOUT", "").strip(),
             ipv4_literal_connect_timeout=env.get("TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT", "750ms").strip(),
             ipv6_literal_connect_timeout=env.get("TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT", "2s").strip(),
         )
