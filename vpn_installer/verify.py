@@ -8,6 +8,7 @@ from . import health, remote, workflows
 from .common import print_header
 from .diagnostics import DiagnosticsSnapshot
 from .models import ROLE_FOREIGN, ROLE_RU
+from .roles import requested_roles
 
 
 def _probe_has_broken_result(raw_value: str) -> bool:
@@ -91,7 +92,7 @@ def _verify_snapshot(snapshot: DiagnosticsSnapshot) -> DiagnosticsSnapshot:
 
 def verify_live_workflow(deployment: str | None, *, non_interactive: bool = False) -> int:
     print_header("Live verification")
-    roles = workflows.requested_roles("all")
+    roles = requested_roles("all")
     deployment_name, env_path, env, _state, targets, _preflights = workflows.prepare_remote_session(
         deployment,
         roles=roles,

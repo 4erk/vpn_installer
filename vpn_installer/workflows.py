@@ -51,6 +51,7 @@ from .prompts import (
     validate_target_settings,
 )
 from .remote import ensure_remote_privilege, fetch_remote_deployment_env, print_preflight, remote_preflight, scp_upload, ssh_stream
+from .roles import execution_roles, requested_roles
 from .client_artifacts import client_artifact_paths, render_client_profiles
 from .render import deployment_out_dir, render_all_artifacts, render_config_artifacts
 from .state import load_state, state_json_path, state_legacy_path, write_state
@@ -118,20 +119,6 @@ def apply_env_connection_overrides(target: RemoteTarget) -> RemoteTarget:
     if target.public_ip and target.ssh_host and target.ssh_user and target.ssh_port:
         target.saved_connection = True
     return target
-
-
-def requested_roles(role_arg: str) -> list[str]:
-    return [ROLE_RU, ROLE_FOREIGN] if role_arg == "all" else [role_arg]
-
-
-def execution_roles(action: str, roles: list[str]) -> list[str]:
-    if action in {"install", "reinstall"}:
-        preferred = [ROLE_FOREIGN, ROLE_RU]
-    elif action in {"remove", "purge"}:
-        preferred = [ROLE_RU, ROLE_FOREIGN]
-    else:
-        preferred = [ROLE_RU, ROLE_FOREIGN]
-    return [role for role in preferred if role in roles]
 
 
 def update_env_with_targets(env: dict[str, str], targets: list[RemoteTarget]) -> None:

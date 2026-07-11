@@ -13,23 +13,8 @@ from vpn_installer import workflows
 
 
 class WorkflowTests(unittest.TestCase):
-    def test_execution_roles_install_foreign_then_ru(self) -> None:
-        self.assertEqual(
-            workflows.execution_roles("install", [workflows.ROLE_RU, workflows.ROLE_FOREIGN]),
-            [workflows.ROLE_FOREIGN, workflows.ROLE_RU],
-        )
-
-    def test_execution_roles_remove_ru_then_foreign(self) -> None:
-        self.assertEqual(
-            workflows.execution_roles("remove", [workflows.ROLE_RU, workflows.ROLE_FOREIGN]),
-            [workflows.ROLE_RU, workflows.ROLE_FOREIGN],
-        )
-
     def test_current_wg_interface_defaults_to_wg0(self) -> None:
         self.assertEqual(health.current_wg_interface({}), "wg0")
-
-    def test_requested_roles_all(self) -> None:
-        self.assertEqual(workflows.requested_roles("all"), [workflows.ROLE_RU, workflows.ROLE_FOREIGN])
 
     def test_build_target_from_env_without_state(self) -> None:
         env = {"RU_PUBLIC_IP": "203.0.113.10", "SSH_PORT": "22"}

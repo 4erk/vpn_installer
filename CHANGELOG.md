@@ -6,6 +6,12 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.9.19] - 2026-07-11
+
+### Fixed
+
+- Role selection helpers вынесены из `workflows.py` в `vpn_installer.roles`: `verify live` и `diagnose` больше не зависят от workflow-монолита ради `requested_roles()`, а install/remove orchestration использует тот же общий helper без дублирования.
+
 ## [0.9.18] - 2026-07-11
 
 ### Fixed
