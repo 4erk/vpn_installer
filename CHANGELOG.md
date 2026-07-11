@@ -6,6 +6,12 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.9.17] - 2026-07-11
+
+### Fixed
+
+- `verify live` вынесен из общего `workflows.py` в отдельный модуль `vpn_installer.verify`: policy принятия verdict, parsing probe-результатов и live orchestration больше не смешаны с install/status/remove workflows. CLI-контракт `vpn verify live` не изменён, тесты переведены на новый модуль.
+
 ## [0.9.16] - 2026-07-11
 
 ### Fixed

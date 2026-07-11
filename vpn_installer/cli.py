@@ -6,7 +6,8 @@ import sys
 from .android import DEFAULT_HIDDIFY_PACKAGE, android_diagnose
 from .diagnose import diagnose_client_log_workflow, diagnose_front_workflow, diagnose_path_workflow
 from .models import AppError, ROLE_FOREIGN, ROLE_RU, UserCancelled
-from .workflows import cleanup_local_workflow, client_check_workflow, install_workflow, menu_workflow, remote_action_workflow, status_workflow, verify_live_workflow
+from .verify import verify_live_workflow
+from .workflows import cleanup_local_workflow, client_check_workflow, install_workflow, menu_workflow, remote_action_workflow, status_workflow
 
 
 def build_parser() -> argparse.ArgumentParser:

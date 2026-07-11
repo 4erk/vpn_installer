@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from vpn_installer.diagnostics import DiagnosticsSnapshot
 from vpn_installer.models import ROLE_FOREIGN, ROLE_RU, RemoteTarget
-from vpn_installer.workflows import _verify_snapshot, verify_live_workflow
+from vpn_installer.verify import _verify_snapshot, verify_live_workflow
 
 
 class VerifyTests(unittest.TestCase):
@@ -134,10 +134,10 @@ class VerifyTests(unittest.TestCase):
             return preflights[target.role]
 
         with (
-            patch("vpn_installer.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), env, {}, targets, {})),
-            patch("vpn_installer.workflows.print_summary"),
-            patch("vpn_installer.workflows.print_preflight"),
-            patch("vpn_installer.workflows.remote_preflight", side_effect=fake_remote_preflight),
+            patch("vpn_installer.verify.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), env, {}, targets, {})),
+            patch("vpn_installer.verify.workflows.print_summary"),
+            patch("vpn_installer.verify.remote.print_preflight"),
+            patch("vpn_installer.verify.remote.remote_preflight", side_effect=fake_remote_preflight),
         ):
             self.assertEqual(verify_live_workflow("demo", non_interactive=True), 1)
 
@@ -174,11 +174,11 @@ class VerifyTests(unittest.TestCase):
             return preflights[target.role]
 
         with (
-            patch("vpn_installer.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), env, {}, targets, {})),
-            patch("vpn_installer.workflows.print_summary"),
-            patch("vpn_installer.workflows.print_preflight"),
-            patch("vpn_installer.workflows.print_deployment_health"),
-            patch("vpn_installer.workflows.remote_preflight", side_effect=fake_remote_preflight),
+            patch("vpn_installer.verify.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), env, {}, targets, {})),
+            patch("vpn_installer.verify.workflows.print_summary"),
+            patch("vpn_installer.verify.remote.print_preflight"),
+            patch("vpn_installer.verify.workflows.print_deployment_health"),
+            patch("vpn_installer.verify.remote.remote_preflight", side_effect=fake_remote_preflight),
         ):
             self.assertEqual(verify_live_workflow("demo", non_interactive=True), 1)
 
@@ -215,12 +215,12 @@ class VerifyTests(unittest.TestCase):
             return preflights[target.role]
 
         with (
-            patch("vpn_installer.workflows.time.time", return_value=1783733002),
-            patch("vpn_installer.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), env, {}, targets, {})),
-            patch("vpn_installer.workflows.print_summary"),
-            patch("vpn_installer.workflows.print_preflight"),
-            patch("vpn_installer.workflows.print_deployment_health"),
-            patch("vpn_installer.workflows.remote_preflight", side_effect=fake_remote_preflight),
+            patch("vpn_installer.verify.time.time", return_value=1783733002),
+            patch("vpn_installer.verify.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), env, {}, targets, {})),
+            patch("vpn_installer.verify.workflows.print_summary"),
+            patch("vpn_installer.verify.remote.print_preflight"),
+            patch("vpn_installer.verify.workflows.print_deployment_health"),
+            patch("vpn_installer.verify.remote.remote_preflight", side_effect=fake_remote_preflight),
         ):
             self.assertEqual(verify_live_workflow("demo", non_interactive=True), 0)
         self.assertEqual(anchors, [1783733002, 1783733002])
