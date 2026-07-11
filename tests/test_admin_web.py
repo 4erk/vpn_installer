@@ -656,6 +656,15 @@ class AdminWebTests(unittest.TestCase):
 
         self.assertEqual([rule["value"] for rule in rules], ["91.108.56.103/32", "149.154.167.51/32"])
 
+    def test_remove_adaptive_rule_removes_only_matching_cidr(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            rules_path = Path(tmp) / "adaptive.json"
+            admin_apply.upsert_adaptive_rule("91.108.56.103/32", "to-foreign", "first", 3600, rules_path, now=1_700_000_000)
+            admin_apply.upsert_adaptive_rule("149.154.167.51/32", "to-foreign", "second", 3600, rules_path, now=1_700_000_100)
+            rules = admin_apply.remove_adaptive_rule("91.108.56.103/32", rules_path, now=1_700_000_200)
+
+        self.assertEqual([rule["value"] for rule in rules], ["149.154.167.51/32"])
+
     def test_admin_apply_cli_can_add_adaptive_rule_without_restart(self) -> None:
         env = generate_default_env("demo")
         env["RU_PUBLIC_IP"] = "203.0.113.10"

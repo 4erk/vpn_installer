@@ -184,6 +184,14 @@ def upsert_adaptive_rule(
     return rules
 
 
+def remove_adaptive_rule(value: str, path: Path = ADAPTIVE_RULES_PATH, *, now: int | None = None) -> list[dict[str, Any]]:
+    now = now if now is not None else int(time.time())
+    network = str(ipaddress.ip_network(value, strict=False))
+    rules = [item for item in load_adaptive_rules(path, now=now) if item["value"] != network]
+    write_json_atomic(path, {"rules": rules, "updated_at": now})
+    return rules
+
+
 def route_insert_index(rules: list[dict[str, Any]]) -> int:
     index = 0
     for i, rule in enumerate(rules):
@@ -280,6 +288,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--rules", type=Path, default=RULES_PATH)
     parser.add_argument("--adaptive-rules", type=Path, default=ADAPTIVE_RULES_PATH)
     parser.add_argument("--add-adaptive-cidr", default="")
+    parser.add_argument("--remove-adaptive-cidr", default="")
     parser.add_argument("--adaptive-outbound", default="to-foreign")
     parser.add_argument("--adaptive-reason", default="runtime")
     parser.add_argument("--adaptive-ttl", type=int, default=86400)
@@ -293,6 +302,8 @@ def main(argv: list[str] | None = None) -> int:
             args.adaptive_ttl,
             args.adaptive_rules,
         )
+    if args.remove_adaptive_cidr:
+        remove_adaptive_rule(args.remove_adaptive_cidr, args.adaptive_rules)
     apply_rules(args.base, args.config, args.rules, args.adaptive_rules, restart=not args.no_restart)
     return 0
 

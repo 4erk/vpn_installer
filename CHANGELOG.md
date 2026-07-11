@@ -6,6 +6,14 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.9.22] - 2026-07-11
+
+### Fixed
+
+- Adaptive IPv4 literal promotion теперь требует majority-проверку: минимум 2 успешных WG probe из 3, а не один случайный успешный connect. Это не дает продвигать нестабильный literal в более длинный route.
+- Health теперь снимает adaptive IPv4 literal rule, если уже promoted destination начинает timeout'иться через обычный `to-foreign`; runtime overlay больше не остается висеть до TTL при свежем доказательстве деградации.
+- `admin_apply.py` получил typed remove-путь для adaptive CIDR rules и сохраняет остальные свежие adaptive entries при удалении одного destination.
+
 ## [0.9.21] - 2026-07-11
 
 ### Fixed

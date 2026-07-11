@@ -75,7 +75,11 @@ def render_route_fail_collector_shell() -> str:
     )
     decision_blocks: list[str] = []
     for route_class in ROUTE_FAIL_CLASSES:
-        adapt_line = f'    maybe_adapt_ipv4_literal_route "${{{route_class.name}_top}}"\n' if route_class.name == "ipv4_literal" else ""
+        adapt_line = ""
+        if route_class.name == "ipv4_literal":
+            adapt_line = f'    maybe_adapt_ipv4_literal_route "${{{route_class.name}_top}}"\n'
+        elif route_class.name == "domain_foreign":
+            adapt_line = f'    maybe_drop_adaptive_ipv4_route "${{{route_class.name}_top}}"\n'
         decision_blocks.append(
             f'  if [[ "${{{route_class.name}_count}}" =~ ^[0-9]+$ && "${{{route_class.name}_count}}" -ge "${{ROUTE_FAIL_THRESHOLD}}" ]]; then\n'
             f'    mark_route_fail_bucket "{route_class.cache_prefix}" "${{{route_class.name}_count}}" "${{{route_class.name}_top}}"\n'
@@ -119,17 +123,31 @@ def render_route_fail_collector_shell() -> str:
             '  local host="$1"',
             '  local port="$2"',
             '  local scheme="http"',
-            '  local rc="0"',
+            '  local rc="0" ok_count="0" attempt=""',
             '  command -v curl >/dev/null 2>&1 || return 1',
             '  if [[ "${port}" == "443" ]]; then scheme="https"; fi',
-            '  curl -4ksS --interface "${WG_INTERFACE}" --connect-timeout 2 --max-time 4 -o /dev/null "${scheme}://${host}:${port}/" >/dev/null 2>&1 || rc="$?"',
-            '  [[ "${rc}" == "0" || "${rc}" == "35" || "${rc}" == "52" ]]',
+            '  for attempt in 1 2 3; do',
+            '    rc="0"',
+            '    curl -4ksS --interface "${WG_INTERFACE}" --connect-timeout 2 --max-time 3 -o /dev/null "${scheme}://${host}:${port}/" >/dev/null 2>&1 || rc="$?"',
+            '    if [[ "${rc}" == "0" || "${rc}" == "35" || "${rc}" == "52" ]]; then',
+            '      ok_count="$((ok_count + 1))"',
+            "    fi",
+            "  done",
+            '  (( ok_count >= 2 ))',
             "}",
             "write_adaptive_ipv4_literal_rule() {",
             '  local host="$1"',
             '  local reason="$2"',
             "  if [[ -x /usr/bin/python3 && -r /usr/local/lib/vpn-stack/admin_apply.py ]]; then",
             "    /usr/bin/python3 /usr/local/lib/vpn-stack/admin_apply.py --add-adaptive-cidr \"${host}/32\" --adaptive-outbound to-foreign --adaptive-reason \"${reason}\" --adaptive-ttl 86400 --no-restart >/dev/null 2>&1",
+            "    return $?",
+            "  fi",
+            "  return 1",
+            "}",
+            "remove_adaptive_ipv4_literal_rule() {",
+            '  local host="$1"',
+            "  if [[ -x /usr/bin/python3 && -r /usr/local/lib/vpn-stack/admin_apply.py ]]; then",
+            "    /usr/bin/python3 /usr/local/lib/vpn-stack/admin_apply.py --remove-adaptive-cidr \"${host}/32\" --no-restart >/dev/null 2>&1",
             "    return $?",
             "  fi",
             "  return 1",
@@ -151,6 +169,18 @@ def render_route_fail_collector_shell() -> str:
             '  if adaptive_ipv4_literal_is_live "${host}" "${port}"; then',
             '    if write_adaptive_ipv4_literal_rule "${host}" "ipv4_literal_slow_live:${top_dest}" && apply_adaptive_routing_rules; then',
             '      printf "ipv4_literal_adapted=%s:%s\\n" "${host}" "${port}"',
+            "    fi",
+            "  fi",
+            "}",
+            "maybe_drop_adaptive_ipv4_route() {",
+            '  local top_dest="$1"',
+            '  local parsed="" host="" port=""',
+            '  parsed="$(adaptive_ipv4_from_top_dest "${top_dest}")"',
+            '  [[ -n "${parsed}" ]] || return 0',
+            '  read -r host port <<<"${parsed}"',
+            '  if grep -q "\\"value\\": \\"${host}/32\\"" /var/lib/vpn-stack/adaptive-routing-rules.json 2>/dev/null; then',
+            '    if remove_adaptive_ipv4_literal_rule "${host}" && apply_adaptive_routing_rules; then',
+            '      printf "ipv4_literal_adaptive_dropped=%s:%s\\n" "${host}" "${port}"',
             "    fi",
             "  fi",
             "}",
