@@ -131,6 +131,8 @@ class PackageTests(unittest.TestCase):
         self.assertIn('ADMIN_WEB_USERNAME="${ADMIN_WEB_USERNAME:-user}"', install_script)
         self.assertIn('ADMIN_WEB_PASSWORD="${ADMIN_WEB_PASSWORD:-password}"', install_script)
         self.assertIn('python3 "${ADMIN_APPLY_SCRIPT_PATH}" --no-restart', install_script)
+        self.assertIn('ADAPTIVE_ROUTING_RULES_PATH="/var/lib/vpn-stack/adaptive-routing-rules.json"', install_script)
+        self.assertIn("reset_runtime_adaptive_cache", install_script)
         self.assertIn('systemctl enable vpn-stack-admin.service', install_script)
         self.assertIn('FOREIGN_BLOCK_RU="${FOREIGN_BLOCK_RU:-0}"', install_script)
         self.assertIn('RU_BLOCK_IP_CIDR="${RU_BLOCK_IP_CIDR:-}"', install_script)
@@ -218,7 +220,7 @@ class PackageTests(unittest.TestCase):
 
     def test_package_exposes_version_via_getattr(self) -> None:
         package = importlib.import_module("vpn_installer")
-        self.assertEqual(package.__version__, "0.9.22")
+        self.assertEqual(package.__version__, "0.9.23")
         with self.assertRaises(AttributeError):
             package.__getattr__("nope")
 

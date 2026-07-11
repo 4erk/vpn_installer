@@ -4,6 +4,7 @@ import ipaddress
 import json
 import os
 import re
+import http.client
 import urllib.error
 import urllib.request
 import uuid
@@ -630,8 +631,11 @@ def _write_prefix_lines(destination: Path, prefixes: list[str]) -> None:
 
 def _download_ripe_country_resource(url: str, destination: Path, asset_name: str) -> None:
     request = urllib.request.Request(url, headers={"User-Agent": "vpn-installer/1.0"})
-    with urllib.request.urlopen(request, timeout=DEFAULT_ASSET_TIMEOUT) as response:
-        payload = json.loads(response.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(request, timeout=DEFAULT_ASSET_TIMEOUT) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except http.client.IncompleteRead as exc:
+        raise RuntimeError(f"incomplete download for {asset_name}: {exc}") from exc
     resources = payload.get("data", {}).get("resources", {})
     family_key = _country_resource_key(asset_name)
     prefixes = resources.get(family_key, [])
@@ -652,6 +656,9 @@ def download_file(url: str, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     request = urllib.request.Request(url, headers={"User-Agent": "vpn-installer/1.0"})
     tmp_path = destination.with_suffix(destination.suffix + ".tmp")
-    with urllib.request.urlopen(request, timeout=DEFAULT_ASSET_TIMEOUT) as response:
-        tmp_path.write_bytes(response.read())
+    try:
+        with urllib.request.urlopen(request, timeout=DEFAULT_ASSET_TIMEOUT) as response:
+            tmp_path.write_bytes(response.read())
+    except http.client.IncompleteRead as exc:
+        raise RuntimeError(f"incomplete download: {exc}") from exc
     tmp_path.replace(destination)

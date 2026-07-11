@@ -261,6 +261,7 @@ SUBSCRIPTION_SERVICE_PATH="/etc/systemd/system/vpn-stack-subscription.service"
 SYSCTL_PATH="/etc/sysctl.d/90-vpn-stack.conf"
 JOURNALD_DROPIN_PATH="/etc/systemd/journald.conf.d/90-vpn-stack.conf"
 SUBSCRIPTION_ROOT="/var/lib/vpn-stack/subscription"
+ADAPTIVE_ROUTING_RULES_PATH="/var/lib/vpn-stack/adaptive-routing-rules.json"
 VPNSTACK_ROLE_FILE="${VPNSTACK_ROOT}/role"
 VPNSTACK_DEPLOYMENT_FILE="${VPNSTACK_ROOT}/deployment.env"
 VPNSTACK_INSTALLED_AT_FILE="${VPNSTACK_ROOT}/installed_at"
@@ -741,9 +742,16 @@ remove_managed_files() {
     "${GUARD_TIMER_PATH}" \
     "${ADMIN_WEB_SERVICE_PATH}" \
     "${SUBSCRIPTION_SERVICE_PATH}" \
-    "${SYSCTL_PATH}"
+    "${SYSCTL_PATH}" \
+    "${ADAPTIVE_ROUTING_RULES_PATH}"
   rm -rf "${SUBSCRIPTION_ROOT}"
   rm -rf "${RULESET_DIR}"
+}
+
+reset_runtime_adaptive_cache() {
+  if [[ "${ROLE}" == "ru-gateway" ]]; then
+    rm -f "${ADAPTIVE_ROUTING_RULES_PATH}"
+  fi
 }
 
 record_install_metadata() {
@@ -1385,6 +1393,7 @@ INSTALL_MUTATION_STARTED=1
 if [[ "$ACTION" == "reinstall" ]]; then
   stop_managed_services
 fi
+reset_runtime_adaptive_cache
 copy_role_artifacts "${ROLE_ARTIFACTS_DIR}"
 
 if [[ "$ROLE" == "ru-gateway" ]]; then

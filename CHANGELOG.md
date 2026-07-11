@@ -6,6 +6,14 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.9.23] - 2026-07-11
+
+### Fixed
+
+- `install.sh` теперь сбрасывает `/var/lib/vpn-stack/adaptive-routing-rules.json` на RU при `install/reinstall`, чтобы runtime adaptive cache не переживал смену rendered base config и не переносил ошибочные learned routes из предыдущего патча.
+- Managed remove/purge также удаляет adaptive routing cache вместе с остальными server-side runtime artifacts.
+- Неполные HTTP downloads rule-set assets (`IncompleteRead`) теперь конвертируются в контролируемый failed source, чтобы `fetch_assets` мог перейти к следующему URL или cache fallback вместо падения audit/install посередине загрузки.
+
 ## [0.9.22] - 2026-07-11
 
 ### Fixed

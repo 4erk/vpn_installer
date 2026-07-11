@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import http.client
 import json
 import tempfile
 import unittest
@@ -400,6 +401,11 @@ class ConfigTests(unittest.TestCase):
                     "ru-ipv4.zone",
                 )
             self.assertEqual(output.read_text(encoding="utf-8"), "5.8.0.0/21\n31.13.24.0/21\n")
+
+    def test_download_file_converts_incomplete_read_to_runtime_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch("urllib.request.urlopen", side_effect=http.client.IncompleteRead(b"partial", 10)):
+            with self.assertRaises(RuntimeError):
+                config.download_file("https://example.invalid/file.srs", Path(tmp) / "file.srs")
 
     def test_require_env_and_existing_deployment_helpers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
