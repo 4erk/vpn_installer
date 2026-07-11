@@ -15,7 +15,7 @@ from ..common import OUT_DIR, ROOT_DIR, RUNTIME_SITE_PACKAGES
 from ..config import load_env_file
 from ..render import render_all_artifacts
 from ..runtime_deps import ensure_python_package
-from ..workflows import build_target
+from ..targets import build_target
 from .runner import AUDIT_IMAGE, VPN_PS1, AuditFailure, AuditRunner, powershell_executable, python_cmd, write_bytes
 
 COVERAGE_THRESHOLD = 90
@@ -112,6 +112,7 @@ def run(runner: AuditRunner) -> None:
                 str(ROOT_DIR / "vpn_installer" / "cli.py"),
                 str(ROOT_DIR / "vpn_installer" / "install_support.py"),
                 str(ROOT_DIR / "vpn_installer" / "runtime_deps.py"),
+                str(ROOT_DIR / "vpn_installer" / "targets.py"),
                 str(ROOT_DIR / "vpn_installer" / "workflows.py"),
                 str(ROOT_DIR / "vpn_installer" / "render.py"),
                 str(ROOT_DIR / "vpn_installer" / "audit" / "runner.py"),

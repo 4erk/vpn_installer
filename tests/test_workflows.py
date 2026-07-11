@@ -9,6 +9,7 @@ from vpn_installer.config import generate_default_env
 from vpn_installer import health
 from vpn_installer.localnet import LocalRoute
 from vpn_installer.models import AppError, ROLE_FOREIGN, ROLE_RU, RemoteTarget, UserCancelled
+from vpn_installer import targets
 from vpn_installer import workflows
 
 
@@ -18,14 +19,14 @@ class WorkflowTests(unittest.TestCase):
 
     def test_build_target_from_env_without_state(self) -> None:
         env = {"RU_PUBLIC_IP": "203.0.113.10", "SSH_PORT": "22"}
-        target = workflows.build_target(workflows.ROLE_RU, env, {})
+        target = targets.build_target(ROLE_RU, env, {})
         self.assertEqual(target.public_ip, "203.0.113.10")
         self.assertFalse(target.saved_connection)
 
     def test_apply_env_connection_overrides_supports_unattended_password_login(self) -> None:
         target = RemoteTarget(role=ROLE_RU)
         with patch.dict(
-            "vpn_installer.workflows.os.environ",
+            "vpn_installer.targets.os.environ",
             {
                 "VPN_RU_PUBLIC_IP": "203.0.113.10",
                 "VPN_RU_SSH_HOST": "ssh.example.test",
@@ -35,7 +36,7 @@ class WorkflowTests(unittest.TestCase):
             },
             clear=False,
         ):
-            updated = workflows.apply_env_connection_overrides(target)
+            updated = targets.apply_env_connection_overrides(target)
         self.assertTrue(updated.saved_connection)
         self.assertEqual(updated.public_ip, "203.0.113.10")
         self.assertEqual(updated.ssh_host, "ssh.example.test")
@@ -46,7 +47,7 @@ class WorkflowTests(unittest.TestCase):
 
     def test_update_env_with_targets(self) -> None:
         env = {}
-        workflows.update_env_with_targets(
+        targets.update_env_with_targets(
             env,
             [
                 RemoteTarget(role=ROLE_RU, public_ip="203.0.113.10"),

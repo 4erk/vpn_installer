@@ -6,6 +6,12 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.9.20] - 2026-07-11
+
+### Fixed
+
+- Target/env resolution вынесен из `workflows.py` в `vpn_installer.targets`: построение `RemoteTarget`, unattended SSH overrides, синхронизация public IP и remote-env match теперь живут в одном чистом модуле. `diagnose` и `audit.quick` больше не импортируют workflow-монолит ради target helpers.
+
 ## [0.9.19] - 2026-07-11
 
 ### Fixed

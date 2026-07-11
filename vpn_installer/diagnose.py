@@ -16,7 +16,8 @@ from .state import load_state
 from .client_artifacts import client_artifact_paths
 from .health import current_wg_interface
 from .roles import requested_roles
-from .workflows import build_target, prepare_remote_session
+from .targets import build_target
+from .workflows import prepare_remote_session
 
 _SOURCE_IP_RE = re.compile(r"^[0-9A-Fa-f:.]+$")
 PATH_DIAGNOSE_COMMAND_TIMEOUT = 180
