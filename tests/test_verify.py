@@ -177,7 +177,7 @@ class VerifyTests(unittest.TestCase):
             patch("vpn_installer.verify.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), env, {}, targets, {})),
             patch("vpn_installer.verify.workflows.print_summary"),
             patch("vpn_installer.verify.remote.print_preflight"),
-            patch("vpn_installer.verify.workflows.print_deployment_health"),
+            patch("vpn_installer.verify.health.print_deployment_health"),
             patch("vpn_installer.verify.remote.remote_preflight", side_effect=fake_remote_preflight),
         ):
             self.assertEqual(verify_live_workflow("demo", non_interactive=True), 1)
@@ -219,7 +219,7 @@ class VerifyTests(unittest.TestCase):
             patch("vpn_installer.verify.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), env, {}, targets, {})),
             patch("vpn_installer.verify.workflows.print_summary"),
             patch("vpn_installer.verify.remote.print_preflight"),
-            patch("vpn_installer.verify.workflows.print_deployment_health"),
+            patch("vpn_installer.verify.health.print_deployment_health"),
             patch("vpn_installer.verify.remote.remote_preflight", side_effect=fake_remote_preflight),
         ):
             self.assertEqual(verify_live_workflow("demo", non_interactive=True), 0)

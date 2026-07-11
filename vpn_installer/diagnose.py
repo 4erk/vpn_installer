@@ -14,7 +14,8 @@ from .prompts import select_existing_deployment
 from .remote import ssh_capture
 from .state import load_state
 from .client_artifacts import client_artifact_paths
-from .workflows import current_wg_interface, prepare_remote_session, requested_roles
+from .health import current_wg_interface
+from .workflows import prepare_remote_session, requested_roles
 from .workflows import build_target
 
 _SOURCE_IP_RE = re.compile(r"^[0-9A-Fa-f:.]+$")

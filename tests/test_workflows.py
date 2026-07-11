@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from vpn_installer.config import generate_default_env
+from vpn_installer import health
 from vpn_installer.localnet import LocalRoute
 from vpn_installer.models import AppError, ROLE_FOREIGN, ROLE_RU, RemoteTarget, UserCancelled
 from vpn_installer import workflows
@@ -25,7 +26,7 @@ class WorkflowTests(unittest.TestCase):
         )
 
     def test_current_wg_interface_defaults_to_wg0(self) -> None:
-        self.assertEqual(workflows.current_wg_interface({}), "wg0")
+        self.assertEqual(health.current_wg_interface({}), "wg0")
 
     def test_requested_roles_all(self) -> None:
         self.assertEqual(workflows.requested_roles("all"), [workflows.ROLE_RU, workflows.ROLE_FOREIGN])
@@ -318,7 +319,7 @@ class WorkflowTests(unittest.TestCase):
 
     def test_deployment_health_snapshot_reports_expected_verdicts(self) -> None:
         env = generate_default_env("demo")
-        healthy = workflows.deployment_health_snapshot(
+        healthy = health.deployment_health_snapshot(
             env,
             {
                 ROLE_RU: {"wg_observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "20", "deep_ru_wg_download_min_bps": "800000", "deep_ru_wg_upload_bps": "1200000"},
@@ -330,7 +331,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(healthy["foreign_direct_upload_bps"], "1400000")
         self.assertEqual(healthy["handshake_grace_s"], "200")
 
-        mismatch = workflows.deployment_health_snapshot(
+        mismatch = health.deployment_health_snapshot(
             env,
             {
                 ROLE_RU: {"wg_observed_ipv4": "203.0.113.10", "wg_latest_handshake_age_s": "20"},
@@ -339,7 +340,7 @@ class WorkflowTests(unittest.TestCase):
         )
         self.assertEqual(mismatch["health_verdict"], "foreign_ru_ip_mismatch")
 
-        stale_with_verified_egress = workflows.deployment_health_snapshot(
+        stale_with_verified_egress = health.deployment_health_snapshot(
             env,
             {
                 ROLE_RU: {"wg_observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "999"},
@@ -350,7 +351,7 @@ class WorkflowTests(unittest.TestCase):
 
         dynamic_grace_env = generate_default_env("demo")
         dynamic_grace_env["WG_KEEPALIVE"] = "40"
-        dynamic_grace = workflows.deployment_health_snapshot(
+        dynamic_grace = health.deployment_health_snapshot(
             dynamic_grace_env,
             {
                 ROLE_RU: {"wg_observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "300"},
@@ -360,7 +361,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(dynamic_grace["health_verdict"], "ok")
         self.assertEqual(dynamic_grace["handshake_grace_s"], "320")
 
-        stale_deep_ignored = workflows.deployment_health_snapshot(
+        stale_deep_ignored = health.deployment_health_snapshot(
             env,
             {
                 ROLE_RU: {"wg_observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "20", "wg_download_bps": "900000", "deep_ru_wg_download_min_bps": "120000"},
@@ -370,7 +371,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(stale_deep_ignored["health_verdict"], "ok")
         self.assertEqual(stale_deep_ignored["ru_wg_download_bps"], "900000")
 
-        missing_current_falls_back_to_deep = workflows.deployment_health_snapshot(
+        missing_current_falls_back_to_deep = health.deployment_health_snapshot(
             env,
             {
                 ROLE_RU: {"wg_observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "20", "wg_download_bps": "-1", "deep_ru_wg_download_min_bps": "900000"},
@@ -380,7 +381,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(missing_current_falls_back_to_deep["health_verdict"], "ok")
         self.assertEqual(missing_current_falls_back_to_deep["ru_wg_download_bps"], "900000")
 
-        degraded = workflows.deployment_health_snapshot(
+        degraded = health.deployment_health_snapshot(
             env,
             {
                 ROLE_RU: {"wg_observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "20", "wg_download_bps": "120000", "deep_ru_wg_download_min_bps": "900000"},
@@ -389,7 +390,7 @@ class WorkflowTests(unittest.TestCase):
         )
         self.assertEqual(degraded["health_verdict"], "ru_wg_download_degraded")
 
-        loss_profile_only = workflows.deployment_health_snapshot(
+        loss_profile_only = health.deployment_health_snapshot(
             env,
             {
                 ROLE_RU: {"wg_observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "20", "deep_ru_wg_download_min_bps": "900000"},
@@ -407,7 +408,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(loss_profile_only["health_verdict"], "foreign_ru_ping_loss_degraded")
         self.assertEqual(loss_profile_only["foreign_ru_ping_loss_pct"], "12")
 
-        fast_loss_overrides_stale_deep = workflows.deployment_health_snapshot(
+        fast_loss_overrides_stale_deep = health.deployment_health_snapshot(
             env,
             {
                 ROLE_RU: {"wg_observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "20", "deep_ru_wg_download_min_bps": "900000"},
@@ -425,7 +426,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(fast_loss_overrides_stale_deep["health_verdict"], "ok")
         self.assertEqual(fast_loss_overrides_stale_deep["foreign_ru_ping_loss_pct"], "0")
 
-        gateway_loss_profile_only = workflows.deployment_health_snapshot(
+        gateway_loss_profile_only = health.deployment_health_snapshot(
             env,
             {
                 ROLE_RU: {"wg_observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "20", "deep_ru_wg_download_min_bps": "900000"},
@@ -443,7 +444,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(gateway_loss_profile_only["health_verdict"], "foreign_gateway_ping_loss_degraded")
         self.assertEqual(gateway_loss_profile_only["foreign_gateway_ping_loss_pct"], "12")
 
-        partial_target_issue = workflows.deployment_health_snapshot(
+        partial_target_issue = health.deployment_health_snapshot(
             env,
             {
                 ROLE_RU: {
@@ -468,7 +469,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(partial_target_issue["health_verdict"], "ok")
         self.assertIn("github.com:broken:000", partial_target_issue["target_probe_issues"])
 
-        target_degraded = workflows.deployment_health_snapshot(
+        target_degraded = health.deployment_health_snapshot(
             env,
             {
                 ROLE_RU: {
@@ -493,7 +494,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(target_degraded["health_verdict"], "ru_wg_target_degraded")
         self.assertIn("chatgpt.com:blocked:451", target_degraded["target_probe_issues"])
 
-        threshold_jitter = workflows.deployment_health_snapshot(
+        threshold_jitter = health.deployment_health_snapshot(
             env,
             {
                 ROLE_RU: {"wg_observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "20", "deep_ru_wg_download_min_bps": "492000", "deep_ru_wg_upload_bps": "1200000"},

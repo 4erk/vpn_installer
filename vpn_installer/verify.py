@@ -4,7 +4,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import remote, workflows
+from . import health, remote, workflows
 from .common import print_header
 from .diagnostics import DiagnosticsSnapshot
 from .models import ROLE_FOREIGN, ROLE_RU
@@ -109,7 +109,7 @@ def verify_live_workflow(deployment: str | None, *, non_interactive: bool = Fals
     rank = {"verified": 0, "degraded": 1, "inconclusive": 2, "failed": 3}
     verify_started_epoch = int(time.time())
     for target in targets:
-        preflight = remote.remote_preflight(target, workflows.current_wg_interface(env), fresh_since_epoch=verify_started_epoch)
+        preflight = remote.remote_preflight(target, health.current_wg_interface(env), fresh_since_epoch=verify_started_epoch)
         preflights_by_role[target.role] = preflight
         remote.print_preflight(target, preflight)
         snapshot = _verify_snapshot(DiagnosticsSnapshot.from_preflight(preflight, deployment=deployment_name))
@@ -118,11 +118,11 @@ def verify_live_workflow(deployment: str | None, *, non_interactive: bool = Fals
             worst = snapshot.verdict
     health_reason = ""
     if {ROLE_RU, ROLE_FOREIGN}.issubset(preflights_by_role):
-        health = workflows.deployment_health_snapshot(env, preflights_by_role)
-        workflows.print_deployment_health(health)
-        if health["health_verdict"] != "ok":
-            health_verdict = "failed" if workflows.is_hard_health_verdict(health["health_verdict"]) else "degraded"
-            health_reason = workflows.health_failure_message(health)
+        deployment_health = health.deployment_health_snapshot(env, preflights_by_role)
+        health.print_deployment_health(deployment_health)
+        if deployment_health["health_verdict"] != "ok":
+            health_verdict = "failed" if health.is_hard_health_verdict(deployment_health["health_verdict"]) else "degraded"
+            health_reason = health.health_failure_message(deployment_health)
             if rank[health_verdict] > rank[worst]:
                 worst = health_verdict
     print_header("Live verification result")

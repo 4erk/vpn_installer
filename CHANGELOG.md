@@ -6,6 +6,12 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.9.18] - 2026-07-11
+
+### Fixed
+
+- Dataplane health policy вынесена из `workflows.py` в отдельный модуль `vpn_installer.health`: расчёт verdict, parsing probe-результатов, границы soft/hard деградации и форматирование health больше не смешаны с install/status/self-heal orchestration. `verify live` и `diagnose path` используют health-модуль напрямую.
+
 ## [0.9.17] - 2026-07-11
 
 ### Fixed
