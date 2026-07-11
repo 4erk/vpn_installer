@@ -327,7 +327,8 @@ def fetch_remote_deployment_env(target: RemoteTarget) -> str:
     return ssh_capture(target, "cat /etc/vpn-stack/deployment.env", as_root=True)
 
 
-def preflight_script(wg_interface: str) -> str:
+def preflight_script(wg_interface: str, fresh_since_epoch: int | None = None) -> str:
+    fresh_since_value = "" if fresh_since_epoch is None else str(int(fresh_since_epoch))
     return f"""\
 set -euo pipefail
 
@@ -802,6 +803,7 @@ xray_log_window_minutes="30"
 post_install_log_grace_seconds="10"
 singbox_recent_effective_since="-${{singbox_log_window_minutes}} minutes"
 xray_recent_effective_since="-${{xray_log_window_minutes}} minutes"
+verify_fresh_since_epoch="{fresh_since_value}"
 xray_recent_error_count="0"
 xray_recent_invalid_reality_count="0"
 xray_recent_disabled_invalid_count="0"
@@ -822,6 +824,10 @@ if command -v date >/dev/null 2>&1 && [[ -n "${{installed_at}}" ]]; then
     if (( post_install_epoch > singbox_window_epoch )); then singbox_recent_effective_since="@${{post_install_epoch}}"; fi
     if (( post_install_epoch > xray_window_epoch )); then xray_recent_effective_since="@${{post_install_epoch}}"; fi
   fi
+fi
+if [[ "${{verify_fresh_since_epoch}}" =~ ^[0-9]+$ ]]; then
+  singbox_recent_effective_since="@${{verify_fresh_since_epoch}}"
+  xray_recent_effective_since="@${{verify_fresh_since_epoch}}"
 fi
 
 if [[ "${{role}}" == "ru-gateway" ]] && command -v journalctl >/dev/null 2>&1; then
@@ -1352,8 +1358,8 @@ printf 'ssh_socket=%s\\n' "$(service_state ssh.socket)"
 """.strip()
 
 
-def remote_preflight(target: RemoteTarget, wg_interface: str) -> dict[str, str]:
-    return parse_kv_output(ssh_capture(target, preflight_script(wg_interface)))
+def remote_preflight(target: RemoteTarget, wg_interface: str, *, fresh_since_epoch: int | None = None) -> dict[str, str]:
+    return parse_kv_output(ssh_capture(target, preflight_script(wg_interface, fresh_since_epoch=fresh_since_epoch)))
 
 
 def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:

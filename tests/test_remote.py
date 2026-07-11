@@ -92,6 +92,12 @@ class RemoteTests(unittest.TestCase):
         self.assertIn('"${xray_recent_log}" | grep \'REALITY: processed invalid connection\' || true)"', script)
         self.assertNotIn("journalctl -u vpn-stack-xray.service --since '-30 minutes'", script)
 
+    def test_preflight_can_anchor_fresh_log_window_for_live_verify(self) -> None:
+        script = preflight_script("wg0", fresh_since_epoch=1783733000)
+        self.assertIn('verify_fresh_since_epoch="1783733000"', script)
+        self.assertIn('singbox_recent_effective_since="@${verify_fresh_since_epoch}"', script)
+        self.assertIn('xray_recent_effective_since="@${verify_fresh_since_epoch}"', script)
+
     def test_password_mode_forces_python_backend(self) -> None:
         target = RemoteTarget(role=ROLE_RU, auth_mode="password")
         self.assertTrue(use_python_ssh_backend(target))
@@ -371,6 +377,11 @@ class RemoteTests(unittest.TestCase):
             payload = remote_preflight(RemoteTarget(role=ROLE_RU), "wgx")
         mocked.assert_called_once()
         self.assertEqual(payload["role"], "ru-gateway")
+
+    def test_remote_preflight_passes_fresh_log_anchor(self) -> None:
+        with patch("vpn_installer.remote.ssh_capture", return_value="role=ru-gateway\n") as mocked:
+            remote_preflight(RemoteTarget(role=ROLE_RU), "wgx", fresh_since_epoch=1783733001)
+        self.assertIn('verify_fresh_since_epoch="1783733001"', mocked.call_args.args[1])
 
     def test_fetch_remote_deployment_env_uses_root_capture(self) -> None:
         with patch("vpn_installer.remote.ssh_capture", return_value='DEPLOY_NAME="demo"\n') as mocked:

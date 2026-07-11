@@ -1104,8 +1104,9 @@ def verify_live_workflow(deployment: str | None, *, non_interactive: bool = Fals
     preflights_by_role: dict[str, dict[str, str]] = {}
     worst = "verified"
     rank = {"verified": 0, "degraded": 1, "inconclusive": 2, "failed": 3}
+    verify_started_epoch = int(time.time())
     for target in targets:
-        preflight = remote_preflight(target, current_wg_interface(env))
+        preflight = remote_preflight(target, current_wg_interface(env), fresh_since_epoch=verify_started_epoch)
         preflights_by_role[target.role] = preflight
         print_preflight(target, preflight)
         snapshot = _verify_snapshot(DiagnosticsSnapshot.from_preflight(preflight, deployment=deployment_name))

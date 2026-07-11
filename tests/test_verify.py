@@ -130,7 +130,7 @@ class VerifyTests(unittest.TestCase):
             },
         }
 
-        def fake_remote_preflight(target: RemoteTarget, _wg_interface: str) -> dict[str, str]:
+        def fake_remote_preflight(target: RemoteTarget, _wg_interface: str, *, fresh_since_epoch: int | None = None) -> dict[str, str]:
             return preflights[target.role]
 
         with (
@@ -170,7 +170,7 @@ class VerifyTests(unittest.TestCase):
             },
         }
 
-        def fake_remote_preflight(target: RemoteTarget, _wg_interface: str) -> dict[str, str]:
+        def fake_remote_preflight(target: RemoteTarget, _wg_interface: str, *, fresh_since_epoch: int | None = None) -> dict[str, str]:
             return preflights[target.role]
 
         with (
@@ -181,6 +181,49 @@ class VerifyTests(unittest.TestCase):
             patch("vpn_installer.workflows.remote_preflight", side_effect=fake_remote_preflight),
         ):
             self.assertEqual(verify_live_workflow("demo", non_interactive=True), 1)
+
+    def test_verify_live_workflow_anchors_preflight_log_window_at_verify_start(self) -> None:
+        targets = [
+            RemoteTarget(role=ROLE_RU, ssh_host="ru.example"),
+            RemoteTarget(role=ROLE_FOREIGN, ssh_host="foreign.example"),
+        ]
+        env = {"WG_INTERFACE": "wg-test"}
+        anchors: list[int | None] = []
+        preflights = {
+            ROLE_RU: {
+                "role": ROLE_RU,
+                "sing_box": "active",
+                "xray": "active",
+                "wireguard": "active",
+                "nftables": "active",
+                "drift": "none",
+                "observed_ipv4": "198.51.100.1",
+                "wg_observed_ipv4": "198.51.100.2",
+                "ipv6_literal_tcp_probe": "cloudflare_v6:reachable:200:0:2606:4700:4700::1111:0.08",
+            },
+            ROLE_FOREIGN: {
+                "role": ROLE_FOREIGN,
+                "wireguard": "active",
+                "nftables": "active",
+                "drift": "none",
+                "observed_ipv4": "198.51.100.2",
+            },
+        }
+
+        def fake_remote_preflight(target: RemoteTarget, _wg_interface: str, *, fresh_since_epoch: int | None = None) -> dict[str, str]:
+            anchors.append(fresh_since_epoch)
+            return preflights[target.role]
+
+        with (
+            patch("vpn_installer.workflows.time.time", return_value=1783733002),
+            patch("vpn_installer.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), env, {}, targets, {})),
+            patch("vpn_installer.workflows.print_summary"),
+            patch("vpn_installer.workflows.print_preflight"),
+            patch("vpn_installer.workflows.print_deployment_health"),
+            patch("vpn_installer.workflows.remote_preflight", side_effect=fake_remote_preflight),
+        ):
+            self.assertEqual(verify_live_workflow("demo", non_interactive=True), 0)
+        self.assertEqual(anchors, [1783733002, 1783733002])
 
 
 if __name__ == "__main__":

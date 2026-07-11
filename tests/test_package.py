@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import re
 import runpy
 import sys
 import unittest
@@ -8,10 +9,46 @@ from pathlib import Path
 from unittest.mock import patch
 
 from vpn_installer.audit.runner import AUDIT_IMAGE, AUDIT_SINGBOX_REQUIRED_VERSION
-from vpn_installer.config import render_example_env_text
+from vpn_installer.config import generate_default_env, render_example_env_text
 
 
 class PackageTests(unittest.TestCase):
+    GENERATED_SECRET_DEFAULTS = {
+        "CLIENT_UUID",
+        "RU_REALITY_PRIVATE_KEY",
+        "RU_REALITY_PUBLIC_KEY",
+        "WG_RU_PRIVATE_KEY",
+        "WG_RU_PUBLIC_KEY",
+        "WG_FOREIGN_PRIVATE_KEY",
+        "WG_FOREIGN_PUBLIC_KEY",
+        "WG_PRESHARED_KEY",
+    }
+    PYTHON_ONLY_DEFAULTS = GENERATED_SECRET_DEFAULTS | {
+        "CLIENT_ENABLE_IPV6",
+        "CLIENT_FAKEIP_V4",
+        "CLIENT_FAKEIP_V6",
+        "CLIENT_ROUTE_EXCLUDE_V4",
+        "CLIENT_ROUTE_EXCLUDE_V6",
+        "CLIENT_TUN_ADDRESS_V4",
+        "CLIENT_TUN_ADDRESS_V6",
+        "CLIENT_TUN_NAME",
+        "FOREIGN_PUBLIC_IP",
+        "RU_HTTPS_INPUT_BURST",
+        "RU_HTTPS_INPUT_RATE",
+        "RU_PUBLIC_IP",
+        "RU_REALITY_HANDSHAKE_SERVER",
+        "RU_REALITY_SERVER_NAME",
+        "RU_REALITY_SHORT_ID",
+        "SSH_INPUT_BURST",
+        "SSH_INPUT_RATE",
+        "WAN_INTERFACE",
+    }
+    SHELL_ONLY_DEFAULTS = {
+        "APT_LOCK_RETRY_SECONDS",
+        "APT_LOCK_TIMEOUT_SECONDS",
+        "XRAY_REQUIRED_VERSION",
+    }
+
     def test_package_main_is_lazy(self) -> None:
         sys.modules.pop("vpn_installer", None)
         sys.modules.pop("vpn_installer.cli", None)
@@ -26,6 +63,24 @@ class PackageTests(unittest.TestCase):
             self.skipTest("deployment.env.example удалён локально, сравнение checked-in примера пропущено")
         checked_in = example_path.read_text(encoding="utf-8")
         self.assertEqual(checked_in, render_example_env_text())
+
+    def test_install_shell_defaults_match_python_defaults(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        install_script = (repo_root / "install.sh").read_text(encoding="utf-8")
+        shell_defaults = {
+            match.group(1): match.group(2)
+            for match in re.finditer(r'^([A-Z0-9_]+)="\$\{\1(?::-|-)(.*)\}"$', install_script, re.MULTILINE)
+        }
+        python_defaults = generate_default_env("vpn-stack")
+        comparable_keys = sorted((set(shell_defaults) & set(python_defaults)) - self.GENERATED_SECRET_DEFAULTS)
+        mismatches = {
+            key: (shell_defaults[key], python_defaults[key])
+            for key in comparable_keys
+            if shell_defaults[key] != python_defaults[key]
+        }
+        self.assertEqual(mismatches, {})
+        self.assertEqual(set(shell_defaults) - set(python_defaults), self.SHELL_ONLY_DEFAULTS)
+        self.assertEqual(set(python_defaults) - set(shell_defaults), self.PYTHON_ONLY_DEFAULTS)
 
     def test_install_script_starts_sync_timer_after_enabling(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
@@ -163,7 +218,7 @@ class PackageTests(unittest.TestCase):
 
     def test_package_exposes_version_via_getattr(self) -> None:
         package = importlib.import_module("vpn_installer")
-        self.assertEqual(package.__version__, "0.9.15")
+        self.assertEqual(package.__version__, "0.9.16")
         with self.assertRaises(AttributeError):
             package.__getattr__("nope")
 

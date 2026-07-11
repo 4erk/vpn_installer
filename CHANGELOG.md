@@ -6,6 +6,13 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.9.16] - 2026-07-11
+
+### Fixed
+
+- Добавлен структурный тест дрейфа между bootstrap defaults в `install.sh` и Python `generate_default_env()`: совпадающие runtime-параметры теперь сравниваются автоматически, а допустимые shell-only/python-only ключи перечислены явно. Это закрывает слой техдолга, где duplicated defaults могли расходиться без сигнала от тестов и ломать reinstall/server-authoritative env незаметно для audit.
+- `vpn verify live` больше не использует обычное 30-минутное status-окно как verdict-window: workflow передаёт в `remote_preflight` timestamp старта проверки, а Xray/sing-box fresh buckets для verify считаются от этого якоря. Исторические ошибки остаются видимыми в `status`, но больше не валят live verification как будто они появились во время проверки.
+
 ## [0.9.15] - 2026-07-11
 
 ### Fixed
