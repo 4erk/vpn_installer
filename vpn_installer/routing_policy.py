@@ -7,7 +7,7 @@ from typing import Any
 
 from .dns_policy import CONNECTIVITY_CHECK_DIRECT_DOMAINS, CONNECTIVITY_CHECK_IPV6_ONLY_DOMAINS, merged_domains
 
-POLICY_VERSION = "0.9.14"
+POLICY_VERSION = "0.9.24"
 
 TRAFFIC_CLASSES = (
     "ru_direct_domain",
@@ -17,6 +17,7 @@ TRAFFIC_CLASSES = (
     "connectivity_check",
     "connectivity_check_ipv6_only",
     "dns_global",
+    "resolved_ru_ip",
     "domain_foreign",
     "ipv4_literal_foreign",
     "ipv6_literal_foreign",
@@ -199,8 +200,7 @@ def build_ru_routing_policy(env: dict[str, str]) -> RoutingPolicy:
         route_rules.append({"ip_cidr": ["0.0.0.0/0"], "action": "route", "outbound": "to-foreign-ip-literal"})
     route_rules.append({"action": "resolve", "server": "dns-global", "strategy": "ipv4_only"})
     route_rules.append({"ip_is_private": True, "action": "route", "outbound": "blocked"})
-    if geoip_direct:
-        route_rules.append({"rule_set": ["ru-geoip"], "action": "route", "outbound": "direct-ru"})
+    route_rules.append({"rule_set": ["ru-geoip"], "action": "route", "outbound": "direct-ru"})
 
     foreign_base = {
         "type": "direct",
@@ -233,6 +233,7 @@ def build_ru_routing_policy(env: dict[str, str]) -> RoutingPolicy:
         "connectivity_check": RouteClass("connectivity_check", "direct-ru", "dns-ru-direct", "none", "direct_ru", "dns-global"),
         "connectivity_check_ipv6_only": RouteClass("connectivity_check_ipv6_only", "blocked", "none", "none", "blocked_private_fake", "none"),
         "dns_global": RouteClass("dns_global", "to-foreign", "dns-global", "domain_foreign", "dns_failed", "dns-ru-direct"),
+        "resolved_ru_ip": RouteClass("resolved_ru_ip", "direct-ru", "dns-global", "none", "direct_ru_resolved", "to-foreign"),
         "domain_foreign": RouteClass("domain_foreign", "to-foreign", "dns-global", "operator_override", "domain_to_foreign_timeout", "none"),
         "ipv4_literal_foreign": RouteClass("ipv4_literal_foreign", "to-foreign-ip-literal", "dns-global", literal_policy, "ipv4_literal_timeout", "reject"),
         "ipv6_literal_foreign": RouteClass("ipv6_literal_foreign", "to-foreign-ipv6-literal", "dns-global", ipv6_literal_policy, "ipv6_literal_timeout", "reject"),

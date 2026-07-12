@@ -19,6 +19,8 @@ class RoutingPolicyTests(unittest.TestCase):
         self.assertEqual(policy.classes["ipv4_literal_foreign"].outbound, "to-foreign-ip-literal")
         self.assertEqual(policy.classes["ipv6_literal_foreign"].outbound, "to-foreign-ipv6-literal")
         self.assertEqual(policy.classes["domain_foreign"].outbound, "to-foreign")
+        self.assertEqual(policy.classes["resolved_ru_ip"].outbound, "direct-ru")
+        self.assertEqual(policy.classes["resolved_ru_ip"].resolver, "dns-global")
         self.assertEqual(policy.classes["client_dns_dot"].outbound, "direct-ru")
         self.assertEqual(policy.classes["connectivity_check"].outbound, "direct-ru")
         self.assertEqual(policy.classes["connectivity_check_ipv6_only"].outbound, "blocked")
@@ -65,6 +67,25 @@ class RoutingPolicyTests(unittest.TestCase):
         self.assertNotIn("connect_timeout", outbounds["to-foreign"])
         self.assertEqual(outbounds["to-foreign-ip-literal"]["connect_timeout"], "750ms")
         self.assertEqual(outbounds["to-foreign-ipv6-literal"]["connect_timeout"], "2s")
+
+    def test_resolved_ru_geoip_direct_only_after_domain_resolution(self) -> None:
+        parts = build_ru_routing_policy(self.make_env()).singbox_parts()
+        route_rules = parts["route_rules"]
+        ipv4_literal_index = next(index for index, rule in enumerate(route_rules) if rule.get("ip_cidr") == ["0.0.0.0/0"])
+        resolve_index = next(index for index, rule in enumerate(route_rules) if rule.get("server") == "dns-global")
+        ru_geoip_indexes = [index for index, rule in enumerate(route_rules) if rule.get("rule_set") == ["ru-geoip"] and rule.get("outbound") == "direct-ru"]
+
+        self.assertEqual(len(ru_geoip_indexes), 1)
+        self.assertLess(ipv4_literal_index, resolve_index)
+        self.assertLess(resolve_index, ru_geoip_indexes[0])
+
+        env = self.make_env()
+        env["RU_GEOIP_DIRECT"] = "1"
+        route_rules = build_ru_routing_policy(env).route_rules
+        ipv4_literal_index = next(index for index, rule in enumerate(route_rules) if rule.get("ip_cidr") == ["0.0.0.0/0"])
+        ru_geoip_indexes = [index for index, rule in enumerate(route_rules) if rule.get("rule_set") == ["ru-geoip"] and rule.get("outbound") == "direct-ru"]
+        self.assertEqual(len(ru_geoip_indexes), 2)
+        self.assertLess(ru_geoip_indexes[0], ipv4_literal_index)
 
     def test_ipv6_literal_route_budget_stays_explicit_operator_mode(self) -> None:
         env = self.make_env()

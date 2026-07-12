@@ -216,6 +216,7 @@ class RenderTests(unittest.TestCase):
         global_resolve_index = next(index for index, rule in enumerate(route_rules) if rule.get("action") == "resolve" and rule.get("server") == "dns-global")
         ipv6_index = next(index for index, rule in enumerate(route_rules) if rule.get("ip_version") == 6)
         ipv4_literal_index = next(index for index, rule in enumerate(route_rules) if rule.get("ip_cidr") == ["0.0.0.0/0"] and rule.get("outbound") == "to-foreign-ip-literal")
+        resolved_ru_geoip_index = next(index for index, rule in enumerate(route_rules) if rule.get("rule_set") == ["ru-geoip"] and rule.get("outbound") == "direct-ru")
         first_direct_route_index = next(index for index, rule in enumerate(route_rules) if rule.get("outbound") == "direct-ru")
         self.assertEqual(sniff_rule, {"inbound": ["router-in"], "action": "sniff", "timeout": "250ms"})
         self.assertIn({"network": "udp", "port": 443, "action": "reject"}, route_rules)
@@ -224,6 +225,7 @@ class RenderTests(unittest.TestCase):
         self.assertLess(first_direct_route_index, ipv6_index)
         self.assertLess(ipv6_index, ipv4_literal_index)
         self.assertLess(ipv4_literal_index, global_resolve_index)
+        self.assertLess(global_resolve_index, resolved_ru_geoip_index)
         self.assertNotIn("connect_timeout", outbounds["to-foreign"])
         self.assertEqual(outbounds["to-foreign-ip-literal"]["connect_timeout"], "750ms")
         self.assertEqual(outbounds["to-foreign-ipv6-literal"]["connect_timeout"], "2s")
@@ -264,6 +266,7 @@ class RenderTests(unittest.TestCase):
         route_rules = payload["route"]["rules"]
         sniff_index = next(index for index, rule in enumerate(route_rules) if rule.get("action") == "sniff")
         global_resolve_index = next(index for index, rule in enumerate(route_rules) if rule.get("action") == "resolve" and rule.get("server") == "dns-global")
+        resolved_ru_geoip_index = next(index for index, rule in enumerate(route_rules) if rule.get("rule_set") == ["ru-geoip"] and rule.get("outbound") == "direct-ru")
         ipv6_index = next(index for index, rule in enumerate(route_rules) if rule.get("ip_version") == 6)
         private_indexes = [index for index, rule in enumerate(route_rules) if rule.get("ip_is_private") is True]
         ipv4_literal_index = next(index for index, rule in enumerate(route_rules) if rule.get("ip_cidr") == ["0.0.0.0/0"] and rule.get("outbound") == "to-foreign-ip-literal")
@@ -279,6 +282,7 @@ class RenderTests(unittest.TestCase):
         self.assertLess(ipv6_index, ipv4_literal_index)
         self.assertLess(ipv4_literal_index, global_resolve_index)
         self.assertLess(global_resolve_index, private_indexes[1])
+        self.assertLess(private_indexes[1], resolved_ru_geoip_index)
         self.assertEqual(route_rules[global_resolve_index]["strategy"], "ipv4_only")
 
     def test_ru_server_routes_public_ipv4_literals_to_dedicated_foreign_outbound_before_global_resolve(self) -> None:
@@ -361,11 +365,11 @@ class RenderTests(unittest.TestCase):
         private_index = route_rules.index(private_rule)
         global_resolve_index = next(index for index, rule in enumerate(route_rules) if rule.get("action") == "resolve" and rule.get("server") == "dns-global")
         ipv4_literal_index = next(index for index, rule in enumerate(route_rules) if rule.get("ip_cidr") == ["0.0.0.0/0"] and rule.get("outbound") == "to-foreign-ip-literal")
+        resolved_ru_geoip_index = next(index for index, rule in enumerate(route_rules) if rule.get("rule_set") == ["ru-geoip"] and rule.get("outbound") == "direct-ru")
         direct_domain_route_index = next(index for index, rule in enumerate(route_rules) if rule.get("outbound") == "direct-ru" and "domain" in rule)
         direct_suffix_route_index = next(index for index, rule in enumerate(route_rules) if rule.get("outbound") == "direct-ru" and "domain_suffix" in rule)
         ru_geosite_route_index = next(index for index, rule in enumerate(route_rules) if rule.get("outbound") == "direct-ru" and rule.get("rule_set") == ["ru-geosite"])
 
-        self.assertFalse(any(rule.get("rule_set") == ["ru-geoip"] and rule.get("outbound") == "direct-ru" for rule in route_rules))
         self.assertLess(direct_domain_route_index, ipv6_index)
         self.assertLess(direct_suffix_route_index, ipv6_index)
         self.assertLess(ru_geosite_route_index, ipv6_index)
@@ -373,13 +377,19 @@ class RenderTests(unittest.TestCase):
         self.assertLess(private_index, ipv6_index)
         self.assertLess(ipv6_index, ipv4_literal_index)
         self.assertLess(ipv4_literal_index, global_resolve_index)
+        self.assertLess(global_resolve_index, resolved_ru_geoip_index)
         self.assertEqual(private_rule["outbound"], "blocked")
 
-    def test_ru_server_geoip_direct_is_opt_in_for_unknown_ip_literals(self) -> None:
+    def test_ru_server_resolved_ru_geoip_direct_does_not_capture_raw_ip_literals(self) -> None:
         env = self.make_env()
         payload = json.loads(render.render_ru_singbox(env))
         route_rules = payload["route"]["rules"]
-        self.assertFalse(any(rule.get("rule_set") == ["ru-geoip"] and rule.get("outbound") == "direct-ru" for rule in route_rules))
+        ru_geoip_indexes = [index for index, rule in enumerate(route_rules) if rule.get("rule_set") == ["ru-geoip"] and rule.get("outbound") == "direct-ru"]
+        ipv4_literal_index = next(index for index, rule in enumerate(route_rules) if rule.get("ip_cidr") == ["0.0.0.0/0"] and rule.get("outbound") == "to-foreign-ip-literal")
+        global_resolve_index = next(index for index, rule in enumerate(route_rules) if rule.get("action") == "resolve" and rule.get("server") == "dns-global")
+        self.assertEqual(len(ru_geoip_indexes), 1)
+        self.assertLess(ipv4_literal_index, global_resolve_index)
+        self.assertLess(global_resolve_index, ru_geoip_indexes[0])
 
         env["RU_GEOIP_DIRECT"] = "1"
         payload = json.loads(render.render_ru_singbox(env))
