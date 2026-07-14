@@ -7,12 +7,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .adaptive import (
-    format_route_fail_cache,
-    render_route_fail_cache_printf_shell,
-    render_route_fail_cache_read_shell,
-    route_fail_cache_has_data,
-)
 from .common import command_exists, fail, run_command
 from .models import AppError, RemoteTarget
 from .runtime_deps import ensure_python_package
@@ -327,10 +321,12 @@ def fetch_remote_deployment_env(target: RemoteTarget) -> str:
     return ssh_capture(target, "cat /etc/vpn-stack/deployment.env", as_root=True)
 
 
-def preflight_script(wg_interface: str, fresh_since_epoch: int | None = None) -> str:
+def preflight_script(wg_interface: str, fresh_since_epoch: int | None = None, *, run_live_probes: bool = False) -> str:
     fresh_since_value = "" if fresh_since_epoch is None else str(int(fresh_since_epoch))
+    live_probes_value = "1" if run_live_probes else "0"
     return f"""\
 set -euo pipefail
+run_live_probes="{live_probes_value}"
 
 service_state() {{
   if command -v systemctl >/dev/null 2>&1; then
@@ -358,13 +354,6 @@ state_value() {{
   local key="$1"
   if [[ -r /var/lib/vpn-stack/health-state.env ]]; then
     awk -F= -v key="${{key}}" '$1 == key {{ sub(/^[^=]*=/, ""); gsub(/^"/, ""); gsub(/"$/, ""); print; exit }}' /var/lib/vpn-stack/health-state.env
-  fi
-}}
-
-cache_value() {{
-  local key="$1"
-  if [[ -r /var/lib/vpn-stack/dataplane-cache.env ]]; then
-    awk -F= -v key="${{key}}" '$1 == key {{ sub(/^[^=]*=/, ""); gsub(/^"/, ""); gsub(/"$/, ""); print; exit }}' /var/lib/vpn-stack/dataplane-cache.env
   fi
 }}
 
@@ -403,12 +392,15 @@ nft_port_packets() {{
 probe_download_bps() {{
   local bind_iface="$1"
   local url="$2"
+  local proxy_url="${{3:-}}"
   if ! command -v curl >/dev/null 2>&1 || [[ -z "${{url}}" ]]; then
     printf -- '-1'
     return 0
   fi
   local speed
-  if [[ -n "${{bind_iface}}" ]]; then
+  if [[ -n "${{proxy_url}}" ]]; then
+    speed="$(curl -4fsS --proxy "${{proxy_url}}" --max-time 15 -o /dev/null -w '%{{speed_download}}' "${{url}}" 2>/dev/null || true)"
+  elif [[ -n "${{bind_iface}}" ]]; then
     speed="$(curl -4fsS --interface "${{bind_iface}}" --max-time 15 -o /dev/null -w '%{{speed_download}}' "${{url}}" 2>/dev/null || true)"
   else
     speed="$(curl -4fsS --max-time 15 -o /dev/null -w '%{{speed_download}}' "${{url}}" 2>/dev/null || true)"
@@ -451,6 +443,7 @@ probe_target_urls() {{
   local urls="$2"
   local connect_timeout="$3"
   local max_time="$4"
+  local proxy_url="${{5:-}}"
   local url="" label="" result="" result_tail="" code="" exit_code="" remote_ip="" time_total="" verdict="" joined=""
   if ! command -v curl >/dev/null 2>&1 || [[ -z "${{urls}}" ]]; then
     return 0
@@ -460,7 +453,9 @@ probe_target_urls() {{
   for url in ${{urls}}; do
     label="${{url#*://}}"
     label="${{label%%/*}}"
-    if [[ -n "${{bind_iface}}" ]]; then
+    if [[ -n "${{proxy_url}}" ]]; then
+      result="$(curl -4kIsS --proxy "${{proxy_url}}" --connect-timeout "${{connect_timeout}}" --max-time "${{max_time}}" -o /dev/null -w '%{{http_code}}|%{{exitcode}}|%{{remote_ip}}|%{{time_total}}' "${{url}}" 2>/dev/null || true)"
+    elif [[ -n "${{bind_iface}}" ]]; then
       result="$(curl -4kIsS --interface "${{bind_iface}}" --connect-timeout "${{connect_timeout}}" --max-time "${{max_time}}" -o /dev/null -w '%{{http_code}}|%{{exitcode}}|%{{remote_ip}}|%{{time_total}}' "${{url}}" 2>/dev/null || true)"
     else
       result="$(curl -4kIsS --connect-timeout "${{connect_timeout}}" --max-time "${{max_time}}" -o /dev/null -w '%{{http_code}}|%{{exitcode}}|%{{remote_ip}}|%{{time_total}}' "${{url}}" 2>/dev/null || true)"
@@ -469,10 +464,12 @@ probe_target_urls() {{
     result_tail="${{result#*|}}"
     exit_code="${{result_tail%%|*}}"
     if target_probe_needs_body_fallback "${{code}}" "${{exit_code}}"; then
-      if [[ -n "${{bind_iface}}" ]]; then
-        result="$(curl -4kLsS --range 0-0 --interface "${{bind_iface}}" --connect-timeout "${{connect_timeout}}" --max-time "${{max_time}}" -o /dev/null -w '%{{http_code}}|%{{exitcode}}|%{{remote_ip}}|%{{time_total}}' "${{url}}" 2>/dev/null || printf '000|curl_failed||0')"
+      if [[ -n "${{proxy_url}}" ]]; then
+        result="$(curl -4kLsS --range 0-0 --proxy "${{proxy_url}}" --connect-timeout "${{connect_timeout}}" --max-time "${{max_time}}" -o /dev/null -w '%{{http_code}}|%{{exitcode}}|%{{remote_ip}}|%{{time_total}}' "${{url}}" 2>/dev/null || true)"
+      elif [[ -n "${{bind_iface}}" ]]; then
+        result="$(curl -4kLsS --range 0-0 --interface "${{bind_iface}}" --connect-timeout "${{connect_timeout}}" --max-time "${{max_time}}" -o /dev/null -w '%{{http_code}}|%{{exitcode}}|%{{remote_ip}}|%{{time_total}}' "${{url}}" 2>/dev/null || true)"
       else
-        result="$(curl -4kLsS --range 0-0 --connect-timeout "${{connect_timeout}}" --max-time "${{max_time}}" -o /dev/null -w '%{{http_code}}|%{{exitcode}}|%{{remote_ip}}|%{{time_total}}' "${{url}}" 2>/dev/null || printf '000|curl_failed||0')"
+        result="$(curl -4kLsS --range 0-0 --connect-timeout "${{connect_timeout}}" --max-time "${{max_time}}" -o /dev/null -w '%{{http_code}}|%{{exitcode}}|%{{remote_ip}}|%{{time_total}}' "${{url}}" 2>/dev/null || true)"
       fi
     fi
     code="${{result%%|*}}"
@@ -521,8 +518,8 @@ probe_ipv6_literal_tcp_path() {{
 {{
   "log": {{"level": "error", "timestamp": true}},
   "inbounds": [{{"type": "mixed", "tag": "in", "listen": "127.0.0.1", "listen_port": ${{port}}}}],
-  "outbounds": [{{"type": "direct", "tag": "to-foreign-ipv6-literal-probe", "bind_interface": "${{bind_iface}}", "routing_mark": ${{route_mark}}, "connect_timeout": "4s"}}],
-  "route": {{"final": "to-foreign-ipv6-literal-probe"}}
+  "outbounds": [{{"type": "direct", "tag": "foreign-ipv6-probe", "bind_interface": "${{bind_iface}}", "routing_mark": ${{route_mark}}, "connect_timeout": "4s"}}],
+  "route": {{"final": "foreign-ipv6-probe"}}
 }}
 JSON
   sing-box run -c "${{config}}" >"${{log}}" 2>&1 &
@@ -543,7 +540,7 @@ JSON
   for target in "cloudflare_v6=https://[2606:4700:4700::1111]/cdn-cgi/trace" "google_v6=https://[2a00:1450:400f:807::200e]/generate_204" "meta_v6=https://[2a02:ec80:600:ed1a::2:b]/"; do
     label="${{target%%=*}}"
     url="${{target#*=}}"
-    result="$(curl -kLsS --proxy "socks5h://127.0.0.1:${{port}}" --connect-timeout 4 --max-time 6 -o /dev/null -w '%{{http_code}}|%{{exitcode}}|%{{remote_ip}}|%{{time_total}}' "${{url}}" 2>/dev/null || printf '000|curl_failed||0')"
+    result="$(curl -kLsS --proxy "socks5h://127.0.0.1:${{port}}" --connect-timeout 4 --max-time 6 -o /dev/null -w '%{{http_code}}|%{{exitcode}}|%{{remote_ip}}|%{{time_total}}' "${{url}}" 2>/dev/null || true)"
     code="${{result%%|*}}"
     result="${{result#*|}}"
     exit_code="${{result%%|*}}"
@@ -586,8 +583,6 @@ configured_wan_interface=""
 singbox_configured_log_level=""
 global_doh_server=""
 global_doh_server_name=""
-ru_literal_policy=""
-ru_ipv6_literal_policy=""
 deprecated_routing_overrides=""
 installed_env_sha256=""
 installed_singbox_sha256=""
@@ -605,12 +600,11 @@ if [[ -r /etc/vpn-stack/deployment.env ]]; then
   singbox_configured_log_level="$(grep -E '^SING_BOX_LOG_LEVEL=' /etc/vpn-stack/deployment.env | head -n1 | cut -d= -f2- | sed 's/^"//; s/"$//')"
   global_doh_server="$(grep -E '^GLOBAL_DOH_SERVER=' /etc/vpn-stack/deployment.env | head -n1 | cut -d= -f2- | sed 's/^"//; s/"$//')"
   global_doh_server_name="$(grep -E '^GLOBAL_DOH_SERVER_NAME=' /etc/vpn-stack/deployment.env | head -n1 | cut -d= -f2- | sed 's/^"//; s/"$//')"
-  ru_literal_policy="$(env_value RU_LITERAL_POLICY)"
-  ru_ipv6_literal_policy="$(env_value RU_IPV6_LITERAL_POLICY)"
-  if [[ "$(env_value TO_FOREIGN_CONNECT_TIMEOUT)" != "" ]]; then deprecated_routing_overrides="${{deprecated_routing_overrides}},TO_FOREIGN_CONNECT_TIMEOUT"; fi
-  if [[ "$(env_value TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT)" != "750ms" ]]; then deprecated_routing_overrides="${{deprecated_routing_overrides}},TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT"; fi
-  if [[ "$(env_value TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT)" != "2s" ]]; then deprecated_routing_overrides="${{deprecated_routing_overrides}},TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT"; fi
-  deprecated_routing_overrides="${{deprecated_routing_overrides#,}}"
+  deprecated_routing_overrides="$(
+    grep -E '^(RU_LITERAL_POLICY|RU_IPV6_LITERAL_POLICY|RU_IPV6_POLICY|RU_GEOIP_DIRECT|TO_FOREIGN_CONNECT_TIMEOUT|TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT|TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT)=' /etc/vpn-stack/deployment.env 2>/dev/null |
+      cut -d= -f1 |
+      paste -sd, - || true
+  )"
 fi
 if [[ -r /etc/vpn-stack/role ]]; then role="$(tr -d '\\r\\n' </etc/vpn-stack/role)"; fi
 if [[ -r /etc/vpn-stack/installed_at ]]; then installed_at="$(tr -d '\\r\\n' </etc/vpn-stack/installed_at)"; fi
@@ -710,6 +704,8 @@ ssh_port="$(env_value SSH_PORT)"
 if [[ -z "${{ssh_port}}" ]]; then ssh_port="22"; fi
 ru_listen_port="$(env_value RU_LISTEN_PORT)"
 if [[ -z "${{ru_listen_port}}" ]]; then ru_listen_port="443"; fi
+ru_router_listen_port="$(env_value RU_ROUTER_LISTEN_PORT)"
+if [[ -z "${{ru_router_listen_port}}" ]]; then ru_router_listen_port="2080"; fi
 direct_download_bps="-1"
 wg_download_bps="-1"
 target_probe_direct=""
@@ -722,17 +718,15 @@ nft_vless_drop_packets=""
 deep_probe_at="$(state_value DEEP_PROBE_AT)"
 deep_probe_verdict="$(state_value DEEP_PROBE_VERDICT)"
 deep_probe_reasons="$(state_value DEEP_PROBE_REASONS)"
-deep_foreign_direct_download_min_bps="$(state_value DEEP_FOREIGN_DIRECT_DOWNLOAD_MIN_BPS)"
+deep_foreign_direct_download_bps="$(state_value DEEP_FOREIGN_DIRECT_DOWNLOAD_BPS)"
 deep_foreign_direct_download_detail="$(state_value DEEP_FOREIGN_DIRECT_DOWNLOAD_DETAIL)"
 deep_foreign_direct_upload_bps="$(state_value DEEP_FOREIGN_DIRECT_UPLOAD_BPS)"
 deep_foreign_gateway_ping_loss_pct="$(state_value DEEP_FOREIGN_GATEWAY_PING_LOSS_PCT)"
 deep_foreign_ru_ping_loss_pct="$(state_value DEEP_FOREIGN_RU_PING_LOSS_PCT)"
 deep_foreign_internet_ping_loss_pct="$(state_value DEEP_FOREIGN_INTERNET_PING_LOSS_PCT)"
-deep_ru_wg_download_min_bps="$(state_value DEEP_RU_WG_DOWNLOAD_MIN_BPS)"
+deep_ru_wg_download_bps="$(state_value DEEP_RU_WG_DOWNLOAD_BPS)"
 deep_ru_wg_download_detail="$(state_value DEEP_RU_WG_DOWNLOAD_DETAIL)"
 deep_ru_wg_upload_bps="$(state_value DEEP_RU_WG_UPLOAD_BPS)"
-fast_foreign_ru_ping_loss_pct="$(state_value FAST_FOREIGN_RU_PING_LOSS_PCT)"
-fast_ru_foreign_ping_loss_pct="$(state_value FAST_RU_FOREIGN_PING_LOSS_PCT)"
 self_heal_last_reason="$(state_value SELF_HEAL_LAST_REASON)"
 self_heal_consecutive="$(state_value SELF_HEAL_CONSECUTIVE)"
 self_heal_last_action="$(state_value SELF_HEAL_LAST_ACTION)"
@@ -744,15 +738,7 @@ profile_updated_at="$(state_value PROFILE_UPDATED_AT)"
 profile_handshake_age_s="$(state_value PROFILE_HANDSHAKE_AGE_S)"
 profile_handshake_grace_s="$(state_value PROFILE_HANDSHAKE_GRACE_S)"
 profile_wg_path_ok="$(state_value PROFILE_WG_PATH_OK)"
-profile_fast_ping_loss_pct="$(state_value PROFILE_FAST_PING_LOSS_PCT)"
 profile_stale_handshake_live_path_s="$(state_value PROFILE_STALE_HANDSHAKE_WITH_LIVE_PATH_S)"
-good_wg_path_at="$(cache_value GOOD_WG_PATH_AT)"
-good_wg_path_at_epoch="$(cache_value GOOD_WG_PATH_AT_EPOCH)"
-good_wg_path_age_s="$(age_from_epoch "${{good_wg_path_at_epoch}}")"
-good_wg_path_source="$(cache_value GOOD_WG_PATH_SOURCE)"
-good_wg_path_handshake_age_s="$(cache_value GOOD_WG_PATH_HANDSHAKE_AGE_S)"
-good_cache_ttl_seconds="$(cache_value GOOD_CACHE_TTL_SECONDS)"
-{render_route_fail_cache_read_shell()}
 reality_invalid_recent_count="0"
 reality_invalid_recent_sources=""
 guard_last_run="$(guard_state_value GUARD_LAST_RUN_AT)"
@@ -763,12 +749,21 @@ singbox_to_foreign_ip_literal_timeout_count="0"
 singbox_to_foreign_ipv6_literal_timeout_count="0"
 singbox_direct_ru_timeout_count="0"
 singbox_dns_timeout_count="0"
+singbox_dns_nxdomain_count="0"
+singbox_dns_failed_count="0"
+singbox_start_count_24h="$(journalctl -u sing-box --since '24 hours ago' --no-pager -o cat 2>/dev/null | grep -c '^Started sing-box.service' || true)"
+singbox_start_count_since_install=""
+if [[ -n "${{installed_at}}" ]]; then
+  singbox_start_count_since_install="$(journalctl -u sing-box --since "${{installed_at}}" --no-pager -o cat 2>/dev/null | grep -c '^Started sing-box.service' || true)"
+fi
 singbox_recent_timeout_sample=""
 singbox_log_window_minutes="30"
 singbox_recent_blocked_count="0"
 singbox_recent_mux_closed_count="0"
 singbox_recent_eof_count="0"
 singbox_recent_dns_failed_count="0"
+singbox_recent_dns_timeout_count="0"
+singbox_recent_dns_nxdomain_count="0"
 singbox_recent_timeout_count="0"
 singbox_recent_invalid_reality_count="0"
 singbox_recent_to_foreign_timeout_count="0"
@@ -880,11 +875,15 @@ if [[ "${{role}}" == "ru-gateway" ]] && command -v journalctl >/dev/null 2>&1; t
   fi
   singbox_recent_timeouts="$(journalctl -u sing-box --since '4 hours ago' --no-pager 2>/dev/null | grep -E 'i/o timeout|dns: (lookup|exchange) failed|context deadline exceeded' || true)"
   if [[ -n "${{singbox_recent_timeouts}}" ]]; then
-    singbox_to_foreign_timeout_count="$(grep -c 'outbound/direct\\[to-foreign\\].*i/o timeout' <<<"${{singbox_recent_timeouts}}" || true)"
-    singbox_to_foreign_ip_literal_timeout_count="$(printf '%s\n' "${{singbox_recent_timeouts}}" | grep -E 'outbound/direct\\[to-foreign-ip-literal\\].*i/o timeout' | grep -Ev 'open connection to \\[[0-9A-Fa-f:.]+\\]' | grep -c . || true)"
-    singbox_to_foreign_ipv6_literal_timeout_count="$(printf '%s\n' "${{singbox_recent_timeouts}}" | grep -E 'outbound/direct\\[to-foreign-ipv6-literal\\].*i/o timeout|open connection to \\[[0-9A-Fa-f:.]+\\].*outbound/direct\\[to-foreign-ip-literal\\].*i/o timeout' | grep -c . || true)"
+    singbox_to_foreign_ip_literal_timeout_count="$(grep -Ec 'open connection to ([0-9]{{1,3}}[.]){{3}}[0-9]{{1,3}}:[0-9]+ using outbound/direct\\[to-foreign\\].*(i/o timeout|context deadline exceeded)' <<<"${{singbox_recent_timeouts}}" || true)"
+    singbox_to_foreign_ipv6_literal_timeout_count="$(grep -Ec 'open connection to \\[[0-9A-Fa-f:.]+\\]:[0-9]+ using outbound/direct\\[to-foreign\\].*(i/o timeout|context deadline exceeded)' <<<"${{singbox_recent_timeouts}}" || true)"
+    singbox_to_foreign_all_timeout_count="$(grep -Ec 'outbound/direct\\[to-foreign\\].*(i/o timeout|context deadline exceeded)' <<<"${{singbox_recent_timeouts}}" || true)"
+    singbox_to_foreign_timeout_count="$((singbox_to_foreign_all_timeout_count - singbox_to_foreign_ip_literal_timeout_count - singbox_to_foreign_ipv6_literal_timeout_count))"
     singbox_direct_ru_timeout_count="$(grep -c 'outbound/direct\\[direct-ru\\].*i/o timeout' <<<"${{singbox_recent_timeouts}}" || true)"
-    singbox_dns_timeout_count="$(grep -Ec 'dns: (lookup|exchange) failed' <<<"${{singbox_recent_timeouts}}" || true)"
+    singbox_dns_timeout_count="$(grep -Ec 'dns: exchange failed.*(context deadline exceeded|i/o timeout)' <<<"${{singbox_recent_timeouts}}" || true)"
+    singbox_dns_nxdomain_count="$(grep -Ec 'dns: lookup failed.*NXDOMAIN' <<<"${{singbox_recent_timeouts}}" || true)"
+    singbox_dns_all_failed_count="$(grep -Ec 'dns: (lookup|exchange) failed' <<<"${{singbox_recent_timeouts}}" || true)"
+    singbox_dns_failed_count="$((singbox_dns_all_failed_count - singbox_dns_timeout_count - singbox_dns_nxdomain_count))"
     singbox_recent_timeout_sample="$(tail -n1 <<<"${{singbox_recent_timeouts}}" | tr -d '\\r' | cut -c1-240)"
     singbox_recent_timeout_destinations="$(
       printf '%s\n' "${{singbox_recent_timeouts}}" |
@@ -897,8 +896,7 @@ if [[ "${{role}}" == "ru-gateway" ]] && command -v journalctl >/dev/null 2>&1; t
     )"
     singbox_recent_ip_literal_timeout_destinations="$(
       printf '%s\n' "${{singbox_recent_timeouts}}" |
-        grep -Ev 'open connection to \\[[0-9A-Fa-f:.]+\\]' |
-        sed -n 's/.*open connection to \\([^ ]*\\) using outbound\\/direct\\[to-foreign-ip-literal\\].*/\\1/p' |
+        sed -n 's/.*open connection to \\([0-9][0-9.]*:[0-9][0-9]*\\) using outbound\\/direct\\[to-foreign\\].*/\\1/p' |
         sort |
         uniq -c |
         sort -nr |
@@ -908,15 +906,19 @@ if [[ "${{role}}" == "ru-gateway" ]] && command -v journalctl >/dev/null 2>&1; t
   fi
   singbox_recent_log="$(journalctl -u sing-box --since "${{singbox_recent_effective_since}}" --no-pager -o cat 2>/dev/null | sed -r 's/\\x1B\\[[0-9;]*[mK]//g' || true)"
   if [[ -n "${{singbox_recent_log}}" ]]; then
-    singbox_recent_blocked_count="$(grep -c 'outbound/block\\[blocked\\]' <<<"${{singbox_recent_log}}" || true)"
+    singbox_recent_blocked_count="$(grep -Ec 'outbound/block\\[blocked\\]|connection rejected|packet connection rejected' <<<"${{singbox_recent_log}}" || true)"
     singbox_recent_mux_closed_count="$(grep -c 'mux connection closed' <<<"${{singbox_recent_log}}" || true)"
     singbox_recent_eof_count="$(grep -c 'EOF' <<<"${{singbox_recent_log}}" || true)"
-    singbox_recent_dns_failed_count="$(grep -Ec 'dns: (lookup|exchange) failed' <<<"${{singbox_recent_log}}" || true)"
+    singbox_recent_dns_timeout_count="$(grep -Ec 'dns: exchange failed.*(context deadline exceeded|i/o timeout)' <<<"${{singbox_recent_log}}" || true)"
+    singbox_recent_dns_nxdomain_count="$(grep -Ec 'dns: lookup failed.*NXDOMAIN' <<<"${{singbox_recent_log}}" || true)"
+    singbox_recent_dns_all_failed_count="$(grep -Ec 'dns: (lookup|exchange) failed' <<<"${{singbox_recent_log}}" || true)"
+    singbox_recent_dns_failed_count="$((singbox_recent_dns_all_failed_count - singbox_recent_dns_timeout_count - singbox_recent_dns_nxdomain_count))"
     singbox_recent_timeout_count="$(grep -Ec 'i/o timeout|context deadline exceeded' <<<"${{singbox_recent_log}}" || true)"
     singbox_recent_invalid_reality_count="$(grep -c 'REALITY: processed invalid connection' <<<"${{singbox_recent_log}}" || true)"
-    singbox_recent_to_foreign_timeout_count="$(grep -c 'outbound/direct\\[to-foreign\\].*i/o timeout' <<<"${{singbox_recent_log}}" || true)"
-    singbox_recent_to_foreign_ip_literal_timeout_count="$(printf '%s\n' "${{singbox_recent_log}}" | grep -E 'outbound/direct\\[to-foreign-ip-literal\\].*i/o timeout' | grep -Ev 'open connection to \\[[0-9A-Fa-f:.]+\\]' | grep -c . || true)"
-    singbox_recent_to_foreign_ipv6_literal_timeout_count="$(printf '%s\n' "${{singbox_recent_log}}" | grep -E 'outbound/direct\\[to-foreign-ipv6-literal\\].*i/o timeout|open connection to \\[[0-9A-Fa-f:.]+\\].*outbound/direct\\[to-foreign-ip-literal\\].*i/o timeout' | grep -c . || true)"
+    singbox_recent_to_foreign_ip_literal_timeout_count="$(grep -Ec 'open connection to ([0-9]{{1,3}}[.]){{3}}[0-9]{{1,3}}:[0-9]+ using outbound/direct\\[to-foreign\\].*(i/o timeout|context deadline exceeded)' <<<"${{singbox_recent_log}}" || true)"
+    singbox_recent_to_foreign_ipv6_literal_timeout_count="$(grep -Ec 'open connection to \\[[0-9A-Fa-f:.]+\\]:[0-9]+ using outbound/direct\\[to-foreign\\].*(i/o timeout|context deadline exceeded)' <<<"${{singbox_recent_log}}" || true)"
+    singbox_recent_to_foreign_all_timeout_count="$(grep -Ec 'outbound/direct\\[to-foreign\\].*(i/o timeout|context deadline exceeded)' <<<"${{singbox_recent_log}}" || true)"
+    singbox_recent_to_foreign_timeout_count="$((singbox_recent_to_foreign_all_timeout_count - singbox_recent_to_foreign_ip_literal_timeout_count - singbox_recent_to_foreign_ipv6_literal_timeout_count))"
     singbox_recent_direct_ru_timeout_count="$(grep -c 'outbound/direct\\[direct-ru\\].*i/o timeout' <<<"${{singbox_recent_log}}" || true)"
     singbox_recent_sources="$(
       printf '%s\n' "${{singbox_recent_log}}" |
@@ -952,8 +954,8 @@ if [[ "${{role}}" == "ru-gateway" ]] && command -v journalctl >/dev/null 2>&1; t
         awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
     )"
     singbox_recent_to_foreign_count="$(grep -c 'outbound/direct\\[to-foreign\\]: outbound connection to' <<<"${{singbox_recent_log}}" || true)"
-    singbox_recent_to_foreign_ip_literal_count="$(grep -c 'outbound/direct\\[to-foreign-ip-literal\\]: outbound connection to' <<<"${{singbox_recent_log}}" || true)"
-    singbox_recent_to_foreign_ipv6_literal_count="$(grep -c 'outbound/direct\\[to-foreign-ipv6-literal\\]: outbound connection to' <<<"${{singbox_recent_log}}" || true)"
+    singbox_recent_to_foreign_ip_literal_count="$(grep -Ec 'outbound/direct\\[to-foreign\\]: outbound connection to ([0-9]{{1,3}}[.]){{3}}[0-9]{{1,3}}:[0-9]+' <<<"${{singbox_recent_log}}" || true)"
+    singbox_recent_to_foreign_ipv6_literal_count="$(grep -Ec 'outbound/direct\\[to-foreign\\]: outbound connection to \\[[0-9A-Fa-f:.]+\\]:[0-9]+' <<<"${{singbox_recent_log}}" || true)"
     singbox_recent_direct_ru_count="$(grep -c 'outbound/direct\\[direct-ru\\]: outbound connection to' <<<"${{singbox_recent_log}}" || true)"
     singbox_recent_to_foreign_destinations="$(
       printf '%s\n' "${{singbox_recent_log}}" |
@@ -975,7 +977,7 @@ if [[ "${{role}}" == "ru-gateway" ]] && command -v journalctl >/dev/null 2>&1; t
     )"
     singbox_recent_to_foreign_ip_literal_destinations="$(
       printf '%s\n' "${{singbox_recent_log}}" |
-        sed -n 's/.*outbound\\/direct\\[to-foreign-ip-literal\\]: outbound connection to \\([^ ]*\\).*/\\1/p' |
+        sed -n 's/.*outbound\\/direct\\[to-foreign\\]: outbound connection to \\([0-9][0-9.]*:[0-9][0-9]*\\).*/\\1/p' |
         sort |
         uniq -c |
         sort -nr |
@@ -984,7 +986,7 @@ if [[ "${{role}}" == "ru-gateway" ]] && command -v journalctl >/dev/null 2>&1; t
     )"
     singbox_recent_to_foreign_ipv6_literal_destinations="$(
       printf '%s\n' "${{singbox_recent_log}}" |
-        sed -n 's/.*outbound\\/direct\\[to-foreign-ipv6-literal\\]: outbound connection to \\([^ ]*\\).*/\\1/p' |
+        sed -n 's/.*outbound\\/direct\\[to-foreign\\]: outbound connection to \\(\\[[0-9A-Fa-f:.]*\\]:[0-9][0-9]*\\).*/\\1/p' |
         sort |
         uniq -c |
         sort -nr |
@@ -1077,9 +1079,7 @@ if [[ "${{role}}" == "ru-gateway" ]] && command -v journalctl >/dev/null 2>&1; t
     )"
     singbox_fresh_ip_literal_timeout_destinations="$(
       printf '%s\n' "${{singbox_recent_log}}" |
-        grep -E 'outbound/direct\\[to-foreign-ip-literal\\].*i/o timeout' |
-        grep -Ev 'open connection to \\[[0-9A-Fa-f:.]+\\]' |
-        sed -n 's/.*open connection to \\([^ ]*\\) using outbound\\/direct\\[to-foreign-ip-literal\\].*/\\1/p' |
+        sed -n '/outbound\\/direct\\[to-foreign\\].*i\\/o timeout/s/.*open connection to \\([0-9][0-9.]*:[0-9][0-9]*\\) using outbound.*/\\1/p' |
         sort |
         uniq -c |
         sort -nr |
@@ -1088,8 +1088,7 @@ if [[ "${{role}}" == "ru-gateway" ]] && command -v journalctl >/dev/null 2>&1; t
     )"
     singbox_fresh_ipv6_literal_timeout_destinations="$(
       printf '%s\n' "${{singbox_recent_log}}" |
-        grep -E 'outbound/direct\\[to-foreign-ipv6-literal\\].*i/o timeout|open connection to \\[[0-9A-Fa-f:.]+\\].*outbound/direct\\[to-foreign-ip-literal\\].*i/o timeout' |
-        sed -n 's/.*open connection to \\(\\[[0-9A-Fa-f:.]*\\]:[0-9][0-9]*\\) using outbound\\/direct\\[[^]]*\\].*/\\1/p' |
+        sed -n '/outbound\\/direct\\[to-foreign\\].*i\\/o timeout/s/.*open connection to \\(\\[[0-9A-Fa-f:.]*\\]:[0-9][0-9]*\\) using outbound.*/\\1/p' |
         sort |
         uniq -c |
         sort -nr |
@@ -1151,16 +1150,16 @@ if [[ "${{role}}" == "ru-gateway" ]] && ip link show dev {wg_interface} >/dev/nu
   wg_observed_ipv4="$(curl -4fsS --interface {wg_interface} --max-time 8 https://api.ipify.org 2>/dev/null || true)"
 fi
 
-if [[ "${{installed}}" == "1" && "${{role}}" == "foreign-exit" ]]; then
+if [[ "${{run_live_probes}}" == "1" && "${{installed}}" == "1" && "${{role}}" == "foreign-exit" ]]; then
   direct_download_bps="$(probe_download_bps "" "${{throughput_url}}")"
-  target_probe_direct="$(probe_target_urls "" "${{target_probe_urls}}" "${{target_probe_connect_timeout}}" "${{target_probe_max_time}}")"
-elif [[ "${{installed}}" == "1" && "${{role}}" == "ru-gateway" ]]; then
+  target_probe_direct="$(probe_target_urls "" "${{target_probe_urls}}" "${{target_probe_connect_timeout}}" "${{target_probe_max_time}}" "")"
+elif [[ "${{run_live_probes}}" == "1" && "${{installed}}" == "1" && "${{role}}" == "ru-gateway" ]]; then
   direct_download_bps="$(probe_download_bps "" "${{throughput_url}}")"
-  target_probe_direct="$(probe_target_urls "" "${{ru_direct_target_probe_urls}}" "${{target_probe_connect_timeout}}" "${{target_probe_max_time}}")"
+  target_probe_direct="$(probe_target_urls "" "${{ru_direct_target_probe_urls}}" "${{target_probe_connect_timeout}}" "${{target_probe_max_time}}" "socks5h://127.0.0.1:${{ru_router_listen_port}}")"
 fi
-if [[ "${{installed}}" == "1" && "${{role}}" == "ru-gateway" ]] && ip link show dev {wg_interface} >/dev/null 2>&1; then
-  wg_download_bps="$(probe_download_bps "{wg_interface}" "${{throughput_url}}")"
-  target_probe_wg="$(probe_target_urls "{wg_interface}" "${{target_probe_urls}}" "${{target_probe_connect_timeout}}" "${{target_probe_max_time}}")"
+if [[ "${{run_live_probes}}" == "1" && "${{installed}}" == "1" && "${{role}}" == "ru-gateway" ]] && ip link show dev {wg_interface} >/dev/null 2>&1; then
+  wg_download_bps="$(probe_download_bps "" "${{throughput_url}}" "socks5h://127.0.0.1:${{ru_router_listen_port}}")"
+  target_probe_wg="$(probe_target_urls "" "${{target_probe_urls}}" "${{target_probe_connect_timeout}}" "${{target_probe_max_time}}" "socks5h://127.0.0.1:${{ru_router_listen_port}}")"
   ipv6_literal_tcp_probe="$(probe_ipv6_literal_tcp_path "{wg_interface}")"
 fi
 
@@ -1206,8 +1205,6 @@ printf 'configured_wan_interface=%s\\n' "${{configured_wan_interface}}"
 printf 'singbox_configured_log_level=%s\\n' "${{singbox_configured_log_level}}"
 printf 'global_doh_server=%s\\n' "${{global_doh_server}}"
 printf 'global_doh_server_name=%s\\n' "${{global_doh_server_name}}"
-printf 'ru_literal_policy=%s\\n' "${{ru_literal_policy}}"
-printf 'ru_ipv6_literal_policy=%s\\n' "${{ru_ipv6_literal_policy}}"
 printf 'deprecated_routing_overrides=%s\\n' "${{deprecated_routing_overrides}}"
 printf 'wan_mtu=%s\\n' "${{wan_mtu}}"
 printf 'default_qdisc=%s\\n' "${{default_qdisc}}"
@@ -1245,17 +1242,15 @@ printf 'ipv6_literal_tcp_probe=%s\\n' "${{ipv6_literal_tcp_probe}}"
 printf 'deep_probe_at=%s\\n' "${{deep_probe_at}}"
 printf 'deep_probe_verdict=%s\\n' "${{deep_probe_verdict}}"
 printf 'deep_probe_reasons=%s\\n' "${{deep_probe_reasons}}"
-printf 'deep_foreign_direct_download_min_bps=%s\\n' "${{deep_foreign_direct_download_min_bps}}"
+printf 'deep_foreign_direct_download_bps=%s\\n' "${{deep_foreign_direct_download_bps}}"
 printf 'deep_foreign_direct_download_detail=%s\\n' "${{deep_foreign_direct_download_detail}}"
 printf 'deep_foreign_direct_upload_bps=%s\\n' "${{deep_foreign_direct_upload_bps}}"
 printf 'deep_foreign_gateway_ping_loss_pct=%s\\n' "${{deep_foreign_gateway_ping_loss_pct}}"
 printf 'deep_foreign_ru_ping_loss_pct=%s\\n' "${{deep_foreign_ru_ping_loss_pct}}"
 printf 'deep_foreign_internet_ping_loss_pct=%s\\n' "${{deep_foreign_internet_ping_loss_pct}}"
-printf 'deep_ru_wg_download_min_bps=%s\\n' "${{deep_ru_wg_download_min_bps}}"
+printf 'deep_ru_wg_download_bps=%s\\n' "${{deep_ru_wg_download_bps}}"
 printf 'deep_ru_wg_download_detail=%s\\n' "${{deep_ru_wg_download_detail}}"
 printf 'deep_ru_wg_upload_bps=%s\\n' "${{deep_ru_wg_upload_bps}}"
-printf 'fast_foreign_ru_ping_loss_pct=%s\\n' "${{fast_foreign_ru_ping_loss_pct}}"
-printf 'fast_ru_foreign_ping_loss_pct=%s\\n' "${{fast_ru_foreign_ping_loss_pct}}"
 printf 'self_heal_last_reason=%s\\n' "${{self_heal_last_reason}}"
 printf 'self_heal_consecutive=%s\\n' "${{self_heal_consecutive}}"
 printf 'self_heal_last_action=%s\\n' "${{self_heal_last_action}}"
@@ -1267,14 +1262,7 @@ printf 'profile_updated_at=%s\\n' "${{profile_updated_at}}"
 printf 'profile_handshake_age_s=%s\\n' "${{profile_handshake_age_s}}"
 printf 'profile_handshake_grace_s=%s\\n' "${{profile_handshake_grace_s}}"
 printf 'profile_wg_path_ok=%s\\n' "${{profile_wg_path_ok}}"
-printf 'profile_fast_ping_loss_pct=%s\\n' "${{profile_fast_ping_loss_pct}}"
 printf 'profile_stale_handshake_live_path_s=%s\\n' "${{profile_stale_handshake_live_path_s}}"
-printf 'good_wg_path_at=%s\\n' "${{good_wg_path_at}}"
-printf 'good_wg_path_age_s=%s\\n' "${{good_wg_path_age_s}}"
-printf 'good_wg_path_source=%s\\n' "${{good_wg_path_source}}"
-printf 'good_wg_path_handshake_age_s=%s\\n' "${{good_wg_path_handshake_age_s}}"
-printf 'good_cache_ttl_seconds=%s\\n' "${{good_cache_ttl_seconds}}"
-{render_route_fail_cache_printf_shell()}
 printf 'reality_invalid_recent_count=%s\\n' "${{reality_invalid_recent_count}}"
 printf 'reality_invalid_recent_sources=%s\\n' "${{reality_invalid_recent_sources}}"
 printf 'singbox_to_foreign_timeout_count=%s\\n' "${{singbox_to_foreign_timeout_count}}"
@@ -1282,6 +1270,10 @@ printf 'singbox_to_foreign_ip_literal_timeout_count=%s\\n' "${{singbox_to_foreig
 printf 'singbox_to_foreign_ipv6_literal_timeout_count=%s\\n' "${{singbox_to_foreign_ipv6_literal_timeout_count}}"
 printf 'singbox_direct_ru_timeout_count=%s\\n' "${{singbox_direct_ru_timeout_count}}"
 printf 'singbox_dns_timeout_count=%s\\n' "${{singbox_dns_timeout_count}}"
+printf 'singbox_dns_nxdomain_count=%s\\n' "${{singbox_dns_nxdomain_count}}"
+printf 'singbox_dns_failed_count=%s\\n' "${{singbox_dns_failed_count}}"
+printf 'singbox_start_count_24h=%s\\n' "${{singbox_start_count_24h}}"
+printf 'singbox_start_count_since_install=%s\\n' "${{singbox_start_count_since_install}}"
 printf 'singbox_recent_timeout_sample=%s\\n' "${{singbox_recent_timeout_sample}}"
 printf 'singbox_log_window_minutes=%s\\n' "${{singbox_log_window_minutes}}"
 printf 'singbox_recent_effective_since=%s\\n' "${{singbox_recent_effective_since}}"
@@ -1289,6 +1281,8 @@ printf 'singbox_recent_blocked_count=%s\\n' "${{singbox_recent_blocked_count}}"
 printf 'singbox_recent_mux_closed_count=%s\\n' "${{singbox_recent_mux_closed_count}}"
 printf 'singbox_recent_eof_count=%s\\n' "${{singbox_recent_eof_count}}"
 printf 'singbox_recent_dns_failed_count=%s\\n' "${{singbox_recent_dns_failed_count}}"
+printf 'singbox_recent_dns_timeout_count=%s\\n' "${{singbox_recent_dns_timeout_count}}"
+printf 'singbox_recent_dns_nxdomain_count=%s\\n' "${{singbox_recent_dns_nxdomain_count}}"
 printf 'singbox_recent_timeout_count=%s\\n' "${{singbox_recent_timeout_count}}"
 printf 'singbox_recent_invalid_reality_count=%s\\n' "${{singbox_recent_invalid_reality_count}}"
 printf 'singbox_recent_to_foreign_timeout_count=%s\\n' "${{singbox_recent_to_foreign_timeout_count}}"
@@ -1358,8 +1352,19 @@ printf 'ssh_socket=%s\\n' "$(service_state ssh.socket)"
 """.strip()
 
 
-def remote_preflight(target: RemoteTarget, wg_interface: str, *, fresh_since_epoch: int | None = None) -> dict[str, str]:
-    return parse_kv_output(ssh_capture(target, preflight_script(wg_interface, fresh_since_epoch=fresh_since_epoch)))
+def remote_preflight(
+    target: RemoteTarget,
+    wg_interface: str,
+    *,
+    fresh_since_epoch: int | None = None,
+    run_live_probes: bool = False,
+) -> dict[str, str]:
+    return parse_kv_output(
+        ssh_capture(
+            target,
+            preflight_script(wg_interface, fresh_since_epoch=fresh_since_epoch, run_live_probes=run_live_probes),
+        )
+    )
 
 
 def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
@@ -1405,15 +1410,13 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
             print(f"admin route rules: {summary}")
     if preflight.get("render_manifest_policy_version"):
         print(f"routing policy version: {preflight.get('render_manifest_policy_version', '-')}")
-    if preflight.get("ru_literal_policy") or preflight.get("ru_ipv6_literal_policy"):
-        print(
-            "literal policy: "
-            f"ipv4={preflight.get('ru_literal_policy', '-')}, "
-            f"ipv6={preflight.get('ru_ipv6_literal_policy', '-')}"
-        )
     if preflight.get("deprecated_routing_overrides"):
-        print(f"deprecated routing overrides: {preflight.get('deprecated_routing_overrides')}")
+        print(f"ignored legacy routing fields: {preflight.get('deprecated_routing_overrides')}")
     print(f"sing-box: {preflight.get('sing_box', '-')}")
+    if preflight.get("singbox_start_count_since_install") not in {"", None}:
+        print(f"sing-box starts since install: {preflight.get('singbox_start_count_since_install', '0')}")
+    if preflight.get("singbox_start_count_24h") not in {"", None}:
+        print(f"sing-box starts historical / 24h: {preflight.get('singbox_start_count_24h', '0')}")
     print(f"xray: {preflight.get('xray', '-')}")
     print(f"nftables: {preflight.get('nftables', '-')}")
     if any(preflight.get(key) for key in ("nft_ssh_accept_packets", "nft_ssh_drop_packets", "nft_vless_accept_packets", "nft_vless_drop_packets")):
@@ -1436,33 +1439,19 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
         print(f"deep probe at: {preflight.get('deep_probe_at', '-')}")
         print(f"deep probe verdict: {preflight.get('deep_probe_verdict', '-')}")
         print(f"deep probe reasons: {preflight.get('deep_probe_reasons', '-')}")
-        print(f"foreign direct min download B/s: {preflight.get('deep_foreign_direct_download_min_bps', '-')}")
+        print(f"foreign direct usable download B/s: {preflight.get('deep_foreign_direct_download_bps', '-')}")
         print(f"foreign direct upload B/s: {preflight.get('deep_foreign_direct_upload_bps', '-')}")
         print(f"foreign ping loss to gateway (%): {preflight.get('deep_foreign_gateway_ping_loss_pct', '-')}")
         print(f"foreign ping loss to RU (%): {preflight.get('deep_foreign_ru_ping_loss_pct', '-')}")
         print(f"foreign ping loss to internet (%): {preflight.get('deep_foreign_internet_ping_loss_pct', '-')}")
-        print(f"RU over wg min download B/s: {preflight.get('deep_ru_wg_download_min_bps', '-')}")
+        print(f"RU over wg usable download B/s: {preflight.get('deep_ru_wg_download_bps', '-')}")
         print(f"RU over wg upload B/s: {preflight.get('deep_ru_wg_upload_bps', '-')}")
-    if preflight.get("fast_foreign_ru_ping_loss_pct") or preflight.get("fast_ru_foreign_ping_loss_pct"):
-        print(f"fast foreign->RU ping loss (%): {preflight.get('fast_foreign_ru_ping_loss_pct', '-')}")
-        print(f"fast RU->foreign ping loss (%): {preflight.get('fast_ru_foreign_ping_loss_pct', '-')}")
     if preflight.get("profile_updated_at"):
         print(f"runtime profile at: {preflight.get('profile_updated_at', '-')}")
         print(f"profile handshake age/grace (s): {preflight.get('profile_handshake_age_s', '-')}/{preflight.get('profile_handshake_grace_s', '-')}")
         print(f"profile wg path ok: {preflight.get('profile_wg_path_ok', '-')}")
-        print(f"profile fast ping loss (%): {preflight.get('profile_fast_ping_loss_pct', '-')}")
         if preflight.get("profile_stale_handshake_live_path_s"):
             print(f"profile stale handshake with live path (s): {preflight.get('profile_stale_handshake_live_path_s', '-')}")
-    if preflight.get("good_wg_path_at"):
-        print(
-            "dataplane cache good WG path: "
-            f"age={preflight.get('good_wg_path_age_s', '-')}s/"
-            f"ttl={preflight.get('good_cache_ttl_seconds', '-')}s, "
-            f"source={preflight.get('good_wg_path_source', '-')}, "
-            f"handshake_age={preflight.get('good_wg_path_handshake_age_s', '-')}s"
-        )
-    if route_fail_cache_has_data(preflight):
-        print(f"dataplane route-fail cache: {format_route_fail_cache(preflight)}")
     if preflight.get("self_heal_last_action") or preflight.get("self_heal_last_reason"):
         print(f"self-heal last reason: {preflight.get('self_heal_last_reason', '-')}")
         print(f"self-heal consecutive: {preflight.get('self_heal_consecutive', '-')}")
@@ -1477,12 +1466,14 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
         print(f"recent invalid Reality handshakes: {preflight.get('reality_invalid_recent_count', '-')}")
         print(f"invalid Reality sources: {preflight.get('reality_invalid_recent_sources', '-')}")
         print("diagnosis: invalid Reality happens before routing; if this is your IP, at least one active client/profile does not match current generated credentials.")
-    if any(preflight.get(key) not in {"", None, "0"} for key in ("singbox_to_foreign_timeout_count", "singbox_to_foreign_ip_literal_timeout_count", "singbox_to_foreign_ipv6_literal_timeout_count", "singbox_direct_ru_timeout_count", "singbox_dns_timeout_count")):
+    if any(preflight.get(key) not in {"", None, "0"} for key in ("singbox_to_foreign_timeout_count", "singbox_to_foreign_ip_literal_timeout_count", "singbox_to_foreign_ipv6_literal_timeout_count", "singbox_direct_ru_timeout_count", "singbox_dns_timeout_count", "singbox_dns_nxdomain_count", "singbox_dns_failed_count")):
         print(f"sing-box to-foreign timeouts / 4h: {preflight.get('singbox_to_foreign_timeout_count', '0')}")
         print(f"sing-box IPv4-literal to-foreign timeouts / 4h: {preflight.get('singbox_to_foreign_ip_literal_timeout_count', '0')}")
         print(f"sing-box IPv6-literal to-foreign timeouts / 4h: {preflight.get('singbox_to_foreign_ipv6_literal_timeout_count', '0')}")
         print(f"sing-box direct-ru timeouts / 4h: {preflight.get('singbox_direct_ru_timeout_count', '0')}")
         print(f"sing-box DNS timeouts / 4h: {preflight.get('singbox_dns_timeout_count', '0')}")
+        print(f"sing-box DNS NXDOMAIN / 4h: {preflight.get('singbox_dns_nxdomain_count', '0')}")
+        print(f"sing-box other DNS failures / 4h: {preflight.get('singbox_dns_failed_count', '0')}")
         if preflight.get("global_doh_server") or preflight.get("global_doh_server_name"):
             print(
                 "sing-box global DoH: "
@@ -1525,6 +1516,8 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
         "singbox_recent_blocked_count",
         "singbox_recent_mux_closed_count",
         "singbox_recent_eof_count",
+        "singbox_recent_dns_timeout_count",
+        "singbox_recent_dns_nxdomain_count",
         "singbox_recent_dns_failed_count",
         "singbox_recent_timeout_count",
         "singbox_recent_invalid_reality_count",
@@ -1539,7 +1532,9 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
             f"blocked={preflight.get('singbox_recent_blocked_count', '0')}, "
             f"mux_closed={preflight.get('singbox_recent_mux_closed_count', '0')}, "
             f"eof={preflight.get('singbox_recent_eof_count', '0')}, "
-            f"dns_failed={preflight.get('singbox_recent_dns_failed_count', '0')}, "
+            f"dns_timeout={preflight.get('singbox_recent_dns_timeout_count', '0')}, "
+            f"dns_nxdomain={preflight.get('singbox_recent_dns_nxdomain_count', '0')}, "
+            f"dns_other={preflight.get('singbox_recent_dns_failed_count', '0')}, "
             f"timeout={preflight.get('singbox_recent_timeout_count', '0')}, "
             f"invalid_reality={preflight.get('singbox_recent_invalid_reality_count', '0')}, "
             f"private_dns_leak={preflight.get('singbox_recent_private_dns_leak_count', '0')}"
@@ -1600,10 +1595,7 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
             print(f"sing-box recent direct-ru destinations: {preflight.get('singbox_recent_direct_ru_destinations')}")
         if preflight.get("singbox_recent_ipv6_literal_destinations"):
             print(f"sing-box recent IPv6 literal destinations: {preflight.get('singbox_recent_ipv6_literal_destinations')}")
-            if preflight.get("ru_ipv6_literal_policy") == "reject":
-                print("diagnosis: clients sent IPv6 literal destinations; current RU IPv6 literal policy rejects new IPv6 literals fail-fast.")
-            else:
-                print("diagnosis: clients sent IPv6 literal destinations; current RU IPv6 literal policy routes TCP/443 through the dedicated IPv6-literal foreign outbound and rejects other IPv6 literal ports fail-fast.")
+            print("diagnosis: client sent IPv6 literal destinations; public IPv6 literals use the same foreign WireGuard egress as ordinary foreign traffic.")
         if preflight.get("singbox_recent_inbound_destinations"):
             print(f"sing-box recent inbound destinations: {preflight.get('singbox_recent_inbound_destinations')}")
     if preflight.get("guard_last_run"):

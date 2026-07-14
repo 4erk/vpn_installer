@@ -42,7 +42,7 @@ class InstallSupportTests(unittest.TestCase):
             self.assertTrue((output_dir / "vpn-stack-guard.service").is_file())
             self.assertFalse((output_dir / "vpn-stack-subscription.service").exists())
 
-    def test_render_role_migrates_legacy_ru_port_before_render(self) -> None:
+    def test_render_role_preserves_explicit_ru_port(self) -> None:
         env = self.make_env()
         env["RU_LISTEN_PORT"] = "8443"
         env["RU_REALITY_MAX_TIME_DIFFERENCE"] = "24h"
@@ -56,7 +56,7 @@ class InstallSupportTests(unittest.TestCase):
             router_payload = json.loads((output_dir / "sing-box.json").read_text(encoding="utf-8"))
             xray_payload = json.loads((output_dir / "xray.json").read_text(encoding="utf-8"))
         self.assertEqual([inbound["listen_port"] for inbound in router_payload["inbounds"]], [2080])
-        self.assertEqual(xray_payload["inbounds"][0]["port"], 443)
+        self.assertEqual(xray_payload["inbounds"][0]["port"], 8443)
         self.assertNotIn("maxTimeDiff", xray_payload["inbounds"][0]["streamSettings"]["realitySettings"])
 
     def test_render_role_applies_wan_override(self) -> None:

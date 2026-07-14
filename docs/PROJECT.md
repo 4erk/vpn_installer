@@ -1,365 +1,220 @@
-# Что внутри проекта
+# Техническая карта проекта
 
-## Как читать этот документ
+## Как читать документацию
 
-- `README.md` — быстрый старт для обычного пользователя
-- [Как выбрать серверы](./PROVIDERS.md) — подбор провайдеров и готовые пары
-- [История версий](../CHANGELOG.md) — изменения по релизам
-- этот документ — техническая карта проекта
+- [README](../README.md) — установка и обычная эксплуатация.
+- [PROVIDERS](./PROVIDERS.md) — выбор провайдеров и серверов.
+- [CHANGELOG](../CHANGELOG.md) — история релизов.
+- Этот файл — границы архитектуры, policy, health и диагностики.
 
 ## Назначение
 
-Проект разворачивает переносимый приватный контур:
-
-`клиент -> российский сервер -> зарубежный сервер`
-
-Смысл схемы:
-
-- клиент подключается только к российскому серверу
-- российские сайты выходят через российский IP
-- остальной трафик уходит через зарубежный IP
-- итоговый профиль клиента сохраняется локально
-
-Технические роли:
-
-- `российский сервер` = `ru-gateway`
-- `зарубежный сервер` = `foreign-exit`
-
-## Публичный интерфейс
-
-Поддерживаются только:
-
-- `vpn.cmd` для Windows
-- `vpn.ps1`
-- `vpn.sh`
-
-Команды:
-
-- `install`
-- `status`
-- `reinstall`
-- `remove`
-- `purge`
-- `cleanup-local`
-- `audit`
-
-Без аргументов `vpn` открывает интерактивное меню.
-
-Для Windows пользовательский путь по умолчанию: `vpn.cmd`.
-
-### Консольный режим без вопросов
-
-Для обслуживания без интерактивного меню используются те же entrypoints, что и у обычного пользователя:
-
-- `vpn.cmd install --deployment <name> --non-interactive --yes`
-- `vpn.cmd reinstall --deployment <name> --role all --non-interactive --yes`
-- `vpn.cmd status --deployment <name> --role all --non-interactive`
-- `vpn.cmd diagnose path --deployment <name> --role all --non-interactive`
-
-Role-scoped env overrides:
-
-- `VPN_RU_PUBLIC_IP`, `VPN_RU_SSH_HOST`, `VPN_RU_SSH_PORT`, `VPN_RU_SSH_USER`, `VPN_RU_SSH_AUTH_MODE`, `VPN_RU_SSH_IDENTITY_PATH`, `VPN_RU_SSH_PASSWORD`
-- `VPN_FOREIGN_PUBLIC_IP`, `VPN_FOREIGN_SSH_HOST`, `VPN_FOREIGN_SSH_PORT`, `VPN_FOREIGN_SSH_USER`, `VPN_FOREIGN_SSH_AUTH_MODE`, `VPN_FOREIGN_SSH_IDENTITY_PATH`, `VPN_FOREIGN_SSH_PASSWORD`
-- `VPN_SSH_PASSWORD` — общий fallback, если пароль одинаковый или роль явно не задана
-
-Пароли из env живут только в памяти текущего процесса. В `state/<name>.json` сохраняются только адрес, порт, пользователь, режим входа и путь к ключу.
-
-## Архитектура
-
-### Российский сервер
-
-- публичный вход `443/tcp` для VLESS/Reality
-- `Xray` как публичный VLESS/Reality front
-- локальный `sing-box` mixed-router на `127.0.0.1:RU_ROUTER_LISTEN_PORT`
-- `WireGuard` до зарубежного сервера
-- маршрутизация:
-  - российские домены и IP идут напрямую
-  - остальной трафик уходит через `WireGuard`
-
-Причина двухслойной схемы: простой `VLESS URI` не кодирует DNS/sniffing policy, а часть клиентов может открывать сайт как IPv6 literal с SNI. Xray front умеет восстановить домен из SNI и передать уже доменный запрос во внутренний router; `sing-box` остаётся источником истины для российской/зарубежной маршрутизации.
-
-### Зарубежный сервер
-
-- клиентский VPN-вход не поднимается
-- работает как `WireGuard` peer + NAT egress
-- может резать обратный выход на российские подсети
-
-## Порядок работы мастера
-
-На вводе и проверке:
-
-1. `российский сервер`
-2. `зарубежный сервер`
-
-На установке:
-
-1. `зарубежный сервер`
-2. `российский сервер`
-
-На удалении:
-
-1. `российский сервер`
-2. `зарубежный сервер`
-
-## Аутентификация
-
-Поддерживаются:
-
-- `SSH key`
-- `SSH password`
-- `sudo password`, если нет passwordless sudo
-
-Пароли живут только в памяти текущего запуска и не сохраняются в `env/state`.
-
-## Локальные артефакты
-
-Для каждого deployment создаются:
-
-- `deployments/<name>.env`
-- `deployments/<name>.ru-direct-domains.txt`
-- `deployments/<name>.ru-direct-suffixes.txt`
-- `deployments/<name>.ru-direct-cidrs.txt`
-- `state/<name>.json`
-- `out/<name>/assets`
-- `out/<name>/bundle`
-- `out/<name>/cloud-init`
-- `out/<name>/preview`
-- `out/<name>/client`
-- `out/<name>/NEXT-STEPS.txt`
-
-Server-side артефакты на `российском сервере`:
-
-- `/etc/vpn-stack/sing-box.base.json` — базовый router-конфиг, который пришёл из установщика
-- `/etc/vpn-stack/admin-routing-rules.json` — правила web admin поверх базового конфига
-- `/etc/vpn-stack/admin-auth.json` — hash логина/пароля web admin
-- `/usr/local/lib/vpn-stack/admin_web.py` — HTTP admin server
-- `/usr/local/lib/vpn-stack/admin_apply.py` — безопасное применение правил через `sing-box check`
-
-Основные клиентские файлы:
-
-- `out/<name>/client/vless-uri.txt`
-- `out/<name>/client/android-v2rayng-xray.json`
-- `out/<name>/client/windows-xray.json`
-- `out/<name>/client/hiddify-cross-platform.json`
-- `out/<name>/client/hiddify-android.json`
-- `out/<name>/client/hiddify-uri.txt`
-- `out/<name>/client/linux-sing-box.json`
-
-Пользовательский контракт:
-
-- основной публичный артефакт — простой `vless-uri.txt`
-- клиентский контракт — обычный VLESS/Reality tunnel; важная маршрутизация остаётся на сервере
-- `android-v2rayng-xray.json` и `windows-xray.json` остаются fallback-артефактами для клиентов, которым нужен импорт JSON-файлом
-- `Hiddify`-артефакты остаются совместимым вторичным путём, а не основным контрактом
-- для `Hiddify` сначала использовать `hiddify-uri.txt`; локальные JSON нужны только как запасной путь
-- server-hosted subscription path больше не считается штатной частью продукта
-- `hiddify-uri.txt` — совместимый alias того же `VLESS URI`
-- клиентские профили intentionally не содержат product-critical split-routing; вся российская/зарубежная маршрутизация живёт на серверной стороне
-- `status/diagnose` группируют серверные симптомы, включая случаи, когда клиент отправляет на сервер fake/private IP вместо домена
-- полный Xray JSON включает IPv4-only DNS, блокировку клиентского IPv6 `::/0` и inbound sniffing (`http`, `tls`, `quic`); это fallback для клиентов, которые иначе отправляют на сервер локально разрешённый IPv6 literal вместо домена
-- локальные JSON-профили исключают IP самих `российского` и `зарубежного` серверов из клиентского туннеля, чтобы `status/reinstall/remove` не упирались в SSH hairpin при уже активном VPN
-- сырой `VLESS URI` не умеет кодировать route-exclude и DNS/sniffing-политику; для TUN/full VPN клиент должен сам bypass'ить IP серверов или использовать generated JSON с такими правилами
-- `vpn client-check` проверяет локальный маршрут до серверов; если он показывает `BAD: self-tunnel`, удалённые действия намеренно блокируются до исправления маршрута или явного emergency override
-- `windows-route-bypass.ps1` добавляет active `/32` routes до IP серверов через физический Windows gateway; это операторский helper для обслуживания, а не часть server-side маршрутизации
-- optional `ru-direct` overlay-файлы мерджатся только в server-side routing и не переписывают основной `deployments/<name>.env`
-- `RU_BLOCK_IP_CIDR` — пустой по умолчанию server-side deny-list для аварийной диагностики; не добавляй туда service-owned CIDR без подтверждения, потому часть клиентов не обязана корректно fallback'иться после block
-- `RU_IPV6_POLICY=fast-fail` по умолчанию быстро закрывает IPv6 literals на российском сервере: текущий рабочий контур держится на стабильном IPv4 dataplane, а IPv6 path зарубежного сервера даёт частые timeout'ы и подвисы сайтов
-- публичный VLESS/Reality вход обслуживает `vpn-stack-xray.service`; `sing-box` на российском сервере не слушает внешний `443/tcp`, а принимает локальный SOCKS/Mixed трафик от Xray front
-- `GUARD_REALITY_BLOCK_ENABLED=0` по умолчанию оставляет Reality-invalid события в диагностике, но не блокирует клиентские IP; включай `1` только если точно подтверждён внешний сканер, потому нормальные клиенты тоже могут дать серию invalid/EOF при старых профилях или обрывах сети
-
-## Web Admin
-
-Web admin — это операторский интерфейс на `российском сервере` для изменения server-side исключений маршрутизации без пересборки клиентских профилей.
-
-Компоненты:
-
-- `vpn-stack-admin.service` запускает `python3 /usr/local/lib/vpn-stack/admin_web.py`
-- интерфейс слушает `ADMIN_WEB_BIND:ADMIN_WEB_PORT`, по умолчанию `0.0.0.0:11333`
-- авторизация: HTTP Basic Auth, hash хранится в `/etc/vpn-stack/admin-auth.json`
-- стартовый доступ: `ADMIN_WEB_USERNAME=user`, `ADMIN_WEB_PASSWORD=password`
-- смена логина/пароля доступна в самом интерфейсе, но только после успешной авторизации
-
-Основной операторский доступ:
+Проект разворачивает контур:
 
 ```text
-http://<ip-российского-сервера>:11333
+клиент -> RU Xray/Reality -> RU sing-box -> direct-ru
+                                      \-> WireGuard -> foreign-exit
 ```
 
-Доступ не привязан к одному конкретному пользователю или устройству. Кто сейчас является активным VPN-клиентом российского сервера, тот имеет право открыть админку.
+- Клиент всегда подключается к российскому серверу.
+- Российские ресурсы выходят через RU IP.
+- Остальной трафик выходит через foreign IP.
+- Основной клиентский контракт — `out/<deployment>/client/vless-uri.txt`.
+- Split routing — server-side policy. Клиентский URI не несёт критическую логику маршрутизации.
 
-Защита:
+Роли:
 
-- `ADMIN_WEB_ACTIVE_CLIENT_REQUIRED=1` держит публичный порт закрытым для всех, кроме IP-адресов, у которых сейчас есть established TCP-сессия к `RU_LISTEN_PORT`
-- `vpn-stack-admin.service` регулярно синхронизирует динамический nftables set `admin_clients_ipv4`
-- если доступ идёт через VPN/hairpin и source выглядит как `RU_PUBLIC_IP`, `FOREIGN_PUBLIC_IP` или WireGuard-адрес сервера, `ADMIN_WEB_ALLOW_TUNNEL_CLIENTS=1` разрешает такой вход только пока есть хотя бы один активный VPN-клиент
-- `ADMIN_WEB_ALLOWED_CIDR` и `ADMIN_WEB_ALLOW_WG` остаются аварийными allowlist-ручками и не должны быть основным режимом
-- если `ADMIN_WEB_ACTIVE_CLIENT_REQUIRED=0`, публичный bind с дефолтными `user/password` запрещён
+- `ru-gateway` — публичный VLESS/Reality front, внутренний router и WireGuard peer.
+- `foreign-exit` — WireGuard peer, NAT44/NAT66 и зарубежный egress.
 
-Правила:
+## CLI
 
-- тип `domain`: `example.com`
-- wildcard/subdomains: `*.example.com` или чекбокс "включить все поддомены"
-- тип `cidr`: `203.0.113.0/24`
-- outbound `direct-ru` = через `российский сервер`
-- outbound `to-foreign` = через `зарубежный сервер`
+Публичные entrypoint: `vpn.cmd`, `vpn.ps1`, `vpn.sh`. Без аргументов открывается меню.
 
-SSH-туннель остаётся запасным способом: `ssh -L 11333:127.0.0.1:11333 root@<ip-российского-сервера>` и затем `http://127.0.0.1:11333`.
+Основные команды:
 
-Применение:
+- `install`, `reinstall`, `remove`, `purge`, `cleanup-local` — lifecycle.
+- `status` — быстрый read-only snapshot без тяжёлых сетевых проб.
+- `verify live` — свежая acceptance-проверка конфигов, DNS, route и throughput.
+- `diagnose path` — подробный path/qdisc/WireGuard/MTR отчёт.
+- `diagnose front` — анализ RU `443/tcp` и конкретного client source IP.
+- `diagnose client-log` и `android-diagnose` — клиентские журналы.
+- `client-check` — локальный self-tunnel check до IP серверов.
+- `audit quick|docker|lab|interop|all` — регрессионные контуры.
 
-1. UI валидирует и сохраняет правило в `/etc/vpn-stack/admin-routing-rules.json`.
-2. `admin_apply.py` накладывает правила на `/etc/vpn-stack/sing-box.base.json`.
-3. Новый `/etc/sing-box/config.json` сначала проверяется через `sing-box check`.
-4. Только после успешной проверки файл заменяется атомарно и перезапускается `sing-box`.
+Пример без вопросов:
 
-`reinstall` обновляет `/etc/vpn-stack/sing-box.base.json`, но сохраняет существующие web-admin правила и повторно накладывает их перед restart `sing-box`.
+```powershell
+.\vpn.cmd reinstall --deployment 1 --role all --non-interactive --yes
+.\vpn.cmd verify live --deployment 1 --non-interactive
+```
 
-## Lifecycle
+Данные SSH можно передать через `VPN_RU_*` и `VPN_FOREIGN_*`. Пароли живут только в памяти процесса; `state/<deployment>.json` хранит адрес, порт, user, auth mode и путь к ключу.
 
-### install / reinstall
+## Источники истины
 
-- собирает локальные артефакты
-- загружает bundle на сервер
-- запускает `install.sh` с нужной ролью
-- выполняет postcheck по сервисам
-- затем делает deployment-level dataplane health pass:
-  - свежесть `WireGuard` handshake
-  - прямой IPv4 egress на `зарубежном сервере`
-  - IPv4 egress на `российском сервере` через `wg0`
-- при неуспехе делает один repair cycle и только потом валится с явной причиной вроде `wg_handshake_stale` или `ru_wg_egress_failed`
+- `deployments/<name>.env` — declarative deployment input.
+- `RoutingPolicy` в `vpn_installer/routing_policy.py` — единственное место, где RU трафик классифицируется и привязывается к outbound.
+- `render.py` сериализует модели в sing-box, Xray, WireGuard, nftables и systemd artifacts. Он не должен принимать route-решения.
+- `install.sh` делает server bootstrap, package installation и атомарную установку уже rendered artifacts. Route defaults в shell не дублируются.
+- `/etc/vpn-stack/render-manifest.json` хранит version, policy version, env hash и hashes installed artifacts.
+- `status` сравнивает local/rendered/installed state и показывает drift, а не маскирует его перезапуском.
 
-### Фоновое самовосстановление
+Явные operator rules из web admin хранятся в `/etc/vpn-stack/admin-routing-rules.json`. Это единственный поддерживаемый runtime overlay; автоматические learned routes и route cache удалены.
 
-На каждом сервере работает `vpn-stack-health.timer`. Он раз в несколько минут применяет безопасный runtime tuning, проверяет дешёвые признаки деградации и пишет состояние в `/var/lib/vpn-stack/health-state.env`.
+## RU dataplane
 
-Самовосстановление включено по умолчанию, но ограничено:
-- SSH не рестартуется
-- `WireGuard` перезапускается только при подтверждённой деградации туннельного пути
-- `nftables` на `зарубежном сервере` перезапускается только при локальных egress-проблемах
-- перед действием требуется несколько одинаковых наблюдений
-- после действия действует cooldown и лимит действий в час
+### Публичный front
 
-Параметры: `HEALTH_SELF_HEAL`, `HEALTH_SELF_HEAL_CONFIRMATIONS`, `HEALTH_SELF_HEAL_COOLDOWN_MINUTES`, `HEALTH_SELF_HEAL_MAX_ACTIONS_PER_HOUR`.
+- Xray слушает public `443/tcp` и владеет VLESS/Reality contract.
+- Xray передаёт accepted stream в local mixed inbound `sing-box`.
+- RU `sing-box` не слушает public `443`; его router inbound привязан к `127.0.0.1`.
+- Sniffing в Xray и sing-box восстанавливает HTTP/TLS/QUIC domain, когда протокол его действительно несёт. Raw IP без domain остаётся literal.
+
+### Маршруты
+
+Policy имеет два outbound:
+
+- `direct-ru` — прямой RU egress.
+- `to-foreign` — `bind_interface=wg0`, policy routing mark и foreign egress.
+
+Порядок правил стабилен и покрыт unit-тестами:
+
+1. Sniff и route options.
+2. DNS hijack и optional QUIC policy.
+3. Явные RU domain/suffix/geosite/CIDR -> `direct-ru`.
+4. Явные block CIDR и private/fake destination -> `reject`.
+5. Публичный raw IPv6 literal -> `to-foreign`.
+6. Публичный raw IPv4 literal -> `to-foreign`.
+7. Обычный domain -> `dns-global` с IPv4 answer.
+8. Resolved RU geoip -> `direct-ru`; остальное -> final `to-foreign`.
+
+Доменный трафик резолвится IPv4-only, чтобы избежать client-dependent Happy Eyeballs и недетерминированного IPv6 fallback. Это не блокирует raw IPv6 literals: они идут через foreign IPv6 path.
+
+Отдельные literal-outbound и connect timeout удалены: они ссылались на тот же `wg0`, поэтому не давали fallback, а только обрывали медленные живые endpoints.
+
+## DNS
+
+- `dns-ru-direct` — системный resolver RU-хоста для direct classes. На Linux sing-box 1.13 использует API systemd-resolved и получает его список upstream и failover вместо привязки к одному UDP-адресу.
+- `dns-global` — DoH через `to-foreign` для global classes.
+- `cache_capacity=4096` включает единый LRU cache.
+- `independent_cache` не используется: он дробит cache по серверам и deprecated в актуальном sing-box.
+- NXDOMAIN означает отрицательный DNS-ответ, а не transport failure. Диагностика не смешивает его с `context deadline exceeded`.
+- Публичных `RU_DIRECT_DNS_SERVER/PORT` нет: upstream direct DNS принадлежит сетевой конфигурации сервера и не дублируется в installer env.
+
+Модель следует актуальным опциям [sing-box DNS](https://sing-box.sagernet.org/configuration/dns/), [Local DNS](https://sing-box.sagernet.org/configuration/dns/server/local/) и [DNS over HTTPS](https://sing-box.sagernet.org/configuration/dns/server/https/).
+
+## Health и self-heal
+
+Health не является route controller. Он не меняет sing-box policy, `qdisc`, NIC offload и nftables.
+
+Быстрый timer-cycle проверяет:
+
+- SSH banner;
+- наличие route до peer;
+- фактический HTTP egress через WireGuard;
+- handshake age, но не считает старый handshake отказом, если path уже доказан свежей пробой;
+- direct egress foreign role как диагноз без попытки "починить" провайдера рестартом firewall.
+
+Deep-cycle по отдельному интервалу меряет download, upload и 10-packet ping loss. Из нескольких download sources берётся лучший доступный результат; медленный отдельный CDN не маскирует работоспособную полосу как общий отказ.
+
+Классы:
+
+- `soft/degraded` — speed, upload, packet loss и target availability. Только запись в state/log, без restart.
+- `hard` — доказанная потеря WireGuard route/path. Действие допустимо только после двух последовательных одинаковых cycles.
+
+Любой good или soft-cycle сбрасывает hard confirmation. Действия ограничены WireGuard restart или восстановление явно отсутствующих RU policy routes. Cooldown и hourly cap защищают от restart loop.
+
+`PersistentKeepalive=25` поддерживает NAT mapping в соответствии с [WireGuard Quick Start](https://www.wireguard.com/quickstart/).
+
+Параллельные SSH handshakes ограничиваются OpenSSH через `MaxStartups`, `PerSourceMaxStartups` и `MaxAuthTries`. Guard временно помещает в `abuse_ipv4` только источники повторяющихся authentication failures; сетевые `banner exchange` и timeouts не считаются атакой. Public IP RU и foreign являются защищенным topology-инвариантом: guard очищает их из set и никогда не блокирует повторно.
+
+## Диагностика
 
 ### status
 
-- читает только существующий deployment
-- не создаёт новый deployment
-- не переписывает `state`
-- если локальный `deployments/<name>.env` разъехался с уже установленным сервером, синхронизирует его из живого `/etc/vpn-stack/deployment.env` и сразу пересобирает локальные клиентские артефакты
-- печатает runtime-диагностику по сети и тюнингу:
-  - default/WAN interface
-  - активный `qdisc`
-  - активный TCP congestion control
-  - `netdev backlog`
-  - drops по интерфейсу
-  - `WireGuard` transfer/handshake summary
-  - observed public IPv4 на `зарубежном сервере`
-  - observed public IPv4 на `российском сервере` через `wg0`
-  - target probes по `HEALTH_TARGET_PROBE_URLS` для зарубежного пути: `reachable`, `blocked` или `broken`
-  - отдельные короткие RU-direct probes по `HEALTH_RU_DIRECT_TARGET_PROBE_URLS`, чтобы не проверять глобальные сайты прямым российским каналом
-  - итоговый `health verdict`
+`status` показывает services, installed version/manifest, drift, interfaces, WireGuard, сохранённый health-state и классифицированные журналы. Он не качает тестовые файлы и не запускает временные sing-box instances.
+
+Журналы делятся на взаимоисключающие buckets: DNS timeout, DNS NXDOMAIN, DNS other, domain timeout, IPv4 literal timeout, IPv6 literal timeout, private/fake block, client reset/EOF, invalid Reality, disabled/invalid noise.
+
+### verify live
+
+`verify live` всегда собирает fresh snapshot и проверяет:
+
+- installed manifest и config hash;
+- Xray front, sing-box router, WireGuard и foreign NAT;
+- direct и foreign domain routes;
+- DNS transport;
+- raw IPv4 и IPv6 literals;
+- private/fake reject;
+- target routes и bounded throughput;
+- новые ошибки только за окно этой проверки.
+
+Вердикты: `verified`, `degraded`, `failed`, `inconclusive`. Green `status` не заменяет `verify live` после install/reinstall.
 
 ### diagnose path
 
-- собирает подробный сетевой отчёт в `out/diagnostics/<timestamp>-<deployment>`
-- читает live-состояние серверов: `ip -s link`, `tc -s qdisc`, `sysctl`, `wg show`, `health-state`, последние health-логи
-- запускает короткие `ping`, `mtr` и `curl` проверки для gateway, peer, `wg0` и внешнего интернета
-- при флаге `--iperf` временно открывает `5201/tcp+udp` только на `wg0` зарубежного сервера, прогоняет bounded `iperf3` между серверами и удаляет правила после теста
-- не меняет продуктовые конфиги и не оставляет публичных диагностических портов
+Сохраняет отчёт в `out/diagnostics`: `ip -s link`, `tc -s qdisc`, sysctl, WireGuard, MTR/ping/curl и health journal. `--iperf` временно открывает порт только в `wg0` и удаляет правило после теста.
 
-### remove / purge
+## Lifecycle и безопасность
 
-- требуют server-side metadata стека
-- на unmanaged host жёстко отказываются
-- `purge` дополнительно удаляет server-side metadata
+- Install order: `foreign-exit`, затем `ru-gateway`.
+- Remove order: `ru-gateway`, затем `foreign-exit`.
+- `remove/purge` отказываются работать на unmanaged host.
+- Reinstall удаляет legacy adaptive/cache state и пишет новый manifest.
+- Journald ограничен managed drop-in: 256 MB и 14 дней по умолчанию; reinstall выполняет bounded vacuum.
+- Admin rules применяются только после `sing-box check`, затем config заменяется атомарно.
+- Public web admin по умолчанию доступен только active VPN clients; дефолтный пароль нужно сменить после первого входа.
 
-### cleanup-local
+## Артефакты
 
-- работает только с уже существующим deployment
-- удаляет локальные артефакты и state
-- по флагам может удалить `env` и portable runtime
+Локально:
 
-## Assets и fail-fast
+- `deployments/<name>.env` и optional `.ru-direct-*.txt` overlays;
+- `state/<name>.json`;
+- `out/<name>/assets`, `bundle`, `cloud-init`, `preview`, `client`;
+- `out/<name>/NEXT-STEPS.txt`.
 
-Локальная сборка останавливается сразу, если обязательный asset недоступен и нет валидного локального cache.
+Клиенты:
 
-Обязательные assets:
+- `vless-uri.txt` — основной контракт;
+- `windows-xray.json`, `android-v2rayng-xray.json` — Xray fallback;
+- `hiddify-uri.txt`, `hiddify-*.json` — Hiddify fallback;
+- `linux-sing-box.json` — Linux fallback;
+- `windows-route-bypass.ps1` — operator helper для SSH self-tunnel, а не часть VPN policy.
 
-- для российского сервера: `geosite-ru.srs`, `geoip-ru.srs`
-- для зарубежного сервера: `ru-ipv4.zone`, `ru-ipv6.zone`, только если явно включён `FOREIGN_BLOCK_RU=1`
+Assets имеют несколько upstream URLs и валидный local cache. Неполный или невалидный asset не попадает в bundle.
 
-Стратегия устойчивости по источникам:
+## Карта кода
 
-- для `geosite` и `geoip` по умолчанию используется цепочка из нескольких URL, а не один источник
-- для RU CIDR-листов при включённом `FOREIGN_BLOCK_RU=1` используются `IPdeny` и fallback через `RIPE Stat country-resource-list`
-- если обновление не удалось, локальная сборка использует уже сохранённый cache
-- bundle и `cloud-init` всегда несут preseed-копии assets с собой
-- server-side `vpn-stack-sync` при неудачном обновлении оставляет последнюю рабочую копию, если она уже есть
-- при желании можно задать свои URL-источники прямо в `deployment env`
+- `config.py`, `models.py`, `state.py` — declarative input и validation.
+- `routing_policy.py`, `dns_policy.py` — domain models.
+- `render.py`, `client_artifacts.py`, `manifest.py` — pure artifact generation.
+- `targets.py`, `remote.py` — SSH target resolution и remote snapshot collection.
+- `log_classifier.py`, `diagnostics.py`, `status_output.py` — structured diagnostics и presentation.
+- `health.py`, `verify.py`, `diagnose.py` — verdict policies и read-only/live workflows.
+- `workflows.py`, `install_support.py`, `roles.py` — lifecycle orchestration.
+- `admin_web.py`, `admin_apply.py` — явные operator overrides.
+- `audit/` — quick, Docker, lab и cross-platform regression.
 
-## Проверки и тесты
+Большие функции `render_health_script()` и `preflight_script()` остаются генераторами единых shell-артефактов. Их не следует дробить на модули только ради числа строк: граница ответственности здесь — один generated executable artifact и его tests.
 
-### Unit
+## Проверки и релиз
 
-Основной стек: `stdlib unittest`.
+Минимальный developer gate:
 
-Покрыты:
+```powershell
+python -m unittest discover -s tests -p "test_*.py"
+.\vpn.cmd audit quick
+.\vpn.cmd audit all
+```
 
-- config/state validation
-- порядок wizard-шагов и reuse logic
-- SSH transport decisions
-- render contract и fail-fast
-- порядок install/remove
-- clipboard fallback
-- CLI dispatch
+Production gate:
 
-### Audit
+1. Reinstall обеих ролей только штатным CLI.
+2. `verify live` с `verified` и без manifest drift.
+3. Проверка свежих RU Xray/sing-box журналов после reinstall.
+4. Наблюдение нескольких health cycles: нет новых sing-box restart и необоснованных self-heal actions.
+5. Только после этого commit, SemVer tag и push.
 
-`vpn audit quick`
-
-- пользовательская быстрая самопроверка
-- launcher smoke для текущей платформы
-- рендер артефактов
-- JSON / tar / cloud-init validation
-- dev-only проверки (`unittest`, `coverage`, Docker/container, cross-platform regression) в обычном `quick` переходят в `skipped`
-- для полного developer/regression контура используется `vpn audit all`
-
-`vpn audit docker`
-
-- guard для `remove/purge`
-- role-scoped read-only `status`
-- role-scoped lifecycle без зависимости от второго узла
-- asset fail-fast/cache fallback
-
-`vpn audit lab`
-
-- dataplane `клиент -> российский сервер -> зарубежный сервер`
-- реальные `sing-box`, `WireGuard`, `nftables`
-- российский трафик идёт напрямую
-- глобальный трафик идёт через зарубежный сервер
-- при падении зарубежного сервера работает `fail-closed`
-
-## Что ещё не доказывается без живых VPS
-
-- first boot у конкретного VPS-провайдера
-- реальный `root/sudo` путь на удалённые серверы
-- реальный публичный российский и зарубежный egress
-- DNS leak в обычной сети вне Docker
-- поведение каждого конкретного стороннего клиента на реальных устройствах
-
-Итог: локальный и Docker-контур покрыт, но финальный production-подтверждающий шаг всё равно остаётся за live staging на двух реальных `Ubuntu 24.04` VPS.
-
-## Версионирование
-
-Проект использует `SemVer`: `major.minor.patch`.
-
-- `major` — несовместимые изменения в поведении или публичном интерфейсе
-- `minor` — новые пользовательские возможности и заметные доработки без обязательной ломки старого сценария
-- `patch` — исправления ошибок и точечные улучшения
-
-## Релизы
-
-- история изменений ведётся в [CHANGELOG.md](../CHANGELOG.md)
-- релизный тег должен совпадать с `SemVer`, например `0.2.1`
-- GitHub Release создаётся автоматически по push такого тега через workflow в `.github/workflows/release.yml`
+Локальные тесты не доказывают first boot конкретного VPS, provider path и поведение каждого стороннего клиента. Эти границы в релизном отчёте нужно называть явно.

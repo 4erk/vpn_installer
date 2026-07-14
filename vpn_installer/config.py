@@ -40,6 +40,25 @@ MERGED_SOURCE_DEFAULT_KEYS = {
 DEPRECATED_ENV_KEYS = {
     "CLIENT_COMPAT_UUID",
     "RU_COMPAT_LISTEN_PORTS",
+    "RU_LITERAL_POLICY",
+    "RU_IPV6_LITERAL_POLICY",
+    "RU_IPV6_POLICY",
+    "RU_GEOIP_DIRECT",
+    "TO_FOREIGN_CONNECT_TIMEOUT",
+    "TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT",
+    "TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT",
+    "HEALTH_ROUTE_FAIL_CACHE_TTL_SECONDS",
+    "HEALTH_ROUTE_FAIL_THRESHOLD",
+    "HEALTH_GOOD_CACHE_TTL_SECONDS",
+    "HEALTH_THROUGHPUT_URL",
+    "SUBSCRIPTION_PORT",
+    "SUBSCRIPTION_TOKEN",
+    "SSH_INPUT_RATE",
+    "SSH_INPUT_BURST",
+    "RU_HTTPS_INPUT_RATE",
+    "RU_HTTPS_INPUT_BURST",
+    "RU_DIRECT_DNS_SERVER",
+    "RU_DIRECT_DNS_PORT",
 }
 
 REMOTE_ENV_CRITICAL_KEYS = {
@@ -52,11 +71,6 @@ REMOTE_ENV_CRITICAL_KEYS = {
     "RU_REALITY_ACCEPT_EMPTY_SHORT_ID",
     "SING_BOX_LOG_LEVEL",
     "RU_SNIFF_TIMEOUT",
-    "RU_LITERAL_POLICY",
-    "RU_IPV6_LITERAL_POLICY",
-    "TO_FOREIGN_CONNECT_TIMEOUT",
-    "TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT",
-    "TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT",
     "GUARD_ENABLED",
     "GUARD_INTERVAL_MINUTES",
     "GUARD_LOOKBACK_MINUTES",
@@ -88,9 +102,6 @@ REMOTE_ENV_CRITICAL_KEYS = {
     "HEALTH_SELF_HEAL_COOLDOWN_MINUTES",
     "HEALTH_SELF_HEAL_MAX_ACTIONS_PER_HOUR",
     "HEALTH_SELF_HEAL_CONFIRMATIONS",
-    "HEALTH_GOOD_CACHE_TTL_SECONDS",
-    "HEALTH_ROUTE_FAIL_CACHE_TTL_SECONDS",
-    "HEALTH_ROUTE_FAIL_THRESHOLD",
     "HEALTH_TARGET_PROBE_URLS",
     "HEALTH_RU_DIRECT_TARGET_PROBE_URLS",
     "HEALTH_TARGET_CONNECT_TIMEOUT_SECONDS",
@@ -99,9 +110,7 @@ REMOTE_ENV_CRITICAL_KEYS = {
     "RU_FORCE_DIRECT_DOMAIN_SUFFIX",
     "RU_FORCE_DIRECT_IP_CIDR",
     "RU_BLOCK_IP_CIDR",
-    "RU_IPV6_POLICY",
     "RU_BLOCK_QUIC",
-    "RU_GEOIP_DIRECT",
     "RU_GEOSITE_URL",
     "RU_GEOIP_URL",
     "FOREIGN_BLOCK_RU",
@@ -214,10 +223,6 @@ def generate_default_env(deploy_name: str) -> dict[str, str]:
         "SSH_MAX_STARTUPS": "10:30:60",
         "SSH_PER_SOURCE_MAX_STARTUPS": "6",
         "SSH_PER_SOURCE_NETBLOCK_SIZE": "24:64",
-        "SSH_INPUT_RATE": "6/minute",
-        "SSH_INPUT_BURST": "3",
-        "RU_HTTPS_INPUT_RATE": "120/minute",
-        "RU_HTTPS_INPUT_BURST": "60",
         "GUARD_ENABLED": "1",
         "GUARD_INTERVAL_MINUTES": "5",
         "GUARD_LOOKBACK_MINUTES": "30",
@@ -243,11 +248,6 @@ def generate_default_env(deploy_name: str) -> dict[str, str]:
         "UTLS_FINGERPRINT": "chrome",
         "SING_BOX_LOG_LEVEL": "info",
         "RU_SNIFF_TIMEOUT": "250ms",
-        "RU_LITERAL_POLICY": "fail-fast",
-        "RU_IPV6_LITERAL_POLICY": "reject",
-        "TO_FOREIGN_CONNECT_TIMEOUT": "",
-        "TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT": "750ms",
-        "TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT": "2s",
         "WG_INTERFACE": "wg0",
         "WG_PORT": "51820",
         "WG_MTU": "1360",
@@ -265,18 +265,14 @@ def generate_default_env(deploy_name: str) -> dict[str, str]:
         "WG_FOREIGN_PRIVATE_KEY": base64_std(foreign_wg_private),
         "WG_FOREIGN_PUBLIC_KEY": base64_std(foreign_wg_public),
         "WG_PRESHARED_KEY": base64_std(os.urandom(32)),
-        "RU_DIRECT_DNS_SERVER": "77.88.8.8",
-        "RU_DIRECT_DNS_PORT": "53",
         "GLOBAL_DOH_SERVER": "8.8.8.8",
         "GLOBAL_DOH_SERVER_NAME": "dns.google",
         "GLOBAL_DOH_PATH": "/dns-query",
-        "RU_FORCE_DIRECT_DOMAIN": "api.oneme.ru,mtalk.google.com,calls.okcdn.ru,gosuslugi.ru,api.ok.ru,ifconfig.me,ifconfig.co,checkip.amazonaws.com,ipapi.co,ipinfo.io,ident.me,tnedi.me,icanhazip.com,ip.mail.ru,ipv4-internet.yandex.net,ipv6-internet.yandex.net,2ip.ru",
+        "RU_FORCE_DIRECT_DOMAIN": "api.oneme.ru,mtalk.google.com,calls.okcdn.ru,gosuslugi.ru,api.ok.ru,ifconfig.me,ifconfig.co,checkip.amazonaws.com,ipapi.co,ipinfo.io,ident.me,tnedi.me,icanhazip.com,ip.mail.ru,ipv4-internet.yandex.net,2ip.ru",
         "RU_FORCE_DIRECT_DOMAIN_SUFFIX": ".gstatic.com,.gosuslugi.ru,.ipify.org,.ipinfo.io,.ident.me,.tnedi.me,.icanhazip.com",
         "RU_FORCE_DIRECT_IP_CIDR": "",
         "RU_BLOCK_IP_CIDR": "",
-        "RU_IPV6_POLICY": "to-foreign",
         "RU_BLOCK_QUIC": "1",
-        "RU_GEOIP_DIRECT": "0",
         "RULESET_DIR": "/var/lib/vpn-stack/rules",
         "RU_GEOSITE_URL": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ru.srs https://cdn.jsdelivr.net/gh/SagerNet/sing-geosite@rule-set/geosite-category-ru.srs https://github.com/SagerNet/sing-geosite/raw/rule-set/geosite-category-ru.srs",
         "RU_GEOIP_URL": "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-ru.srs https://cdn.jsdelivr.net/gh/SagerNet/sing-geoip@rule-set/geoip-ru.srs https://github.com/SagerNet/sing-geoip/raw/rule-set/geoip-ru.srs",
@@ -305,9 +301,6 @@ def generate_default_env(deploy_name: str) -> dict[str, str]:
         "HEALTH_SELF_HEAL_COOLDOWN_MINUTES": "15",
         "HEALTH_SELF_HEAL_MAX_ACTIONS_PER_HOUR": "2",
         "HEALTH_SELF_HEAL_CONFIRMATIONS": "2",
-        "HEALTH_GOOD_CACHE_TTL_SECONDS": "900",
-        "HEALTH_ROUTE_FAIL_CACHE_TTL_SECONDS": "300",
-        "HEALTH_ROUTE_FAIL_THRESHOLD": "3",
         "HEALTH_TARGET_PROBE_URLS": "https://chatgpt.com/ https://discord.com/ https://github.com/ https://www.google.com/generate_204 https://telegram.org/ https://api.telegram.org/ https://t.me/",
         "HEALTH_RU_DIRECT_TARGET_PROBE_URLS": "https://api.ipify.org/ https://2ip.ru/",
         "HEALTH_TARGET_CONNECT_TIMEOUT_SECONDS": "2",
@@ -395,66 +388,6 @@ def merge_env_with_defaults(existing: dict[str, str], deploy_name: str) -> dict[
     for key in MERGED_SOURCE_DEFAULT_KEYS:
         if existing.get(key):
             merged[key] = _merge_source_defaults(existing[key], defaults[key])
-    if merged.get("UTLS_FINGERPRINT") == "randomized":
-        merged["UTLS_FINGERPRINT"] = defaults["UTLS_FINGERPRINT"]
-    if merged.get("RU_LISTEN_PORT") == "8443":
-        merged["RU_LISTEN_PORT"] = defaults["RU_LISTEN_PORT"]
-    if merged.get("RU_REALITY_SERVER_NAME") == "www.cloudflare.com":
-        merged["RU_REALITY_SERVER_NAME"] = defaults["RU_REALITY_SERVER_NAME"]
-    if merged.get("RU_REALITY_HANDSHAKE_SERVER") == "www.cloudflare.com":
-        merged["RU_REALITY_HANDSHAKE_SERVER"] = defaults["RU_REALITY_HANDSHAKE_SERVER"]
-    if merged.get("SSH_INPUT_RATE") == "12/minute":
-        merged["SSH_INPUT_RATE"] = defaults["SSH_INPUT_RATE"]
-    if merged.get("SSH_INPUT_BURST") == "6":
-        merged["SSH_INPUT_BURST"] = defaults["SSH_INPUT_BURST"]
-    if merged.get("SSH_MAX_STARTUPS") == "5:30:20":
-        merged["SSH_MAX_STARTUPS"] = defaults["SSH_MAX_STARTUPS"]
-    if merged.get("SSH_PER_SOURCE_MAX_STARTUPS") == "2":
-        merged["SSH_PER_SOURCE_MAX_STARTUPS"] = defaults["SSH_PER_SOURCE_MAX_STARTUPS"]
-    if merged.get("WG_MTU") == "1380":
-        merged["WG_MTU"] = defaults["WG_MTU"]
-    if merged.get("RUNTIME_QDISC", "") == "":
-        merged["RUNTIME_QDISC"] = defaults["RUNTIME_QDISC"]
-    if merged.get("DISABLE_NIC_OFFLOADS") in {"", "1", "true", "yes", "on"}:
-        merged["DISABLE_NIC_OFFLOADS"] = defaults["DISABLE_NIC_OFFLOADS"]
-    if merged.get("HEALTH_HANDSHAKE_GRACE_SECONDS") == "120":
-        merged["HEALTH_HANDSHAKE_GRACE_SECONDS"] = defaults["HEALTH_HANDSHAKE_GRACE_SECONDS"]
-    if merged.get("HEALTH_DEEP_PROBE_INTERVAL_MINUTES") == "30":
-        merged["HEALTH_DEEP_PROBE_INTERVAL_MINUTES"] = defaults["HEALTH_DEEP_PROBE_INTERVAL_MINUTES"]
-    if merged.get("RU_BLOCK_IP_CIDR") == "91.108.56.0/22":
-        merged["RU_BLOCK_IP_CIDR"] = defaults["RU_BLOCK_IP_CIDR"]
-    if merged.get("RU_BLOCK_QUIC") in {"", "0", "false", "no", "off"}:
-        merged["RU_BLOCK_QUIC"] = defaults["RU_BLOCK_QUIC"]
-    if merged.get("RU_IPV6_POLICY") == "fast-fail":
-        merged["RU_IPV6_POLICY"] = defaults["RU_IPV6_POLICY"]
-    if merged.get("RU_LITERAL_POLICY") not in {"fail-fast", "route", "reject"}:
-        merged["RU_LITERAL_POLICY"] = defaults["RU_LITERAL_POLICY"]
-    if not existing.get("RU_IPV6_LITERAL_POLICY"):
-        merged["RU_IPV6_LITERAL_POLICY"] = "reject" if merged.get("RU_IPV6_POLICY") in {"block", "reject"} else defaults["RU_IPV6_LITERAL_POLICY"]
-    elif merged.get("RU_IPV6_LITERAL_POLICY") == "route-with-budget":
-        merged["RU_IPV6_LITERAL_POLICY"] = defaults["RU_IPV6_LITERAL_POLICY"]
-    elif merged.get("RU_IPV6_LITERAL_POLICY") not in {"route-with-budget", "reject"}:
-        merged["RU_IPV6_LITERAL_POLICY"] = defaults["RU_IPV6_LITERAL_POLICY"]
-    if merged.get("RU_SNIFF_TIMEOUT") == "1s":
-        merged["RU_SNIFF_TIMEOUT"] = defaults["RU_SNIFF_TIMEOUT"]
-    if merged.get("TO_FOREIGN_CONNECT_TIMEOUT") in {"1s", "2s"}:
-        merged["TO_FOREIGN_CONNECT_TIMEOUT"] = defaults["TO_FOREIGN_CONNECT_TIMEOUT"]
-    if merged.get("TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT") == "2s":
-        merged["TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT"] = defaults["TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT"]
-    if merged.get("TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT") == "3s":
-        merged["TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT"] = defaults["TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT"]
-    if merged.get("SING_BOX_LOG_LEVEL") == "warn":
-        merged["SING_BOX_LOG_LEVEL"] = defaults["SING_BOX_LOG_LEVEL"]
-    if merged.get("GLOBAL_DOH_SERVER") == "1.1.1.1" and merged.get("GLOBAL_DOH_SERVER_NAME") == "cloudflare-dns.com":
-        merged["GLOBAL_DOH_SERVER"] = defaults["GLOBAL_DOH_SERVER"]
-        merged["GLOBAL_DOH_SERVER_NAME"] = defaults["GLOBAL_DOH_SERVER_NAME"]
-    if (
-        existing.get("ADMIN_WEB_BIND") in {"127.0.0.1", "localhost"}
-        and merged.get("ADMIN_WEB_ACTIVE_CLIENT_REQUIRED", "1").strip().lower() in {"1", "true", "yes", "on"}
-        and not existing.get("ADMIN_WEB_ALLOWED_CIDR", "").strip()
-        and existing.get("ADMIN_WEB_ALLOW_WG", "0").strip().lower() in {"", "0", "false", "no", "off"}
-    ):
-        merged["ADMIN_WEB_BIND"] = defaults["ADMIN_WEB_BIND"]
     merged["DEPLOY_NAME"] = deploy_name
     return merged
 

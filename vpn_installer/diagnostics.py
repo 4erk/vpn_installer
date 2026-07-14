@@ -6,8 +6,6 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from .adaptive import route_fail_cache_fields
-
 
 def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -15,7 +13,7 @@ def sha256_text(text: str) -> str:
 
 @dataclass
 class DiagnosticsSnapshot:
-    schema_version: int = 1
+    schema_version: int = 2
     generated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     deployment: str = ""
     role: str = ""
@@ -27,7 +25,7 @@ class DiagnosticsSnapshot:
     drift: str = "unknown"
     wg_state: dict[str, str] = field(default_factory=dict)
     route_probes: dict[str, str] = field(default_factory=dict)
-    dataplane_cache: dict[str, str] = field(default_factory=dict)
+    runtime_overrides: dict[str, str] = field(default_factory=dict)
     log_buckets: dict[str, int] = field(default_factory=dict)
     historical_log_buckets: dict[str, int] = field(default_factory=dict)
     top_destinations: dict[str, str] = field(default_factory=dict)
@@ -44,7 +42,15 @@ class DiagnosticsSnapshot:
 
     @classmethod
     def from_json(cls, payload: str) -> "DiagnosticsSnapshot":
-        return cls(**json.loads(payload))
+        data = json.loads(payload)
+        legacy_cache = data.pop("dataplane_cache", {})
+        if legacy_cache and "runtime_overrides" not in data:
+            data["runtime_overrides"] = {
+                key: value
+                for key, value in legacy_cache.items()
+                if key in {"admin_routing_rules_count", "admin_routing_rules_summary"}
+            }
+        return cls(**data)
 
     @classmethod
     def from_preflight(cls, preflight: dict[str, str], *, deployment: str = "") -> "DiagnosticsSnapshot":
@@ -55,6 +61,8 @@ class DiagnosticsSnapshot:
             "nftables": preflight.get("nftables", ""),
         }
         log_buckets = {
+            "dns_timeout": int(preflight.get("singbox_recent_dns_timeout_count") or 0),
+            "dns_nxdomain": int(preflight.get("singbox_recent_dns_nxdomain_count") or 0),
             "dns_failed": int(preflight.get("singbox_recent_dns_failed_count") or 0),
             "domain_to_foreign_timeout": int(preflight.get("singbox_recent_to_foreign_timeout_count") or 0),
             "ipv4_literal_timeout": int(preflight.get("singbox_recent_to_foreign_ip_literal_timeout_count") or 0),
@@ -66,7 +74,9 @@ class DiagnosticsSnapshot:
             "private_dns_leak": int(preflight.get("singbox_recent_private_dns_leak_count") or 0),
         }
         historical_log_buckets = {
-            "dns_failed": int(preflight.get("singbox_dns_timeout_count") or 0),
+            "dns_timeout": int(preflight.get("singbox_dns_timeout_count") or 0),
+            "dns_nxdomain": int(preflight.get("singbox_dns_nxdomain_count") or 0),
+            "dns_failed": int(preflight.get("singbox_dns_failed_count") or 0),
             "domain_to_foreign_timeout": int(preflight.get("singbox_to_foreign_timeout_count") or 0),
             "ipv4_literal_timeout": int(preflight.get("singbox_to_foreign_ip_literal_timeout_count") or 0),
             "ipv6_literal_timeout": int(preflight.get("singbox_to_foreign_ipv6_literal_timeout_count") or 0),
@@ -102,14 +112,7 @@ class DiagnosticsSnapshot:
                 "deep_probe_verdict": preflight.get("deep_probe_verdict", ""),
                 "deep_probe_reasons": preflight.get("deep_probe_reasons", ""),
             },
-            dataplane_cache={
-                "good_wg_path_at": preflight.get("good_wg_path_at", ""),
-                "good_wg_path_age_s": preflight.get("good_wg_path_age_s", ""),
-                "good_wg_path_source": preflight.get("good_wg_path_source", ""),
-                "good_wg_path_handshake_age_s": preflight.get("good_wg_path_handshake_age_s", ""),
-                "good_cache_ttl_seconds": preflight.get("good_cache_ttl_seconds", ""),
-                **route_fail_cache_fields(preflight),
-                "singbox_runtime_overlay": preflight.get("singbox_runtime_overlay", ""),
+            runtime_overrides={
                 "admin_routing_rules_count": preflight.get("admin_routing_rules_count", ""),
                 "admin_routing_rules_summary": preflight.get("admin_routing_rules_summary", ""),
             },

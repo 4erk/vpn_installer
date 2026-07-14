@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Any
-
-from . import health, remote, workflows
+from . import health, workflows
 from .common import print_header
 from .diagnostics import DiagnosticsSnapshot
 from .models import ROLE_FOREIGN, ROLE_RU
@@ -39,13 +37,6 @@ def _probe_has_any_reachable_result(raw_value: str) -> bool:
     return False
 
 
-def _positive_int(raw_value: Any) -> int:
-    try:
-        return int(str(raw_value or "0"))
-    except ValueError:
-        return 0
-
-
 def _verify_snapshot(snapshot: DiagnosticsSnapshot) -> DiagnosticsSnapshot:
     hard_failures: list[str] = []
     degradations: list[str] = []
@@ -61,20 +52,22 @@ def _verify_snapshot(snapshot: DiagnosticsSnapshot) -> DiagnosticsSnapshot:
         hard_failures.append("installed config hash differs from render manifest")
     elif snapshot.drift == "unknown":
         degradations.append("render manifest is missing or incomplete")
-    if _probe_has_broken_result(snapshot.route_probes.get("direct", "")):
+    direct_probe = snapshot.route_probes.get("direct", "")
+    if not _probe_has_any_reachable_result(direct_probe):
+        degradations.append("direct route probe did not produce a reachable target")
+    elif _probe_has_broken_result(direct_probe):
         degradations.append("direct route probe has broken targets")
-    if snapshot.role == ROLE_RU and _probe_has_broken_result(snapshot.route_probes.get("wg", "")):
-        degradations.append("wg route probe has broken targets")
     if snapshot.role == ROLE_RU:
+        wg_probe = snapshot.route_probes.get("wg", "")
+        if not _probe_has_any_reachable_result(wg_probe):
+            degradations.append("wg route probe did not produce a reachable target")
+        elif _probe_has_broken_result(wg_probe):
+            degradations.append("wg route probe has broken targets")
         ipv6_probe = snapshot.route_probes.get("ipv6_literal_tcp", "")
         if not ipv6_probe:
             degradations.append("IPv6 literal TCP route probe did not run")
         elif _probe_has_broken_result(ipv6_probe) and not _probe_has_any_reachable_result(ipv6_probe):
             degradations.append("IPv6 literal TCP route probe has broken targets")
-    for bucket in ("dns_failed", "domain_to_foreign_timeout", "ipv4_literal_timeout", "ipv6_literal_timeout", "invalid_reality", "private_dns_leak"):
-        count = _positive_int(snapshot.log_buckets.get(bucket, 0))
-        if count > 0:
-            degradations.append(f"fresh {bucket}={count}")
     if hard_failures:
         snapshot.verdict = "failed"
         snapshot.reasons = hard_failures + degradations
@@ -93,7 +86,8 @@ def _verify_snapshot(snapshot: DiagnosticsSnapshot) -> DiagnosticsSnapshot:
 def verify_live_workflow(deployment: str | None, *, non_interactive: bool = False) -> int:
     print_header("Live verification")
     roles = requested_roles("all")
-    deployment_name, env_path, env, _state, targets, _preflights = workflows.prepare_remote_session(
+    verify_started_epoch = int(time.time())
+    deployment_name, env_path, env, _state, targets, preflights_by_role = workflows.prepare_remote_session(
         deployment,
         roles=roles,
         require_privilege=False,
@@ -102,17 +96,16 @@ def verify_live_workflow(deployment: str | None, *, non_interactive: bool = Fals
         persist_local=False,
         confirm_existing_connections=False,
         non_interactive=non_interactive,
+        enforce_safe_route=False,
+        fresh_since_epoch=verify_started_epoch,
+        run_live_probes=True,
     )
     workflows.print_summary(deployment_name, env, targets)
     snapshots: list[DiagnosticsSnapshot] = []
-    preflights_by_role: dict[str, dict[str, str]] = {}
     worst = "verified"
     rank = {"verified": 0, "degraded": 1, "inconclusive": 2, "failed": 3}
-    verify_started_epoch = int(time.time())
     for target in targets:
-        preflight = remote.remote_preflight(target, health.current_wg_interface(env), fresh_since_epoch=verify_started_epoch)
-        preflights_by_role[target.role] = preflight
-        remote.print_preflight(target, preflight)
+        preflight = preflights_by_role[target.role]
         snapshot = _verify_snapshot(DiagnosticsSnapshot.from_preflight(preflight, deployment=deployment_name))
         snapshots.append(snapshot)
         if rank[snapshot.verdict] > rank[worst]:

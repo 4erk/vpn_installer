@@ -6,6 +6,33 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.10.0] - 2026-07-14
+
+### Changed
+
+- RU routing сведён к детерминированной `RoutingPolicy` с двумя реальными путями: `direct-ru` и `to-foreign`. Удалены дублирующие literal-outbound, runtime promotion и route cache, которые меняли конфиг, но не меняли физический egress.
+- Публичные IPv4/IPv6 literals и обычные foreign-домены идут через один `to-foreign` без искусственного connect timeout. `RU_*LITERAL_POLICY`, `RU_IPV6_POLICY` и `TO_FOREIGN_*CONNECT_TIMEOUT` больше не участвуют в policy и удаляются при миграции.
+- DNS cache RU `sing-box` увеличен до 4096 записей; убран `independent_cache`. NXDOMAIN, transport timeout и прочие DNS-отказы классифицируются раздельно.
+- `vpn status` стал структурной и дешёвой проверкой; тяжёлые route/throughput/IPv6 probes выполняет только `vpn verify live`. Verify использует один fresh snapshot на роль без повторных SSH-обходов.
+- RU route targets и throughput в `verify live` проходят через `socks5h://127.0.0.1:<router-port>`: acceptance проверяет тот же sing-box DNS/routing path, что и клиент, а не подменяет его `curl --interface wg0` с системным DNS VPS.
+- `DiagnosticsSnapshot` обновлён до schema 2: вместо удалённого dataplane cache он хранит только явные admin runtime overrides; legacy JSON читается через migration path.
+
+### Fixed
+
+- Устранён главный источник периодических обрывов: health/adaptive loop больше не перезапускает RU `sing-box` из-за timeout destination и не мутирует `qdisc`/offload каждые несколько минут.
+- Soft loss/speed degradation больше не запускает restart. Self-heal допускает только восстановление WireGuard после двух последовательных hard-failure cycles; любой успешный или soft-cycle сбрасывает confirmation.
+- Убран автоматический shotgun-repair `WireGuard + nftables + sync`; provider/direct egress failure теперь завершается диагнозом без разрушающих действий.
+- Deep probe больше не затирает health-state, не запускается каждые две минуты после degradation и не объявляет весь path медленным по худшему из нескольких download-источников.
+- Reinstall удаляет устаревшие `/var/lib/vpn-stack/adaptive-routing-rules.json` и `/var/lib/vpn-stack/dataplane-cache.env`, чтобы старое runtime-состояние не влияло на новую policy.
+- Preflight больше не падает под `set -euo pipefail`, когда после успешной миграции в installed env нет deprecated routing fields; failed `curl -w` больше не склеивает два невалидных probe results.
+- Reinstall больше не угадывает происхождение настроек по их значениям и не переписывает явные operator overrides как «старые defaults»; удаляются только ключи с формально завершённым deprecated-контрактом.
+- Guard больше не может добавить RU/foreign public IP в общий abuse set из-за hairpin SSH `banner exchange`: инфраструктурные адреса выводятся из set на каждом цикле и не учитываются как выполненная блокировка.
+- Удалён конфликтующий с собственным workflow nft SSH meter `6/minute burst 3`: последовательные preflight/upload/reinstall/verify больше не блокируют сами себя. Ограничение параллельных handshakes оставлено OpenSSH, а guard реагирует только на authentication failures.
+- Xray/Reality interop audit изолирован от внешнего DNS: lab-router использует встроенный hosts resolver для локального TLS target, поэтому тест проверяет front/router контракт, а не доступность Docker DNS.
+- `dns-ru-direct` больше не зависит от единственного `77.88.8.8:53`: sing-box использует системный resolver RU-хоста с управляемым списком upstream и failover. Дублирующие `RU_DIRECT_DNS_SERVER/PORT` удалены из Python/shell/env и мигрируют как deprecated keys.
+- `ipv6-internet.yandex.net` перенесён из общего direct-списка в централизованный класс IPv6-only connectivity probes: IPv4-only DNS policy теперь отклоняет такой probe до lookup и не пишет ложный `empty result`.
+- Install/reinstall начинает health с чистого state-файла: старые self-heal actions и deep-probe verdict больше не отображаются как события новой установки; исторические и fresh счётчики запусков sing-box выводятся отдельно.
+
 ## [0.9.24] - 2026-07-12
 
 ### Fixed

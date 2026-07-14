@@ -18,7 +18,7 @@ class StatusOutputTests(unittest.TestCase):
                 log_buckets={"ipv4_literal_timeout": 2},
                 historical_log_buckets={"ipv4_literal_timeout": 9},
                 top_destinations={"ipv4_literal_timeout": "91.108.56.103:443=2"},
-                dataplane_cache={"good_wg_path_age_s": "45", "route_fail_ipv4_literal_count": "2"},
+                runtime_overrides={"admin_routing_rules_count": "2"},
                 reasons=["domain_to_foreign_timeout present"],
             )
         )
@@ -30,8 +30,8 @@ class StatusOutputTests(unittest.TestCase):
         self.assertIn("ipv4_literal_timeout=2", rendered)
         self.assertIn("historical log buckets: ipv4_literal_timeout=9", rendered)
         self.assertIn("91.108.56.103:443=2", rendered)
-        self.assertIn("dataplane cache:", rendered)
-        self.assertIn("good_wg_path_age_s=45", rendered)
+        self.assertIn("runtime overrides:", rendered)
+        self.assertIn("admin_routing_rules_count=2", rendered)
         self.assertIn("domain_to_foreign_timeout present", rendered)
 
 

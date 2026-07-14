@@ -435,9 +435,6 @@ def test_ru_singbox_runtime_smoke(runner: AuditRunner, out_dir: Path) -> dict[st
     router_config["outbounds"] = [
         {"type": "direct", "tag": "direct-ru", "domain_resolver": {"server": "dns-ru-direct", "strategy": "ipv4_only"}},
         {"type": "direct", "tag": "to-foreign", "domain_resolver": {"server": "dns-global", "strategy": "ipv4_only"}},
-        {"type": "direct", "tag": "to-foreign-ip-literal", "domain_resolver": {"server": "dns-global", "strategy": "ipv4_only"}},
-        {"type": "direct", "tag": "to-foreign-ipv6-literal", "domain_resolver": {"server": "dns-global", "strategy": "ipv4_only"}},
-        {"type": "block", "tag": "blocked"},
     ]
     router_config["route"]["rules"].insert(0, {"ip_cidr": ["127.0.0.0/8"], "action": "route", "outbound": "direct-ru"})
     write_bytes(router_plain_path, json.dumps(router_config, ensure_ascii=False, indent=2).encode("utf-8") + b"\n")
@@ -484,17 +481,22 @@ def test_xray_reality_interop(runner: AuditRunner, out_dir: Path) -> dict[str, s
     router_config = json.loads((out_dir / "preview" / "ru" / "sing-box.json").read_text(encoding="utf-8"))
     router_config["inbounds"][0]["listen"] = "0.0.0.0"
     router_config["log"] = {"level": "debug", "timestamp": True}
-    for dns_server in router_config.get("dns", {}).get("servers", []):
-        dns_server.pop("detour", None)
+    router_config["dns"] = {
+        "servers": [
+            {
+                "type": "hosts",
+                "tag": "interop-hosts",
+                "predefined": {"example.com": ["127.0.0.1"]},
+            }
+        ],
+        "final": "interop-hosts",
+    }
     router_config["route"]["final"] = "direct-ru"
-    router_config["route"].pop("default_domain_resolver", None)
+    router_config["route"]["default_domain_resolver"] = "interop-hosts"
     router_config["route"]["rules"] = [rule for rule in router_config["route"]["rules"] if rule.get("action") != "resolve"]
     router_config["outbounds"] = [
         {"type": "direct", "tag": "direct-ru"},
         {"type": "direct", "tag": "to-foreign"},
-        {"type": "direct", "tag": "to-foreign-ip-literal"},
-        {"type": "direct", "tag": "to-foreign-ipv6-literal"},
-        {"type": "block", "tag": "blocked"},
     ]
 
     xray_server_config = json.loads((out_dir / "preview" / "ru" / "xray.json").read_text(encoding="utf-8"))
@@ -534,7 +536,6 @@ def test_xray_reality_interop(runner: AuditRunner, out_dir: Path) -> dict[str, s
                     runner.docker_copy(router, out_dir / "assets" / asset, f"/var/lib/vpn-stack/rules/{asset}")
                 runner.docker_copy(router, router_config_path, "/work/sing-box-router.json")
                 runner.docker_exec(router, "ENABLE_DEPRECATED_MISSING_DOMAIN_RESOLVER=true sing-box check -c /work/sing-box-router.json")
-                runner.docker_exec(router, "printf '127.0.0.1 example.com\\n' >>/etc/hosts")
                 runner.docker_exec(router, "openssl req -x509 -newkey rsa:2048 -nodes -keyout /tmp/example.key -out /tmp/example.crt -subj /CN=www.bing.com -days 1 >/tmp/openssl-gen.log 2>&1")
                 runner.docker_exec(router, "openssl s_server -quiet -accept 443 -cert /tmp/example.crt -key /tmp/example.key -www >/tmp/example-tls.log 2>&1 & sleep 1")
                 runner.docker_exec(router, "ENABLE_DEPRECATED_MISSING_DOMAIN_RESOLVER=true sing-box run -c /work/sing-box-router.json >/tmp/sing-box-router.log 2>&1 & sleep 1")

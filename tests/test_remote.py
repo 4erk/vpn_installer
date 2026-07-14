@@ -34,6 +34,7 @@ from vpn_installer.remote import (
 class RemoteTests(unittest.TestCase):
     def test_preflight_uses_configured_interface(self) -> None:
         script = preflight_script("wg-test")
+        self.assertIn('run_live_probes="0"', script)
         self.assertIn("wg-quick@wg-test", script)
         self.assertIn("wg_latest_handshake_age_s", script)
         self.assertIn("observed_ipv4", script)
@@ -41,7 +42,7 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("direct_download_bps", script)
         self.assertIn("wg_download_bps", script)
         self.assertIn("deep_probe_verdict", script)
-        self.assertIn("deep_foreign_direct_download_min_bps", script)
+        self.assertIn("deep_foreign_direct_download_bps", script)
         self.assertIn("deep_ru_wg_upload_bps", script)
         self.assertIn("wan_offload_gro", script)
         self.assertIn("wan_offload_tso", script)
@@ -53,6 +54,15 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("head -n1 || true", script)
         self.assertIn("dns: (lookup|exchange) failed", script)
         self.assertIn("exchange failed for", script)
+
+    def test_preflight_enables_expensive_probes_only_for_live_verification(self) -> None:
+        script = preflight_script("wg0", run_live_probes=True)
+        self.assertIn('run_live_probes="1"', script)
+        self.assertIn('if [[ "${run_live_probes}" == "1"', script)
+
+    def test_preflight_treats_missing_deprecated_env_as_normal(self) -> None:
+        script = preflight_script("wg0")
+        self.assertIn("paste -sd, - || true", script)
 
     def test_target_probe_uses_header_probe_with_short_range_fallback(self) -> None:
         script = preflight_script("wg-test")
@@ -66,9 +76,11 @@ class RemoteTests(unittest.TestCase):
         self.assertIn('ru_direct_target_probe_urls="$(env_value HEALTH_RU_DIRECT_TARGET_PROBE_URLS)"', script)
         self.assertIn('target_probe_connect_timeout="$(env_value HEALTH_TARGET_CONNECT_TIMEOUT_SECONDS)"', script)
         self.assertIn('target_probe_max_time="$(env_value HEALTH_TARGET_MAX_TIME_SECONDS)"', script)
-        self.assertIn('probe_target_urls "" "${target_probe_urls}" "${target_probe_connect_timeout}" "${target_probe_max_time}"', script)
-        self.assertIn('probe_target_urls "" "${ru_direct_target_probe_urls}" "${target_probe_connect_timeout}" "${target_probe_max_time}"', script)
-        self.assertIn('probe_target_urls "wg0" "${target_probe_urls}" "${target_probe_connect_timeout}" "${target_probe_max_time}"', script)
+        self.assertIn('ru_router_listen_port="$(env_value RU_ROUTER_LISTEN_PORT)"', script)
+        self.assertIn('probe_target_urls "" "${target_probe_urls}" "${target_probe_connect_timeout}" "${target_probe_max_time}" ""', script)
+        self.assertIn('probe_target_urls "" "${ru_direct_target_probe_urls}" "${target_probe_connect_timeout}" "${target_probe_max_time}" "socks5h://127.0.0.1:${ru_router_listen_port}"', script)
+        self.assertIn('probe_target_urls "" "${target_probe_urls}" "${target_probe_connect_timeout}" "${target_probe_max_time}" "socks5h://127.0.0.1:${ru_router_listen_port}"', script)
+        self.assertIn('probe_download_bps "" "${throughput_url}" "socks5h://127.0.0.1:${ru_router_listen_port}"', script)
         self.assertIn('ipv6_literal_tcp_probe="$(probe_ipv6_literal_tcp_path "wg0")"', script)
         self.assertIn('"cloudflare_v6=https://[2606:4700:4700::1111]/cdn-cgi/trace"', script)
         self.assertIn('route_mark="$(env_value APP_ROUTE_MARK)"', script)
@@ -76,8 +88,10 @@ class RemoteTests(unittest.TestCase):
         self.assertIn('curl -kLsS --proxy "socks5h://127.0.0.1:${port}"', script)
         self.assertNotIn('curl -6kLsS --proxy "socks5h://127.0.0.1:${port}"', script)
         self.assertIn("target_probe_needs_body_fallback", script)
+        self.assertIn('--proxy "${proxy_url}"', script)
         self.assertIn('--connect-timeout "${connect_timeout}" --max-time "${max_time}"', script)
         self.assertNotIn("--connect-timeout 6 --max-time 10", script)
+        self.assertNotIn("printf '000|curl_failed||0'", script)
 
     def test_preflight_log_grouping_does_not_fail_on_pipe_sigpipe(self) -> None:
         script = preflight_script("wg0")
@@ -442,35 +456,18 @@ class RemoteTests(unittest.TestCase):
                     "deep_probe_at": "2026-04-24T12:00:00+00:00",
                     "deep_probe_verdict": "degraded",
                     "deep_probe_reasons": "ru_wg_download=120000",
-                    "deep_foreign_direct_download_min_bps": "300000",
+                    "deep_foreign_direct_download_bps": "300000",
                     "deep_foreign_direct_upload_bps": "900000",
                     "deep_foreign_gateway_ping_loss_pct": "15",
                     "deep_foreign_ru_ping_loss_pct": "10",
                     "deep_foreign_internet_ping_loss_pct": "5",
-                    "deep_ru_wg_download_min_bps": "120000",
+                    "deep_ru_wg_download_bps": "120000",
                     "deep_ru_wg_upload_bps": "800000",
-                    "fast_ru_foreign_ping_loss_pct": "25",
                     "profile_updated_at": "2026-06-17T19:00:00+00:00",
                     "profile_handshake_age_s": "130",
                     "profile_handshake_grace_s": "200",
                     "profile_wg_path_ok": "1",
-                    "profile_fast_ping_loss_pct": "25",
                     "profile_stale_handshake_live_path_s": "130",
-                    "good_wg_path_at": "2026-06-17T19:01:00+00:00",
-                    "good_wg_path_age_s": "45",
-                    "good_wg_path_source": "health-hard-probe",
-                    "good_wg_path_handshake_age_s": "12",
-                    "good_cache_ttl_seconds": "900",
-                    "route_fail_cache_ttl_seconds": "300",
-                    "route_fail_domain_foreign_count": "3",
-                    "route_fail_domain_foreign_top_dest": "[173.194.160.162]:443=3",
-                    "route_fail_domain_foreign_age_s": "15",
-                    "route_fail_ipv4_literal_count": "4",
-                    "route_fail_ipv4_literal_top_dest": "91.108.56.103:443=4",
-                    "route_fail_ipv4_literal_age_s": "20",
-                    "route_fail_ipv6_literal_count": "5",
-                    "route_fail_ipv6_literal_top_dest": "[2001:db8::1]:443=5",
-                    "route_fail_ipv6_literal_age_s": "30",
                     "self_heal_last_reason": "soft:wireguard_path",
                     "self_heal_consecutive": "2",
                     "self_heal_last_action": "restart-wireguard",
@@ -484,13 +481,17 @@ class RemoteTests(unittest.TestCase):
                     "singbox_to_foreign_ipv6_literal_timeout_count": "5",
                     "singbox_direct_ru_timeout_count": "2",
                     "singbox_dns_timeout_count": "1",
-                    "singbox_recent_timeout_sample": "connection: open connection to [2001:db8::1]:443 using outbound/direct[to-foreign-ip-literal]: i/o timeout",
+                    "singbox_recent_timeout_sample": "connection: open connection to [2001:db8::1]:443 using outbound/direct[to-foreign]: i/o timeout",
+                    "singbox_start_count_24h": "1",
+                    "singbox_start_count_since_install": "1",
                     "singbox_log_window_minutes": "30",
                     "singbox_recent_effective_since": "@1783600000",
                     "singbox_recent_blocked_count": "22",
                     "singbox_recent_mux_closed_count": "36",
                     "singbox_recent_eof_count": "38",
-                    "singbox_recent_dns_failed_count": "1",
+                    "singbox_recent_dns_failed_count": "0",
+                    "singbox_recent_dns_timeout_count": "1",
+                    "singbox_recent_dns_nxdomain_count": "2",
                     "singbox_recent_timeout_count": "0",
                     "singbox_recent_invalid_reality_count": "3",
                     "singbox_recent_private_dns_leak_count": "1",
@@ -550,19 +551,13 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("target probes RU over wg: chatgpt.com:reachable:403:0", output)
         self.assertIn("IPv6 literal TCP path: cloudflare_v6:reachable:200:0", output)
         self.assertIn("deep probe verdict: degraded", output)
-        self.assertIn("foreign direct min download B/s: 300000", output)
+        self.assertIn("foreign direct usable download B/s: 300000", output)
         self.assertIn("RU over wg upload B/s: 800000", output)
         self.assertIn("foreign ping loss to gateway (%): 15", output)
-        self.assertIn("fast RU->foreign ping loss (%): 25", output)
         self.assertIn("runtime profile at: 2026-06-17T19:00:00+00:00", output)
         self.assertIn("profile handshake age/grace (s): 130/200", output)
         self.assertIn("profile wg path ok: 1", output)
         self.assertIn("profile stale handshake with live path (s): 130", output)
-        self.assertIn("dataplane cache good WG path: age=45s/ttl=900s, source=health-hard-probe, handshake_age=12s", output)
-        self.assertIn(
-            "dataplane route-fail cache: ttl=300s, domain_foreign=3@15s [173.194.160.162]:443=3, ipv4_literal=4@20s 91.108.56.103:443=4, ipv6_literal=5@30s [2001:db8::1]:443=5",
-            output,
-        )
         self.assertIn("self-heal last action: restart-wireguard/scheduled age=3600s", output)
         self.assertIn("recent invalid Reality handshakes: 7", output)
         self.assertIn("invalid Reality sources: 178.66.129.100=7", output)
@@ -572,6 +567,8 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("sing-box IPv6-literal to-foreign timeouts / 4h: 5", output)
         self.assertIn("sing-box direct-ru timeouts / 4h: 2", output)
         self.assertIn("sing-box DNS timeouts / 4h: 1", output)
+        self.assertIn("sing-box starts since install: 1", output)
+        self.assertIn("sing-box starts historical / 24h: 1", output)
         self.assertIn("sing-box global DoH: 8.8.8.8/dns.google", output)
         self.assertIn("sing-box IP-literal timeout destinations / 4h: 91.108.56.103:443=4", output)
         self.assertIn("sing-box timeout destinations / 4h: [185.234.59.121]=2,ipv6.msftncsi.com:AAAA=1", output)
@@ -585,7 +582,7 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("Xray front recent sample: REALITY: processed invalid connection from 203.0.113.20:12345", output)
         self.assertIn("sing-box recent window (min): 30", output)
         self.assertIn("sing-box recent since: @1783600000", output)
-        self.assertIn("sing-box recent grouped errors: blocked=22, mux_closed=36, eof=38, dns_failed=1, timeout=0, invalid_reality=3, private_dns_leak=1", output)
+        self.assertIn("sing-box recent grouped errors: blocked=22, mux_closed=36, eof=38, dns_timeout=1, dns_nxdomain=2, dns_other=0, timeout=0, invalid_reality=3, private_dns_leak=1", output)
         self.assertIn("sing-box recent timeout classes: domain_to_foreign=2, ipv4_literal=4, ipv6_literal=5, direct_ru=1", output)
         self.assertIn("sing-box recent timeout destinations: ipv6.msftconnecttest.com:AAAA=2", output)
         self.assertIn("sing-box recent domain timeout context: rr2---sn-aj5go5-5i.googlevideo.com:443->[173.194.160.162]=1", output)
@@ -600,7 +597,7 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("sing-box recent IPv6-literal to-foreign destinations: [2400:52e0:1e00::722:1]:443=4", output)
         self.assertIn("sing-box recent direct-ru destinations: 142.251.143.131:80=2", output)
         self.assertIn("sing-box recent IPv6 literal destinations: [2400:52e0:1e00::722:1]:443=4,[fdfd::1ad5:632a]:55517=3", output)
-        self.assertIn("diagnosis: clients sent IPv6 literal destinations; current RU IPv6 literal policy routes TCP/443 through the dedicated IPv6-literal foreign outbound and rejects other IPv6 literal ports fail-fast.", output)
+        self.assertIn("diagnosis: client sent IPv6 literal destinations; public IPv6 literals use the same foreign WireGuard egress as ordinary foreign traffic.", output)
         self.assertIn("sing-box recent inbound destinations: chatgpt.com:443=2,[2606:4700::6810:5c12]:443=1", output)
 
     def test_ensure_remote_privilege_paths(self) -> None:

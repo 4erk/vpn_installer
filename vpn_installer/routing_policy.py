@@ -7,7 +7,7 @@ from typing import Any
 
 from .dns_policy import CONNECTIVITY_CHECK_DIRECT_DOMAINS, CONNECTIVITY_CHECK_IPV6_ONLY_DOMAINS, merged_domains
 
-POLICY_VERSION = "0.9.24"
+POLICY_VERSION = "0.10.0"
 
 TRAFFIC_CLASSES = (
     "ru_direct_domain",
@@ -23,9 +23,6 @@ TRAFFIC_CLASSES = (
     "ipv6_literal_foreign",
     "blocked",
 )
-
-LITERAL_POLICIES = {"fail-fast", "route", "reject"}
-IPV6_LITERAL_POLICIES = {"route-with-budget", "reject"}
 
 
 def _env_list(env: dict[str, str], key: str) -> list[str]:
@@ -55,21 +52,6 @@ def _ip_network_or_raw(raw_value: str) -> str:
         return raw_value
 
 
-def _normalize_literal_policy(raw_value: str) -> str:
-    policy = (raw_value or "fail-fast").strip().lower()
-    return policy if policy in LITERAL_POLICIES else "fail-fast"
-
-
-def _normalize_ipv6_literal_policy(env: dict[str, str]) -> str:
-    legacy = env.get("RU_IPV6_POLICY", "to-foreign").strip().lower()
-    if legacy in {"block", "reject", "disabled", "off", "0", "false", "no"}:
-        return "reject"
-    policy = env.get("RU_IPV6_LITERAL_POLICY", "").strip().lower()
-    if policy in IPV6_LITERAL_POLICIES:
-        return policy
-    return "reject"
-
-
 def _client_dns_dot_networks(env: dict[str, str]) -> list[str]:
     networks: list[str] = []
     for key in ("CLIENT_TUN_ADDRESS_V4", "CLIENT_FAKEIP_V4"):
@@ -78,21 +60,6 @@ def _client_dns_dot_networks(env: dict[str, str]) -> list[str]:
             networks.append(_ip_network_or_raw(raw_value))
     networks.append("fd00::/8")
     return networks
-
-
-@dataclass(frozen=True)
-class TrafficBudget:
-    domain_foreign_connect_timeout: str = ""
-    ipv4_literal_connect_timeout: str = "750ms"
-    ipv6_literal_connect_timeout: str = "2s"
-
-    @classmethod
-    def from_env(cls, env: dict[str, str]) -> "TrafficBudget":
-        return cls(
-            domain_foreign_connect_timeout=env.get("TO_FOREIGN_CONNECT_TIMEOUT", "").strip(),
-            ipv4_literal_connect_timeout=env.get("TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT", "750ms").strip(),
-            ipv6_literal_connect_timeout=env.get("TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT", "2s").strip(),
-        )
 
 
 @dataclass(frozen=True)
@@ -129,10 +96,8 @@ class RoutingPolicy:
 
 def build_ru_routing_policy(env: dict[str, str]) -> RoutingPolicy:
     sniff_timeout = env.get("RU_SNIFF_TIMEOUT", "250ms").strip() or "250ms"
-    literal_policy = _normalize_literal_policy(env.get("RU_LITERAL_POLICY", "fail-fast"))
-    ipv6_literal_policy = _normalize_ipv6_literal_policy(env)
-    budget = TrafficBudget.from_env(env)
-    direct_domains = _env_list(env, "RU_FORCE_DIRECT_DOMAIN")
+    ipv6_only_domains = {domain.lower() for domain in CONNECTIVITY_CHECK_IPV6_ONLY_DOMAINS}
+    direct_domains = [domain for domain in _env_list(env, "RU_FORCE_DIRECT_DOMAIN") if domain.lower() not in ipv6_only_domains]
     direct_domain_suffixes = _env_list(env, "RU_FORCE_DIRECT_DOMAIN_SUFFIX")
     direct_ip_cidrs = _env_list(env, "RU_FORCE_DIRECT_IP_CIDR")
     client_dns_dot_networks = _client_dns_dot_networks(env)
@@ -143,7 +108,6 @@ def build_ru_routing_policy(env: dict[str, str]) -> RoutingPolicy:
             direct_ip_cidrs.append(ru_public_cidr)
     block_ip_cidrs = _env_list(env, "RU_BLOCK_IP_CIDR")
     block_quic = _enabled(env.get("RU_BLOCK_QUIC", "0"))
-    geoip_direct = _enabled(env.get("RU_GEOIP_DIRECT", "0"))
 
     dns_rules: list[dict[str, Any]] = [{"query_type": ["AAAA"], "action": "reject"}]
     dns_rules.append({"domain": list(CONNECTIVITY_CHECK_IPV6_ONLY_DOMAINS), "action": "reject"})
@@ -173,33 +137,22 @@ def build_ru_routing_policy(env: dict[str, str]) -> RoutingPolicy:
     if direct_ip_cidrs:
         route_rules.append({"ip_cidr": direct_ip_cidrs, "action": "route", "outbound": "direct-ru"})
     if block_ip_cidrs:
-        route_rules.append({"ip_cidr": block_ip_cidrs, "action": "route", "outbound": "blocked"})
+        route_rules.append({"ip_cidr": block_ip_cidrs, "action": "reject"})
     route_rules.append(
         {
             "ip_cidr": client_dns_dot_networks,
             "port": 853,
             "action": "route",
-            "outbound": "direct-ru",
+            "outbound": "to-foreign",
             "override_address": env["GLOBAL_DOH_SERVER"],
             "override_port": 853,
         }
     )
-    route_rules.append({"ip_is_private": True, "action": "route", "outbound": "blocked"})
-    if ipv6_literal_policy == "reject":
-        route_rules.append({"ip_version": 6, "action": "reject"})
-    else:
-        route_rules.append({"ip_version": 6, "port": 443, "action": "route", "outbound": "to-foreign-ipv6-literal"})
-        route_rules.append({"ip_version": 6, "action": "reject"})
-    if geoip_direct:
-        route_rules.append({"rule_set": ["ru-geoip"], "action": "route", "outbound": "direct-ru"})
-    if literal_policy == "reject":
-        route_rules.append({"ip_cidr": ["0.0.0.0/0"], "action": "reject"})
-    elif literal_policy == "route":
-        route_rules.append({"ip_cidr": ["0.0.0.0/0"], "action": "route", "outbound": "to-foreign"})
-    else:
-        route_rules.append({"ip_cidr": ["0.0.0.0/0"], "action": "route", "outbound": "to-foreign-ip-literal"})
+    route_rules.append({"ip_is_private": True, "action": "reject"})
+    route_rules.append({"ip_version": 6, "action": "route", "outbound": "to-foreign"})
+    route_rules.append({"ip_cidr": ["0.0.0.0/0"], "action": "route", "outbound": "to-foreign"})
     route_rules.append({"action": "resolve", "server": "dns-global", "strategy": "ipv4_only"})
-    route_rules.append({"ip_is_private": True, "action": "route", "outbound": "blocked"})
+    route_rules.append({"ip_is_private": True, "action": "reject"})
     route_rules.append({"rule_set": ["ru-geoip"], "action": "route", "outbound": "direct-ru"})
 
     foreign_base = {
@@ -208,46 +161,36 @@ def build_ru_routing_policy(env: dict[str, str]) -> RoutingPolicy:
         "routing_mark": _env_int(env, "APP_ROUTE_MARK"),
         "domain_resolver": {"server": "dns-global", "strategy": "ipv4_only"},
     }
-    to_foreign = dict(foreign_base, tag="to-foreign")
-    if budget.domain_foreign_connect_timeout:
-        to_foreign["connect_timeout"] = budget.domain_foreign_connect_timeout
-    to_foreign_ip_literal = dict(foreign_base, tag="to-foreign-ip-literal")
-    if budget.ipv4_literal_connect_timeout:
-        to_foreign_ip_literal["connect_timeout"] = budget.ipv4_literal_connect_timeout
-    to_foreign_ipv6_literal = dict(foreign_base, tag="to-foreign-ipv6-literal")
-    if budget.ipv6_literal_connect_timeout:
-        to_foreign_ipv6_literal["connect_timeout"] = budget.ipv6_literal_connect_timeout
-
     outbounds = [
         {"type": "direct", "tag": "direct-ru", "domain_resolver": {"server": "dns-ru-direct", "strategy": "ipv4_only"}},
-        to_foreign,
-        to_foreign_ip_literal,
-        to_foreign_ipv6_literal,
-        {"type": "block", "tag": "blocked"},
+        dict(foreign_base, tag="to-foreign"),
     ]
     classes = {
         "ru_direct_domain": RouteClass("ru_direct_domain", "direct-ru", "dns-ru-direct", "none", "direct_ru", "blocked"),
         "ru_direct_ip": RouteClass("ru_direct_ip", "direct-ru", "dns-ru-direct", "none", "direct_ru", "blocked"),
-        "client_dns_dot": RouteClass("client_dns_dot", "direct-ru", "none", "fixed_budget", "client_dns_dot", "blocked"),
-        "private_or_fake": RouteClass("private_or_fake", "blocked", "none", "none", "blocked_private_fake", "none"),
+        "client_dns_dot": RouteClass("client_dns_dot", "to-foreign", "none", "system", "client_dns_dot", "reject"),
+        "private_or_fake": RouteClass("private_or_fake", "reject", "none", "none", "blocked_private_fake", "none"),
         "connectivity_check": RouteClass("connectivity_check", "direct-ru", "dns-ru-direct", "none", "direct_ru", "dns-global"),
-        "connectivity_check_ipv6_only": RouteClass("connectivity_check_ipv6_only", "blocked", "none", "none", "blocked_private_fake", "none"),
+        "connectivity_check_ipv6_only": RouteClass("connectivity_check_ipv6_only", "reject", "none", "none", "blocked_private_fake", "none"),
         "dns_global": RouteClass("dns_global", "to-foreign", "dns-global", "domain_foreign", "dns_failed", "dns-ru-direct"),
         "resolved_ru_ip": RouteClass("resolved_ru_ip", "direct-ru", "dns-global", "none", "direct_ru_resolved", "to-foreign"),
-        "domain_foreign": RouteClass("domain_foreign", "to-foreign", "dns-global", "operator_override", "domain_to_foreign_timeout", "none"),
-        "ipv4_literal_foreign": RouteClass("ipv4_literal_foreign", "to-foreign-ip-literal", "dns-global", literal_policy, "ipv4_literal_timeout", "reject"),
-        "ipv6_literal_foreign": RouteClass("ipv6_literal_foreign", "to-foreign-ipv6-literal", "dns-global", ipv6_literal_policy, "ipv6_literal_timeout", "reject"),
-        "blocked": RouteClass("blocked", "blocked", "none", "none", "blocked_private_fake", "none"),
+        "domain_foreign": RouteClass("domain_foreign", "to-foreign", "dns-global", "system", "domain_to_foreign_timeout", "none"),
+        "ipv4_literal_foreign": RouteClass("ipv4_literal_foreign", "to-foreign", "none", "system", "ipv4_literal_timeout", "none"),
+        "ipv6_literal_foreign": RouteClass("ipv6_literal_foreign", "to-foreign", "none", "system", "ipv6_literal_timeout", "none"),
+        "blocked": RouteClass("blocked", "reject", "none", "none", "blocked_private_fake", "none"),
     }
     deprecated_overrides = [
         key
-        for key, default_value in (
-            ("TO_FOREIGN_CONNECT_TIMEOUT", ""),
-            ("TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT", "750ms"),
-            ("TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT", "2s"),
-            ("RU_IPV6_POLICY", "to-foreign"),
+        for key in (
+            "RU_LITERAL_POLICY",
+            "RU_IPV6_LITERAL_POLICY",
+            "RU_IPV6_POLICY",
+            "RU_GEOIP_DIRECT",
+            "TO_FOREIGN_CONNECT_TIMEOUT",
+            "TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT",
+            "TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT",
         )
-        if key in env and env.get(key, "").strip() != default_value
+        if key in env
     ]
     return RoutingPolicy(
         policy_version=POLICY_VERSION,

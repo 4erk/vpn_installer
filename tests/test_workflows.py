@@ -162,6 +162,26 @@ class WorkflowTests(unittest.TestCase):
         preflight.assert_called_once()
         prompt.assert_not_called()
 
+    def test_verify_target_non_interactively_reports_role_password_env(self) -> None:
+        target = RemoteTarget(
+            role=ROLE_RU,
+            public_ip="203.0.113.10",
+            ssh_host="203.0.113.10",
+            ssh_port=22,
+            ssh_user="root",
+            auth_mode="password",
+            saved_connection=True,
+        )
+        with self.assertRaises(AppError) as ctx:
+            workflows.verify_target_non_interactively(
+                target,
+                env=generate_default_env("demo"),
+                wg_interface="wg0",
+                require_privilege=True,
+                validate_os=True,
+            )
+        self.assertIn("VPN_RU_SSH_PASSWORD", str(ctx.exception))
+
     def test_verify_target_interactively_checks_remote_privilege(self) -> None:
         target = RemoteTarget(role=ROLE_RU, public_ip="203.0.113.10", ssh_host="203.0.113.10", ssh_port=22, ssh_user="root")
         with patch("vpn_installer.workflows.prompt_server_connection", return_value=target), patch("vpn_installer.workflows.assert_server_route_not_self_tunneled"), patch("vpn_installer.workflows.remote_preflight", return_value={"os_id": "ubuntu", "os_version": "24.04"}), patch("vpn_installer.workflows.print_preflight"), patch("vpn_installer.workflows.ensure_remote_privilege") as mocked:
@@ -207,21 +227,20 @@ class WorkflowTests(unittest.TestCase):
         write_text_mock.assert_called_once()
         write_state_mock.assert_called_once()
 
-    def test_prepare_remote_session_blocks_saved_self_tunneled_server_route_before_ssh(self) -> None:
+    def test_prepare_remote_session_delegates_safe_route_check_to_target_verification(self) -> None:
         env = generate_default_env("demo")
         env["RU_PUBLIC_IP"] = "203.0.113.10"
         state = {ROLE_RU: {"public_ip": "203.0.113.10", "ssh_host": "203.0.113.10", "ssh_port": "22", "ssh_user": "root", "auth_mode": "password"}}
-        with patch("vpn_installer.workflows.ensure_directories"), patch("vpn_installer.workflows.select_existing_deployment", return_value="demo"), patch("vpn_installer.workflows.load_existing_deployment_env", return_value=(Path("deployments/demo.env"), env)), patch("vpn_installer.workflows.load_state", return_value=state), patch("vpn_installer.workflows.assert_server_route_not_self_tunneled", side_effect=AppError("идёт через VPN-интерфейс")), patch("vpn_installer.workflows.verify_target_interactively") as verify:
-            with self.assertRaises(AppError) as ctx:
-                workflows.prepare_remote_session(
-                    "demo",
-                    roles=[ROLE_RU],
-                    require_privilege=False,
-                    allow_create=False,
-                    persist_local=False,
-                )
-        verify.assert_not_called()
-        self.assertIn("идёт через VPN-интерфейс", str(ctx.exception))
+        target = workflows.build_target(ROLE_RU, env, state)
+        with patch("vpn_installer.workflows.ensure_directories"), patch("vpn_installer.workflows.select_existing_deployment", return_value="demo"), patch("vpn_installer.workflows.load_existing_deployment_env", return_value=(Path("deployments/demo.env"), env)), patch("vpn_installer.workflows.load_state", return_value=state), patch("vpn_installer.workflows.verify_target_interactively", return_value=(target, {"role": ROLE_RU})) as verify:
+            workflows.prepare_remote_session(
+                "demo",
+                roles=[ROLE_RU],
+                require_privilege=False,
+                allow_create=False,
+                persist_local=False,
+            )
+        self.assertTrue(verify.call_args.kwargs["enforce_safe_route"])
 
     def test_client_check_workflow_reports_self_tunnel(self) -> None:
         env = generate_default_env("demo")
@@ -308,8 +327,8 @@ class WorkflowTests(unittest.TestCase):
         healthy = health.deployment_health_snapshot(
             env,
             {
-                ROLE_RU: {"wg_observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "20", "deep_ru_wg_download_min_bps": "800000", "deep_ru_wg_upload_bps": "1200000"},
-                ROLE_FOREIGN: {"observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "15", "deep_foreign_direct_download_min_bps": "700000", "deep_foreign_direct_upload_bps": "1400000", "deep_foreign_gateway_ping_loss_pct": "0", "deep_foreign_ru_ping_loss_pct": "0", "deep_foreign_internet_ping_loss_pct": "0"},
+                ROLE_RU: {"wg_observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "20", "deep_ru_wg_download_bps": "800000", "deep_ru_wg_upload_bps": "1200000"},
+                ROLE_FOREIGN: {"observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "15", "deep_foreign_direct_download_bps": "700000", "deep_foreign_direct_upload_bps": "1400000", "deep_foreign_gateway_ping_loss_pct": "0", "deep_foreign_ru_ping_loss_pct": "0", "deep_foreign_internet_ping_loss_pct": "0"},
             },
         )
         self.assertEqual(healthy["health_verdict"], "ok")
@@ -350,8 +369,8 @@ class WorkflowTests(unittest.TestCase):
         stale_deep_ignored = health.deployment_health_snapshot(
             env,
             {
-                ROLE_RU: {"wg_observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "20", "wg_download_bps": "900000", "deep_ru_wg_download_min_bps": "120000"},
-                ROLE_FOREIGN: {"observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "15", "direct_download_bps": "900000", "deep_foreign_direct_download_min_bps": "900000"},
+                ROLE_RU: {"wg_observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "20", "wg_download_bps": "900000", "deep_ru_wg_download_bps": "120000"},
+                ROLE_FOREIGN: {"observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "15", "direct_download_bps": "900000", "deep_foreign_direct_download_bps": "900000"},
             },
         )
         self.assertEqual(stale_deep_ignored["health_verdict"], "ok")
@@ -360,8 +379,8 @@ class WorkflowTests(unittest.TestCase):
         missing_current_falls_back_to_deep = health.deployment_health_snapshot(
             env,
             {
-                ROLE_RU: {"wg_observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "20", "wg_download_bps": "-1", "deep_ru_wg_download_min_bps": "900000"},
-                ROLE_FOREIGN: {"observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "15", "direct_download_bps": "-1", "deep_foreign_direct_download_min_bps": "900000"},
+                ROLE_RU: {"wg_observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "20", "wg_download_bps": "-1", "deep_ru_wg_download_bps": "900000"},
+                ROLE_FOREIGN: {"observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "15", "direct_download_bps": "-1", "deep_foreign_direct_download_bps": "900000"},
             },
         )
         self.assertEqual(missing_current_falls_back_to_deep["health_verdict"], "ok")
@@ -370,8 +389,8 @@ class WorkflowTests(unittest.TestCase):
         degraded = health.deployment_health_snapshot(
             env,
             {
-                ROLE_RU: {"wg_observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "20", "wg_download_bps": "120000", "deep_ru_wg_download_min_bps": "900000"},
-                ROLE_FOREIGN: {"observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "15", "direct_download_bps": "900000", "deep_foreign_direct_download_min_bps": "900000"},
+                ROLE_RU: {"wg_observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "20", "wg_download_bps": "120000", "deep_ru_wg_download_bps": "900000"},
+                ROLE_FOREIGN: {"observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "15", "direct_download_bps": "900000", "deep_foreign_direct_download_bps": "900000"},
             },
         )
         self.assertEqual(degraded["health_verdict"], "ru_wg_download_degraded")
@@ -379,11 +398,11 @@ class WorkflowTests(unittest.TestCase):
         loss_profile_only = health.deployment_health_snapshot(
             env,
             {
-                ROLE_RU: {"wg_observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "20", "deep_ru_wg_download_min_bps": "900000"},
+                ROLE_RU: {"wg_observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "20", "deep_ru_wg_download_bps": "900000"},
                 ROLE_FOREIGN: {
                     "observed_ipv4": "198.51.100.20",
                     "wg_latest_handshake_age_s": "15",
-                    "deep_foreign_direct_download_min_bps": "900000",
+                    "deep_foreign_direct_download_bps": "900000",
                     "deep_foreign_direct_upload_bps": "1400000",
                     "deep_foreign_gateway_ping_loss_pct": "0",
                     "deep_foreign_ru_ping_loss_pct": "12",
@@ -394,32 +413,14 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(loss_profile_only["health_verdict"], "foreign_ru_ping_loss_degraded")
         self.assertEqual(loss_profile_only["foreign_ru_ping_loss_pct"], "12")
 
-        fast_loss_overrides_stale_deep = health.deployment_health_snapshot(
-            env,
-            {
-                ROLE_RU: {"wg_observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "20", "deep_ru_wg_download_min_bps": "900000"},
-                ROLE_FOREIGN: {
-                    "observed_ipv4": "198.51.100.20",
-                    "wg_latest_handshake_age_s": "15",
-                    "deep_foreign_direct_download_min_bps": "900000",
-                    "deep_foreign_direct_upload_bps": "1400000",
-                    "fast_foreign_ru_ping_loss_pct": "0",
-                    "deep_foreign_ru_ping_loss_pct": "12",
-                    "deep_foreign_internet_ping_loss_pct": "0",
-                },
-            },
-        )
-        self.assertEqual(fast_loss_overrides_stale_deep["health_verdict"], "ok")
-        self.assertEqual(fast_loss_overrides_stale_deep["foreign_ru_ping_loss_pct"], "0")
-
         gateway_loss_profile_only = health.deployment_health_snapshot(
             env,
             {
-                ROLE_RU: {"wg_observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "20", "deep_ru_wg_download_min_bps": "900000"},
+                ROLE_RU: {"wg_observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "20", "deep_ru_wg_download_bps": "900000"},
                 ROLE_FOREIGN: {
                     "observed_ipv4": "198.51.100.20",
                     "wg_latest_handshake_age_s": "15",
-                    "deep_foreign_direct_download_min_bps": "900000",
+                    "deep_foreign_direct_download_bps": "900000",
                     "deep_foreign_direct_upload_bps": "1400000",
                     "deep_foreign_gateway_ping_loss_pct": "12",
                     "deep_foreign_ru_ping_loss_pct": "1",
@@ -436,14 +437,14 @@ class WorkflowTests(unittest.TestCase):
                 ROLE_RU: {
                     "wg_observed_ipv4": "198.51.100.20",
                     "wg_latest_handshake_age_s": "20",
-                    "deep_ru_wg_download_min_bps": "900000",
+                    "deep_ru_wg_download_bps": "900000",
                     "deep_ru_wg_upload_bps": "1200000",
                     "target_probe_wg": "chatgpt.com:reachable:403:0:172.64.155.209:0.09;github.com:broken:000:1:-:2.0",
                 },
                 ROLE_FOREIGN: {
                     "observed_ipv4": "198.51.100.20",
                     "wg_latest_handshake_age_s": "15",
-                    "deep_foreign_direct_download_min_bps": "900000",
+                    "deep_foreign_direct_download_bps": "900000",
                     "deep_foreign_direct_upload_bps": "1400000",
                     "deep_foreign_gateway_ping_loss_pct": "0",
                     "deep_foreign_ru_ping_loss_pct": "0",
@@ -461,14 +462,14 @@ class WorkflowTests(unittest.TestCase):
                 ROLE_RU: {
                     "wg_observed_ipv4": "198.51.100.20",
                     "wg_latest_handshake_age_s": "20",
-                    "deep_ru_wg_download_min_bps": "900000",
+                    "deep_ru_wg_download_bps": "900000",
                     "deep_ru_wg_upload_bps": "1200000",
                     "target_probe_wg": "chatgpt.com:blocked:451:0:172.64.155.209:0.09;github.com:broken:000:1:-:2.0",
                 },
                 ROLE_FOREIGN: {
                     "observed_ipv4": "198.51.100.20",
                     "wg_latest_handshake_age_s": "15",
-                    "deep_foreign_direct_download_min_bps": "900000",
+                    "deep_foreign_direct_download_bps": "900000",
                     "deep_foreign_direct_upload_bps": "1400000",
                     "deep_foreign_gateway_ping_loss_pct": "0",
                     "deep_foreign_ru_ping_loss_pct": "0",
@@ -483,8 +484,8 @@ class WorkflowTests(unittest.TestCase):
         threshold_jitter = health.deployment_health_snapshot(
             env,
             {
-                ROLE_RU: {"wg_observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "20", "deep_ru_wg_download_min_bps": "492000", "deep_ru_wg_upload_bps": "1200000"},
-                ROLE_FOREIGN: {"observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "15", "deep_foreign_direct_download_min_bps": "900000", "deep_foreign_direct_upload_bps": "1400000"},
+                ROLE_RU: {"wg_observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "20", "deep_ru_wg_download_bps": "492000", "deep_ru_wg_upload_bps": "1200000"},
+                ROLE_FOREIGN: {"observed_ipv4": "198.51.100.20", "wg_latest_handshake_age_s": "15", "deep_foreign_direct_download_bps": "900000", "deep_foreign_direct_upload_bps": "1400000"},
             },
         )
         self.assertEqual(threshold_jitter["health_verdict"], "ok")
@@ -689,12 +690,13 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(foreign_call.args[0], foreign)
         self.assertIn("systemctl restart --no-block", foreign_call.args[1])
         self.assertIn("wg-quick@wg0", foreign_call.args[1])
-        self.assertIn("vpn-stack-sync.service", foreign_call.args[1])
+        self.assertNotIn("nftables", foreign_call.args[1])
+        self.assertNotIn("vpn-stack-sync.service", foreign_call.args[1])
         self.assertTrue(foreign_call.kwargs["as_root"])
         self.assertEqual(ru_call.args[0], ru)
         self.assertIn("systemctl restart --no-block", ru_call.args[1])
         self.assertIn("wg-quick@wg0", ru_call.args[1])
-        self.assertIn("sing-box", ru_call.args[1])
+        self.assertNotIn("sing-box", ru_call.args[1])
         self.assertTrue(ru_call.kwargs["as_root"])
 
     def test_ensure_deployment_health_fails_after_repair_exhaustion(self) -> None:
@@ -713,6 +715,22 @@ class WorkflowTests(unittest.TestCase):
             with self.assertRaises(AppError) as ctx:
                 workflows.ensure_deployment_health(env, [ru, foreign], auto_repair=True)
         self.assertIn("wg_handshake_stale", str(ctx.exception))
+
+    def test_ensure_deployment_health_does_not_repair_foreign_provider_failure(self) -> None:
+        env = generate_default_env("demo")
+        targets = [RemoteTarget(role=ROLE_RU), RemoteTarget(role=ROLE_FOREIGN)]
+        health = {
+            "health_verdict": "foreign_direct_egress_failed",
+            "foreign_direct_observed_ipv4": "-",
+            "ru_wg_observed_ipv4": "-",
+            "ru_handshake_age_s": "20",
+            "foreign_handshake_age_s": "20",
+            "handshake_grace_s": "200",
+        }
+        with patch("vpn_installer.workflows.wait_for_dataplane_health", return_value=({}, health)), patch("vpn_installer.workflows.run_dataplane_repair_cycle") as repair:
+            with self.assertRaises(AppError):
+                workflows.ensure_deployment_health(env, targets, auto_repair=True)
+        repair.assert_not_called()
 
     def test_run_selected_remote_action_install_reraises_nonrecoverable_error(self) -> None:
         env = generate_default_env("demo")
@@ -842,9 +860,12 @@ class WorkflowTests(unittest.TestCase):
         env["FOREIGN_PUBLIC_IP"] = "198.51.100.20"
         ru = RemoteTarget(role=ROLE_RU)
         foreign = RemoteTarget(role=ROLE_FOREIGN)
-        with patch("vpn_installer.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), env, {}, [ru, foreign], {})), patch("vpn_installer.workflows.print_summary"), patch("vpn_installer.workflows.ensure_deployment_health") as health_mock:
+        preflights = {ROLE_RU: {"role": ROLE_RU}, ROLE_FOREIGN: {"role": ROLE_FOREIGN}}
+        snapshot = {"health_verdict": "ok"}
+        with patch("vpn_installer.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), env, {}, [ru, foreign], preflights)), patch("vpn_installer.workflows.print_summary"), patch("vpn_installer.workflows.deployment_health_snapshot", return_value=snapshot) as snapshot_mock, patch("vpn_installer.workflows.print_deployment_health") as print_health:
             self.assertEqual(workflows.status_workflow("demo", "all"), 0)
-        health_mock.assert_called_once_with(env, [ru, foreign], auto_repair=False)
+        snapshot_mock.assert_called_once_with(env, preflights)
+        print_health.assert_called_once_with(snapshot)
 
     def test_menu_workflow_dispatches_actions_and_returns_to_menu(self) -> None:
         with patch("vpn_installer.workflows.prompt_choice", side_effect=["audit", "quick", "back", "exit"]), patch("vpn_installer.audit.runner.main", return_value=0) as audit_main:

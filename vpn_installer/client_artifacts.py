@@ -318,7 +318,7 @@ def render_next_steps(env: dict[str, str], *, out_dir: Path | None = None) -> st
             f"4. Если нужен Hiddify, сначала пробуй URI {paths['hiddify_uri_compat'].name}; локальные JSON {paths['hiddify_json'].name} и {paths['android_hiddify_json'].name} остаются запасным вариантом.",
             f"5. Если сайты висят, сначала смотри серверные группы ошибок: vpn status --deployment {env['DEPLOY_NAME']} --role ru-gateway",
             f"6. Если включён TUN/full VPN и client-check показывает self-tunnel, запусти PowerShell от администратора: .\\{paths['windows_route_bypass'].name}",
-            f"7. Для проверки серверов потом запусти: vpn status --deployment {env['DEPLOY_NAME']}",
+            f"7. После install/reinstall запусти live-приёмку: vpn verify live --deployment {env['DEPLOY_NAME']}",
         ]
     ) + "\n"
 

@@ -121,7 +121,7 @@ $env:VPN_NO_PAUSE="1"
 1. Сначала импортируй простой `vless-uri.txt`
 2. Если нужен Hiddify, сначала пробуй `hiddify-uri.txt`, это тот же `VLESS URI`
 3. JSON-файлы используй как fallback для клиентов, которым нужен импорт файлом
-4. Если сайты висят, сначала смотри `vpn status --deployment <name> --role ru-gateway`: там будут группы ошибок публичного входа и внутреннего роутера
+4. Если сайты висят, сначала смотри `vpn status --deployment <name> --role ru-gateway`, затем запускай свежую acceptance-проверку `vpn verify live --deployment <name>`
 5. `sing-box recent blocked destinations` показывает случаи, когда внутренний роутер заблокировал private/fake IP вместо нормального домена или публичного адреса
 6. Если включён TUN/full VPN и `client-check` показывает self-tunnel, используй route bypass helper ниже
 
@@ -207,7 +207,7 @@ SSH-туннель остаётся запасным способом админ
 - `latest-error.log` — traceback и детали необработанной ошибки
 - `latest-console.log` — краткий wrapper-log от `vpn.cmd`
 
-Для быстрой проверки после установки:
+Для быстрой структурной проверки после установки:
 
 ```powershell
 .\vpn.cmd status --deployment my-vpn
@@ -216,6 +216,14 @@ SSH-туннель остаётся запасным способом админ
 ```bash
 ./vpn.sh status --deployment my-vpn
 ```
+
+Для обязательной live-приёмки после `install/reinstall`:
+
+```powershell
+.\vpn.cmd verify live --deployment my-vpn --non-interactive
+```
+
+`status` читает сервисы, manifest, WireGuard и свежие журналы без download-нагрузки. `verify live` дополнительно проверяет реальные DNS/domain/literal routes и throughput; только он может подтвердить dataplane после переустановки.
 
 Если начались потери, высокий ping или просадка скорости, собери сетевой отчёт:
 
@@ -232,7 +240,7 @@ SSH-туннель остаётся запасным способом админ
 - dev-only проверки в `quick` будут помечены как `skipped`, а не как ошибка
 - полный контур для разработки и регрессий — это `vpn audit all`
 
-`vpn status` теперь печатает не только состояние сервисов, но и live dataplane health:
+`vpn status` печатает состояние сервисов и последний наблюдённый dataplane health:
 
 - observed public IPv4 на `зарубежном сервере`
 - observed public IPv4 для `российского сервера` через `wg0`

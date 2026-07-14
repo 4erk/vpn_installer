@@ -59,6 +59,7 @@ from .targets import (
     build_target,
     can_fetch_remote_env,
     remote_env_matches_target,
+    role_env_prefix,
     sync_targets_from_env,
     update_env_with_targets,
 )
@@ -121,19 +122,27 @@ def nonblocking_systemd_restart_command(*units: str) -> str:
 
 def run_dataplane_repair_cycle(target_map: dict[str, RemoteTarget], wg_interface: str) -> None:
     print_header("Dataplane repair")
-    print(f"{target_map[ROLE_FOREIGN].label}: запускаю repair units без блокировки")
+    print(f"{target_map[ROLE_FOREIGN].label}: перезапускаю подтверждённо неисправный WireGuard path")
     ssh_stream(
         target_map[ROLE_FOREIGN],
-        nonblocking_systemd_restart_command(f"wg-quick@{wg_interface}", "nftables", "vpn-stack-sync.service"),
+        nonblocking_systemd_restart_command(f"wg-quick@{wg_interface}"),
         as_root=True,
     )
-    print(f"{target_map[ROLE_RU].label}: запускаю repair units без блокировки")
+    print(f"{target_map[ROLE_RU].label}: перезапускаю подтверждённо неисправный WireGuard path")
     ssh_stream(
         target_map[ROLE_RU],
-        nonblocking_systemd_restart_command(f"wg-quick@{wg_interface}", "sing-box"),
+        nonblocking_systemd_restart_command(f"wg-quick@{wg_interface}"),
         as_root=True,
     )
     print("Repair-команды отправлены, жду восстановления dataplane.")
+
+
+def health_verdict_is_repairable(verdict: str) -> bool:
+    return verdict in {
+        "ru_wg_egress_failed",
+        "foreign_ru_ip_mismatch",
+        "wg_handshake_stale",
+    }
 
 
 def prime_runtime_health(targets: list[RemoteTarget]) -> None:
@@ -187,6 +196,8 @@ def ensure_deployment_health(
         return preflights
     if not auto_repair:
         return preflights
+    if not health_verdict_is_repairable(health["health_verdict"]):
+        raise AppError(f"Dataplane health check failed without a safe automatic repair: {health_failure_message(health)}")
     target_map = {target.role: target for target in targets}
     run_dataplane_repair_cycle(target_map, current_wg_interface(env))
     repaired_preflights, repaired_health = wait_for_dataplane_health(env, targets, allow_soft_degraded=True)
@@ -236,14 +247,26 @@ def verify_target_interactively(
     require_privilege: bool,
     validate_os: bool,
     confirm_existing_connection: bool,
+    enforce_safe_route: bool = True,
+    fresh_since_epoch: int | None = None,
+    run_live_probes: bool = False,
 ) -> tuple[RemoteTarget, dict[str, str]]:
     force_prompt = not target.saved_connection
     while True:
         target = prompt_server_connection(target, force_prompt=force_prompt, confirm_existing=confirm_existing_connection)
         print(f"Проверяю подключение к {target.label}: {target.ssh_user}@{target.ssh_host}:{target.ssh_port}")
         try:
-            assert_server_route_not_self_tunneled(target, env)
-            preflight = remote_preflight(target, wg_interface)
+            if enforce_safe_route:
+                assert_server_route_not_self_tunneled(target, env)
+            if fresh_since_epoch is None:
+                preflight = remote_preflight(target, wg_interface, run_live_probes=run_live_probes)
+            else:
+                preflight = remote_preflight(
+                    target,
+                    wg_interface,
+                    fresh_since_epoch=fresh_since_epoch,
+                    run_live_probes=run_live_probes,
+                )
             print_preflight(target, preflight)
             if validate_os:
                 if preflight.get("os_id") != "ubuntu":
@@ -279,6 +302,9 @@ def verify_target_non_interactively(
     wg_interface: str,
     require_privilege: bool,
     validate_os: bool,
+    enforce_safe_route: bool = True,
+    fresh_since_epoch: int | None = None,
+    run_live_probes: bool = False,
 ) -> tuple[RemoteTarget, dict[str, str]]:
     if not target.saved_connection:
         raise AppError(
@@ -292,8 +318,17 @@ def verify_target_non_interactively(
             f"{role_env_prefix(target.role)}_SSH_PASSWORD или VPN_SSH_PASSWORD."
         )
     print(f"Проверяю подключение к {target.label}: {target.ssh_user}@{target.ssh_host}:{target.ssh_port}")
-    assert_server_route_not_self_tunneled(target, env)
-    preflight = remote_preflight(target, wg_interface)
+    if enforce_safe_route:
+        assert_server_route_not_self_tunneled(target, env)
+    if fresh_since_epoch is None:
+        preflight = remote_preflight(target, wg_interface, run_live_probes=run_live_probes)
+    else:
+        preflight = remote_preflight(
+            target,
+            wg_interface,
+            fresh_since_epoch=fresh_since_epoch,
+            run_live_probes=run_live_probes,
+        )
     print_preflight(target, preflight)
     if validate_os:
         if preflight.get("os_id") != "ubuntu":
@@ -322,6 +357,9 @@ def prepare_remote_session(
     persist_local: bool = True,
     confirm_existing_connections: bool = True,
     non_interactive: bool = False,
+    enforce_safe_route: bool = True,
+    fresh_since_epoch: int | None = None,
+    run_live_probes: bool = False,
 ) -> tuple[str, Path, dict[str, str], dict[str, Any], list[RemoteTarget], dict[str, dict[str, str]]]:
     if allow_create or persist_local:
         ensure_directories()
@@ -340,8 +378,6 @@ def prepare_remote_session(
     wg_interface = current_wg_interface(env)
     for role in roles:
         target = apply_env_connection_overrides(build_target(role, env, state))
-        if target.saved_connection:
-            assert_server_route_not_self_tunneled(target, env)
         if non_interactive:
             target, preflight = verify_target_non_interactively(
                 target,
@@ -349,6 +385,9 @@ def prepare_remote_session(
                 wg_interface=wg_interface,
                 require_privilege=require_privilege,
                 validate_os=validate_os,
+                enforce_safe_route=enforce_safe_route,
+                fresh_since_epoch=fresh_since_epoch,
+                run_live_probes=run_live_probes,
             )
         else:
             target, preflight = verify_target_interactively(
@@ -358,6 +397,9 @@ def prepare_remote_session(
                 require_privilege=require_privilege,
                 validate_os=validate_os,
                 confirm_existing_connection=confirm_existing_connections,
+                enforce_safe_route=enforce_safe_route,
+                fresh_since_epoch=fresh_since_epoch,
+                run_live_probes=run_live_probes,
             )
         targets.append(target)
         preflights[role] = preflight
@@ -540,7 +582,7 @@ def finalize_install_output(env: dict[str, str], deployment_name: str) -> None:
     print(f"4. Для Hiddify сначала пробуй URI {paths['hiddify_uri_compat'].name}; JSON оставлен как запасной вариант.")
     print(f"5. Если сайты висят, сначала проверь серверные группы ошибок: vpn status --deployment {deployment_name} --role ru-gateway")
     print(f"6. Если включён TUN/full VPN и client-check показывает self-tunnel, запусти PowerShell от администратора: .\\{paths['windows_route_bypass'].name}")
-    print(f"7. Для проверки серверов потом запусти: vpn status --deployment {deployment_name}")
+    print(f"7. После install/reinstall запусти live-приёмку: vpn verify live --deployment {deployment_name}")
 
 
 def load_env_for_render(env_path: Path) -> dict[str, str]:
@@ -640,7 +682,7 @@ def install_workflow(deployment: str | None, *, non_interactive: bool = False, y
 
 def status_workflow(deployment: str | None, role: str, *, non_interactive: bool = False) -> int:
     roles = requested_roles(role)
-    deployment_name, env_path, env, _state, targets, _preflights = prepare_remote_session(
+    deployment_name, env_path, env, _state, targets, preflights = prepare_remote_session(
         deployment,
         roles=roles,
         require_privilege=False,
@@ -649,10 +691,11 @@ def status_workflow(deployment: str | None, role: str, *, non_interactive: bool 
         persist_local=False,
         confirm_existing_connections=False,
         non_interactive=non_interactive,
+        enforce_safe_route=False,
     )
     print_summary(deployment_name, env, targets)
     if set(roles) == {ROLE_RU, ROLE_FOREIGN} and {target.role for target in targets} == {ROLE_RU, ROLE_FOREIGN}:
-        ensure_deployment_health(env, targets, auto_repair=False)
+        print_deployment_health(deployment_health_snapshot(env, preflights))
     print(f"Deployment env: {env_path}")
     return 0
 

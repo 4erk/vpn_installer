@@ -132,14 +132,6 @@ RU_REALITY_MAX_TIME_DIFFERENCE="${RU_REALITY_MAX_TIME_DIFFERENCE:-24h}"
 UTLS_FINGERPRINT="${UTLS_FINGERPRINT:-chrome}"
 SING_BOX_LOG_LEVEL="${SING_BOX_LOG_LEVEL:-info}"
 RU_SNIFF_TIMEOUT="${RU_SNIFF_TIMEOUT:-250ms}"
-RU_LITERAL_POLICY="${RU_LITERAL_POLICY:-fail-fast}"
-RU_IPV6_LITERAL_POLICY="${RU_IPV6_LITERAL_POLICY:-reject}"
-TO_FOREIGN_CONNECT_TIMEOUT="${TO_FOREIGN_CONNECT_TIMEOUT:-}"
-TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT="${TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT-750ms}"
-TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT="${TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT-2s}"
-if [[ "${RU_LISTEN_PORT}" == "8443" ]]; then
-  RU_LISTEN_PORT="443"
-fi
 
 WG_INTERFACE="${WG_INTERFACE:-wg0}"
 WG_PORT="${WG_PORT:-51820}"
@@ -155,38 +147,14 @@ WG_FOREIGN_ADDRESS_V6="${WG_FOREIGN_ADDRESS_V6:-fd74:7670:6e73::2/128}"
 WG_IPV6_PREFIX="${WG_IPV6_PREFIX:-fd74:7670:6e73::/64}"
 RUNTIME_QDISC="${RUNTIME_QDISC:-fq}"
 
-RU_DIRECT_DNS_SERVER="${RU_DIRECT_DNS_SERVER:-77.88.8.8}"
-RU_DIRECT_DNS_PORT="${RU_DIRECT_DNS_PORT:-53}"
 GLOBAL_DOH_SERVER="${GLOBAL_DOH_SERVER:-8.8.8.8}"
 GLOBAL_DOH_SERVER_NAME="${GLOBAL_DOH_SERVER_NAME:-dns.google}"
 GLOBAL_DOH_PATH="${GLOBAL_DOH_PATH:-/dns-query}"
-RU_FORCE_DIRECT_DOMAIN="${RU_FORCE_DIRECT_DOMAIN:-api.oneme.ru,mtalk.google.com,calls.okcdn.ru,gosuslugi.ru,api.ok.ru,ifconfig.me,ifconfig.co,checkip.amazonaws.com,ipapi.co,ipinfo.io,ident.me,tnedi.me,icanhazip.com,ip.mail.ru,ipv4-internet.yandex.net,ipv6-internet.yandex.net,2ip.ru}"
+RU_FORCE_DIRECT_DOMAIN="${RU_FORCE_DIRECT_DOMAIN:-api.oneme.ru,mtalk.google.com,calls.okcdn.ru,gosuslugi.ru,api.ok.ru,ifconfig.me,ifconfig.co,checkip.amazonaws.com,ipapi.co,ipinfo.io,ident.me,tnedi.me,icanhazip.com,ip.mail.ru,ipv4-internet.yandex.net,2ip.ru}"
 RU_FORCE_DIRECT_DOMAIN_SUFFIX="${RU_FORCE_DIRECT_DOMAIN_SUFFIX:-.gstatic.com,.gosuslugi.ru,.ipify.org,.ipinfo.io,.ident.me,.tnedi.me,.icanhazip.com}"
 RU_FORCE_DIRECT_IP_CIDR="${RU_FORCE_DIRECT_IP_CIDR:-}"
 RU_BLOCK_IP_CIDR="${RU_BLOCK_IP_CIDR:-}"
-RU_IPV6_POLICY="${RU_IPV6_POLICY:-to-foreign}"
 RU_BLOCK_QUIC="${RU_BLOCK_QUIC:-1}"
-RU_GEOIP_DIRECT="${RU_GEOIP_DIRECT:-0}"
-if [[ "${RU_BLOCK_IP_CIDR}" == "91.108.56.0/22" ]]; then
-  RU_BLOCK_IP_CIDR=""
-fi
-if [[ "${RU_IPV6_POLICY}" == "fast-fail" ]]; then
-  RU_IPV6_POLICY="to-foreign"
-fi
-case "${RU_LITERAL_POLICY}" in
-  fail-fast|route|reject) ;;
-  *) RU_LITERAL_POLICY="fail-fast" ;;
-esac
-case "${RU_IPV6_LITERAL_POLICY}" in
-  route-with-budget|reject) ;;
-  *) RU_IPV6_LITERAL_POLICY="reject" ;;
-esac
-if [[ "${TO_FOREIGN_CONNECT_TIMEOUT}" == "1s" || "${TO_FOREIGN_CONNECT_TIMEOUT}" == "2s" ]]; then
-  TO_FOREIGN_CONNECT_TIMEOUT=""
-fi
-if [[ "${TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT}" == "2s" ]]; then
-  TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT="750ms"
-fi
 
 RULESET_DIR="${RULESET_DIR:-/var/lib/vpn-stack/rules}"
 RU_GEOSITE_URL="${RU_GEOSITE_URL:-https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ru.srs https://cdn.jsdelivr.net/gh/SagerNet/sing-geosite@rule-set/geosite-category-ru.srs https://github.com/SagerNet/sing-geosite/raw/rule-set/geosite-category-ru.srs}"
@@ -213,9 +181,6 @@ HEALTH_SELF_HEAL="${HEALTH_SELF_HEAL:-1}"
 HEALTH_SELF_HEAL_COOLDOWN_MINUTES="${HEALTH_SELF_HEAL_COOLDOWN_MINUTES:-15}"
 HEALTH_SELF_HEAL_MAX_ACTIONS_PER_HOUR="${HEALTH_SELF_HEAL_MAX_ACTIONS_PER_HOUR:-2}"
 HEALTH_SELF_HEAL_CONFIRMATIONS="${HEALTH_SELF_HEAL_CONFIRMATIONS:-2}"
-HEALTH_GOOD_CACHE_TTL_SECONDS="${HEALTH_GOOD_CACHE_TTL_SECONDS:-900}"
-HEALTH_ROUTE_FAIL_CACHE_TTL_SECONDS="${HEALTH_ROUTE_FAIL_CACHE_TTL_SECONDS:-300}"
-HEALTH_ROUTE_FAIL_THRESHOLD="${HEALTH_ROUTE_FAIL_THRESHOLD:-3}"
 HEALTH_TARGET_PROBE_URLS="${HEALTH_TARGET_PROBE_URLS:-https://chatgpt.com/ https://discord.com/ https://github.com/ https://www.google.com/generate_204 https://telegram.org/ https://api.telegram.org/ https://t.me/}"
 HEALTH_RU_DIRECT_TARGET_PROBE_URLS="${HEALTH_RU_DIRECT_TARGET_PROBE_URLS:-https://api.ipify.org/ https://2ip.ru/}"
 HEALTH_TARGET_CONNECT_TIMEOUT_SECONDS="${HEALTH_TARGET_CONNECT_TIMEOUT_SECONDS:-2}"
@@ -261,7 +226,9 @@ SUBSCRIPTION_SERVICE_PATH="/etc/systemd/system/vpn-stack-subscription.service"
 SYSCTL_PATH="/etc/sysctl.d/90-vpn-stack.conf"
 JOURNALD_DROPIN_PATH="/etc/systemd/journald.conf.d/90-vpn-stack.conf"
 SUBSCRIPTION_ROOT="/var/lib/vpn-stack/subscription"
-ADAPTIVE_ROUTING_RULES_PATH="/var/lib/vpn-stack/adaptive-routing-rules.json"
+LEGACY_ADAPTIVE_ROUTING_RULES_PATH="/var/lib/vpn-stack/adaptive-routing-rules.json"
+LEGACY_DATAPLANE_CACHE_PATH="/var/lib/vpn-stack/dataplane-cache.env"
+HEALTH_STATE_PATH="/var/lib/vpn-stack/health-state.env"
 VPNSTACK_ROLE_FILE="${VPNSTACK_ROOT}/role"
 VPNSTACK_DEPLOYMENT_FILE="${VPNSTACK_ROOT}/deployment.env"
 VPNSTACK_INSTALLED_AT_FILE="${VPNSTACK_ROOT}/installed_at"
@@ -743,14 +710,17 @@ remove_managed_files() {
     "${ADMIN_WEB_SERVICE_PATH}" \
     "${SUBSCRIPTION_SERVICE_PATH}" \
     "${SYSCTL_PATH}" \
-    "${ADAPTIVE_ROUTING_RULES_PATH}"
+    "${LEGACY_ADAPTIVE_ROUTING_RULES_PATH}" \
+    "${LEGACY_DATAPLANE_CACHE_PATH}" \
+    "${HEALTH_STATE_PATH}"
   rm -rf "${SUBSCRIPTION_ROOT}"
   rm -rf "${RULESET_DIR}"
 }
 
-reset_runtime_adaptive_cache() {
+reset_install_runtime_state() {
+  rm -f "${LEGACY_DATAPLANE_CACHE_PATH}" "${HEALTH_STATE_PATH}"
   if [[ "${ROLE}" == "ru-gateway" ]]; then
-    rm -f "${ADAPTIVE_ROUTING_RULES_PATH}"
+    rm -f "${LEGACY_ADAPTIVE_ROUTING_RULES_PATH}"
   fi
 }
 
@@ -761,10 +731,6 @@ record_install_metadata() {
       local seen_ru_listen_port="0"
       local seen_reality_empty_short_id="0"
       local seen_reality_time="0"
-      local seen_literal_policy="0"
-      local seen_ipv6_literal_policy="0"
-      local seen_ip_literal_timeout="0"
-      local seen_ipv6_literal_timeout="0"
       local seen_journal_limit_enabled="0"
       local seen_journal_system_max_use="0"
       local seen_journal_max_retention_sec="0"
@@ -786,21 +752,8 @@ record_install_metadata() {
             printf 'RU_REALITY_ACCEPT_EMPTY_SHORT_ID="%s"\n' "${RU_REALITY_ACCEPT_EMPTY_SHORT_ID}"
             seen_reality_empty_short_id="1"
             ;;
-          RU_LITERAL_POLICY=*)
-            printf 'RU_LITERAL_POLICY="%s"\n' "${RU_LITERAL_POLICY}"
-            seen_literal_policy="1"
-            ;;
-          RU_IPV6_LITERAL_POLICY=*)
-            printf 'RU_IPV6_LITERAL_POLICY="%s"\n' "${RU_IPV6_LITERAL_POLICY}"
-            seen_ipv6_literal_policy="1"
-            ;;
-          TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT=*)
-            printf 'TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT="%s"\n' "${TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT}"
-            seen_ip_literal_timeout="1"
-            ;;
-          TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT=*)
-            printf 'TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT="%s"\n' "${TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT}"
-            seen_ipv6_literal_timeout="1"
+          RU_LITERAL_POLICY=*|RU_IPV6_LITERAL_POLICY=*|RU_IPV6_POLICY=*|RU_GEOIP_DIRECT=*|TO_FOREIGN_CONNECT_TIMEOUT=*|TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT=*|TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT=*|HEALTH_ROUTE_FAIL_CACHE_TTL_SECONDS=*|HEALTH_ROUTE_FAIL_THRESHOLD=*|HEALTH_GOOD_CACHE_TTL_SECONDS=*|SSH_INPUT_RATE=*|SSH_INPUT_BURST=*|RU_HTTPS_INPUT_RATE=*|RU_HTTPS_INPUT_BURST=*|RU_DIRECT_DNS_SERVER=*|RU_DIRECT_DNS_PORT=*)
+            :
             ;;
           JOURNAL_LIMIT_ENABLED=*)
             printf 'JOURNAL_LIMIT_ENABLED="%s"\n' "${JOURNAL_LIMIT_ENABLED}"
@@ -827,18 +780,6 @@ record_install_metadata() {
       fi
       if [[ "${seen_reality_time}" != "1" && -n "${RU_REALITY_MAX_TIME_DIFFERENCE}" ]]; then
         printf 'RU_REALITY_MAX_TIME_DIFFERENCE="%s"\n' "${RU_REALITY_MAX_TIME_DIFFERENCE}"
-      fi
-      if [[ "${seen_literal_policy}" != "1" ]]; then
-        printf 'RU_LITERAL_POLICY="%s"\n' "${RU_LITERAL_POLICY}"
-      fi
-      if [[ "${seen_ipv6_literal_policy}" != "1" ]]; then
-        printf 'RU_IPV6_LITERAL_POLICY="%s"\n' "${RU_IPV6_LITERAL_POLICY}"
-      fi
-      if [[ "${seen_ip_literal_timeout}" != "1" ]]; then
-        printf 'TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT="%s"\n' "${TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT}"
-      fi
-      if [[ "${seen_ipv6_literal_timeout}" != "1" ]]; then
-        printf 'TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT="%s"\n' "${TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT}"
       fi
       if [[ "${seen_journal_limit_enabled}" != "1" ]]; then
         printf 'JOURNAL_LIMIT_ENABLED="%s"\n' "${JOURNAL_LIMIT_ENABLED}"
@@ -1393,7 +1334,7 @@ INSTALL_MUTATION_STARTED=1
 if [[ "$ACTION" == "reinstall" ]]; then
   stop_managed_services
 fi
-reset_runtime_adaptive_cache
+reset_install_runtime_state
 copy_role_artifacts "${ROLE_ARTIFACTS_DIR}"
 
 if [[ "$ROLE" == "ru-gateway" ]]; then

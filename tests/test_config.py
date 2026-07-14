@@ -72,83 +72,79 @@ class ConfigTests(unittest.TestCase):
         env = config.generate_default_env("sample")
         self.assertEqual(env["SING_BOX_LOG_LEVEL"], "info")
         self.assertEqual(env["RU_SNIFF_TIMEOUT"], "250ms")
-        self.assertEqual(env["RU_LITERAL_POLICY"], "fail-fast")
-        self.assertEqual(env["RU_IPV6_LITERAL_POLICY"], "reject")
-        self.assertEqual(env["TO_FOREIGN_CONNECT_TIMEOUT"], "")
-        self.assertEqual(env["TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT"], "750ms")
-        self.assertEqual(env["TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT"], "2s")
+        self.assertNotIn("RU_LITERAL_POLICY", env)
+        self.assertNotIn("RU_IPV6_LITERAL_POLICY", env)
+        self.assertNotIn("TO_FOREIGN_CONNECT_TIMEOUT", env)
+        self.assertNotIn("TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT", env)
+        self.assertNotIn("TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT", env)
+        self.assertNotIn("RU_DIRECT_DNS_SERVER", env)
+        self.assertNotIn("RU_DIRECT_DNS_PORT", env)
         self.assertEqual(env["GLOBAL_DOH_SERVER"], "8.8.8.8")
         self.assertEqual(env["GLOBAL_DOH_SERVER_NAME"], "dns.google")
         self.assertEqual(env["SSH_MAX_STARTUPS"], "10:30:60")
         self.assertEqual(env["SSH_PER_SOURCE_MAX_STARTUPS"], "6")
 
-    def test_merge_env_with_defaults_preserves_empty_ip_literal_timeout_override(self) -> None:
-        env = config.merge_env_with_defaults(
-            {"TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT": "", "TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT": ""},
-            "sample",
-        )
-        self.assertEqual(env["TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT"], "")
-        self.assertEqual(env["TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT"], "")
-
-    def test_merge_env_with_defaults_migrates_old_sniff_timeout_default(self) -> None:
-        env = config.merge_env_with_defaults({"RU_SNIFF_TIMEOUT": "1s"}, "sample")
-        self.assertEqual(env["RU_SNIFF_TIMEOUT"], "250ms")
-
-    def test_merge_env_with_defaults_migrates_old_to_foreign_timeout_defaults(self) -> None:
-        env = config.merge_env_with_defaults({"TO_FOREIGN_CONNECT_TIMEOUT": "1s"}, "sample")
-        self.assertEqual(env["TO_FOREIGN_CONNECT_TIMEOUT"], "")
-        env = config.merge_env_with_defaults({"TO_FOREIGN_CONNECT_TIMEOUT": "2s"}, "sample")
-        self.assertEqual(env["TO_FOREIGN_CONNECT_TIMEOUT"], "")
-        env = config.merge_env_with_defaults({"TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT": "2s"}, "sample")
-        self.assertEqual(env["TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT"], "750ms")
-        env = config.merge_env_with_defaults({"TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT": "3s"}, "sample")
-        self.assertEqual(env["TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT"], "2s")
-
-    def test_merge_env_with_defaults_migrates_bad_warn_log_default(self) -> None:
-        env = config.merge_env_with_defaults({"SING_BOX_LOG_LEVEL": "warn"}, "sample")
-        self.assertEqual(env["SING_BOX_LOG_LEVEL"], "info")
-
-    def test_merge_env_with_defaults_migrates_unstable_cloudflare_doh_default(self) -> None:
-        env = config.merge_env_with_defaults(
-            {"GLOBAL_DOH_SERVER": "1.1.1.1", "GLOBAL_DOH_SERVER_NAME": "cloudflare-dns.com"},
-            "sample",
-        )
-        self.assertEqual(env["GLOBAL_DOH_SERVER"], "8.8.8.8")
-        self.assertEqual(env["GLOBAL_DOH_SERVER_NAME"], "dns.google")
-
-    def test_merge_env_with_defaults_migrates_legacy_admin_loopback_bind_to_active_client_gate(self) -> None:
-        env = config.merge_env_with_defaults({"ADMIN_WEB_BIND": "127.0.0.1", "ADMIN_WEB_ALLOW_WG": "0", "ADMIN_WEB_ALLOWED_CIDR": ""}, "sample")
-        self.assertEqual(env["ADMIN_WEB_BIND"], "0.0.0.0")
-        self.assertEqual(env["ADMIN_WEB_ACTIVE_CLIENT_REQUIRED"], "1")
-        self.assertEqual(env["ADMIN_WEB_ALLOW_TUNNEL_CLIENTS"], "1")
-
-        explicit_env = config.merge_env_with_defaults({"ADMIN_WEB_BIND": "127.0.0.1", "ADMIN_WEB_ACTIVE_CLIENT_REQUIRED": "0"}, "sample")
-        self.assertEqual(explicit_env["ADMIN_WEB_BIND"], "127.0.0.1")
-
-    def test_merge_env_with_defaults_migrates_randomized_fingerprint(self) -> None:
-        env = config.merge_env_with_defaults({"UTLS_FINGERPRINT": "randomized"}, "sample")
-        self.assertEqual(env["UTLS_FINGERPRINT"], "chrome")
-
-    def test_merge_env_with_defaults_migrates_legacy_cloudflare_reality_sni(self) -> None:
+    def test_merge_env_with_defaults_drops_legacy_routing_knobs(self) -> None:
         env = config.merge_env_with_defaults(
             {
-                "RU_REALITY_SERVER_NAME": "www.cloudflare.com",
-                "RU_REALITY_HANDSHAKE_SERVER": "www.cloudflare.com",
+                "RU_LITERAL_POLICY": "reject",
+                "RU_IPV6_LITERAL_POLICY": "reject",
+                "TO_FOREIGN_CONNECT_TIMEOUT": "5s",
+                "TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT": "750ms",
+                "SSH_INPUT_RATE": "12/minute",
+                "SSH_INPUT_BURST": "6",
+                "RU_HTTPS_INPUT_RATE": "120/minute",
+                "RU_HTTPS_INPUT_BURST": "60",
+                "RU_DIRECT_DNS_SERVER": "77.88.8.8",
+                "RU_DIRECT_DNS_PORT": "53",
             },
             "sample",
         )
-        self.assertEqual(env["RU_REALITY_SERVER_NAME"], "www.bing.com")
-        self.assertEqual(env["RU_REALITY_HANDSHAKE_SERVER"], "www.bing.com")
+        self.assertFalse(set(config.DEPRECATED_ENV_KEYS) & set(env))
 
-    def test_merge_env_with_defaults_migrates_legacy_ssh_rate_limit(self) -> None:
+    def test_merge_env_with_defaults_preserves_explicit_operator_values(self) -> None:
         env = config.merge_env_with_defaults(
-            {"SSH_INPUT_RATE": "12/minute", "SSH_INPUT_BURST": "6", "SSH_MAX_STARTUPS": "5:30:20", "SSH_PER_SOURCE_MAX_STARTUPS": "2"},
+            {
+                "RU_SNIFF_TIMEOUT": "1s",
+                "SING_BOX_LOG_LEVEL": "warn",
+                "GLOBAL_DOH_SERVER": "1.1.1.1",
+                "GLOBAL_DOH_SERVER_NAME": "cloudflare-dns.com",
+                "ADMIN_WEB_BIND": "127.0.0.1",
+                "UTLS_FINGERPRINT": "randomized",
+                "RU_REALITY_SERVER_NAME": "www.cloudflare.com",
+                "RU_REALITY_HANDSHAKE_SERVER": "www.cloudflare.com",
+                "SSH_MAX_STARTUPS": "5:30:20",
+                "SSH_PER_SOURCE_MAX_STARTUPS": "2",
+                "WG_MTU": "1380",
+                "RU_BLOCK_QUIC": "0",
+                "DISABLE_NIC_OFFLOADS": "1",
+                "RU_LISTEN_PORT": "8443",
+                "HEALTH_HANDSHAKE_GRACE_SECONDS": "120",
+                "HEALTH_DEEP_PROBE_INTERVAL_MINUTES": "30",
+                "RU_BLOCK_IP_CIDR": "91.108.56.0/22",
+            },
             "sample",
         )
-        self.assertEqual(env["SSH_INPUT_RATE"], "6/minute")
-        self.assertEqual(env["SSH_INPUT_BURST"], "3")
-        self.assertEqual(env["SSH_MAX_STARTUPS"], "10:30:60")
-        self.assertEqual(env["SSH_PER_SOURCE_MAX_STARTUPS"], "6")
+        for key, value in {
+            "RU_SNIFF_TIMEOUT": "1s",
+            "SING_BOX_LOG_LEVEL": "warn",
+            "GLOBAL_DOH_SERVER": "1.1.1.1",
+            "GLOBAL_DOH_SERVER_NAME": "cloudflare-dns.com",
+            "ADMIN_WEB_BIND": "127.0.0.1",
+            "UTLS_FINGERPRINT": "randomized",
+            "RU_REALITY_SERVER_NAME": "www.cloudflare.com",
+            "RU_REALITY_HANDSHAKE_SERVER": "www.cloudflare.com",
+            "SSH_MAX_STARTUPS": "5:30:20",
+            "SSH_PER_SOURCE_MAX_STARTUPS": "2",
+            "WG_MTU": "1380",
+            "RU_BLOCK_QUIC": "0",
+            "DISABLE_NIC_OFFLOADS": "1",
+            "RU_LISTEN_PORT": "8443",
+            "HEALTH_HANDSHAKE_GRACE_SECONDS": "120",
+            "HEALTH_DEEP_PROBE_INTERVAL_MINUTES": "30",
+            "RU_BLOCK_IP_CIDR": "91.108.56.0/22",
+        }.items():
+            self.assertEqual(env[key], value, key)
 
     def test_default_runtime_network_tuning_uses_fq_and_lower_wireguard_mtu(self) -> None:
         env = config.generate_default_env("sample")
@@ -157,25 +153,8 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(env["RU_BLOCK_QUIC"], "1")
         self.assertEqual(env["DISABLE_NIC_OFFLOADS"], "0")
 
-    def test_merge_env_with_defaults_migrates_legacy_wireguard_mtu(self) -> None:
-        env = config.merge_env_with_defaults({"WG_MTU": "1380", "RUNTIME_QDISC": ""}, "sample")
-        self.assertEqual(env["WG_MTU"], "1360")
-        self.assertEqual(env["RUNTIME_QDISC"], "fq")
-
-    def test_merge_env_with_defaults_migrates_legacy_quic_allow(self) -> None:
-        env = config.merge_env_with_defaults({"RU_BLOCK_QUIC": "0"}, "sample")
-        self.assertEqual(env["RU_BLOCK_QUIC"], "1")
-
-    def test_merge_env_with_defaults_migrates_legacy_offload_disable(self) -> None:
-        env = config.merge_env_with_defaults({"DISABLE_NIC_OFFLOADS": "1"}, "sample")
-        self.assertEqual(env["DISABLE_NIC_OFFLOADS"], "0")
-
     def test_default_ru_listen_port_stays_public_443(self) -> None:
         env = config.generate_default_env("sample")
-        self.assertEqual(env["RU_LISTEN_PORT"], "443")
-
-    def test_merge_env_with_defaults_migrates_temporary_ru_listen_port_8443_back_to_443(self) -> None:
-        env = config.merge_env_with_defaults({"RU_LISTEN_PORT": "8443"}, "sample")
         self.assertEqual(env["RU_LISTEN_PORT"], "443")
 
     def test_merge_env_with_defaults_removes_deprecated_compat_values(self) -> None:
@@ -197,19 +176,6 @@ class ConfigTests(unittest.TestCase):
         env = config.generate_default_env("sample")
         self.assertEqual(env["RU_REALITY_ACCEPT_EMPTY_SHORT_ID"], "1")
 
-    def test_merge_env_with_defaults_migrates_old_health_profile(self) -> None:
-        env = config.merge_env_with_defaults(
-            {
-                "HEALTH_HANDSHAKE_GRACE_SECONDS": "120",
-                "HEALTH_DEEP_PROBE_INTERVAL_MINUTES": "30",
-            },
-            "sample",
-        )
-        self.assertEqual(env["HEALTH_HANDSHAKE_GRACE_SECONDS"], "180")
-        self.assertEqual(env["HEALTH_HANDSHAKE_MIN_GRACE_SECONDS"], "180")
-        self.assertEqual(env["HEALTH_HANDSHAKE_GRACE_MULTIPLIER"], "8")
-        self.assertEqual(env["HEALTH_DEEP_PROBE_INTERVAL_MINUTES"], "15")
-
     def test_merge_env_with_defaults_restores_empty_reality_time_tolerance_to_default(self) -> None:
         env = config.merge_env_with_defaults({"RU_REALITY_MAX_TIME_DIFFERENCE": ""}, "sample")
         self.assertEqual(env["RU_REALITY_MAX_TIME_DIFFERENCE"], "24h")
@@ -226,16 +192,12 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("ident.me", env["RU_FORCE_DIRECT_DOMAIN"])
         self.assertIn("ip.mail.ru", env["RU_FORCE_DIRECT_DOMAIN"])
         self.assertIn("ipv4-internet.yandex.net", env["RU_FORCE_DIRECT_DOMAIN"])
-        self.assertIn("ipv6-internet.yandex.net", env["RU_FORCE_DIRECT_DOMAIN"])
+        self.assertNotIn("ipv6-internet.yandex.net", env["RU_FORCE_DIRECT_DOMAIN"])
         self.assertIn("2ip.ru", env["RU_FORCE_DIRECT_DOMAIN"])
         self.assertIn(".ipify.org", env["RU_FORCE_DIRECT_DOMAIN_SUFFIX"])
         self.assertIn(".ipinfo.io", env["RU_FORCE_DIRECT_DOMAIN_SUFFIX"])
         self.assertEqual(env["RU_BLOCK_IP_CIDR"], "")
-        self.assertEqual(env["RU_IPV6_POLICY"], "to-foreign")
-        self.assertEqual(env["RU_LITERAL_POLICY"], "fail-fast")
-        self.assertEqual(env["RU_IPV6_LITERAL_POLICY"], "reject")
         self.assertEqual(env["RU_BLOCK_QUIC"], "1")
-        self.assertEqual(env["RU_GEOIP_DIRECT"], "0")
         self.assertEqual(env["CLIENT_ENABLE_IPV6"], "0")
         self.assertEqual(env["GUARD_REALITY_BLOCK_ENABLED"], "0")
         self.assertIn("https://telegram.org/", env["HEALTH_TARGET_PROBE_URLS"])
@@ -243,9 +205,7 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("https://2ip.ru/", env["HEALTH_RU_DIRECT_TARGET_PROBE_URLS"])
         self.assertEqual(env["HEALTH_TARGET_CONNECT_TIMEOUT_SECONDS"], "2")
         self.assertEqual(env["HEALTH_TARGET_MAX_TIME_SECONDS"], "4")
-        self.assertEqual(env["HEALTH_GOOD_CACHE_TTL_SECONDS"], "900")
-        self.assertEqual(env["HEALTH_ROUTE_FAIL_CACHE_TTL_SECONDS"], "300")
-        self.assertEqual(env["HEALTH_ROUTE_FAIL_THRESHOLD"], "3")
+        self.assertNotIn("HEALTH_GOOD_CACHE_TTL_SECONDS", env)
 
     def test_render_env_roundtrip(self) -> None:
         env = config.generate_default_env("sample")
@@ -297,20 +257,10 @@ class ConfigTests(unittest.TestCase):
             "sample",
         )
         fast_fail_merged = config.merge_env_with_defaults({"RU_IPV6_POLICY": "fast-fail"}, "sample")
-        self.assertEqual(block_merged["RU_BLOCK_IP_CIDR"], "")
-        self.assertEqual(block_merged["RU_IPV6_POLICY"], "block")
+        self.assertEqual(block_merged["RU_BLOCK_IP_CIDR"], "91.108.56.0/22")
+        self.assertNotIn("RU_IPV6_POLICY", block_merged)
         self.assertEqual(block_merged["GUARD_REALITY_BLOCK_ENABLED"], "1")
-        self.assertEqual(fast_fail_merged["RU_IPV6_POLICY"], "to-foreign")
-
-    def test_merge_env_with_defaults_migrates_ipv6_literal_route_budget_default(self) -> None:
-        merged = config.merge_env_with_defaults({"RU_IPV6_LITERAL_POLICY": "route-with-budget"}, "sample")
-        self.assertEqual(merged["RU_IPV6_LITERAL_POLICY"], "reject")
-
-    def test_merge_env_with_defaults_preserves_ipv6_literal_reject(self) -> None:
-        merged = config.merge_env_with_defaults({"RU_IPV6_LITERAL_POLICY": "reject", "RU_IPV6_POLICY": "to-foreign"}, "sample")
-        self.assertEqual(merged["RU_IPV6_LITERAL_POLICY"], "reject")
-        blocked = config.merge_env_with_defaults({"RU_IPV6_LITERAL_POLICY": "reject", "RU_IPV6_POLICY": "block"}, "sample")
-        self.assertEqual(blocked["RU_IPV6_LITERAL_POLICY"], "reject")
+        self.assertNotIn("RU_IPV6_POLICY", fast_fail_merged)
 
     def test_merge_env_with_defaults_appends_new_asset_sources(self) -> None:
         merged = config.merge_env_with_defaults({"RU_GEOSITE_URL": "https://legacy.example/geosite.srs"}, "sample")

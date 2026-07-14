@@ -226,10 +226,12 @@ if [[ "${{role}}" == "ru-gateway" ]]; then
   singbox_log="$(journalctl -u sing-box --since "${{recent_since}}" --no-pager -o cat 2>/dev/null | sed -r 's/\\x1B\\[[0-9;]*[mK]//g' || true)"
   printf 'window_minutes=30\n'
   printf 'window_since=%s\n' "${{recent_since}}"
-  printf 'blocked=%s\n' "$(grep -c 'outbound/block\\[blocked\\]' <<<"${{singbox_log}}" || true)"
+  printf 'blocked=%s\n' "$(grep -Ec 'outbound/block\\[blocked\\]|connection rejected|packet connection rejected' <<<"${{singbox_log}}" || true)"
   printf 'mux_closed=%s\n' "$(grep -c 'mux connection closed' <<<"${{singbox_log}}" || true)"
   printf 'eof=%s\n' "$(grep -c 'EOF' <<<"${{singbox_log}}" || true)"
-  printf 'dns_failed=%s\n' "$(grep -Ec 'dns: (lookup|exchange) failed' <<<"${{singbox_log}}" || true)"
+  printf 'dns_timeout=%s\n' "$(grep -Ec 'dns: exchange failed.*(context deadline exceeded|i/o timeout)' <<<"${{singbox_log}}" || true)"
+  printf 'dns_nxdomain=%s\n' "$(grep -Ec 'dns: lookup failed.*NXDOMAIN' <<<"${{singbox_log}}" || true)"
+  printf 'dns_failed_total=%s\n' "$(grep -Ec 'dns: (lookup|exchange) failed' <<<"${{singbox_log}}" || true)"
   printf 'timeout=%s\n' "$(grep -Ec 'i/o timeout|context deadline exceeded' <<<"${{singbox_log}}" || true)"
   printf 'invalid_reality=%s\n' "$(grep -c 'REALITY: processed invalid connection' <<<"${{singbox_log}}" || true)"
   printf 'sources='
@@ -243,8 +245,8 @@ if [[ "${{role}}" == "ru-gateway" ]]; then
     sort | uniq -c | sort -nr | head -n 12 |
     awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
   printf '\nto_foreign=%s\n' "$(grep -c 'outbound/direct\\[to-foreign\\]: outbound connection to' <<<"${{singbox_log}}" || true)"
-  printf 'to_foreign_ip_literal=%s\n' "$(grep -c 'outbound/direct\\[to-foreign-ip-literal\\]: outbound connection to' <<<"${{singbox_log}}" || true)"
-  printf 'to_foreign_ipv6_literal=%s\n' "$(grep -c 'outbound/direct\\[to-foreign-ipv6-literal\\]: outbound connection to' <<<"${{singbox_log}}" || true)"
+  printf 'to_foreign_ip_literal=%s\n' "$(grep -Ec 'outbound/direct\\[to-foreign\\]: outbound connection to ([0-9]{{1,3}}[.]){{3}}[0-9]{{1,3}}:[0-9]+' <<<"${{singbox_log}}" || true)"
+  printf 'to_foreign_ipv6_literal=%s\n' "$(grep -Ec 'outbound/direct\\[to-foreign\\]: outbound connection to \\[[0-9A-Fa-f:.]+\\]:[0-9]+' <<<"${{singbox_log}}" || true)"
   printf 'direct_ru=%s\n' "$(grep -c 'outbound/direct\\[direct-ru\\]: outbound connection to' <<<"${{singbox_log}}" || true)"
   printf 'ipv6_literals=%s\n' "$(grep -Ec 'inbound connection to \\[[0-9A-Fa-f:.]+\\]:' <<<"${{singbox_log}}" || true)"
   printf 'to_foreign_destinations='
@@ -254,12 +256,12 @@ if [[ "${{role}}" == "ru-gateway" ]]; then
     awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
   printf '\nto_foreign_ip_literal_destinations='
   printf '%s\n' "${{singbox_log}}" |
-    sed -n 's/.*outbound\\/direct\\[to-foreign-ip-literal\\]: outbound connection to \\([^ ]*\\).*/\\1/p' |
+    sed -n 's/.*outbound\\/direct\\[to-foreign\\]: outbound connection to \\([0-9][0-9.]*:[0-9][0-9]*\\).*/\\1/p' |
     sort | uniq -c | sort -nr | head -n 12 |
     awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
   printf '\nto_foreign_ipv6_literal_destinations='
   printf '%s\n' "${{singbox_log}}" |
-    sed -n 's/.*outbound\\/direct\\[to-foreign-ipv6-literal\\]: outbound connection to \\([^ ]*\\).*/\\1/p' |
+    sed -n 's/.*outbound\\/direct\\[to-foreign\\]: outbound connection to \\(\\[[0-9A-Fa-f:.]*\\]:[0-9][0-9]*\\).*/\\1/p' |
     sort | uniq -c | sort -nr | head -n 12 |
     awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
   printf '\ndirect_ru_destinations='
@@ -274,7 +276,7 @@ if [[ "${{role}}" == "ru-gateway" ]]; then
     awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
   printf '\nip_literal_timeout_destinations='
   printf '%s\n' "${{singbox_log}}" |
-    sed -n 's/.*open connection to \\([^ ]*\\) using outbound\\/direct\\[to-foreign-ip-literal\\].*/\\1/p; s/.*open connection to \\([^ ]*\\) using outbound\\/direct\\[to-foreign-ipv6-literal\\].*/\\1/p' |
+    sed -n '/outbound\\/direct\\[to-foreign\\].*i\\/o timeout/s/.*open connection to \\([0-9][0-9.]*:[0-9][0-9]*\\) using outbound.*/\\1/p; /outbound\\/direct\\[to-foreign\\].*i\\/o timeout/s/.*open connection to \\(\\[[0-9A-Fa-f:.]*\\]:[0-9][0-9]*\\) using outbound.*/\\1/p' |
     sort | uniq -c | sort -nr | head -n 12 |
     awk 'BEGIN {{ sep="" }} {{ printf "%s%s=%s", sep, $2, $1; sep="," }}'
   printf '\nipv6_literal_destinations='
@@ -418,6 +420,7 @@ def diagnose_front_workflow(deployment: str | None, *, source_ip: str | None = N
         persist_local=False,
         confirm_existing_connections=False,
         non_interactive=non_interactive,
+        enforce_safe_route=False,
     )
     target = targets[0]
     report = ssh_capture(target, _front_script(source_ip, minutes), as_root=True)
@@ -540,6 +543,7 @@ def diagnose_path_workflow(deployment: str | None, role: str, *, iperf: bool = F
         persist_local=False,
         confirm_existing_connections=False,
         non_interactive=non_interactive,
+        enforce_safe_route=False,
     )
     output_dir = _diagnostic_run_dir(deployment_name)
     output_dir.mkdir(parents=True, exist_ok=True)

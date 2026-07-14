@@ -22,7 +22,6 @@ from .common import INSTALL_SCRIPT_PATH, OUT_DIR, ROOT_DIR, ensure_file_parent, 
 from .config import apply_ru_direct_overlays, download_asset, parse_env_text, render_env_text, require_env, split_asset_sources
 from .manifest import render_manifest
 from .models import DEFAULT_ASSET_TIMEOUT, REQUIRED_ENV_VARS, ROLE_FOREIGN, ROLE_RU
-from .adaptive import render_route_fail_collector_shell
 from .routing_policy import build_ru_routing_policy
 
 
@@ -137,12 +136,12 @@ def render_ru_singbox(env: dict[str, str]) -> str:
         "dns": {
             "strategy": "ipv4_only",
             "servers": [
-                {"type": "udp", "tag": "dns-ru-direct", "server": env["RU_DIRECT_DNS_SERVER"], "server_port": env_int(env, "RU_DIRECT_DNS_PORT")},
+                {"type": "local", "tag": "dns-ru-direct"},
                 {"type": "https", "tag": "dns-global", "server": env["GLOBAL_DOH_SERVER"], "server_port": 443, "path": env["GLOBAL_DOH_PATH"], "detour": "to-foreign", "tls": {"enabled": True, "server_name": env["GLOBAL_DOH_SERVER_NAME"]}},
             ],
             "rules": policy_parts["dns_rules"],
             "final": "dns-global",
-            "independent_cache": True,
+            "cache_capacity": 4096,
         },
         "inbounds": [
             {
@@ -263,13 +262,6 @@ def render_foreign_wg(env: dict[str, str]) -> str:
     )
 
 
-def render_rate_limited_tcp_accept(service_tag: str, port: str, rate: str, burst: str) -> list[str]:
-    return [
-        f'    tcp dport {port} ct state new meter {service_tag} {{ ip saddr limit rate {rate} burst {burst} packets }} counter accept',
-        f"    tcp dport {port} counter drop",
-    ]
-
-
 def render_foreign_nftables(env: dict[str, str], wan_iface: str) -> str:
     block_ru = env.get("FOREIGN_BLOCK_RU", "0").strip() == "1"
     lines = [
@@ -313,7 +305,7 @@ def render_foreign_nftables(env: dict[str, str], wan_iface: str) -> str:
             "    ct state established,related accept",
         ]
     )
-    lines.extend(render_rate_limited_tcp_accept("ssh_guard", env["SSH_PORT"], env["SSH_INPUT_RATE"], env["SSH_INPUT_BURST"]))
+    lines.append(f"    tcp dport {env['SSH_PORT']} counter accept")
     forward_rules = [
         f"    udp dport {env['WG_PORT']} accept",
         "  }",
@@ -416,7 +408,7 @@ def render_ru_firewall_nftables(env: dict[str, str]) -> str:
         lines.append(f'    iifname "{env["WG_INTERFACE"]}" tcp dport {admin_port} counter accept')
     if admin_enabled and admin_allowed_cidrs:
         lines.append(f"    ip saddr {{ {', '.join(admin_allowed_cidrs)} }} tcp dport {admin_port} counter accept")
-    lines.extend(render_rate_limited_tcp_accept("ssh_guard", env["SSH_PORT"], env["SSH_INPUT_RATE"], env["SSH_INPUT_BURST"]))
+    lines.append(f"    tcp dport {env['SSH_PORT']} counter accept")
     lines.append(f"    tcp dport {env['RU_LISTEN_PORT']} counter accept")
     lines.extend(["  }", "}", ""])
     return "\n".join(lines)
@@ -650,10 +642,6 @@ def render_health_script(env: dict[str, str], role: str) -> str:
                 '  route_to_foreign_wg_ok && probe_http_ipv4 "${WG_INTERFACE}"',
                 '}',
                 "",
-                "wireguard_cache_can_suppress_failure() {",
-                '  route_to_foreign_wg_ok && cached_good_path_fresh "WG_PATH"',
-                "}",
-                "",
                 "append_wireguard_path_reason() {",
                 '  if ! route_to_foreign_wg_ok; then',
                 '    reasons+=("ru_wg_peer_route_missing")',
@@ -670,10 +658,6 @@ def render_health_script(env: dict[str, str], role: str) -> str:
                 '  ping -4 -I "${WG_INTERFACE}" -c 1 -W 2 "${WG_RU_ADDRESS_HOST}" >/dev/null 2>&1 ||',
                 '    ping -4 -I "${WG_INTERFACE}" -c 1 -W 2 "${WG_RU_ADDRESS_HOST}" >/dev/null 2>&1',
                 '}',
-                "",
-                "wireguard_cache_can_suppress_failure() {",
-                '  cached_good_path_fresh "WG_PATH"',
-                "}",
                 "",
                 "append_wireguard_path_reason() {",
                 '  reasons+=("foreign_wg_peer_unreachable")',
@@ -703,7 +687,6 @@ def render_health_script(env: dict[str, str], role: str) -> str:
         WG_RU_ADDRESS_HOST="{wg_host_address(env['WG_RU_ADDRESS'])}"
         WG_FOREIGN_ADDRESS_HOST="{wg_host_address(env['WG_FOREIGN_ADDRESS'])}"
         WG_FOREIGN_ADDRESS_V6_HOST="{wg_host_address(env['WG_FOREIGN_ADDRESS_V6'])}"
-        WAN_INTERFACE="{env.get('WAN_INTERFACE', '')}"
         RU_PUBLIC_IP="{env['RU_PUBLIC_IP']}"
         FOREIGN_PUBLIC_IP="{env['FOREIGN_PUBLIC_IP']}"
         SSH_PORT="{env['SSH_PORT']}"
@@ -711,7 +694,6 @@ def render_health_script(env: dict[str, str], role: str) -> str:
         HEALTH_THROUGHPUT_URLS="{env['HEALTH_THROUGHPUT_URLS']}"
         HEALTH_UPLOAD_URL="{env['HEALTH_UPLOAD_URL']}"
         HEALTH_UPLOAD_BYTES="{env['HEALTH_UPLOAD_BYTES']}"
-        RUNTIME_QDISC="{env.get('RUNTIME_QDISC', 'fq')}"
         DEEP_PROBE_INTERVAL_MINUTES="{env['HEALTH_DEEP_PROBE_INTERVAL_MINUTES']}"
         MIN_FOREIGN_DIRECT_DOWNLOAD_BPS="{env['HEALTH_MIN_FOREIGN_DIRECT_DOWNLOAD_BPS']}"
         MIN_RU_WG_DOWNLOAD_BPS="{env['HEALTH_MIN_RU_WG_DOWNLOAD_BPS']}"
@@ -722,16 +704,11 @@ def render_health_script(env: dict[str, str], role: str) -> str:
         HANDSHAKE_GRACE="{env['HEALTH_HANDSHAKE_GRACE_SECONDS']}"
         HANDSHAKE_MIN_GRACE="{env['HEALTH_HANDSHAKE_MIN_GRACE_SECONDS']}"
         HANDSHAKE_GRACE_MULTIPLIER="{env['HEALTH_HANDSHAKE_GRACE_MULTIPLIER']}"
-        DISABLE_NIC_OFFLOADS="{env.get('DISABLE_NIC_OFFLOADS', '1')}"
         SELF_HEAL_ENABLED="{env.get('HEALTH_SELF_HEAL', '1')}"
         SELF_HEAL_COOLDOWN_MINUTES="{env.get('HEALTH_SELF_HEAL_COOLDOWN_MINUTES', '15')}"
         SELF_HEAL_MAX_ACTIONS_PER_HOUR="{env.get('HEALTH_SELF_HEAL_MAX_ACTIONS_PER_HOUR', '2')}"
         SELF_HEAL_CONFIRMATIONS="{env.get('HEALTH_SELF_HEAL_CONFIRMATIONS', '2')}"
         HEALTH_STATE_PATH="/var/lib/vpn-stack/health-state.env"
-        DATAPLANE_CACHE_PATH="/var/lib/vpn-stack/dataplane-cache.env"
-        GOOD_CACHE_TTL_SECONDS="{env.get('HEALTH_GOOD_CACHE_TTL_SECONDS', '900')}"
-        ROUTE_FAIL_CACHE_TTL_SECONDS="{env.get('HEALTH_ROUTE_FAIL_CACHE_TTL_SECONDS', '300')}"
-        ROUTE_FAIL_THRESHOLD="{env.get('HEALTH_ROUTE_FAIL_THRESHOLD', '3')}"
 
         log() {{
           echo "vpn-stack-health[$ROLE]: $*" >&2
@@ -762,9 +739,6 @@ def render_health_script(env: dict[str, str], role: str) -> str:
         SELF_HEAL_COOLDOWN_MINUTES="$(number_or_default "${{SELF_HEAL_COOLDOWN_MINUTES}}" 15)"
         SELF_HEAL_MAX_ACTIONS_PER_HOUR="$(number_or_default "${{SELF_HEAL_MAX_ACTIONS_PER_HOUR}}" 2)"
         SELF_HEAL_CONFIRMATIONS="$(number_or_default "${{SELF_HEAL_CONFIRMATIONS}}" 2)"
-        GOOD_CACHE_TTL_SECONDS="$(number_or_default "${{GOOD_CACHE_TTL_SECONDS}}" 900)"
-        ROUTE_FAIL_CACHE_TTL_SECONDS="$(number_or_default "${{ROUTE_FAIL_CACHE_TTL_SECONDS}}" 300)"
-        ROUTE_FAIL_THRESHOLD="$(number_or_default "${{ROUTE_FAIL_THRESHOLD}}" 3)"
         HANDSHAKE_EFFECTIVE_GRACE="$((WG_KEEPALIVE * HANDSHAKE_GRACE_MULTIPLIER))"
         if [[ "${{HANDSHAKE_EFFECTIVE_GRACE}}" -lt "${{HANDSHAKE_MIN_GRACE}}" ]]; then
           HANDSHAKE_EFFECTIVE_GRACE="${{HANDSHAKE_MIN_GRACE}}"
@@ -772,66 +746,6 @@ def render_health_script(env: dict[str, str], role: str) -> str:
         if [[ "${{HANDSHAKE_EFFECTIVE_GRACE}}" -lt "${{HANDSHAKE_GRACE}}" ]]; then
           HANDSHAKE_EFFECTIVE_GRACE="${{HANDSHAKE_GRACE}}"
         fi
-
-        detect_default_iface() {{
-          ip route show default 2>/dev/null | awk '/default/ {{print $5; exit}}'
-        }}
-
-        apply_qdisc() {{
-          local iface="$1"
-          [[ -n "${{iface}}" ]] || return 0
-          command -v tc >/dev/null 2>&1 || return 0
-          case "${{RUNTIME_QDISC:-fq}}" in
-            fq)
-              tc qdisc replace dev "${{iface}}" root fq >/dev/null 2>&1 ||
-                tc qdisc replace dev "${{iface}}" root fq_codel >/dev/null 2>&1 ||
-                true
-              ;;
-            fq_codel)
-              tc qdisc replace dev "${{iface}}" root fq_codel >/dev/null 2>&1 || true
-              ;;
-            none|off|disabled)
-              return 0
-              ;;
-            *)
-              tc qdisc replace dev "${{iface}}" root fq >/dev/null 2>&1 ||
-                tc qdisc replace dev "${{iface}}" root fq_codel >/dev/null 2>&1 ||
-                true
-              ;;
-          esac
-        }}
-
-        configure_offloads() {{
-          local iface="$1"
-          [[ -n "${{iface}}" ]] || return 0
-          command -v ethtool >/dev/null 2>&1 || return 0
-          if [[ "${{DISABLE_NIC_OFFLOADS}}" == "1" ]]; then
-            ethtool -K "${{iface}}" gro off >/dev/null 2>&1 || true
-            ethtool -K "${{iface}}" gso off >/dev/null 2>&1 || true
-            ethtool -K "${{iface}}" tso off >/dev/null 2>&1 || true
-          else
-            ethtool -K "${{iface}}" gro on >/dev/null 2>&1 || true
-            ethtool -K "${{iface}}" gso on >/dev/null 2>&1 || true
-            ethtool -K "${{iface}}" tso on >/dev/null 2>&1 || true
-          fi
-        }}
-
-        harden_interface() {{
-          local iface="$1"
-          [[ -n "${{iface}}" ]] || return 0
-          apply_qdisc "${{iface}}"
-          configure_offloads "${{iface}}"
-        }}
-
-        harden_runtime() {{
-          local default_iface=""
-          default_iface="$(detect_default_iface)"
-          harden_interface "${{default_iface}}"
-          if [[ -n "${{WAN_INTERFACE}}" && "${{WAN_INTERFACE}}" != "${{default_iface}}" ]]; then
-            harden_interface "${{WAN_INTERFACE}}"
-          fi
-          apply_qdisc "${{WG_INTERFACE}}"
-        }}
 
         probe_http_ipv4() {{
           local bind_iface="$1"
@@ -857,13 +771,6 @@ def render_health_script(env: dict[str, str], role: str) -> str:
           fi
         }}
 
-        cache_value() {{
-          local key="$1"
-          if [[ -r "${{DATAPLANE_CACHE_PATH}}" ]]; then
-            awk -F= -v key="${{key}}" '$1 == key {{ sub(/^[^=]*=/, ""); gsub(/^"/, ""); gsub(/"$/, ""); print; exit }}' "${{DATAPLANE_CACHE_PATH}}"
-          fi
-        }}
-
         state_escape() {{
           sed 's/\\\\/\\\\\\\\/g; s/"/\\\\"/g' <<<"$1"
         }}
@@ -881,74 +788,6 @@ def render_health_script(env: dict[str, str], role: str) -> str:
           fi
           printf '%s="%s"\\n' "${{key}}" "$(state_escape "${{value}}")" >> "${{tmp}}"
           mv "${{tmp}}" "${{HEALTH_STATE_PATH}}"
-        }}
-
-        set_cache_value() {{
-          local key="$1"
-          local value="$2"
-          local tmp=""
-          mkdir -p "$(dirname "${{DATAPLANE_CACHE_PATH}}")"
-          tmp="${{DATAPLANE_CACHE_PATH}}.tmp.$$"
-          if [[ -r "${{DATAPLANE_CACHE_PATH}}" ]]; then
-            awk -F= -v key="${{key}}" '$1 != key {{ print }}' "${{DATAPLANE_CACHE_PATH}}" > "${{tmp}}"
-          else
-            : > "${{tmp}}"
-          fi
-          printf '%s="%s"\\n' "${{key}}" "$(state_escape "${{value}}")" >> "${{tmp}}"
-          mv "${{tmp}}" "${{DATAPLANE_CACHE_PATH}}"
-        }}
-
-        cache_age_s() {{
-          local epoch="$1"
-          local now=""
-          now="$(date +%s)"
-          if [[ "${{epoch}}" =~ ^[0-9]+$ && "${{now}}" =~ ^[0-9]+$ && "${{now}}" -ge "${{epoch}}" ]]; then
-            printf '%s' "$((now - epoch))"
-          else
-            printf '999999'
-          fi
-        }}
-
-        cached_good_path_fresh() {{
-          local name="$1"
-          local epoch="" age=""
-          epoch="$(cache_value "GOOD_${{name}}_AT_EPOCH")"
-          age="$(cache_age_s "${{epoch}}")"
-          [[ "${{age}}" =~ ^[0-9]+$ ]] && [[ "${{GOOD_CACHE_TTL_SECONDS}}" =~ ^[0-9]+$ ]] && (( age <= GOOD_CACHE_TTL_SECONDS ))
-        }}
-
-        mark_good_path() {{
-          local name="$1"
-          local source="$2"
-          local handshake_age="$3"
-          local now=""
-          now="$(date +%s)"
-          set_cache_value "GOOD_${{name}}_AT_EPOCH" "${{now}}"
-          set_cache_value "GOOD_${{name}}_AT" "$(date -Is)"
-          set_cache_value "GOOD_${{name}}_SOURCE" "${{source}}"
-          set_cache_value "GOOD_${{name}}_HANDSHAKE_AGE_S" "${{handshake_age}}"
-          set_cache_value "GOOD_CACHE_TTL_SECONDS" "${{GOOD_CACHE_TTL_SECONDS}}"
-        }}
-
-        reset_route_fail_bucket() {{
-          local bucket="$1"
-          set_cache_value "ROUTE_FAIL_${{bucket}}_COUNT" "0"
-          set_cache_value "ROUTE_FAIL_${{bucket}}_TOP_DEST" ""
-          set_cache_value "ROUTE_FAIL_${{bucket}}_LAST_EPOCH" ""
-          set_cache_value "ROUTE_FAIL_${{bucket}}_LAST_AT" ""
-        }}
-
-        mark_route_fail_bucket() {{
-          local bucket="$1"
-          local count="$2"
-          local top_dest="$3"
-          local now=""
-          now="$(date +%s)"
-          set_cache_value "ROUTE_FAIL_${{bucket}}_COUNT" "${{count}}"
-          set_cache_value "ROUTE_FAIL_${{bucket}}_TOP_DEST" "${{top_dest}}"
-          set_cache_value "ROUTE_FAIL_${{bucket}}_LAST_EPOCH" "${{now}}"
-          set_cache_value "ROUTE_FAIL_${{bucket}}_LAST_AT" "$(date -Is)"
-          set_cache_value "ROUTE_FAIL_CACHE_TTL_SECONDS" "${{ROUTE_FAIL_CACHE_TTL_SECONDS}}"
         }}
 
         reset_self_heal_observation() {{
@@ -1015,22 +854,6 @@ def render_health_script(env: dict[str, str], role: str) -> str:
           fi
         }}
 
-        probe_ping_loss_pct_fast() {{
-          local host="$1"
-          if ! command -v ping >/dev/null 2>&1 || [[ -z "${{host}}" ]]; then
-            printf -- '-1'
-            return 0
-          fi
-          local output loss
-          output="$(ping -4 -c 4 -W 1 "${{host}}" 2>/dev/null || true)"
-          loss="$(awk -F', ' '/packets transmitted/ {{ gsub(/% packet loss/, "", $3); print $3; exit }}' <<<"${{output}}")"
-          if [[ "${{loss}}" =~ ^[0-9]+$ ]]; then
-            printf '%s' "${{loss}}"
-          else
-            printf -- '-1'
-          fi
-        }}
-
         below_soft_min() {{
           local value="$1"
           local minimum="$2"
@@ -1042,7 +865,7 @@ def render_health_script(env: dict[str, str], role: str) -> str:
 
         probe_multi_download_summary() {{
           local bind_iface="$1"
-          local min_speed="-1"
+          local best_speed="-1"
           local detail=""
           local url="" label="" speed=""
           for url in ${{HEALTH_THROUGHPUT_URLS}}; do
@@ -1054,21 +877,16 @@ def render_health_script(env: dict[str, str], role: str) -> str:
             fi
             detail="${{detail}}${{label}}:${{speed}}"
             if [[ "${{speed}}" =~ ^[0-9]+$ && "${{speed}}" -ge 0 ]]; then
-              if [[ "${{min_speed}}" == "-1" || "${{speed}}" -lt "${{min_speed}}" ]]; then
-                min_speed="${{speed}}"
+              if [[ "${{best_speed}}" == "-1" || "${{speed}}" -gt "${{best_speed}}" ]]; then
+                best_speed="${{speed}}"
               fi
             fi
           done
-          printf '%s|%s' "${{min_speed}}" "${{detail}}"
+          printf '%s|%s' "${{best_speed}}" "${{detail}}"
         }}
 
         should_run_deep_probe() {{
           local last_epoch="" now="" interval_s=""
-          local last_verdict=""
-          last_verdict="$(state_value DEEP_PROBE_VERDICT)"
-          if [[ -n "${{last_verdict}}" && "${{last_verdict}}" != "ok" ]]; then
-            return 0
-          fi
           last_epoch="$(state_value DEEP_PROBE_AT_EPOCH)"
           if [[ ! "${{last_epoch}}" =~ ^[0-9]+$ ]]; then
             return 0
@@ -1103,30 +921,16 @@ def render_health_script(env: dict[str, str], role: str) -> str:
 
         run_deep_probe() {{
           local probe_at="" probe_epoch="" verdict="ok" reasons_joined=""
-          local direct_summary="" direct_min="-1" direct_detail="" direct_upload="-1"
-          local wg_summary="" wg_min="-1" wg_detail="" wg_upload="-1"
+          local direct_summary="" direct_download="-1" direct_detail="" direct_upload="-1"
+          local wg_summary="" wg_download="-1" wg_detail="" wg_upload="-1"
           local gateway_ping_loss="-1" peer_ping_loss="-1" internet_ping_loss="-1"
-          local self_heal_last_reason="" self_heal_consecutive="0" self_heal_last_action_epoch="0"
-          local self_heal_action_window_epoch="0" self_heal_action_window_count="0"
-          local self_heal_last_action="" self_heal_last_action_result=""
-          local fast_foreign_ru_ping_loss="-1" fast_ru_foreign_ping_loss="-1"
           local -a reasons=()
 
           probe_at="$(date -Is)"
           probe_epoch="$(date +%s)"
-          self_heal_last_reason="$(state_value SELF_HEAL_LAST_REASON)"
-          self_heal_consecutive="$(state_value SELF_HEAL_CONSECUTIVE)"
-          self_heal_last_action_epoch="$(state_value SELF_HEAL_LAST_ACTION_EPOCH)"
-          self_heal_action_window_epoch="$(state_value SELF_HEAL_ACTION_WINDOW_EPOCH)"
-          self_heal_action_window_count="$(state_value SELF_HEAL_ACTION_WINDOW_COUNT)"
-          self_heal_last_action="$(state_value SELF_HEAL_LAST_ACTION)"
-          self_heal_last_action_result="$(state_value SELF_HEAL_LAST_ACTION_RESULT)"
-          fast_foreign_ru_ping_loss="$(state_value FAST_FOREIGN_RU_PING_LOSS_PCT)"
-          fast_ru_foreign_ping_loss="$(state_value FAST_RU_FOREIGN_PING_LOSS_PCT)"
-
           if [[ "${{ROLE}}" == "foreign-exit" ]]; then
             direct_summary="$(probe_multi_download_summary "")"
-            direct_min="${{direct_summary%%|*}}"
+            direct_download="${{direct_summary%%|*}}"
             direct_detail="${{direct_summary#*|}}"
             direct_upload="$(probe_upload_bps "" "${{HEALTH_UPLOAD_URL}}" "${{HEALTH_UPLOAD_BYTES}}")"
             gateway_ping_loss="$(probe_ping_loss_pct "$(ip route show default 2>/dev/null | awk '/default/ {{print $3; exit}}')")"
@@ -1141,19 +945,19 @@ def render_health_script(env: dict[str, str], role: str) -> str:
             if [[ "${{internet_ping_loss}}" =~ ^[0-9]+$ && "${{internet_ping_loss}}" -gt "${{MAX_FOREIGN_INTERNET_PING_LOSS_PCT}}" ]]; then
               reasons+=("foreign_internet_ping_loss=${{internet_ping_loss}}")
             fi
-            if below_soft_min "${{direct_min}}" "${{MIN_FOREIGN_DIRECT_DOWNLOAD_BPS}}"; then
-              reasons+=("foreign_direct_download=${{direct_min}}")
+            if below_soft_min "${{direct_download}}" "${{MIN_FOREIGN_DIRECT_DOWNLOAD_BPS}}"; then
+              reasons+=("foreign_direct_download=${{direct_download}}")
             fi
             if below_soft_min "${{direct_upload}}" "${{MIN_FOREIGN_DIRECT_UPLOAD_BPS}}"; then
               reasons+=("foreign_direct_upload=${{direct_upload}}")
             fi
           else
             wg_summary="$(probe_multi_download_summary "${{WG_INTERFACE}}")"
-            wg_min="${{wg_summary%%|*}}"
+            wg_download="${{wg_summary%%|*}}"
             wg_detail="${{wg_summary#*|}}"
             wg_upload="$(probe_upload_bps "${{WG_INTERFACE}}" "${{HEALTH_UPLOAD_URL}}" "${{HEALTH_UPLOAD_BYTES}}")"
-            if below_soft_min "${{wg_min}}" "${{MIN_RU_WG_DOWNLOAD_BPS}}"; then
-              reasons+=("ru_wg_download=${{wg_min}}")
+            if below_soft_min "${{wg_download}}" "${{MIN_RU_WG_DOWNLOAD_BPS}}"; then
+              reasons+=("ru_wg_download=${{wg_download}}")
             fi
             if below_soft_min "${{wg_upload}}" "${{MIN_RU_WG_UPLOAD_BPS}}"; then
               reasons+=("ru_wg_upload=${{wg_upload}}")
@@ -1165,31 +969,19 @@ def render_health_script(env: dict[str, str], role: str) -> str:
             reasons_joined="$(IFS=,; echo "${{reasons[*]}}")"
           fi
 
-          cat > "${{HEALTH_STATE_PATH}}.tmp" <<EOF
-DEEP_PROBE_AT="${{probe_at}}"
-DEEP_PROBE_AT_EPOCH="${{probe_epoch}}"
-DEEP_PROBE_VERDICT="${{verdict}}"
-DEEP_PROBE_REASONS="${{reasons_joined}}"
-DEEP_FOREIGN_DIRECT_DOWNLOAD_MIN_BPS="${{direct_min}}"
-DEEP_FOREIGN_DIRECT_DOWNLOAD_DETAIL="${{direct_detail}}"
-DEEP_FOREIGN_DIRECT_UPLOAD_BPS="${{direct_upload}}"
-DEEP_FOREIGN_GATEWAY_PING_LOSS_PCT="${{gateway_ping_loss}}"
-DEEP_FOREIGN_RU_PING_LOSS_PCT="${{peer_ping_loss}}"
-DEEP_FOREIGN_INTERNET_PING_LOSS_PCT="${{internet_ping_loss}}"
-DEEP_RU_WG_DOWNLOAD_MIN_BPS="${{wg_min}}"
-DEEP_RU_WG_DOWNLOAD_DETAIL="${{wg_detail}}"
-DEEP_RU_WG_UPLOAD_BPS="${{wg_upload}}"
-FAST_FOREIGN_RU_PING_LOSS_PCT="${{fast_foreign_ru_ping_loss:-1}}"
-FAST_RU_FOREIGN_PING_LOSS_PCT="${{fast_ru_foreign_ping_loss:-1}}"
-SELF_HEAL_LAST_REASON="${{self_heal_last_reason}}"
-SELF_HEAL_CONSECUTIVE="${{self_heal_consecutive:-0}}"
-SELF_HEAL_LAST_ACTION_EPOCH="${{self_heal_last_action_epoch:-0}}"
-SELF_HEAL_ACTION_WINDOW_EPOCH="${{self_heal_action_window_epoch:-0}}"
-SELF_HEAL_ACTION_WINDOW_COUNT="${{self_heal_action_window_count:-0}}"
-SELF_HEAL_LAST_ACTION="${{self_heal_last_action}}"
-SELF_HEAL_LAST_ACTION_RESULT="${{self_heal_last_action_result}}"
-EOF
-          mv "${{HEALTH_STATE_PATH}}.tmp" "${{HEALTH_STATE_PATH}}"
+          set_state_value DEEP_PROBE_AT "${{probe_at}}"
+          set_state_value DEEP_PROBE_AT_EPOCH "${{probe_epoch}}"
+          set_state_value DEEP_PROBE_VERDICT "${{verdict}}"
+          set_state_value DEEP_PROBE_REASONS "${{reasons_joined}}"
+          set_state_value DEEP_FOREIGN_DIRECT_DOWNLOAD_BPS "${{direct_download}}"
+          set_state_value DEEP_FOREIGN_DIRECT_DOWNLOAD_DETAIL "${{direct_detail}}"
+          set_state_value DEEP_FOREIGN_DIRECT_UPLOAD_BPS "${{direct_upload}}"
+          set_state_value DEEP_FOREIGN_GATEWAY_PING_LOSS_PCT "${{gateway_ping_loss}}"
+          set_state_value DEEP_FOREIGN_RU_PING_LOSS_PCT "${{peer_ping_loss}}"
+          set_state_value DEEP_FOREIGN_INTERNET_PING_LOSS_PCT "${{internet_ping_loss}}"
+          set_state_value DEEP_RU_WG_DOWNLOAD_BPS "${{wg_download}}"
+          set_state_value DEEP_RU_WG_DOWNLOAD_DETAIL "${{wg_detail}}"
+          set_state_value DEEP_RU_WG_UPLOAD_BPS "${{wg_upload}}"
 
           if [[ "${{#reasons[@]}}" -gt 0 ]]; then
             log "deep probe degraded: ${{reasons_joined}}"
@@ -1212,11 +1004,6 @@ EOF
                   key="${{key}},wireguard_path"
                 fi
                 ;;
-              foreign_direct_egress)
-                if [[ "${{key}}" != *foreign_nftables* ]]; then
-                  key="${{key}},foreign_nftables"
-                fi
-                ;;
             esac
           done
           key="${{key#,}}"
@@ -1229,8 +1016,6 @@ EOF
             printf 'repair-ru-wireguard-route'
           elif [[ "${{key}}" == *wireguard_path* ]]; then
             printf 'restart-wireguard'
-          elif [[ "${{ROLE}}" == "foreign-exit" && "${{key}}" == *foreign_nftables* ]]; then
-            printf 'restart-foreign-nftables'
           else
             printf 'none'
           fi
@@ -1251,9 +1036,6 @@ EOF
               ip -4 rule add fwmark "{env['APP_ROUTE_MARK']}" table "{env['WG_ROUTE_TABLE']}" priority 10000
               ip -6 rule del fwmark "{env['APP_ROUTE_MARK']}" table "{env['WG_ROUTE_TABLE']}" priority 10000 >/dev/null 2>&1 || true
               ip -6 rule add fwmark "{env['APP_ROUTE_MARK']}" table "{env['WG_ROUTE_TABLE']}" priority 10000
-              ;;
-            restart-foreign-nftables)
-              systemctl restart --no-block nftables vpn-stack-sync.service
               ;;
             *)
               return 1
@@ -1337,8 +1119,6 @@ EOF
           fi
           if probe_wireguard_path; then
             wireguard_path_ok="1"
-          elif wireguard_cache_can_suppress_failure; then
-            log "WireGuard probe missed once, but cached-good WG path is still fresh"
           else
             append_wireguard_path_reason
           fi
@@ -1347,9 +1127,6 @@ EOF
           set_state_value PROFILE_HANDSHAKE_AGE_S "${{age}}"
           set_state_value PROFILE_HANDSHAKE_GRACE_S "${{HANDSHAKE_EFFECTIVE_GRACE}}"
           set_state_value PROFILE_WG_PATH_OK "${{wireguard_path_ok}}"
-          if [[ "${{wireguard_path_ok}}" == "1" ]]; then
-            mark_good_path "WG_PATH" "health-hard-probe" "${{age}}"
-          fi
           if [[ "${{age}}" =~ ^[0-9]+$ && "${{age}}" -gt "${{HANDSHAKE_EFFECTIVE_GRACE}}" ]]; then
             if [[ "${{wireguard_path_ok}}" == "1" ]]; then
               set_state_value PROFILE_STALE_HANDSHAKE_WITH_LIVE_PATH_S "${{age}}"
@@ -1368,41 +1145,21 @@ EOF
 
         collect_soft_reasons() {{
           local deep_reasons=()
-          local fast_loss="-1"
-          if [[ "${{ROLE}}" == "foreign-exit" ]]; then
-            fast_loss="$(probe_ping_loss_pct_fast "${{RU_PUBLIC_IP}}")"
-            set_state_value FAST_FOREIGN_RU_PING_LOSS_PCT "${{fast_loss}}"
-            set_state_value PROFILE_FAST_PING_LOSS_PCT "${{fast_loss}}"
-            if [[ "${{fast_loss}}" =~ ^[0-9]+$ && "${{fast_loss}}" -gt "${{MAX_FOREIGN_RU_PING_LOSS_PCT}}" ]]; then
-              printf 'foreign_ru_ping_loss_fast=%s\\n' "${{fast_loss}}"
-            fi
-          else
-            fast_loss="$(probe_ping_loss_pct_fast "${{FOREIGN_PUBLIC_IP}}")"
-            set_state_value FAST_RU_FOREIGN_PING_LOSS_PCT "${{fast_loss}}"
-            set_state_value PROFILE_FAST_PING_LOSS_PCT "${{fast_loss}}"
-            if [[ "${{fast_loss}}" =~ ^[0-9]+$ && "${{fast_loss}}" -gt "${{MAX_FOREIGN_RU_PING_LOSS_PCT}}" ]]; then
-              printf 'ru_foreign_ping_loss_fast=%s\\n' "${{fast_loss}}"
-            fi
-          fi
           if should_run_deep_probe; then
             mapfile -t deep_reasons < <(run_deep_probe)
           fi
           if [[ "${{#deep_reasons[@]}}" -gt 0 ]]; then
             printf '%s\\n' "${{deep_reasons[@]}}"
           fi
-          collect_route_fail_reasons
         }}
 
-{textwrap.indent(render_route_fail_collector_shell(), '        ')}
-
-        harden_runtime
         mapfile -t hard_reasons < <(collect_hard_reasons)
         mapfile -t soft_reasons < <(collect_soft_reasons)
-        if [[ "${{#hard_reasons[@]}}" -eq 0 && "${{#soft_reasons[@]}}" -eq 0 ]]; then
-          reset_self_heal_observation
-          exit 0
-        fi
         if [[ "${{#hard_reasons[@]}}" -eq 0 ]]; then
+          reset_self_heal_observation
+          if [[ "${{#soft_reasons[@]}}" -eq 0 ]]; then
+            exit 0
+          fi
           log "runtime degraded without hard failure: ${{soft_reasons[*]}}"
           exit 0
         fi
@@ -1441,7 +1198,7 @@ def render_health_timer(env: dict[str, str]) -> str:
     return "\n".join(
         [
             "[Unit]",
-            "Description=Periodic vpn-stack runtime health repair",
+            "Description=Periodic vpn-stack runtime health check",
             "",
             "[Timer]",
             "OnBootSec=1min",
@@ -1469,6 +1226,7 @@ def render_guard_script(env: dict[str, str], role: str) -> str:
         SSH_FAILURE_THRESHOLD="{env['GUARD_SSH_FAILURE_THRESHOLD']}"
         REALITY_INVALID_THRESHOLD="{env['GUARD_REALITY_INVALID_THRESHOLD']}"
         REALITY_BLOCK_ENABLED="{env['GUARD_REALITY_BLOCK_ENABLED']}"
+        PROTECTED_IPV4="{env['RU_PUBLIC_IP']} {env['FOREIGN_PUBLIC_IP']}"
         STATE_PATH="/var/lib/vpn-stack/guard-state.env"
 
         log() {{
@@ -1493,10 +1251,31 @@ def render_guard_script(env: dict[str, str], role: str) -> str:
           nft add set inet vpnstack abuse_ipv4 '{{ type ipv4_addr; flags timeout; }}' >/dev/null 2>&1
         }}
 
+        is_protected_ipv4() {{
+          local candidate="$1"
+          local protected
+          for protected in $PROTECTED_IPV4; do
+            [[ -n "$protected" && "$candidate" == "$protected" ]] && return 0
+          done
+          return 1
+        }}
+
+        remove_protected_blocks() {{
+          local protected
+          for protected in $PROTECTED_IPV4; do
+            is_ipv4 "$protected" || continue
+            nft delete element inet vpnstack abuse_ipv4 "{{ $protected }}" >/dev/null 2>&1 || true
+          done
+        }}
+
         add_block() {{
           local ip="$1"
           local reason="$2"
           is_ipv4 "$ip" || return 0
+          if is_protected_ipv4 "$ip"; then
+            log "skip protected infrastructure IP $ip ($reason)"
+            return 1
+          fi
           nft add element inet vpnstack abuse_ipv4 "{{ $ip timeout $BLOCK_TIMEOUT }}" >/dev/null 2>&1 || true
           log "temporary block $ip ($reason, timeout=$BLOCK_TIMEOUT)"
         }}
@@ -1507,7 +1286,7 @@ def render_guard_script(env: dict[str, str], role: str) -> str:
 
         ssh_noise_ips() {{
           journalctl -u ssh.service -u ssh.socket --since "-${{LOOKBACK_MINUTES}} minutes" --no-pager 2>/dev/null \\
-            | grep -E 'Failed password|Invalid user|maximum authentication attempts|Timeout before authentication|kex_exchange_identification|banner exchange' \\
+            | grep -E 'Failed password|Invalid user|maximum authentication attempts' \\
             | extract_ipv4 || true
         }}
 
@@ -1543,8 +1322,9 @@ def render_guard_script(env: dict[str, str], role: str) -> str:
           while read -r count ip; do
             [[ -n "${{ip:-}}" ]] || continue
             if (( count >= threshold )); then
-              add_block "$ip" "$reason:$count"
-              blocked=$((blocked + 1))
+              if add_block "$ip" "$reason:$count"; then
+                blocked=$((blocked + 1))
+              fi
             fi
           done < <(sort "$tmp" | uniq -c)
           rm -f "$tmp"
@@ -1577,6 +1357,7 @@ def render_guard_script(env: dict[str, str], role: str) -> str:
           write_state 0 0
           exit 0
         fi
+        remove_protected_blocks
 
         ssh_blocked="$(ssh_noise_ips | block_repeated_ips "$SSH_FAILURE_THRESHOLD" ssh)"
         reality_blocked="0"

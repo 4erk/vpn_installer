@@ -101,7 +101,7 @@ class DiagnoseTests(unittest.TestCase):
                 self.assertEqual(diagnose.diagnose_client_log_workflow(str(log_path), deployment="demo", role=ROLE_RU), 1)
         output = stream.getvalue()
         self.assertIn("client_front_connect_failed: 1", output)
-        self.assertIn("dns_failed: 1", output)
+        self.assertIn("dns_timeout: 1", output)
         self.assertIn("BAD: self-tunnel", output)
         self.assertIn("Windows bypass helper", output)
 

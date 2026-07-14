@@ -134,6 +134,8 @@ class AuditQuickTests(unittest.TestCase):
     def test_reality_interop_uses_domain_probe_not_ipv6_connect_to(self) -> None:
         source = inspect.getsource(quick.test_xray_reality_interop)
         self.assertIn('"https://example.com/"', source)
+        self.assertIn('"predefined": {"example.com": ["127.0.0.1"]}', source)
+        self.assertIn('router_config["route"]["default_domain_resolver"] = "interop-hosts"', source)
         self.assertNotIn("--connect-to", source)
         self.assertNotIn("2606:2800:220:1:248:1893:25c8:1946", source)
 

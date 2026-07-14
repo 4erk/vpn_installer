@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import ipaddress
 import re
 from collections import Counter
 from dataclasses import dataclass
 
 BUCKETS = (
     "client_front_connect_failed",
+    "dns_timeout",
+    "dns_nxdomain",
     "dns_failed",
     "domain_to_foreign_timeout",
     "ipv4_literal_timeout",
@@ -57,8 +60,16 @@ def _source(line: str) -> str:
     return match.group("src") if match else ""
 
 
-def _is_ipv6_destination(destination: str) -> bool:
-    return destination.startswith("[")
+def _destination_ip_version(destination: str) -> int | None:
+    host = destination
+    if host.startswith("["):
+        host = host[1 : host.find("]")]
+    elif host.count(":") == 1:
+        host = host.rsplit(":", 1)[0]
+    try:
+        return ipaddress.ip_address(host).version
+    except ValueError:
+        return None
 
 
 def classify_line(line: str) -> ClassifiedLogLine | None:
@@ -68,15 +79,22 @@ def classify_line(line: str) -> ClassifiedLogLine | None:
         return ClassifiedLogLine("invalid_reality", _destination(line), _source(line))
     if "using outbound/vless[" in line and ("dial tcp" in line or "wsarecv" in line or "connected host has failed to respond" in line):
         return ClassifiedLogLine("client_front_connect_failed", _destination(line), _source(line))
+    if ("dns: exchange failed" in line or "exchange failed for " in line or "dns: lookup failed" in line or "lookup failed for " in line) and (
+        "context deadline exceeded" in line or "i/o timeout" in line
+    ):
+        return ClassifiedLogLine("dns_timeout", _destination(line), _source(line))
+    if ("dns: lookup failed" in line or "lookup failed for " in line) and "NXDOMAIN" in line.upper():
+        return ClassifiedLogLine("dns_nxdomain", _destination(line), _source(line))
     if "dns: lookup failed" in line or "lookup failed for " in line or "dns: exchange failed" in line or "exchange failed for " in line:
         return ClassifiedLogLine("dns_failed", _destination(line), _source(line))
-    if "outbound/block[blocked]" in line or "using outbound/block[blocked]" in line:
+    if "outbound/block[blocked]" in line or "using outbound/block[blocked]" in line or "connection rejected" in line:
         return ClassifiedLogLine("blocked_private_fake", _destination(line), _source(line))
     if "i/o timeout" in line or "context deadline exceeded" in line:
         destination = _destination(line)
-        if "to-foreign-ipv6-literal" in line or _is_ipv6_destination(destination):
+        ip_version = _destination_ip_version(destination)
+        if ip_version == 6:
             return ClassifiedLogLine("ipv6_literal_timeout", destination, _source(line))
-        if "to-foreign-ip-literal" in line:
+        if ip_version == 4:
             return ClassifiedLogLine("ipv4_literal_timeout", destination, _source(line))
         if "to-foreign" in line:
             return ClassifiedLogLine("domain_to_foreign_timeout", destination, _source(line))

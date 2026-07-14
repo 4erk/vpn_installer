@@ -33,14 +33,10 @@ class PackageTests(unittest.TestCase):
         "CLIENT_TUN_ADDRESS_V6",
         "CLIENT_TUN_NAME",
         "FOREIGN_PUBLIC_IP",
-        "RU_HTTPS_INPUT_BURST",
-        "RU_HTTPS_INPUT_RATE",
         "RU_PUBLIC_IP",
         "RU_REALITY_HANDSHAKE_SERVER",
         "RU_REALITY_SERVER_NAME",
         "RU_REALITY_SHORT_ID",
-        "SSH_INPUT_BURST",
-        "SSH_INPUT_RATE",
         "WAN_INTERFACE",
     }
     SHELL_ONLY_DEFAULTS = {
@@ -109,9 +105,9 @@ class PackageTests(unittest.TestCase):
         self.assertIn('HEALTH_SELF_HEAL_COOLDOWN_MINUTES="${HEALTH_SELF_HEAL_COOLDOWN_MINUTES:-15}"', install_script)
         self.assertIn('HEALTH_SELF_HEAL_MAX_ACTIONS_PER_HOUR="${HEALTH_SELF_HEAL_MAX_ACTIONS_PER_HOUR:-2}"', install_script)
         self.assertIn('HEALTH_SELF_HEAL_CONFIRMATIONS="${HEALTH_SELF_HEAL_CONFIRMATIONS:-2}"', install_script)
-        self.assertIn('HEALTH_GOOD_CACHE_TTL_SECONDS="${HEALTH_GOOD_CACHE_TTL_SECONDS:-900}"', install_script)
-        self.assertIn('HEALTH_ROUTE_FAIL_CACHE_TTL_SECONDS="${HEALTH_ROUTE_FAIL_CACHE_TTL_SECONDS:-300}"', install_script)
-        self.assertIn('HEALTH_ROUTE_FAIL_THRESHOLD="${HEALTH_ROUTE_FAIL_THRESHOLD:-3}"', install_script)
+        self.assertNotIn('HEALTH_GOOD_CACHE_TTL_SECONDS="${HEALTH_GOOD_CACHE_TTL_SECONDS:-', install_script)
+        self.assertNotIn('HEALTH_ROUTE_FAIL_CACHE_TTL_SECONDS="${HEALTH_ROUTE_FAIL_CACHE_TTL_SECONDS:-', install_script)
+        self.assertNotIn('HEALTH_ROUTE_FAIL_THRESHOLD="${HEALTH_ROUTE_FAIL_THRESHOLD:-', install_script)
         self.assertIn('HEALTH_TARGET_PROBE_URLS="${HEALTH_TARGET_PROBE_URLS:-https://chatgpt.com/ https://discord.com/ https://github.com/ https://www.google.com/generate_204 https://telegram.org/ https://api.telegram.org/ https://t.me/}"', install_script)
         self.assertIn('HEALTH_RU_DIRECT_TARGET_PROBE_URLS="${HEALTH_RU_DIRECT_TARGET_PROBE_URLS:-https://api.ipify.org/ https://2ip.ru/}"', install_script)
         self.assertIn('HEALTH_TARGET_CONNECT_TIMEOUT_SECONDS="${HEALTH_TARGET_CONNECT_TIMEOUT_SECONDS:-2}"', install_script)
@@ -131,19 +127,15 @@ class PackageTests(unittest.TestCase):
         self.assertIn('ADMIN_WEB_USERNAME="${ADMIN_WEB_USERNAME:-user}"', install_script)
         self.assertIn('ADMIN_WEB_PASSWORD="${ADMIN_WEB_PASSWORD:-password}"', install_script)
         self.assertIn('python3 "${ADMIN_APPLY_SCRIPT_PATH}" --no-restart', install_script)
-        self.assertIn('ADAPTIVE_ROUTING_RULES_PATH="/var/lib/vpn-stack/adaptive-routing-rules.json"', install_script)
-        self.assertIn("reset_runtime_adaptive_cache", install_script)
+        self.assertIn('LEGACY_ADAPTIVE_ROUTING_RULES_PATH="/var/lib/vpn-stack/adaptive-routing-rules.json"', install_script)
+        self.assertIn('HEALTH_STATE_PATH="/var/lib/vpn-stack/health-state.env"', install_script)
+        self.assertIn("reset_install_runtime_state", install_script)
+        self.assertIn('rm -f "${LEGACY_DATAPLANE_CACHE_PATH}" "${HEALTH_STATE_PATH}"', install_script)
         self.assertIn('systemctl enable vpn-stack-admin.service', install_script)
         self.assertIn('FOREIGN_BLOCK_RU="${FOREIGN_BLOCK_RU:-0}"', install_script)
         self.assertIn('RU_BLOCK_IP_CIDR="${RU_BLOCK_IP_CIDR:-}"', install_script)
-        self.assertIn('RU_IPV6_POLICY="${RU_IPV6_POLICY:-to-foreign}"', install_script)
-        self.assertIn('RU_LITERAL_POLICY="${RU_LITERAL_POLICY:-fail-fast}"', install_script)
-        self.assertIn('RU_IPV6_LITERAL_POLICY="${RU_IPV6_LITERAL_POLICY:-reject}"', install_script)
         self.assertIn('RU_BLOCK_QUIC="${RU_BLOCK_QUIC:-1}"', install_script)
-        self.assertIn('RU_GEOIP_DIRECT="${RU_GEOIP_DIRECT:-0}"', install_script)
-        self.assertIn('if [[ "${RU_BLOCK_IP_CIDR}" == "91.108.56.0/22" ]]; then', install_script)
-        self.assertIn('if [[ "${RU_IPV6_POLICY}" == "fast-fail" ]]; then', install_script)
-        self.assertIn('if [[ "${TO_FOREIGN_CONNECT_TIMEOUT}" == "1s" || "${TO_FOREIGN_CONNECT_TIMEOUT}" == "2s" ]]; then', install_script)
+        self.assertNotIn('if [[ "${RU_BLOCK_IP_CIDR}" == "91.108.56.0/22" ]]; then', install_script)
         self.assertIn("timeout 60s systemctl start vpn-stack-sync.service", install_script)
         self.assertIn("continuing with bootstrap assets", install_script)
         self.assertIn('RU_LISTEN_PORT="${RU_LISTEN_PORT:-443}"', install_script)
@@ -151,18 +143,14 @@ class PackageTests(unittest.TestCase):
         self.assertIn('RU_REALITY_MAX_TIME_DIFFERENCE="${RU_REALITY_MAX_TIME_DIFFERENCE:-24h}"', install_script)
         self.assertIn('SING_BOX_LOG_LEVEL="${SING_BOX_LOG_LEVEL:-info}"', install_script)
         self.assertIn('RU_SNIFF_TIMEOUT="${RU_SNIFF_TIMEOUT:-250ms}"', install_script)
-        self.assertIn('RU_LITERAL_POLICY="${RU_LITERAL_POLICY:-fail-fast}"', install_script)
-        self.assertIn('RU_IPV6_LITERAL_POLICY="${RU_IPV6_LITERAL_POLICY:-reject}"', install_script)
-        self.assertIn('TO_FOREIGN_CONNECT_TIMEOUT="${TO_FOREIGN_CONNECT_TIMEOUT:-}"', install_script)
-        self.assertIn('TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT="${TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT-750ms}"', install_script)
-        self.assertIn('TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT="750ms"', install_script)
-        self.assertIn('TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT="${TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT-2s}"', install_script)
-        self.assertIn('if [[ "${RU_LISTEN_PORT}" == "8443" ]]; then', install_script)
+        self.assertNotIn('RU_LITERAL_POLICY="${RU_LITERAL_POLICY:-', install_script)
+        self.assertNotIn('TO_FOREIGN_CONNECT_TIMEOUT="${TO_FOREIGN_CONNECT_TIMEOUT:-', install_script)
+        self.assertNotIn('RU_DIRECT_DNS_SERVER="${RU_DIRECT_DNS_SERVER:-', install_script)
+        self.assertNotIn('RU_DIRECT_DNS_PORT="${RU_DIRECT_DNS_PORT:-', install_script)
+        self.assertNotIn('if [[ "${RU_LISTEN_PORT}" == "8443" ]]; then', install_script)
         self.assertIn('seen_ru_listen_port="0"', install_script)
-        self.assertIn('seen_ip_literal_timeout="0"', install_script)
-        self.assertIn('seen_ipv6_literal_timeout="0"', install_script)
-        self.assertIn('seen_literal_policy="0"', install_script)
-        self.assertIn('seen_ipv6_literal_policy="0"', install_script)
+        self.assertIn("TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT=*", install_script)
+        self.assertIn("RU_DIRECT_DNS_SERVER=*", install_script)
         self.assertIn('render-manifest.json', install_script)
         self.assertNotIn('seen_ru_compat_ports="0"', install_script)
         self.assertIn('APT_LOCK_TIMEOUT_SECONDS="${APT_LOCK_TIMEOUT_SECONDS:-900}"', install_script)
@@ -220,7 +208,7 @@ class PackageTests(unittest.TestCase):
 
     def test_package_exposes_version_via_getattr(self) -> None:
         package = importlib.import_module("vpn_installer")
-        self.assertEqual(package.__version__, "0.9.24")
+        self.assertEqual(package.__version__, "0.10.0")
         with self.assertRaises(AttributeError):
             package.__getattr__("nope")
 
