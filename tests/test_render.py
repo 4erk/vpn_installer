@@ -192,19 +192,10 @@ class RenderTests(unittest.TestCase):
         self.assertNotIn("detour", servers["dns-ru-direct"])
         self.assertEqual(servers["dns-global"]["detour"], "to-foreign")
 
-    def test_health_script_never_mutates_queueing_or_offloads(self) -> None:
-        script = render.render_health_script(self.make_env(), "ru-gateway")
-        self.assertNotIn("tc qdisc replace", script)
-        self.assertNotIn("ethtool -K", script)
-        self.assertNotIn("harden_runtime", script)
-
-    def test_sync_script_bounds_external_downloads(self) -> None:
-        env = self.make_env()
-        script = render.render_sync_script(env)
-        self.assertIn('SYNC_DOWNLOAD_CONNECT_TIMEOUT="${SYNC_DOWNLOAD_CONNECT_TIMEOUT:-5}"', script)
-        self.assertIn('SYNC_DOWNLOAD_MAX_TIME="${SYNC_DOWNLOAD_MAX_TIME:-20}"', script)
-        self.assertIn('curl -fsSL --connect-timeout "$SYNC_DOWNLOAD_CONNECT_TIMEOUT" --max-time "$SYNC_DOWNLOAD_MAX_TIME"', script)
-
+    def test_health_service_delegates_to_agent(self) -> None:
+        service = render.render_health_service()
+        self.assertIn("ExecStart=/usr/bin/python3 /usr/local/lib/vpn-stack/vpn-stack-agent.py health", service)
+        self.assertNotIn("sync-state.sh", service)
     def test_ru_server_uses_one_foreign_egress_for_domains_and_literals(self) -> None:
         env = self.make_env()
         payload = json.loads(render.render_ru_singbox(env))
@@ -382,7 +373,7 @@ class RenderTests(unittest.TestCase):
                 ru_yaml = (cloud_dir / "ru.yaml").read_text(encoding="utf-8")
                 self.assertIn("/root/vpn-stack/vpn_installer/install_support.py", ru_yaml)
                 self.assertIn("/root/vpn-stack/rendered/sing-box.json", ru_yaml)
-                self.assertIn("/root/vpn-stack/rendered/sync-state.sh", ru_yaml)
+                self.assertIn("/root/vpn-stack/rendered/vpn-stack-agent.py", ru_yaml)
 
     def test_fetch_assets_fail_fast_without_cache(self) -> None:
         env = self.make_env()
@@ -516,13 +507,17 @@ class RenderTests(unittest.TestCase):
         self.assertIn("xray.json", files)
         self.assertIn(f"{env['WG_INTERFACE']}.conf", files)
         self.assertIn("sshd-vpn-stack.conf", files)
-        self.assertIn("health-check.sh", files)
-        self.assertIn("guard.sh", files)
-        self.assertIn("vpn-stack-sync.service", files)
+        self.assertIn("sysctl-vpn-stack.conf", files)
+        self.assertIn("journald-vpn-stack.conf", files)
+        self.assertIn("apt-vpn-stack-unattended.conf", files)
+        self.assertIn("vpn-stack-agent.py", files)
+        self.assertNotIn("guard.sh", files)
+        self.assertNotIn("sync-state.sh", files)
+        self.assertNotIn("vpn-stack-sync.service", files)
         self.assertIn("vpn-stack-health.service", files)
         self.assertIn("vpn-stack-health.timer", files)
-        self.assertIn("vpn-stack-guard.service", files)
-        self.assertIn("vpn-stack-guard.timer", files)
+        self.assertNotIn("vpn-stack-guard.service", files)
+        self.assertNotIn("vpn-stack-guard.timer", files)
         self.assertIn("admin_apply.py", files)
         self.assertIn("admin_web.py", files)
         self.assertIn("vpn-stack-admin.service", files)
@@ -532,28 +527,16 @@ class RenderTests(unittest.TestCase):
         self.assertNotIn("admin_web.py", foreign_files)
         self.assertNotIn("vpn-stack-admin.service", foreign_files)
 
-    def test_health_script_probes_wireguard_path_before_stale_handshake_verdict(self) -> None:
+    def test_runtime_dropins_are_renderer_owned_and_role_specific(self) -> None:
         env = self.make_env()
-        ru_script = render.render_health_script(env, render.ROLE_RU)
-        self.assertIn("probe_wireguard_path()", ru_script)
-        self.assertIn('WG_FOREIGN_ADDRESS_HOST="10.74.0.2"', ru_script)
-        self.assertIn('WG_FOREIGN_ADDRESS_V6_HOST="fd74:7670:6e73::2"', ru_script)
-        self.assertIn("route_to_foreign_wg_ipv6_ok()", ru_script)
-        self.assertIn('ip -6 route get 2606:4700:4700::1111 mark 48', ru_script)
-        self.assertIn('route_to_foreign_wg_ok && probe_http_ipv4 "${WG_INTERFACE}"', ru_script)
-        self.assertNotIn("cached_good_path", ru_script)
-        self.assertIn('reasons+=("ru_wg_peer_route_missing")', ru_script)
-        self.assertIn('probe_http_ipv4 "${WG_INTERFACE}"', ru_script)
-        self.assertIn('reasons+=("ru_wg_egress")', ru_script)
-        self.assertLess(ru_script.index("if probe_wireguard_path; then"), ru_script.index('age="$(wg_handshake_age)"'))
-
-    def test_foreign_health_script_checks_wg_peer_not_only_direct_egress(self) -> None:
-        env = self.make_env()
-        foreign_script = render.render_health_script(env, render.ROLE_FOREIGN)
-        self.assertIn('ping -4 -I "${WG_INTERFACE}" -c 1 -W 2 "${WG_RU_ADDRESS_HOST}"', foreign_script)
-        self.assertNotIn("cached_good_path", foreign_script)
-        self.assertIn('reasons+=("foreign_wg_peer_unreachable")', foreign_script)
-        self.assertIn('reasons+=("foreign_direct_egress")', foreign_script)
+        ru_files = render.rendered_files_for_role(env, render.ROLE_RU)
+        foreign_files = render.rendered_files_for_role(env, render.ROLE_FOREIGN)
+        self.assertIn("net.ipv4.conf.all.src_valid_mark=1", ru_files["sysctl-vpn-stack.conf"])
+        self.assertIn("net.ipv4.ip_forward=1", foreign_files["sysctl-vpn-stack.conf"])
+        self.assertIn('APT::Periodic::Unattended-Upgrade "1";', ru_files["apt-vpn-stack-unattended.conf"])
+        self.assertIn(f"SystemMaxUse={env['JOURNAL_SYSTEM_MAX_USE']}", ru_files["journald-vpn-stack.conf"])
+        env["JOURNAL_LIMIT_ENABLED"] = "0"
+        self.assertNotIn("journald-vpn-stack.conf", render.rendered_files_for_role(env, render.ROLE_RU))
 
     def test_ru_wireguard_hooks_are_restart_safe(self) -> None:
         env = self.make_env()
@@ -597,152 +580,6 @@ class RenderTests(unittest.TestCase):
             config,
         )
 
-    def test_render_health_script_observes_ru_runtime_without_route_mutation(self) -> None:
-        env = self.make_env()
-        script = render.render_health_script(env, render.ROLE_RU)
-        self.assertIn('ROLE="ru-gateway"', script)
-        self.assertIn('SELF_HEAL_ENABLED="1"', script)
-        self.assertIn('SELF_HEAL_COOLDOWN_MINUTES="15"', script)
-        self.assertIn('SELF_HEAL_MAX_ACTIONS_PER_HOUR="2"', script)
-        self.assertIn('SELF_HEAL_CONFIRMATIONS="2"', script)
-        self.assertNotIn("dataplane-cache.env", script)
-        self.assertNotIn("cached_good_path", script)
-        self.assertIn('WG_KEEPALIVE="25"', script)
-        self.assertIn('HANDSHAKE_EFFECTIVE_GRACE="$((WG_KEEPALIVE * HANDSHAKE_GRACE_MULTIPLIER))"', script)
-        self.assertIn('PROFILE_HANDSHAKE_AGE_S', script)
-        self.assertIn('PROFILE_HANDSHAKE_GRACE_S', script)
-        self.assertIn('PROFILE_WG_PATH_OK', script)
-        self.assertIn('systemctl restart --no-block "wg-quick@${WG_INTERFACE}"', script)
-        self.assertNotIn("systemctl restart --no-block sing-box", script)
-        self.assertIn('ip -6 route replace "${WG_FOREIGN_ADDRESS_V6_HOST}/128" dev "${WG_INTERFACE}"', script)
-        self.assertIn('ip -6 rule add fwmark "48" table "51820" priority 10000', script)
-        self.assertIn('probe_http_ipv4 "${WG_INTERFACE}"', script)
-        self.assertIn('HEALTH_THROUGHPUT_URLS="https://cachefly.cachefly.net/1mb.test https://proof.ovh.net/files/1Mb.dat"', script)
-        self.assertIn('HEALTH_STATE_PATH="/var/lib/vpn-stack/health-state.env"', script)
-        self.assertIn("run_deep_probe()", script)
-        self.assertIn('log "deep probe degraded: ${reasons_joined}"', script)
-        self.assertNotIn('last_verdict="$(state_value DEEP_PROBE_VERDICT)"', script)
-        self.assertIn('set_state_value DEEP_RU_WG_DOWNLOAD_BPS "${wg_download}"', script)
-        self.assertIn('set_state_value DEEP_PROBE_AT "${probe_at}"', script)
-        self.assertNotIn('cat > "${HEALTH_STATE_PATH}.tmp"', script)
-        self.assertIn('probe_upload_bps "${WG_INTERFACE}"', script)
-        self.assertNotIn("tc qdisc replace", script)
-        self.assertNotIn("ethtool -K", script)
-        self.assertNotIn("adaptive", script.lower())
-        self.assertIn("cloudflare.com/cdn-cgi/trace", script)
-        self.assertIn("ssh_banner_ok", script)
-        self.assertIn("collect_hard_reasons()", script)
-        self.assertIn("collect_soft_reasons()", script)
-        soft_branch = script.index('if [[ "${#hard_reasons[@]}" -eq 0 ]]; then')
-        self.assertLess(soft_branch, script.index('log "runtime degraded without hard failure', soft_branch))
-        self.assertIn("reset_self_heal_observation", script[soft_branch : script.index('log "runtime degraded without hard failure', soft_branch)])
-        self.assertIn('ip -4 route get "${WG_FOREIGN_ADDRESS_HOST}"', script)
-        self.assertIn("ru_wireguard_route", script)
-        self.assertIn("repair-ru-wireguard-route", script)
-        self.assertIn('ip -4 route replace "${WG_FOREIGN_ADDRESS_HOST}/32" dev "${WG_INTERFACE}"', script)
-        self.assertIn('log "runtime degraded without hard failure: ${soft_reasons[*]}"', script)
-        self.assertIn('log "runtime hard failure: ${hard_reasons[*]}"', script)
-        self.assertIn("runtime hard failure recorded; keeping systemd unit successful", script)
-        self.assertIn('log "handshake age ${age}s exceeds dynamic grace ${HANDSHAKE_EFFECTIVE_GRACE}s, but WireGuard path is alive"', script)
-        self.assertNotIn('maybe_self_heal "soft" "${soft_reasons[@]}"', script)
-        self.assertIn('maybe_self_heal "hard" "${hard_reasons[@]}"', script)
-        self_heal_key = script.split("self_heal_reason_key() {", 1)[1].split("self_heal_action_for_key()", 1)[0]
-        self.assertIn("wg_handshake_stale=*", self_heal_key)
-        self.assertIn("ru_wg_egress", self_heal_key)
-        self.assertNotIn("ru_wg_download=*", self_heal_key)
-        self.assertNotIn("ru_wg_upload=*", self_heal_key)
-        self.assertNotIn("ru_foreign_ping_loss_fast=*", self_heal_key)
-
-    def test_render_health_script_observes_foreign_runtime(self) -> None:
-        env = self.make_env()
-        script = render.render_health_script(env, render.ROLE_FOREIGN)
-        self.assertIn('ROLE="foreign-exit"', script)
-        self.assertIn('SELF_HEAL_ENABLED="1"', script)
-        self.assertIn('HANDSHAKE_MIN_GRACE="180"', script)
-        self.assertIn('HANDSHAKE_GRACE_MULTIPLIER="8"', script)
-        self.assertIn('systemctl restart --no-block "wg-quick@${WG_INTERFACE}"', script)
-        self.assertNotIn('systemctl restart --no-block nftables', script)
-        self.assertIn('probe_ping_loss_pct "${RU_PUBLIC_IP}"', script)
-        self.assertIn('reasons+=("foreign_gateway_ping_loss=${gateway_ping_loss}")', script)
-        self.assertIn('reasons+=("foreign_ru_ping_loss=${peer_ping_loss}")', script)
-        self.assertIn('reasons+=("foreign_internet_ping_loss=${internet_ping_loss}")', script)
-        self.assertIn('set_state_value DEEP_FOREIGN_DIRECT_DOWNLOAD_BPS "${direct_download}"', script)
-        self.assertIn('set_state_value DEEP_FOREIGN_RU_PING_LOSS_PCT "${peer_ping_loss}"', script)
-        self.assertIn('probe_http_ipv4 ""', script)
-        self.assertNotIn("detect_default_iface", script)
-        self.assertIn('log "latest deep degradation snapshot: ${soft_reasons[*]}"', script)
-        self_heal_key = script.split("self_heal_reason_key() {", 1)[1].split("self_heal_action_for_key()", 1)[0]
-        self.assertNotIn("foreign_direct_download=*", self_heal_key)
-        self.assertNotIn("foreign_direct_upload=*", self_heal_key)
-        self.assertNotIn("foreign_ru_ping_loss=*", self_heal_key)
-        self.assertNotIn("foreign_ru_ping_loss_fast=*", self_heal_key)
-        self.assertNotIn("foreign_direct_egress", self_heal_key)
-
-    @unittest.skipUnless(preferred_bash(), "bash is required for health script syntax test")
-    def test_render_health_script_is_bash_valid_for_both_roles(self) -> None:
-        env = self.make_env()
-        bash = preferred_bash() or "bash"
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            for role in (render.ROLE_RU, render.ROLE_FOREIGN):
-                script_path = tmp_path / f"{role}.sh"
-                script_path.write_text(render.render_health_script(env, role), encoding="utf-8")
-                completed = subprocess.run(
-                    [bash, "-n", str(script_path)],
-                    capture_output=True,
-                    text=True,
-                    env={**os.environ, "LC_ALL": "C.UTF-8"},
-                    check=False,
-                )
-                self.assertEqual(
-                    completed.returncode,
-                    0,
-                    msg=f"{role} health script syntax error:\nstdout:\n{completed.stdout}\nstderr:\n{completed.stderr}",
-                )
-
-    @unittest.skipUnless(preferred_bash(), "bash is required for guard script syntax test")
-    def test_render_guard_script_is_bash_valid_for_both_roles(self) -> None:
-        env = self.make_env()
-        bash = preferred_bash() or "bash"
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            for role in (render.ROLE_RU, render.ROLE_FOREIGN):
-                script_path = tmp_path / f"{role}-guard.sh"
-                script_path.write_text(render.render_guard_script(env, role), encoding="utf-8")
-                completed = subprocess.run(
-                    [bash, "-n", str(script_path)],
-                    capture_output=True,
-                    text=True,
-                    env={**os.environ, "LC_ALL": "C.UTF-8"},
-                    check=False,
-                )
-                self.assertEqual(
-                    completed.returncode,
-                    0,
-                    msg=f"{role} guard script syntax error:\nstdout:\n{completed.stdout}\nstderr:\n{completed.stderr}",
-                )
-
-    def test_render_guard_script_observes_reality_noise_by_default(self) -> None:
-        env = self.make_env()
-        ru_script = render.render_guard_script(env, render.ROLE_RU)
-        foreign_script = render.render_guard_script(env, render.ROLE_FOREIGN)
-        self.assertIn('nft add element inet vpnstack abuse_ipv4 "{ $ip timeout $BLOCK_TIMEOUT }"', ru_script)
-        self.assertIn('SSH_FAILURE_THRESHOLD="6"', ru_script)
-        self.assertIn('REALITY_INVALID_THRESHOLD="8"', ru_script)
-        self.assertIn('REALITY_BLOCK_ENABLED="0"', ru_script)
-        self.assertIn(f'PROTECTED_IPV4="{env["RU_PUBLIC_IP"]} {env["FOREIGN_PUBLIC_IP"]}"', ru_script)
-        self.assertIn('nft delete element inet vpnstack abuse_ipv4 "{ $protected }"', ru_script)
-        self.assertIn('if is_protected_ipv4 "$ip"; then', ru_script)
-        self.assertIn('if add_block "$ip" "$reason:$count"; then', ru_script)
-        self.assertIn("journalctl -u vpn-stack-xray.service", ru_script)
-        self.assertNotIn("journalctl -u sing-box.service --since", ru_script)
-        self.assertIn("REALITY: processed invalid connection", ru_script)
-        self.assertIn("| extract_ipv4 || true", ru_script)
-        self.assertIn('if [[ "$ROLE" == "ru-gateway" ]]; then', ru_script)
-        self.assertIn('if [[ "$REALITY_BLOCK_ENABLED" == "1" ]]; then', ru_script)
-        self.assertIn('count_repeated_ips "$REALITY_INVALID_THRESHOLD"', ru_script)
-        self.assertIn('ROLE="foreign-exit"', foreign_script)
-
     def test_render_sshd_hardening_uses_expected_limits(self) -> None:
         env = self.make_env()
         config = render.render_sshd_hardening(env)
@@ -751,13 +588,11 @@ class RenderTests(unittest.TestCase):
         self.assertIn("MaxStartups 10:30:60", config)
         self.assertIn("PerSourceMaxStartups 6", config)
 
-    def test_render_ru_nftables_admits_ssh_and_vless_after_abuse_set(self) -> None:
+    def test_render_ru_nftables_admits_ssh_and_vless_without_log_driven_blocks(self) -> None:
         env = self.make_env()
         rules = render.render_ru_firewall_nftables(env)
         self.assertIn("ct state invalid drop", rules)
-        self.assertIn("set abuse_ipv4", rules)
-        self.assertIn("flags timeout", rules)
-        self.assertIn('ip saddr @abuse_ipv4 counter drop comment "vpnstack-abuse-block"', rules)
+        self.assertNotIn("abuse_ipv4", rules)
         self.assertIn(f"tcp dport {env['SSH_PORT']} counter accept", rules)
         self.assertNotIn("ssh_guard", rules)
         self.assertNotIn(f"tcp dport {env['SSH_PORT']} counter drop", rules)
@@ -794,14 +629,13 @@ class RenderTests(unittest.TestCase):
         rules = render.render_ru_firewall_nftables(env)
         self.assertIn(f'iifname "{env["WG_INTERFACE"]}" tcp dport 11333 counter accept', rules)
 
-    def test_render_foreign_nftables_admits_ssh_after_abuse_set(self) -> None:
+    def test_render_foreign_nftables_admits_ssh_without_log_driven_blocks(self) -> None:
         env = self.make_env()
         rules = render.render_foreign_nftables(env, "eth0")
         self.assertIn("ct state invalid drop", rules)
-        self.assertIn("set abuse_ipv4", rules)
+        self.assertNotIn("abuse_ipv4", rules)
         self.assertNotIn("set ru_ipv4", rules)
         self.assertNotIn("ip daddr @ru_ipv4 drop", rules)
-        self.assertIn('ip saddr @abuse_ipv4 counter drop comment "vpnstack-abuse-block"', rules)
         self.assertIn(f"tcp dport {env['SSH_PORT']} counter accept", rules)
         self.assertNotIn("ssh_guard", rules)
         self.assertNotIn(f"tcp dport {env['SSH_PORT']} counter drop", rules)
@@ -867,6 +701,20 @@ class RenderTests(unittest.TestCase):
 
                 self.assertFalse(stale_file.exists())
                 self.assertTrue((tmp_path / "out" / "demo" / "preview" / "ru" / "sing-box.json").is_file())
+
+    def test_role_manifest_requires_only_role_assets(self) -> None:
+        env = self.make_env()
+        env["FOREIGN_BLOCK_RU"] = "1"
+        with tempfile.TemporaryDirectory() as tmp:
+            assets = {}
+            for name in ("geosite-ru.srs", "geoip-ru.srs", "ru-ipv4.zone", "ru-ipv6.zone"):
+                path = Path(tmp) / name
+                path.write_text(name, encoding="utf-8")
+                assets[name] = path
+            ru_manifest = json.loads(render.rendered_files_for_role(env, render.ROLE_RU, assets=assets)["render-manifest.json"])
+            foreign_manifest = json.loads(render.rendered_files_for_role(env, render.ROLE_FOREIGN, assets=assets)["render-manifest.json"])
+        self.assertEqual(set(ru_manifest["assets"]), {"geoip-ru.srs", "geosite-ru.srs"})
+        self.assertEqual(set(foreign_manifest["assets"]), {"ru-ipv4.zone", "ru-ipv6.zone"})
 
     @unittest.skipUnless(preferred_bash(), "bash is required for install.sh render-only test")
     def test_install_sh_render_only_contains_forced_direct_rules(self) -> None:

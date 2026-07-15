@@ -39,6 +39,19 @@ class LogClassifierTests(unittest.TestCase):
         self.assertEqual(classified.bucket, "dns_timeout")
         self.assertEqual(classified.destination, "www.msftconnecttest.com:A")
 
+    def test_router_lookup_nxdomain_is_dns_and_deduplicated_by_request_id(self) -> None:
+        lines = [
+            "+0000 2026-07-15 01:53:31 ERROR [1400782119 31ms] dns: lookup failed for assets0.xboxlive.com: NXDOMAIN",
+            "+0000 2026-07-15 01:53:31 ERROR [1400782119 31ms] router: lookup assets0.xboxlive.com: NXDOMAIN",
+        ]
+        classified = classify_line(lines[1])
+        self.assertIsNotNone(classified)
+        self.assertEqual(classified.bucket, "dns_nxdomain")
+        self.assertEqual(classified.destination, "assets0.xboxlive.com")
+        summary = summarize_lines(lines)
+        self.assertEqual(summary["counts"]["dns_nxdomain"], 1)
+        self.assertEqual(summary["counts"]["unclassified_error"], 0)
+
     def test_classifies_xray_disabled_invalid_separately_from_invalid_reality(self) -> None:
         disabled = classify_line("from 203.0.113.4:456 accepted tcp:disabled.invalid:443")
         invalid = classify_line("REALITY: processed invalid connection from 203.0.113.5:1234")

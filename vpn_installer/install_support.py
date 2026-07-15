@@ -7,6 +7,7 @@ from .common import sanitize_name, write_text
 from .config import apply_ru_direct_overlays, load_env_file, merge_env_with_defaults, render_example_env_text
 from .models import ROLE_FOREIGN, ROLE_RU
 from .render import write_role_rendered_files
+from .specs import DeploymentSpec
 
 
 def load_runtime_env(env_file: Path, overrides: dict[str, str] | None = None) -> dict[str, str]:
@@ -15,7 +16,7 @@ def load_runtime_env(env_file: Path, overrides: dict[str, str] | None = None) ->
     env = merge_env_with_defaults(loaded, deploy_name)
     if overrides:
         env.update(overrides)
-    return apply_ru_direct_overlays(env, env_file)
+    return DeploymentSpec.from_env(apply_ru_direct_overlays(env, env_file)).values
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -26,6 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
     render_role.add_argument("--role", choices=[ROLE_RU, ROLE_FOREIGN], required=True)
     render_role.add_argument("--env-file", type=Path, required=True)
     render_role.add_argument("--output-dir", type=Path, required=True)
+    render_role.add_argument("--assets-dir", type=Path, help="Directory with already fetched rule assets.")
     render_role.add_argument("--set", dest="overrides", action="append", default=[], help="Override env values for this render, e.g. WAN_INTERFACE=eth1")
     render_role.set_defaults(func=cmd_render_role)
 
@@ -44,7 +46,8 @@ def cmd_render_role(args: argparse.Namespace) -> int:
             raise SystemExit(f"Invalid override: {item}")
         overrides[key] = value
     env = load_runtime_env(args.env_file, overrides=overrides)
-    write_role_rendered_files(env, args.role, args.output_dir)
+    assets = {path.name: path for path in args.assets_dir.glob("*") if path.is_file()} if args.assets_dir and args.assets_dir.is_dir() else None
+    write_role_rendered_files(env, args.role, args.output_dir, assets=assets)
     return 0
 
 

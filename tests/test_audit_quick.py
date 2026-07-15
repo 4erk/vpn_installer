@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from vpn_installer.audit import quick
-from vpn_installer.audit.quick import coverage_command, coverage_driver_text, unit_test_modules
+from vpn_installer.audit.quick import coverage_command, coverage_driver_text
 
 
 class AuditQuickTests(unittest.TestCase):
@@ -20,9 +20,8 @@ class AuditQuickTests(unittest.TestCase):
 
     def test_coverage_driver_discovers_repo_tests(self) -> None:
         driver = coverage_driver_text()
-        self.assertIn("unittest.defaultTestLoader.loadTestsFromName", driver)
-        self.assertIn("module_name = sys.argv[1]", driver)
-        self.assertTrue(any(name.endswith("test_audit_quick") for name in unit_test_modules()))
+        self.assertIn("unittest.defaultTestLoader.discover", driver)
+        self.assertIn('pattern="test_*.py"', driver)
 
     def test_quick_run_skips_docker_and_bash_dependent_checks_when_missing(self) -> None:
         class FakeRunner:
@@ -83,7 +82,7 @@ class AuditQuickTests(unittest.TestCase):
         docker_info = subprocess.CompletedProcess(["docker", "info"], 0, stdout="ok", stderr="")
         with patch("vpn_installer.audit.quick.shutil.which", return_value="found"), patch("vpn_installer.audit.quick.subprocess.run", return_value=docker_info), patch("vpn_installer.audit.quick.load_env_file", return_value={"DEPLOY_NAME": "demo"}):
             quick.run(fake_runner)
-        self.assertIn("quick-unittest", fake_runner.records)
+        self.assertIn("quick-unittest", fake_runner.skips)
         self.assertIn("quick-coverage", fake_runner.records)
         self.assertIn("quick-xray-reality-interop", fake_runner.records)
         self.assertIn("ensure-audit-image", fake_runner.records)

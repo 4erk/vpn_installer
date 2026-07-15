@@ -122,7 +122,7 @@ $env:VPN_NO_PAUSE="1"
 2. Если нужен Hiddify, сначала пробуй `hiddify-uri.txt`, это тот же `VLESS URI`
 3. JSON-файлы используй как fallback для клиентов, которым нужен импорт файлом
 4. Если сайты висят, сначала смотри `vpn status --deployment <name> --role ru-gateway`, затем запускай свежую acceptance-проверку `vpn verify live --deployment <name>`
-5. `sing-box recent blocked destinations` показывает случаи, когда внутренний роутер заблокировал private/fake IP вместо нормального домена или публичного адреса
+5. `vpn status` выводит отдельные счётчики DNS, domain, IPv4-literal, IPv6-literal и private/fake ошибок за свежее и историческое окна
 6. Если включён TUN/full VPN и `client-check` показывает self-tunnel, используй route bypass helper ниже
 
 Сервер ожидает обычный VLESS/Reality tunnel. Публичный вход на российском сервере принимает Xray, восстанавливает домен из SNI, если клиент пришёл по IPv6 literal, и передаёт трафик во внутренний `sing-box` router. Если клиент отправляет private/fake IP вроде `fdfd::...` без домена, такие случаи явно группируются в `status/diagnose`.
@@ -223,15 +223,21 @@ SSH-туннель остаётся запасным способом админ
 .\vpn.cmd verify live --deployment my-vpn --non-interactive
 ```
 
-`status` читает сервисы, manifest, WireGuard и свежие журналы без download-нагрузки. `verify live` дополнительно проверяет реальные DNS/domain/literal routes и throughput; только он может подтвердить dataplane после переустановки.
+`status` читает services, manifest, WireGuard, TCP front и журналы без нагрузочных скачиваний. `verify live` дополнительно запускает свежие DNS/domain/literal probes и эфемерный sing-box клиент из `vless-uri.txt`; этот клиент проходит публичный Reality front. Только он может подтвердить dataplane после переустановки.
 
-Если начались потери, высокий ping или просадка скорости, собери сетевой отчёт:
+Для release throughput acceptance запусти десятиминутное измерение через тот же VLESS path. Оно использует range-capable 1 GB test file, rate limit 12 Mbit/s и требует не менее 10 Mbit/s:
 
 ```powershell
-.\vpn.cmd diagnose path --deployment my-vpn --iperf
+.\vpn.cmd verify live --deployment my-vpn --non-interactive --throughput-seconds 600
 ```
 
-Отчёт сохраняется в `out/diagnostics`. Флаг `--iperf` временно открывает диагностический порт только внутри `wg0` и удаляет правило после проверки.
+Если начались потери, высокий ping или просадка скорости, собери структурный snapshot:
+
+```powershell
+.\vpn.cmd diagnose path --deployment my-vpn
+```
+
+Отчёт сохраняется в `out/diagnostics` как JSON. Для конкретного устройства используй `vpn diagnose client --source <public-ip>`: он группирует TCP RTT, retransmit, socket state и Xray events именно по этому source IP.
 
 Для самопроверки на обычном пользовательском ПК:
 
@@ -240,11 +246,21 @@ SSH-туннель остаётся запасным способом админ
 - dev-only проверки в `quick` будут помечены как `skipped`, а не как ошибка
 - полный контур для разработки и регрессий — это `vpn audit all`
 
-`vpn status` печатает состояние сервисов и последний наблюдённый dataplane health:
+`vpn status` печатает состояние сервисов и последние наблюдения:
 
 - observed public IPv4 на `зарубежном сервере`
 - observed public IPv4 для `российского сервера` через `wg0`
 - возраст `WireGuard` handshake
-- итоговый `health verdict`
+- отдельные verdict: `server_path`, `public_front`, `client_observation`
+- debt/maintenance: доступные security updates и reboot-required
 
-Если локальный `deployments/<name>.env` разъехался с уже установленным сервером, `status/install/reinstall/remove/purge` сначала подтянут живой `/etc/vpn-stack/deployment.env` и пересоберут локальные клиентские артефакты, чтобы `vless-uri.txt` снова совпадал с сервером.
+Если локальный `deployments/<name>.env` разъехался с уже установленным сервером, lifecycle-команды сначала подтянут живой `/etc/vpn-stack/deployment.env`. Read-only `status`, `verify` и `diagnose` не меняют локальные клиентские артефакты.
+
+Плановое обслуживание серверов отделено от runtime health:
+
+```powershell
+.\vpn.cmd maintain --deployment my-vpn
+.\vpn.cmd maintain --deployment my-vpn --apply --yes --non-interactive
+```
+
+`maintain` сначала только показывает обновления. Применение идёт по ролям и после каждой роли требует свежую verification; web-admin и его явные rules при этом сохраняются.

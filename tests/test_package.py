@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import importlib
-import re
 import runpy
 import sys
 import unittest
@@ -9,42 +8,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 from vpn_installer.audit.runner import AUDIT_IMAGE, AUDIT_SINGBOX_REQUIRED_VERSION
-from vpn_installer.config import generate_default_env, render_example_env_text
+from vpn_installer.config import render_example_env_text
+from vpn_installer.manifest import XRAY_LINUX_AMD64_SHA256, XRAY_VERSION
 
 
 class PackageTests(unittest.TestCase):
-    GENERATED_SECRET_DEFAULTS = {
-        "CLIENT_UUID",
-        "RU_REALITY_PRIVATE_KEY",
-        "RU_REALITY_PUBLIC_KEY",
-        "WG_RU_PRIVATE_KEY",
-        "WG_RU_PUBLIC_KEY",
-        "WG_FOREIGN_PRIVATE_KEY",
-        "WG_FOREIGN_PUBLIC_KEY",
-        "WG_PRESHARED_KEY",
-    }
-    PYTHON_ONLY_DEFAULTS = GENERATED_SECRET_DEFAULTS | {
-        "CLIENT_ENABLE_IPV6",
-        "CLIENT_FAKEIP_V4",
-        "CLIENT_FAKEIP_V6",
-        "CLIENT_ROUTE_EXCLUDE_V4",
-        "CLIENT_ROUTE_EXCLUDE_V6",
-        "CLIENT_TUN_ADDRESS_V4",
-        "CLIENT_TUN_ADDRESS_V6",
-        "CLIENT_TUN_NAME",
-        "FOREIGN_PUBLIC_IP",
-        "RU_PUBLIC_IP",
-        "RU_REALITY_HANDSHAKE_SERVER",
-        "RU_REALITY_SERVER_NAME",
-        "RU_REALITY_SHORT_ID",
-        "WAN_INTERFACE",
-    }
-    SHELL_ONLY_DEFAULTS = {
-        "APT_LOCK_RETRY_SECONDS",
-        "APT_LOCK_TIMEOUT_SECONDS",
-        "XRAY_REQUIRED_VERSION",
-    }
-
     def test_package_main_is_lazy(self) -> None:
         sys.modules.pop("vpn_installer", None)
         sys.modules.pop("vpn_installer.cli", None)
@@ -56,159 +24,41 @@ class PackageTests(unittest.TestCase):
         repo_root = Path(__file__).resolve().parents[1]
         example_path = repo_root / "deployments" / "deployment.env.example"
         if not example_path.is_file():
-            self.skipTest("deployment.env.example удалён локально, сравнение checked-in примера пропущено")
-        checked_in = example_path.read_text(encoding="utf-8")
-        self.assertEqual(checked_in, render_example_env_text())
+            self.skipTest("deployment.env.example is absent")
+        self.assertEqual(example_path.read_text(encoding="utf-8"), render_example_env_text())
 
-    def test_install_shell_defaults_match_python_defaults(self) -> None:
-        repo_root = Path(__file__).resolve().parents[1]
-        install_script = (repo_root / "install.sh").read_text(encoding="utf-8")
-        shell_defaults = {
-            match.group(1): match.group(2)
-            for match in re.finditer(r'^([A-Z0-9_]+)="\$\{\1(?::-|-)(.*)\}"$', install_script, re.MULTILINE)
-        }
-        python_defaults = generate_default_env("vpn-stack")
-        comparable_keys = sorted((set(shell_defaults) & set(python_defaults)) - self.GENERATED_SECRET_DEFAULTS)
-        mismatches = {
-            key: (shell_defaults[key], python_defaults[key])
-            for key in comparable_keys
-            if shell_defaults[key] != python_defaults[key]
-        }
-        self.assertEqual(mismatches, {})
-        self.assertEqual(set(shell_defaults) - set(python_defaults), self.SHELL_ONLY_DEFAULTS)
-        self.assertEqual(set(python_defaults) - set(shell_defaults), self.PYTHON_ONLY_DEFAULTS)
+    def test_installer_uses_staged_release_agent_and_pinned_xray(self) -> None:
+        script = (Path(__file__).resolve().parents[1] / "install.sh").read_text(encoding="utf-8")
+        self.assertIn('AGENT_SCRIPT_PATH="/usr/local/lib/vpn-stack/vpn-stack-agent.py"', script)
+        self.assertIn("stage_release()", script)
+        self.assertIn("normalize_staged_release_permissions", script)
+        self.assertIn('chmod 0600 "${source_dir}/${WG_INTERFACE}.conf"', script)
+        self.assertIn("validate_staged_release()", script)
+        self.assertIn("activate_staged_release", script)
+        self.assertIn("mv -Tf", script)
+        self.assertIn("vpn-stack-sync.timer vpn-stack-sync.service", script)
+        self.assertNotIn("systemctl enable vpn-stack-sync.timer", script)
+        self.assertIn(f'XRAY_REQUIRED_VERSION="${{XRAY_REQUIRED_VERSION:-{XRAY_VERSION}}}"', script)
+        self.assertIn(XRAY_LINUX_AMD64_SHA256, script)
+        self.assertIn("sha256sum -c", script)
+        self.assertIn("record_binary_digests()", script)
+        self.assertIn("verify_active_release()", script)
+        self.assertIn("snapshot --live-probes --profile acceptance", script)
+        self.assertIn("VPNSTACK_PREVIOUS_RELEASE", script)
+        self.assertIn("configure_unattended_security_updates", script)
+        self.assertIn('copy_if_present "${source_dir}/apt-vpn-stack-unattended.conf"', script)
+        self.assertIn('stage_preseed_assets "${ROLE_ARTIFACTS_DIR}/assets"', script)
+        self.assertNotIn('cat >"${SYSCTL_PATH}"', script)
 
-    def test_install_script_starts_sync_timer_after_enabling(self) -> None:
-        repo_root = Path(__file__).resolve().parents[1]
-        install_script = (repo_root / "install.sh").read_text(encoding="utf-8")
-        self.assertIn('systemctl enable vpn-stack-sync.timer', install_script)
-        self.assertIn('systemctl restart vpn-stack-sync.timer', install_script)
-        self.assertIn('systemctl enable vpn-stack-health.timer', install_script)
-        self.assertIn('systemctl restart vpn-stack-health.timer', install_script)
-        self.assertIn('systemctl reset-failed vpn-stack-health.service >/dev/null 2>&1 || true', install_script)
-        self.assertIn('systemctl enable vpn-stack-guard.timer', install_script)
-        self.assertIn('systemctl restart vpn-stack-guard.timer', install_script)
-        self.assertIn('systemctl disable --now ssh.socket', install_script)
-        self.assertIn('systemctl enable ssh.service', install_script)
-        self.assertIn('SSHD_CONFIG_PATH="/etc/ssh/sshd_config.d/90-vpn-stack.conf"', install_script)
-        self.assertIn('HEALTH_SCRIPT_PATH="/usr/local/lib/vpn-stack/health-check.sh"', install_script)
-        self.assertIn('GUARD_SCRIPT_PATH="/usr/local/lib/vpn-stack/guard.sh"', install_script)
-        self.assertIn('GUARD_INTERVAL_MINUTES="${GUARD_INTERVAL_MINUTES:-5}"', install_script)
-        self.assertIn('GUARD_SSH_FAILURE_THRESHOLD="${GUARD_SSH_FAILURE_THRESHOLD:-6}"', install_script)
-        self.assertIn('GUARD_REALITY_BLOCK_ENABLED="${GUARD_REALITY_BLOCK_ENABLED:-0}"', install_script)
-        self.assertIn('HEALTH_THROUGHPUT_URLS="${HEALTH_THROUGHPUT_URLS:-https://cachefly.cachefly.net/1mb.test https://proof.ovh.net/files/1Mb.dat}"', install_script)
-        self.assertIn('HEALTH_DEEP_PROBE_INTERVAL_MINUTES="${HEALTH_DEEP_PROBE_INTERVAL_MINUTES:-15}"', install_script)
-        self.assertIn('HEALTH_HANDSHAKE_GRACE_SECONDS="${HEALTH_HANDSHAKE_GRACE_SECONDS:-180}"', install_script)
-        self.assertIn('HEALTH_HANDSHAKE_MIN_GRACE_SECONDS="${HEALTH_HANDSHAKE_MIN_GRACE_SECONDS:-180}"', install_script)
-        self.assertIn('HEALTH_HANDSHAKE_GRACE_MULTIPLIER="${HEALTH_HANDSHAKE_GRACE_MULTIPLIER:-8}"', install_script)
-        self.assertIn('HEALTH_SELF_HEAL="${HEALTH_SELF_HEAL:-1}"', install_script)
-        self.assertIn('HEALTH_SELF_HEAL_COOLDOWN_MINUTES="${HEALTH_SELF_HEAL_COOLDOWN_MINUTES:-15}"', install_script)
-        self.assertIn('HEALTH_SELF_HEAL_MAX_ACTIONS_PER_HOUR="${HEALTH_SELF_HEAL_MAX_ACTIONS_PER_HOUR:-2}"', install_script)
-        self.assertIn('HEALTH_SELF_HEAL_CONFIRMATIONS="${HEALTH_SELF_HEAL_CONFIRMATIONS:-2}"', install_script)
-        self.assertNotIn('HEALTH_GOOD_CACHE_TTL_SECONDS="${HEALTH_GOOD_CACHE_TTL_SECONDS:-', install_script)
-        self.assertNotIn('HEALTH_ROUTE_FAIL_CACHE_TTL_SECONDS="${HEALTH_ROUTE_FAIL_CACHE_TTL_SECONDS:-', install_script)
-        self.assertNotIn('HEALTH_ROUTE_FAIL_THRESHOLD="${HEALTH_ROUTE_FAIL_THRESHOLD:-', install_script)
-        self.assertIn('HEALTH_TARGET_PROBE_URLS="${HEALTH_TARGET_PROBE_URLS:-https://chatgpt.com/ https://discord.com/ https://github.com/ https://www.google.com/generate_204 https://telegram.org/ https://api.telegram.org/ https://t.me/}"', install_script)
-        self.assertIn('HEALTH_RU_DIRECT_TARGET_PROBE_URLS="${HEALTH_RU_DIRECT_TARGET_PROBE_URLS:-https://api.ipify.org/ https://2ip.ru/}"', install_script)
-        self.assertIn('HEALTH_TARGET_CONNECT_TIMEOUT_SECONDS="${HEALTH_TARGET_CONNECT_TIMEOUT_SECONDS:-2}"', install_script)
-        self.assertIn('HEALTH_TARGET_MAX_TIME_SECONDS="${HEALTH_TARGET_MAX_TIME_SECONDS:-4}"', install_script)
-        self.assertIn('JOURNAL_LIMIT_ENABLED="${JOURNAL_LIMIT_ENABLED:-1}"', install_script)
-        self.assertIn('JOURNAL_SYSTEM_MAX_USE="${JOURNAL_SYSTEM_MAX_USE:-256M}"', install_script)
-        self.assertIn('JOURNAL_MAX_RETENTION_SEC="${JOURNAL_MAX_RETENTION_SEC:-14day}"', install_script)
-        self.assertIn('JOURNALD_DROPIN_PATH="/etc/systemd/journald.conf.d/90-vpn-stack.conf"', install_script)
-        self.assertIn("configure_journald_limits", install_script)
-        self.assertIn('journalctl --vacuum-size="${JOURNAL_SYSTEM_MAX_USE}"', install_script)
-        self.assertIn('ADMIN_WEB_ENABLED="${ADMIN_WEB_ENABLED:-1}"', install_script)
-        self.assertIn('ADMIN_WEB_BIND="${ADMIN_WEB_BIND:-0.0.0.0}"', install_script)
-        self.assertIn('ADMIN_WEB_PORT="${ADMIN_WEB_PORT:-11333}"', install_script)
-        self.assertIn('ADMIN_WEB_ACTIVE_CLIENT_REQUIRED="${ADMIN_WEB_ACTIVE_CLIENT_REQUIRED:-1}"', install_script)
-        self.assertIn('ADMIN_WEB_ACTIVE_CLIENT_TIMEOUT_SECONDS="${ADMIN_WEB_ACTIVE_CLIENT_TIMEOUT_SECONDS:-5}"', install_script)
-        self.assertIn('ADMIN_WEB_ALLOW_TUNNEL_CLIENTS="${ADMIN_WEB_ALLOW_TUNNEL_CLIENTS:-1}"', install_script)
-        self.assertIn('ADMIN_WEB_USERNAME="${ADMIN_WEB_USERNAME:-user}"', install_script)
-        self.assertIn('ADMIN_WEB_PASSWORD="${ADMIN_WEB_PASSWORD:-password}"', install_script)
-        self.assertIn('python3 "${ADMIN_APPLY_SCRIPT_PATH}" --no-restart', install_script)
-        self.assertIn('LEGACY_ADAPTIVE_ROUTING_RULES_PATH="/var/lib/vpn-stack/adaptive-routing-rules.json"', install_script)
-        self.assertIn('HEALTH_STATE_PATH="/var/lib/vpn-stack/health-state.env"', install_script)
-        self.assertIn("reset_install_runtime_state", install_script)
-        self.assertIn('rm -f "${LEGACY_DATAPLANE_CACHE_PATH}" "${HEALTH_STATE_PATH}"', install_script)
-        self.assertIn('systemctl enable vpn-stack-admin.service', install_script)
-        self.assertIn('FOREIGN_BLOCK_RU="${FOREIGN_BLOCK_RU:-0}"', install_script)
-        self.assertIn('RU_BLOCK_IP_CIDR="${RU_BLOCK_IP_CIDR:-}"', install_script)
-        self.assertIn('RU_BLOCK_QUIC="${RU_BLOCK_QUIC:-1}"', install_script)
-        self.assertNotIn('if [[ "${RU_BLOCK_IP_CIDR}" == "91.108.56.0/22" ]]; then', install_script)
-        self.assertIn("timeout 60s systemctl start vpn-stack-sync.service", install_script)
-        self.assertIn("continuing with bootstrap assets", install_script)
-        self.assertIn('RU_LISTEN_PORT="${RU_LISTEN_PORT:-443}"', install_script)
-        self.assertIn('RU_REALITY_ACCEPT_EMPTY_SHORT_ID="${RU_REALITY_ACCEPT_EMPTY_SHORT_ID:-1}"', install_script)
-        self.assertIn('RU_REALITY_MAX_TIME_DIFFERENCE="${RU_REALITY_MAX_TIME_DIFFERENCE:-24h}"', install_script)
-        self.assertIn('SING_BOX_LOG_LEVEL="${SING_BOX_LOG_LEVEL:-info}"', install_script)
-        self.assertIn('RU_SNIFF_TIMEOUT="${RU_SNIFF_TIMEOUT:-250ms}"', install_script)
-        self.assertNotIn('RU_LITERAL_POLICY="${RU_LITERAL_POLICY:-', install_script)
-        self.assertNotIn('TO_FOREIGN_CONNECT_TIMEOUT="${TO_FOREIGN_CONNECT_TIMEOUT:-', install_script)
-        self.assertNotIn('RU_DIRECT_DNS_SERVER="${RU_DIRECT_DNS_SERVER:-', install_script)
-        self.assertNotIn('RU_DIRECT_DNS_PORT="${RU_DIRECT_DNS_PORT:-', install_script)
-        self.assertNotIn('if [[ "${RU_LISTEN_PORT}" == "8443" ]]; then', install_script)
-        self.assertIn('seen_ru_listen_port="0"', install_script)
-        self.assertIn("TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT=*", install_script)
-        self.assertIn("RU_DIRECT_DNS_SERVER=*", install_script)
-        self.assertIn('render-manifest.json', install_script)
-        self.assertNotIn('seen_ru_compat_ports="0"', install_script)
-        self.assertIn('APT_LOCK_TIMEOUT_SECONDS="${APT_LOCK_TIMEOUT_SECONDS:-900}"', install_script)
-        self.assertIn('apt-get -o DPkg::Lock::Timeout="${APT_LOCK_TIMEOUT_SECONDS}" "$@"', install_script)
-        self.assertIn("restore_install_state_on_error()", install_script)
-        self.assertIn("Install failed after applying changes started; restoring previous files and services.", install_script)
-        self.assertIn('RUNTIME_QDISC="${RUNTIME_QDISC:-fq}"', install_script)
-        self.assertIn('net.core.default_qdisc=fq', install_script)
-        self.assertIn('net.core.somaxconn=4096', install_script)
-        self.assertIn('net.core.netdev_max_backlog=8192', install_script)
-        self.assertIn('net.core.rmem_max=8388608', install_script)
-        self.assertIn('net.ipv4.tcp_syncookies=1', install_script)
-        self.assertIn('net.ipv4.udp_rmem_min=16384', install_script)
-        self.assertIn('net.ipv4.tcp_congestion_control=bbr', install_script)
-        self.assertIn('net.ipv4.tcp_mtu_probing=1', install_script)
-        self.assertIn('net.netfilter.nf_conntrack_tcp_be_liberal=1', install_script)
-        self.assertIn('net.ipv4.tcp_max_syn_backlog=2048', install_script)
-        self.assertIn("ethtool", install_script)
-        self.assertIn("iperf3", install_script)
-        self.assertIn("mtr-tiny", install_script)
-        self.assertIn('ethtool -K "${iface}" gro off', install_script)
-        self.assertIn('ethtool -K "${iface}" gso off', install_script)
-        self.assertIn('ethtool -K "${iface}" tso off', install_script)
-        self.assertIn('ethtool -K "${iface}" gro on', install_script)
-        self.assertIn('ethtool -K "${iface}" gso on', install_script)
-        self.assertIn('ethtool -K "${iface}" tso on', install_script)
-        self.assertIn("iputils-ping", install_script)
-        self.assertIn('SINGBOX_REQUIRED_VERSION="1.13.12"', install_script)
+    def test_singbox_version_contract_is_shared_with_audit(self) -> None:
+        script = (Path(__file__).resolve().parents[1] / "install.sh").read_text(encoding="utf-8")
+        self.assertIn('SINGBOX_REQUIRED_VERSION="1.13.12"', script)
         self.assertEqual(AUDIT_SINGBOX_REQUIRED_VERSION, "1.13.12")
         self.assertIn(AUDIT_SINGBOX_REQUIRED_VERSION, AUDIT_IMAGE)
-        self.assertIn('bash -s -- --version "${SINGBOX_REQUIRED_VERSION}"', install_script)
-        self.assertIn('current_singbox_version', install_script)
-        self.assertIn('apply_runtime_interface_tuning "${RUNTIME_QDISC_INTERFACE}"', install_script)
-        self.assertIn('apply_runtime_qdisc "${WG_INTERFACE}"', install_script)
-        self.assertIn('tc qdisc replace dev "${iface}" root fq', install_script)
-        self.assertIn("cleanup_failed_rc_local()", install_script)
-        self.assertIn("Fixing failed rc-local.service caused by non-executable /etc/rc.local.", install_script)
-        self.assertIn("disable_legacy_proxy_services()", install_script)
-        self.assertIn('systemctl disable --now "${unit}"', install_script)
-        self.assertIn("cleanup_failed_rc_local\ndisable_legacy_proxy_services\nconfigure_ssh_daemon_mode", install_script)
-        self.assertIn("cleanup_stale_wireguard_interface()", install_script)
-        self.assertIn('ip link delete dev "${WG_INTERFACE}"', install_script)
-        self.assertIn("restart_wireguard_service()", install_script)
-        self.assertIn('systemctl start "wg-quick@${WG_INTERFACE}"', install_script)
-        self.assertNotIn('systemctl restart "wg-quick@${WG_INTERFACE}"', install_script)
-
-    def test_reinstall_waits_for_apt_before_stopping_services(self) -> None:
-        repo_root = Path(__file__).resolve().parents[1]
-        install_script = (repo_root / "install.sh").read_text(encoding="utf-8")
-        apt_index = install_script.index("run_apt_get update")
-        stop_index = install_script.index('if [[ "$ACTION" == "reinstall" ]]; then\n  stop_managed_services\nfi')
-        copy_index = install_script.index('copy_role_artifacts "${ROLE_ARTIFACTS_DIR}"')
-        self.assertLess(apt_index, stop_index)
-        self.assertLess(stop_index, copy_index)
 
     def test_package_exposes_version_via_getattr(self) -> None:
         package = importlib.import_module("vpn_installer")
-        self.assertEqual(package.__version__, "0.10.0")
+        self.assertEqual(package.__version__, "0.11.0")
         with self.assertRaises(AttributeError):
             package.__getattr__("nope")
 

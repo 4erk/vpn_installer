@@ -117,10 +117,7 @@ class ConfigTests(unittest.TestCase):
                 "SSH_PER_SOURCE_MAX_STARTUPS": "2",
                 "WG_MTU": "1380",
                 "RU_BLOCK_QUIC": "0",
-                "DISABLE_NIC_OFFLOADS": "1",
                 "RU_LISTEN_PORT": "8443",
-                "HEALTH_HANDSHAKE_GRACE_SECONDS": "120",
-                "HEALTH_DEEP_PROBE_INTERVAL_MINUTES": "30",
                 "RU_BLOCK_IP_CIDR": "91.108.56.0/22",
             },
             "sample",
@@ -138,20 +135,17 @@ class ConfigTests(unittest.TestCase):
             "SSH_PER_SOURCE_MAX_STARTUPS": "2",
             "WG_MTU": "1380",
             "RU_BLOCK_QUIC": "0",
-            "DISABLE_NIC_OFFLOADS": "1",
             "RU_LISTEN_PORT": "8443",
-            "HEALTH_HANDSHAKE_GRACE_SECONDS": "120",
-            "HEALTH_DEEP_PROBE_INTERVAL_MINUTES": "30",
             "RU_BLOCK_IP_CIDR": "91.108.56.0/22",
         }.items():
             self.assertEqual(env[key], value, key)
 
-    def test_default_runtime_network_tuning_uses_fq_and_lower_wireguard_mtu(self) -> None:
+    def test_default_network_contract_keeps_only_stable_wireguard_settings(self) -> None:
         env = config.generate_default_env("sample")
-        self.assertEqual(env["RUNTIME_QDISC"], "fq")
         self.assertEqual(env["WG_MTU"], "1360")
         self.assertEqual(env["RU_BLOCK_QUIC"], "1")
-        self.assertEqual(env["DISABLE_NIC_OFFLOADS"], "0")
+        self.assertNotIn("RUNTIME_QDISC", env)
+        self.assertNotIn("DISABLE_NIC_OFFLOADS", env)
 
     def test_default_ru_listen_port_stays_public_443(self) -> None:
         env = config.generate_default_env("sample")
@@ -199,12 +193,9 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(env["RU_BLOCK_IP_CIDR"], "")
         self.assertEqual(env["RU_BLOCK_QUIC"], "1")
         self.assertEqual(env["CLIENT_ENABLE_IPV6"], "0")
-        self.assertEqual(env["GUARD_REALITY_BLOCK_ENABLED"], "0")
-        self.assertIn("https://telegram.org/", env["HEALTH_TARGET_PROBE_URLS"])
-        self.assertIn("https://api.ipify.org/", env["HEALTH_RU_DIRECT_TARGET_PROBE_URLS"])
-        self.assertIn("https://2ip.ru/", env["HEALTH_RU_DIRECT_TARGET_PROBE_URLS"])
-        self.assertEqual(env["HEALTH_TARGET_CONNECT_TIMEOUT_SECONDS"], "2")
-        self.assertEqual(env["HEALTH_TARGET_MAX_TIME_SECONDS"], "4")
+        self.assertNotIn("GUARD_REALITY_BLOCK_ENABLED", env)
+        self.assertNotIn("HEALTH_TARGET_PROBE_URLS", env)
+        self.assertNotIn("HEALTH_TARGET_CONNECT_TIMEOUT_SECONDS", env)
         self.assertNotIn("HEALTH_GOOD_CACHE_TTL_SECONDS", env)
 
     def test_render_env_roundtrip(self) -> None:
@@ -259,7 +250,7 @@ class ConfigTests(unittest.TestCase):
         fast_fail_merged = config.merge_env_with_defaults({"RU_IPV6_POLICY": "fast-fail"}, "sample")
         self.assertEqual(block_merged["RU_BLOCK_IP_CIDR"], "91.108.56.0/22")
         self.assertNotIn("RU_IPV6_POLICY", block_merged)
-        self.assertEqual(block_merged["GUARD_REALITY_BLOCK_ENABLED"], "1")
+        self.assertNotIn("GUARD_REALITY_BLOCK_ENABLED", block_merged)
         self.assertNotIn("RU_IPV6_POLICY", fast_fail_merged)
 
     def test_merge_env_with_defaults_appends_new_asset_sources(self) -> None:
@@ -269,26 +260,18 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(any("raw.githubusercontent.com/SagerNet/sing-geosite" in source for source in geosite_sources))
         self.assertTrue(any("cdn.jsdelivr.net/gh/SagerNet/sing-geosite" in source for source in geosite_sources))
 
-    def test_merge_env_with_defaults_appends_new_health_target_probes(self) -> None:
+    def test_merge_env_with_defaults_removes_legacy_health_probe_parameters(self) -> None:
         merged = config.merge_env_with_defaults(
-            {"HEALTH_TARGET_PROBE_URLS": "https://chatgpt.com/ https://github.com/"},
+            {
+                "HEALTH_TARGET_PROBE_URLS": "https://chatgpt.com/ https://github.com/",
+                "HEALTH_RU_DIRECT_TARGET_PROBE_URLS": "https://api.ipify.org/",
+                "HEALTH_TARGET_MAX_TIME_SECONDS": "4",
+            },
             "sample",
         )
-        probe_sources = config.split_asset_sources(merged["HEALTH_TARGET_PROBE_URLS"])
-        self.assertEqual(probe_sources[0], "https://chatgpt.com/")
-        self.assertIn("https://github.com/", probe_sources)
-        self.assertIn("https://telegram.org/", probe_sources)
-        self.assertEqual(probe_sources.count("https://chatgpt.com/"), 1)
-
-    def test_merge_env_with_defaults_appends_new_ru_direct_health_target_probes(self) -> None:
-        merged = config.merge_env_with_defaults(
-            {"HEALTH_RU_DIRECT_TARGET_PROBE_URLS": "https://api.ipify.org/"},
-            "sample",
-        )
-        probe_sources = config.split_asset_sources(merged["HEALTH_RU_DIRECT_TARGET_PROBE_URLS"])
-        self.assertEqual(probe_sources[0], "https://api.ipify.org/")
-        self.assertIn("https://2ip.ru/", probe_sources)
-        self.assertEqual(probe_sources.count("https://api.ipify.org/"), 1)
+        self.assertNotIn("HEALTH_TARGET_PROBE_URLS", merged)
+        self.assertNotIn("HEALTH_RU_DIRECT_TARGET_PROBE_URLS", merged)
+        self.assertNotIn("HEALTH_TARGET_MAX_TIME_SECONDS", merged)
 
     def test_apply_ru_direct_overlays_merges_files_with_comments_and_deduplicates(self) -> None:
         env = config.generate_default_env("demo")

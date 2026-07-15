@@ -6,222 +6,103 @@ from unittest.mock import patch
 
 from vpn_installer.diagnostics import DiagnosticsSnapshot
 from vpn_installer.models import ROLE_FOREIGN, ROLE_RU, RemoteTarget
-from vpn_installer.verify import _verify_snapshot, verify_live_workflow
+from vpn_installer.verify import _validate_public_vless_result, _verify_snapshot, _vless_runner_timeout, verify_live_workflow
+from vpn_installer.vless_verify import parse_vless_uri
+
+
+def acceptance_snapshot(role: str, **overrides: object) -> DiagnosticsSnapshot:
+    services = {"wireguard": "active", "nftables": "active"}
+    verdicts = {"server_path": "verified", "public_front": "not-applicable", "client_observation": "not-applicable"}
+    if role == ROLE_RU:
+        services.update({"sing-box": "active", "xray": "active"})
+        verdicts.update({"public_front": "verified", "client_observation": "observed"})
+    payload: dict[str, object] = {
+        "role": role,
+        "services": services,
+        "drift": "none",
+        "route_probes": {"profile": "acceptance", "ok": True},
+        "component_verdicts": verdicts,
+    }
+    payload.update(overrides)
+    return DiagnosticsSnapshot(**payload)
 
 
 class VerifyTests(unittest.TestCase):
     def test_verify_snapshot_requires_drift_free_manifest(self) -> None:
-        snapshot = DiagnosticsSnapshot(role="ru-gateway", services={"sing-box": "active", "xray": "active", "wireguard": "active", "nftables": "active"}, drift="server-mutated")
-        verified = _verify_snapshot(snapshot)
+        verified = _verify_snapshot(acceptance_snapshot(ROLE_RU, drift="server-mutated"))
         self.assertEqual(verified.verdict, "failed")
         self.assertIn("installed config hash differs from render manifest", verified.reasons)
 
-    def test_verify_snapshot_keeps_ambient_literal_timeout_out_of_probe_verdict(self) -> None:
-        snapshot = DiagnosticsSnapshot(
-            role="ru-gateway",
-            services={"sing-box": "active", "xray": "active", "wireguard": "active", "nftables": "active"},
-            drift="none",
-            route_probes={
-                "direct": "api.ipify.org:reachable:200:0:127.0.0.1:0.1",
-                "wg": "github.com:reachable:200:0:127.0.0.1:0.2",
-                "ipv6_literal_tcp": "cloudflare_v6:reachable:200:0:127.0.0.1:0.1",
-            },
-            log_buckets={"ipv4_literal_timeout": 5},
-        )
-        verified = _verify_snapshot(snapshot)
-        self.assertEqual(verified.verdict, "verified")
-        self.assertEqual(verified.log_buckets["ipv4_literal_timeout"], 5)
+    def test_verify_snapshot_requires_complete_agent_verdicts(self) -> None:
+        verified = _verify_snapshot(acceptance_snapshot(ROLE_RU, component_verdicts={"server_path": "verified"}))
+        self.assertEqual(verified.verdict, "failed")
+        self.assertIn("agent verdict fields are incomplete", verified.reasons)
+
+    def test_verify_snapshot_degrades_for_front_socket_churn(self) -> None:
+        verdicts = {"server_path": "verified", "public_front": "verified", "client_observation": "degraded"}
+        verified = _verify_snapshot(acceptance_snapshot(ROLE_RU, component_verdicts=verdicts))
+        self.assertEqual(verified.verdict, "degraded")
+        self.assertIn("public TCP front shows retransmission or socket churn", verified.reasons)
+
+    def test_verify_snapshot_requires_acceptance_probes(self) -> None:
+        verified = _verify_snapshot(acceptance_snapshot(ROLE_FOREIGN, route_probes={"profile": "light", "ok": True}))
+        self.assertEqual(verified.verdict, "failed")
+        self.assertIn("acceptance probes did not run", verified.reasons)
 
     def test_verify_snapshot_allows_inactive_foreign_singbox(self) -> None:
-        snapshot = DiagnosticsSnapshot(
-            role=ROLE_FOREIGN,
-            services={"sing-box": "inactive", "wireguard": "active", "nftables": "active"},
-            drift="none",
-            route_probes={"direct": "github.com:reachable:200:0:20.0.0.1:0.2"},
-        )
-        verified = _verify_snapshot(snapshot)
+        verified = _verify_snapshot(acceptance_snapshot(ROLE_FOREIGN, services={"sing-box": "inactive", "wireguard": "active", "nftables": "active"}))
         self.assertEqual(verified.verdict, "verified")
-
-    def test_verify_snapshot_degrades_on_ipv6_literal_tcp_probe_failure(self) -> None:
-        snapshot = DiagnosticsSnapshot(
-            role=ROLE_RU,
-            services={"sing-box": "active", "xray": "active", "wireguard": "active", "nftables": "active"},
-            drift="none",
-            route_probes={"direct": "api.ipify.org:reachable:200:0:127.0.0.1:0.1", "wg": "github.com:reachable:200:0:127.0.0.1:0.2", "ipv6_literal_tcp": "cloudflare_v6:broken:000:28::6.0"},
-        )
-        verified = _verify_snapshot(snapshot)
-        self.assertEqual(verified.verdict, "degraded")
-        self.assertIn("IPv6 literal TCP route probe has broken targets", verified.reasons)
-
-    def test_verify_snapshot_allows_partial_ipv6_literal_probe_failure(self) -> None:
-        snapshot = DiagnosticsSnapshot(
-            role=ROLE_RU,
-            services={"sing-box": "active", "xray": "active", "wireguard": "active", "nftables": "active"},
-            drift="none",
-            route_probes={"direct": "api.ipify.org:reachable:200:0:127.0.0.1:0.1", "wg": "github.com:reachable:200:0:127.0.0.1:0.2", "ipv6_literal_tcp": "cloudflare_v6:reachable:200:0:2606:4700:4700::1111:0.08;meta_v6:broken:000:28:-:2.0"},
-        )
-        verified = _verify_snapshot(snapshot)
-        self.assertEqual(verified.verdict, "verified")
-
-    def test_verify_snapshot_ignores_deep_probe_verdict_without_fresh_failure(self) -> None:
-        snapshot = DiagnosticsSnapshot(
-            role=ROLE_FOREIGN,
-            services={"wireguard": "active", "nftables": "active"},
-            drift="none",
-            route_probes={"direct": "github.com:reachable:200:0:20.0.0.1:0.2", "deep_probe_verdict": "degraded", "deep_probe_reasons": "foreign_ru_ping_loss=10"},
-        )
-        verified = _verify_snapshot(snapshot)
-        self.assertEqual(verified.verdict, "verified")
-
-    def test_verify_snapshot_degrades_when_ipv6_literal_probe_is_missing(self) -> None:
-        snapshot = DiagnosticsSnapshot(
-            role=ROLE_RU,
-            services={"sing-box": "active", "xray": "active", "wireguard": "active", "nftables": "active"},
-            drift="none",
-            route_probes={"direct": "api.ipify.org:reachable:200:0:127.0.0.1:0.1", "wg": "github.com:reachable:200:0:127.0.0.1:0.2"},
-        )
-        verified = _verify_snapshot(snapshot)
-        self.assertEqual(verified.verdict, "degraded")
-        self.assertIn("IPv6 literal TCP route probe did not run", verified.reasons)
-
-    def test_verify_snapshot_keeps_ambient_dns_timeout_out_of_probe_verdict(self) -> None:
-        snapshot = DiagnosticsSnapshot(
-            role=ROLE_RU,
-            services={"sing-box": "active", "xray": "active", "wireguard": "active", "nftables": "active"},
-            drift="none",
-            route_probes={"direct": "api.ipify.org:reachable:200:0:127.0.0.1:0.1", "wg": "github.com:reachable:200:0:127.0.0.1:0.2", "ipv6_literal_tcp": "cloudflare_v6:reachable:200:0:2606:4700:4700::1111:0.08"},
-            log_buckets={"dns_timeout": 2},
-        )
-        verified = _verify_snapshot(snapshot)
-        self.assertEqual(verified.verdict, "verified")
-        self.assertEqual(verified.log_buckets["dns_timeout"], 2)
-
-    def test_verify_snapshot_keeps_ambient_private_dns_event_out_of_probe_verdict(self) -> None:
-        snapshot = DiagnosticsSnapshot(
-            role=ROLE_RU,
-            services={"sing-box": "active", "xray": "active", "wireguard": "active", "nftables": "active"},
-            drift="none",
-            route_probes={"direct": "api.ipify.org:reachable:200:0:127.0.0.1:0.1", "wg": "github.com:reachable:200:0:127.0.0.1:0.2", "ipv6_literal_tcp": "cloudflare_v6:reachable:200:0:2606:4700:4700::1111:0.08"},
-            log_buckets={"private_dns_leak": 7},
-            top_destinations={"private_dns_leak": "172.19.0.2:853=7"},
-        )
-        verified = _verify_snapshot(snapshot)
-        self.assertEqual(verified.verdict, "verified")
-        self.assertEqual(verified.top_destinations["private_dns_leak"], "172.19.0.2:853=7")
 
     def test_verify_live_workflow_returns_nonzero_on_server_mutated_drift(self) -> None:
-        targets = [
-            RemoteTarget(role=ROLE_RU, ssh_host="ru.example"),
-            RemoteTarget(role=ROLE_FOREIGN, ssh_host="foreign.example"),
-        ]
-        env = {"WG_INTERFACE": "wg-test"}
-        preflights = {
-            ROLE_RU: {
-                "role": ROLE_RU,
-                "sing_box": "active",
-                "xray": "active",
-                "wireguard": "active",
-                "nftables": "active",
-                "drift": "server-mutated",
-                "observed_ipv4": "198.51.100.1",
-                "wg_observed_ipv4": "198.51.100.2",
-                "target_probe_direct": "api.ipify.org:reachable:200:0:127.0.0.1:0.1",
-                "target_probe_wg": "github.com:reachable:200:0:127.0.0.1:0.2",
-                "ipv6_literal_tcp_probe": "cloudflare_v6:reachable:200:0:2606:4700:4700::1111:0.08",
-            },
-            ROLE_FOREIGN: {
-                "role": ROLE_FOREIGN,
-                "sing_box": "active",
-                "wireguard": "active",
-                "nftables": "active",
-                "drift": "none",
-                "observed_ipv4": "198.51.100.2",
-                "target_probe_direct": "github.com:reachable:200:0:20.0.0.1:0.2",
-            },
-        }
-
+        targets = [RemoteTarget(role=ROLE_RU, ssh_host="ru.example"), RemoteTarget(role=ROLE_FOREIGN, ssh_host="foreign.example")]
         with (
-            patch("vpn_installer.verify.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), env, {}, targets, preflights)),
+            patch("vpn_installer.verify.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), {}, {}, targets, {})),
             patch("vpn_installer.verify.workflows.print_summary"),
+            patch("vpn_installer.verify._collect_agent_snapshot", side_effect=[acceptance_snapshot(ROLE_RU, drift="server-mutated"), acceptance_snapshot(ROLE_FOREIGN)]),
+            patch("vpn_installer.verify._verify_public_vless_uri", return_value={"verdict": "verified", "result": {}}),
         ):
             self.assertEqual(verify_live_workflow("demo", non_interactive=True), 1)
 
-    def test_verify_live_workflow_returns_nonzero_on_soft_health_degradation(self) -> None:
-        targets = [
-            RemoteTarget(role=ROLE_RU, ssh_host="ru.example"),
-            RemoteTarget(role=ROLE_FOREIGN, ssh_host="foreign.example"),
-        ]
-        env = {"WG_INTERFACE": "wg-test", "HEALTH_MIN_RU_WG_DOWNLOAD_BPS": "500000"}
-        preflights = {
-            ROLE_RU: {
-                "role": ROLE_RU,
-                "sing_box": "active",
-                "xray": "active",
-                "wireguard": "active",
-                "nftables": "active",
-                "drift": "none",
-                "observed_ipv4": "198.51.100.20",
-                "wg_observed_ipv4": "198.51.100.10",
-                "wg_download_bps": "100000",
-                "ipv6_literal_tcp_probe": "cloudflare_v6:reachable:200:0:2606:4700:4700::1111:0.08",
-            },
-            ROLE_FOREIGN: {
-                "role": ROLE_FOREIGN,
-                "wireguard": "active",
-                "nftables": "active",
-                "drift": "none",
-                "observed_ipv4": "198.51.100.10",
-                "direct_download_bps": "800000",
-            },
-        }
-
+    def test_verify_live_workflow_returns_nonzero_when_agent_acceptance_fails(self) -> None:
+        targets = [RemoteTarget(role=ROLE_RU, ssh_host="ru.example"), RemoteTarget(role=ROLE_FOREIGN, ssh_host="foreign.example")]
+        broken = acceptance_snapshot(ROLE_RU, route_probes={"profile": "acceptance", "ok": False}, component_verdicts={"server_path": "failed", "public_front": "verified", "client_observation": "observed"})
         with (
-            patch("vpn_installer.verify.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), env, {}, targets, preflights)),
+            patch("vpn_installer.verify.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), {}, {}, targets, {})),
             patch("vpn_installer.verify.workflows.print_summary"),
-            patch("vpn_installer.verify.health.print_deployment_health"),
+            patch("vpn_installer.verify._collect_agent_snapshot", side_effect=[broken, acceptance_snapshot(ROLE_FOREIGN)]),
+            patch("vpn_installer.verify._verify_public_vless_uri", return_value={"verdict": "verified", "result": {}}),
         ):
             self.assertEqual(verify_live_workflow("demo", non_interactive=True), 1)
 
-    def test_verify_live_workflow_anchors_preflight_log_window_at_verify_start(self) -> None:
-        targets = [
-            RemoteTarget(role=ROLE_RU, ssh_host="ru.example"),
-            RemoteTarget(role=ROLE_FOREIGN, ssh_host="foreign.example"),
-        ]
-        env = {"WG_INTERFACE": "wg-test"}
-        preflights = {
-            ROLE_RU: {
-                "role": ROLE_RU,
-                "sing_box": "active",
-                "xray": "active",
-                "wireguard": "active",
-                "nftables": "active",
-                "drift": "none",
-                "observed_ipv4": "198.51.100.1",
-                "wg_observed_ipv4": "198.51.100.2",
-                "target_probe_direct": "api.ipify.org:reachable:200:0:127.0.0.1:0.1",
-                "target_probe_wg": "github.com:reachable:200:0:127.0.0.1:0.2",
-                "ipv6_literal_tcp_probe": "cloudflare_v6:reachable:200:0:2606:4700:4700::1111:0.08",
-            },
-            ROLE_FOREIGN: {
-                "role": ROLE_FOREIGN,
-                "wireguard": "active",
-                "nftables": "active",
-                "drift": "none",
-                "observed_ipv4": "198.51.100.2",
-                "target_probe_direct": "github.com:reachable:200:0:20.0.0.1:0.2",
-            },
-        }
-
+    def test_verify_live_workflow_requests_one_agent_acceptance_per_role(self) -> None:
+        targets = [RemoteTarget(role=ROLE_RU, ssh_host="ru.example"), RemoteTarget(role=ROLE_FOREIGN, ssh_host="foreign.example")]
         with (
-            patch("vpn_installer.verify.time.time", return_value=1783733002),
-            patch("vpn_installer.verify.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), env, {}, targets, preflights)) as prepare,
+            patch("vpn_installer.verify.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), {}, {}, targets, {})) as prepare,
             patch("vpn_installer.verify.workflows.print_summary"),
-            patch("vpn_installer.verify.health.print_deployment_health"),
+            patch("vpn_installer.verify._collect_agent_snapshot", side_effect=[acceptance_snapshot(ROLE_RU), acceptance_snapshot(ROLE_FOREIGN)]) as collect,
+            patch("vpn_installer.verify._verify_public_vless_uri", return_value={"verdict": "verified", "result": {}}),
         ):
             self.assertEqual(verify_live_workflow("demo", non_interactive=True), 0)
-        self.assertEqual(prepare.call_args.kwargs["fresh_since_epoch"], 1783733002)
+        self.assertEqual(collect.call_count, 2)
+        self.assertFalse(prepare.call_args.kwargs["run_live_probes"])
         self.assertFalse(prepare.call_args.kwargs["enforce_safe_route"])
-        self.assertTrue(prepare.call_args.kwargs["run_live_probes"])
+
+    def test_public_vless_verifier_requires_both_egress_identities(self) -> None:
+        uri = parse_vless_uri("vless://00000000-0000-0000-0000-000000000000@203.0.113.10:443?security=reality&sni=www.bing.com&pbk=public-key&sid=0123456789abcdef&fp=chrome&type=tcp&flow=xtls-rprx-vision")
+        foreign = RemoteTarget(role=ROLE_FOREIGN, public_ip="198.51.100.20", ssh_host="198.51.100.20")
+        valid = {"ru_egress_ip": "203.0.113.10", "foreign_egress_ip": "198.51.100.20", "github_status": "200", "google_status": "204"}
+        self.assertEqual(_validate_public_vless_result(valid, uri, foreign)["verdict"], "verified")
+        invalid = {**valid, "foreign_egress_ip": "203.0.113.99"}
+        self.assertEqual(_validate_public_vless_result(invalid, uri, foreign)["verdict"], "failed")
+
+    def test_public_vless_throughput_requires_rate_and_duration(self) -> None:
+        uri = parse_vless_uri("vless://00000000-0000-0000-0000-000000000000@203.0.113.10:443?security=reality&sni=www.bing.com&pbk=public-key&sid=0123456789abcdef&fp=chrome&type=tcp&flow=xtls-rprx-vision")
+        foreign = RemoteTarget(role=ROLE_FOREIGN, public_ip="198.51.100.20", ssh_host="198.51.100.20")
+        result = {"ru_egress_ip": "203.0.113.10", "foreign_egress_ip": "198.51.100.20", "github_status": "200", "google_status": "204", "throughput": {"bytes_per_second": 1_500_000, "duration_seconds": 58}}
+        self.assertEqual(_validate_public_vless_result(result, uri, foreign, throughput_seconds=60)["verdict"], "verified")
+        self.assertEqual(_validate_public_vless_result({**result, "throughput": {"bytes_per_second": 1_000_000, "duration_seconds": 60}}, uri, foreign, throughput_seconds=60)["verdict"], "failed")
+        self.assertEqual(_vless_runner_timeout(0), 60)
+        self.assertEqual(_vless_runner_timeout(600), 660)
 
 
 if __name__ == "__main__":

@@ -108,97 +108,31 @@ if [[ -z "$ASSETS_DIR" ]]; then
   fi
 fi
 
-DEPLOY_NAME="${DEPLOY_NAME:-vpn-stack}"
-SSH_PORT="${SSH_PORT:-22}"
-SSH_LOGIN_GRACE_TIME="${SSH_LOGIN_GRACE_TIME:-20}"
-SSH_MAX_AUTH_TRIES="${SSH_MAX_AUTH_TRIES:-3}"
-SSH_MAX_STARTUPS="${SSH_MAX_STARTUPS:-10:30:60}"
-SSH_PER_SOURCE_MAX_STARTUPS="${SSH_PER_SOURCE_MAX_STARTUPS:-6}"
-SSH_PER_SOURCE_NETBLOCK_SIZE="${SSH_PER_SOURCE_NETBLOCK_SIZE:-24:64}"
-GUARD_ENABLED="${GUARD_ENABLED:-1}"
-GUARD_INTERVAL_MINUTES="${GUARD_INTERVAL_MINUTES:-5}"
-GUARD_LOOKBACK_MINUTES="${GUARD_LOOKBACK_MINUTES:-30}"
-GUARD_BLOCK_TIMEOUT="${GUARD_BLOCK_TIMEOUT:-6h}"
-GUARD_SSH_FAILURE_THRESHOLD="${GUARD_SSH_FAILURE_THRESHOLD:-6}"
-GUARD_REALITY_INVALID_THRESHOLD="${GUARD_REALITY_INVALID_THRESHOLD:-8}"
-GUARD_REALITY_BLOCK_ENABLED="${GUARD_REALITY_BLOCK_ENABLED:-0}"
+normalize_env_with_python() {
+  local candidate=""
+  local python_bin=""
+  if [[ "$ACTION" != "install" && "$ACTION" != "reinstall" && "$RENDER_ONLY" != "1" ]]; then
+    return 0
+  fi
+  for candidate in "${PYTHON_BIN:-}" python3 python "${SCRIPT_DIR}/.runtime/python/windows/python.exe"; do
+    [[ -n "${candidate}" ]] || continue
+    if "${candidate}" -c 'import sys; assert sys.version_info >= (3, 9)' >/dev/null 2>&1; then
+      python_bin="${candidate}"
+      break
+    fi
+  done
+  [[ -n "${python_bin}" ]] || { echo "Python 3.9+ is required to normalize deployment env." >&2; exit 1; }
+  [[ -f "${SCRIPT_DIR}/vpn_installer/install_support.py" ]] || { echo "Python renderer package not found next to install.sh." >&2; exit 1; }
+  NORMALIZED_ENV_FILE="$(mktemp)"
+  "${python_bin}" -c 'import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); from vpn_installer.config import render_env_text; from vpn_installer.install_support import load_runtime_env; print(render_env_text(load_runtime_env(Path(sys.argv[2]))), end="")' "${SCRIPT_DIR}" "${ENV_FILE}" >"${NORMALIZED_ENV_FILE}"
+  set -a
+  # shellcheck disable=SC1090
+  source "${NORMALIZED_ENV_FILE}"
+  set +a
+}
 
-CLIENT_FLOW="${CLIENT_FLOW:-xtls-rprx-vision}"
-RU_LISTEN_PORT="${RU_LISTEN_PORT:-443}"
-RU_ROUTER_LISTEN_PORT="${RU_ROUTER_LISTEN_PORT:-2080}"
-RU_REALITY_HANDSHAKE_PORT="${RU_REALITY_HANDSHAKE_PORT:-443}"
-RU_REALITY_ACCEPT_EMPTY_SHORT_ID="${RU_REALITY_ACCEPT_EMPTY_SHORT_ID:-1}"
-RU_REALITY_MAX_TIME_DIFFERENCE="${RU_REALITY_MAX_TIME_DIFFERENCE:-24h}"
-UTLS_FINGERPRINT="${UTLS_FINGERPRINT:-chrome}"
-SING_BOX_LOG_LEVEL="${SING_BOX_LOG_LEVEL:-info}"
-RU_SNIFF_TIMEOUT="${RU_SNIFF_TIMEOUT:-250ms}"
+normalize_env_with_python
 
-WG_INTERFACE="${WG_INTERFACE:-wg0}"
-WG_PORT="${WG_PORT:-51820}"
-WG_MTU="${WG_MTU:-1360}"
-WG_KEEPALIVE="${WG_KEEPALIVE:-25}"
-WG_ROUTE_TABLE="${WG_ROUTE_TABLE:-51820}"
-APP_ROUTE_MARK="${APP_ROUTE_MARK:-48}"
-WG_TUNNEL_FWMARK="${WG_TUNNEL_FWMARK:-51820}"
-WG_RU_ADDRESS="${WG_RU_ADDRESS:-10.74.0.1/32}"
-WG_FOREIGN_ADDRESS="${WG_FOREIGN_ADDRESS:-10.74.0.2/32}"
-WG_RU_ADDRESS_V6="${WG_RU_ADDRESS_V6:-fd74:7670:6e73::1/128}"
-WG_FOREIGN_ADDRESS_V6="${WG_FOREIGN_ADDRESS_V6:-fd74:7670:6e73::2/128}"
-WG_IPV6_PREFIX="${WG_IPV6_PREFIX:-fd74:7670:6e73::/64}"
-RUNTIME_QDISC="${RUNTIME_QDISC:-fq}"
-
-GLOBAL_DOH_SERVER="${GLOBAL_DOH_SERVER:-8.8.8.8}"
-GLOBAL_DOH_SERVER_NAME="${GLOBAL_DOH_SERVER_NAME:-dns.google}"
-GLOBAL_DOH_PATH="${GLOBAL_DOH_PATH:-/dns-query}"
-RU_FORCE_DIRECT_DOMAIN="${RU_FORCE_DIRECT_DOMAIN:-api.oneme.ru,mtalk.google.com,calls.okcdn.ru,gosuslugi.ru,api.ok.ru,ifconfig.me,ifconfig.co,checkip.amazonaws.com,ipapi.co,ipinfo.io,ident.me,tnedi.me,icanhazip.com,ip.mail.ru,ipv4-internet.yandex.net,2ip.ru}"
-RU_FORCE_DIRECT_DOMAIN_SUFFIX="${RU_FORCE_DIRECT_DOMAIN_SUFFIX:-.gstatic.com,.gosuslugi.ru,.ipify.org,.ipinfo.io,.ident.me,.tnedi.me,.icanhazip.com}"
-RU_FORCE_DIRECT_IP_CIDR="${RU_FORCE_DIRECT_IP_CIDR:-}"
-RU_BLOCK_IP_CIDR="${RU_BLOCK_IP_CIDR:-}"
-RU_BLOCK_QUIC="${RU_BLOCK_QUIC:-1}"
-
-RULESET_DIR="${RULESET_DIR:-/var/lib/vpn-stack/rules}"
-RU_GEOSITE_URL="${RU_GEOSITE_URL:-https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ru.srs https://cdn.jsdelivr.net/gh/SagerNet/sing-geosite@rule-set/geosite-category-ru.srs https://github.com/SagerNet/sing-geosite/raw/rule-set/geosite-category-ru.srs}"
-RU_GEOIP_URL="${RU_GEOIP_URL:-https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-ru.srs https://cdn.jsdelivr.net/gh/SagerNet/sing-geoip@rule-set/geoip-ru.srs https://github.com/SagerNet/sing-geoip/raw/rule-set/geoip-ru.srs}"
-FOREIGN_BLOCK_RU="${FOREIGN_BLOCK_RU:-0}"
-FOREIGN_RU_IPV4_LIST_URL="${FOREIGN_RU_IPV4_LIST_URL:-https://www.ipdeny.com/ipblocks/data/aggregated/ru-aggregated.zone https://stat.ripe.net/data/country-resource-list/data.json?resource=ru&v4_format=prefix}"
-FOREIGN_RU_IPV6_LIST_URL="${FOREIGN_RU_IPV6_LIST_URL:-https://www.ipdeny.com/ipv6/ipaddresses/aggregated/ru-aggregated.zone https://stat.ripe.net/data/country-resource-list/data.json?resource=ru}"
-HEALTHCHECK_URL="${HEALTHCHECK_URL:-https://api.ipify.org}"
-HEALTH_THROUGHPUT_URLS="${HEALTH_THROUGHPUT_URLS:-https://cachefly.cachefly.net/1mb.test https://proof.ovh.net/files/1Mb.dat}"
-HEALTH_UPLOAD_URL="${HEALTH_UPLOAD_URL:-https://speed.cloudflare.com/__up}"
-HEALTH_UPLOAD_BYTES="${HEALTH_UPLOAD_BYTES:-1048576}"
-HEALTH_DEEP_PROBE_INTERVAL_MINUTES="${HEALTH_DEEP_PROBE_INTERVAL_MINUTES:-15}"
-HEALTH_MIN_FOREIGN_DIRECT_DOWNLOAD_BPS="${HEALTH_MIN_FOREIGN_DIRECT_DOWNLOAD_BPS:-300000}"
-HEALTH_MIN_RU_WG_DOWNLOAD_BPS="${HEALTH_MIN_RU_WG_DOWNLOAD_BPS:-300000}"
-HEALTH_MIN_FOREIGN_DIRECT_UPLOAD_BPS="${HEALTH_MIN_FOREIGN_DIRECT_UPLOAD_BPS:-1000000}"
-HEALTH_MIN_RU_WG_UPLOAD_BPS="${HEALTH_MIN_RU_WG_UPLOAD_BPS:-1000000}"
-HEALTH_MAX_FOREIGN_RU_PING_LOSS_PCT="${HEALTH_MAX_FOREIGN_RU_PING_LOSS_PCT:-5}"
-HEALTH_MAX_FOREIGN_INTERNET_PING_LOSS_PCT="${HEALTH_MAX_FOREIGN_INTERNET_PING_LOSS_PCT:-5}"
-HEALTH_HANDSHAKE_GRACE_SECONDS="${HEALTH_HANDSHAKE_GRACE_SECONDS:-180}"
-HEALTH_HANDSHAKE_MIN_GRACE_SECONDS="${HEALTH_HANDSHAKE_MIN_GRACE_SECONDS:-180}"
-HEALTH_HANDSHAKE_GRACE_MULTIPLIER="${HEALTH_HANDSHAKE_GRACE_MULTIPLIER:-8}"
-HEALTH_CHECK_INTERVAL_MINUTES="${HEALTH_CHECK_INTERVAL_MINUTES:-2}"
-HEALTH_SELF_HEAL="${HEALTH_SELF_HEAL:-1}"
-HEALTH_SELF_HEAL_COOLDOWN_MINUTES="${HEALTH_SELF_HEAL_COOLDOWN_MINUTES:-15}"
-HEALTH_SELF_HEAL_MAX_ACTIONS_PER_HOUR="${HEALTH_SELF_HEAL_MAX_ACTIONS_PER_HOUR:-2}"
-HEALTH_SELF_HEAL_CONFIRMATIONS="${HEALTH_SELF_HEAL_CONFIRMATIONS:-2}"
-HEALTH_TARGET_PROBE_URLS="${HEALTH_TARGET_PROBE_URLS:-https://chatgpt.com/ https://discord.com/ https://github.com/ https://www.google.com/generate_204 https://telegram.org/ https://api.telegram.org/ https://t.me/}"
-HEALTH_RU_DIRECT_TARGET_PROBE_URLS="${HEALTH_RU_DIRECT_TARGET_PROBE_URLS:-https://api.ipify.org/ https://2ip.ru/}"
-HEALTH_TARGET_CONNECT_TIMEOUT_SECONDS="${HEALTH_TARGET_CONNECT_TIMEOUT_SECONDS:-2}"
-HEALTH_TARGET_MAX_TIME_SECONDS="${HEALTH_TARGET_MAX_TIME_SECONDS:-4}"
-ADMIN_WEB_ENABLED="${ADMIN_WEB_ENABLED:-1}"
-ADMIN_WEB_BIND="${ADMIN_WEB_BIND:-0.0.0.0}"
-ADMIN_WEB_PORT="${ADMIN_WEB_PORT:-11333}"
-ADMIN_WEB_ACTIVE_CLIENT_REQUIRED="${ADMIN_WEB_ACTIVE_CLIENT_REQUIRED:-1}"
-ADMIN_WEB_ACTIVE_CLIENT_TIMEOUT_SECONDS="${ADMIN_WEB_ACTIVE_CLIENT_TIMEOUT_SECONDS:-5}"
-ADMIN_WEB_ALLOW_TUNNEL_CLIENTS="${ADMIN_WEB_ALLOW_TUNNEL_CLIENTS:-1}"
-ADMIN_WEB_ALLOWED_CIDR="${ADMIN_WEB_ALLOWED_CIDR:-}"
-ADMIN_WEB_ALLOW_WG="${ADMIN_WEB_ALLOW_WG:-0}"
-ADMIN_WEB_USERNAME="${ADMIN_WEB_USERNAME:-user}"
-ADMIN_WEB_PASSWORD="${ADMIN_WEB_PASSWORD:-password}"
-DISABLE_NIC_OFFLOADS="${DISABLE_NIC_OFFLOADS:-0}"
-JOURNAL_LIMIT_ENABLED="${JOURNAL_LIMIT_ENABLED:-1}"
-JOURNAL_SYSTEM_MAX_USE="${JOURNAL_SYSTEM_MAX_USE:-256M}"
-JOURNAL_MAX_RETENTION_SEC="${JOURNAL_MAX_RETENTION_SEC:-14day}"
 APT_LOCK_TIMEOUT_SECONDS="${APT_LOCK_TIMEOUT_SECONDS:-900}"
 APT_LOCK_RETRY_SECONDS="${APT_LOCK_RETRY_SECONDS:-5}"
 SINGBOX_CONFIG_PATH="/etc/sing-box/config.json"
@@ -206,29 +140,32 @@ SINGBOX_BASE_CONFIG_PATH="${VPNSTACK_ROOT}/sing-box.base.json"
 SINGBOX_REQUIRED_VERSION="1.13.12"
 XRAY_CONFIG_PATH="/etc/xray/config.json"
 XRAY_SERVICE_PATH="/etc/systemd/system/vpn-stack-xray.service"
-XRAY_REQUIRED_VERSION="${XRAY_REQUIRED_VERSION:-}"
-WG_CONFIG_PATH="/etc/wireguard/${WG_INTERFACE}.conf"
+XRAY_REQUIRED_VERSION="${XRAY_REQUIRED_VERSION:-26.3.27}"
+XRAY_LINUX_AMD64_SHA256="23cd9af937744d97776ee35ecad4972cf4b2109d1e0fe6be9930467608f7c8ae"
+WG_CONFIG_PATH="/etc/wireguard/${WG_INTERFACE:-wg0}.conf"
 NFTABLES_PATH="/etc/nftables.conf"
 SSHD_CONFIG_PATH="/etc/ssh/sshd_config.d/90-vpn-stack.conf"
-RULE_SYNC_SCRIPT="/usr/local/lib/vpn-stack/sync-state.sh"
-HEALTH_SCRIPT_PATH="/usr/local/lib/vpn-stack/health-check.sh"
-GUARD_SCRIPT_PATH="/usr/local/lib/vpn-stack/guard.sh"
+AGENT_SCRIPT_PATH="/usr/local/lib/vpn-stack/vpn-stack-agent.py"
 ADMIN_WEB_SCRIPT_PATH="/usr/local/lib/vpn-stack/admin_web.py"
 ADMIN_APPLY_SCRIPT_PATH="/usr/local/lib/vpn-stack/admin_apply.py"
-SYNC_SERVICE_PATH="/etc/systemd/system/vpn-stack-sync.service"
-SYNC_TIMER_PATH="/etc/systemd/system/vpn-stack-sync.timer"
 HEALTH_SERVICE_PATH="/etc/systemd/system/vpn-stack-health.service"
 HEALTH_TIMER_PATH="/etc/systemd/system/vpn-stack-health.timer"
-GUARD_SERVICE_PATH="/etc/systemd/system/vpn-stack-guard.service"
-GUARD_TIMER_PATH="/etc/systemd/system/vpn-stack-guard.timer"
+LEGACY_SYNC_SCRIPT_PATH="/usr/local/lib/vpn-stack/sync-state.sh"
+LEGACY_HEALTH_SCRIPT_PATH="/usr/local/lib/vpn-stack/health-check.sh"
+LEGACY_GUARD_SCRIPT_PATH="/usr/local/lib/vpn-stack/guard.sh"
+LEGACY_SYNC_SERVICE_PATH="/etc/systemd/system/vpn-stack-sync.service"
+LEGACY_SYNC_TIMER_PATH="/etc/systemd/system/vpn-stack-sync.timer"
+LEGACY_GUARD_SERVICE_PATH="/etc/systemd/system/vpn-stack-guard.service"
+LEGACY_GUARD_TIMER_PATH="/etc/systemd/system/vpn-stack-guard.timer"
 ADMIN_WEB_SERVICE_PATH="/etc/systemd/system/vpn-stack-admin.service"
 SUBSCRIPTION_SERVICE_PATH="/etc/systemd/system/vpn-stack-subscription.service"
 SYSCTL_PATH="/etc/sysctl.d/90-vpn-stack.conf"
 JOURNALD_DROPIN_PATH="/etc/systemd/journald.conf.d/90-vpn-stack.conf"
+APT_PERIODIC_DROPIN_PATH="/etc/apt/apt.conf.d/90-vpn-stack-unattended"
 SUBSCRIPTION_ROOT="/var/lib/vpn-stack/subscription"
 LEGACY_ADAPTIVE_ROUTING_RULES_PATH="/var/lib/vpn-stack/adaptive-routing-rules.json"
 LEGACY_DATAPLANE_CACHE_PATH="/var/lib/vpn-stack/dataplane-cache.env"
-HEALTH_STATE_PATH="/var/lib/vpn-stack/health-state.env"
+HEALTH_STATE_PATH="/var/lib/vpn-stack/health-state.json"
 VPNSTACK_ROLE_FILE="${VPNSTACK_ROOT}/role"
 VPNSTACK_DEPLOYMENT_FILE="${VPNSTACK_ROOT}/deployment.env"
 VPNSTACK_INSTALLED_AT_FILE="${VPNSTACK_ROOT}/installed_at"
@@ -236,13 +173,23 @@ VPNSTACK_REMOVED_AT_FILE="${VPNSTACK_ROOT}/removed_at"
 VPNSTACK_RENDER_MANIFEST_FILE="${VPNSTACK_ROOT}/render-manifest.json"
 VPNSTACK_BASELINE_DIR="${VPNSTACK_BACKUP_DIR}/baseline"
 VPNSTACK_SNAPSHOT_DIR="${VPNSTACK_BACKUP_DIR}/snapshots"
+VPNSTACK_RELEASES_DIR="${VPNSTACK_ROOT}/releases"
+VPNSTACK_CURRENT_RELEASE="${VPNSTACK_ROOT}/current"
+VPNSTACK_PREVIOUS_RELEASE="${VPNSTACK_ROOT}/previous"
+VPNSTACK_ACCEPTANCE_FILE="${VPNSTACK_ROOT}/acceptance.json"
 CURRENT_ROLLBACK_DIR=""
 INSTALL_MUTATION_STARTED=0
+PREPARED_ARTIFACTS_DIR=""
+NORMALIZED_ENV_FILE="${NORMALIZED_ENV_FILE:-}"
 
-WG_RU_ADDRESS_HOST="${WG_RU_ADDRESS%%/*}"
-WG_FOREIGN_ADDRESS_HOST="${WG_FOREIGN_ADDRESS%%/*}"
-WG_RU_ADDRESS_V6_HOST="${WG_RU_ADDRESS_V6%%/*}"
-WG_FOREIGN_ADDRESS_V6_HOST="${WG_FOREIGN_ADDRESS_V6%%/*}"
+WG_RU_ADDRESS_HOST="${WG_RU_ADDRESS:-}"
+WG_RU_ADDRESS_HOST="${WG_RU_ADDRESS_HOST%%/*}"
+WG_FOREIGN_ADDRESS_HOST="${WG_FOREIGN_ADDRESS:-}"
+WG_FOREIGN_ADDRESS_HOST="${WG_FOREIGN_ADDRESS_HOST%%/*}"
+WG_RU_ADDRESS_V6_HOST="${WG_RU_ADDRESS_V6:-}"
+WG_RU_ADDRESS_V6_HOST="${WG_RU_ADDRESS_V6_HOST%%/*}"
+WG_FOREIGN_ADDRESS_V6_HOST="${WG_FOREIGN_ADDRESS_V6:-}"
+WG_FOREIGN_ADDRESS_V6_HOST="${WG_FOREIGN_ADDRESS_V6_HOST%%/*}"
 
 require_var() {
   local name="$1"
@@ -284,16 +231,23 @@ require_foreign_env() {
 
 write_file() {
   local path="$1"
+  local tmp
   mkdir -p "$(dirname "$path")"
-  cat >"$path"
+  tmp="$(mktemp "$(dirname "$path")/.${path##*/}.XXXXXX")"
+  cat >"${tmp}"
+  mv -f "${tmp}" "${path}"
 }
 
 copy_if_present() {
   local src="$1"
   local dst="$2"
   if [[ -f "$src" ]]; then
+    local tmp
     mkdir -p "$(dirname "$dst")"
-    cp "$src" "$dst"
+    tmp="$(mktemp "$(dirname "$dst")/.${dst##*/}.XXXXXX")"
+    cp "$src" "$tmp"
+    chmod --reference="$src" "$tmp" 2>/dev/null || true
+    mv -f "$tmp" "$dst"
     return 0
   fi
   return 1
@@ -387,26 +341,40 @@ managed_paths() {
     "${WG_CONFIG_PATH}" \
     "${NFTABLES_PATH}" \
     "${SSHD_CONFIG_PATH}" \
-    "${RULE_SYNC_SCRIPT}" \
-    "${HEALTH_SCRIPT_PATH}" \
-    "${GUARD_SCRIPT_PATH}" \
+    "${AGENT_SCRIPT_PATH}" \
     "${ADMIN_WEB_SCRIPT_PATH}" \
     "${ADMIN_APPLY_SCRIPT_PATH}" \
-    "${SYNC_SERVICE_PATH}" \
-    "${SYNC_TIMER_PATH}" \
     "${HEALTH_SERVICE_PATH}" \
     "${HEALTH_TIMER_PATH}" \
-    "${GUARD_SERVICE_PATH}" \
-    "${GUARD_TIMER_PATH}" \
     "${ADMIN_WEB_SERVICE_PATH}" \
     "${SUBSCRIPTION_SERVICE_PATH}" \
     "${SUBSCRIPTION_ROOT}" \
     "${SYSCTL_PATH}" \
     "${JOURNALD_DROPIN_PATH}" \
+    "${APT_PERIODIC_DROPIN_PATH}" \
     "${VPNSTACK_DEPLOYMENT_FILE}" \
     "${VPNSTACK_ROLE_FILE}" \
     "${VPNSTACK_INSTALLED_AT_FILE}" \
-    "${VPNSTACK_REMOVED_AT_FILE}"
+    "${VPNSTACK_REMOVED_AT_FILE}" \
+    "${VPNSTACK_CURRENT_RELEASE}" \
+    "${VPNSTACK_PREVIOUS_RELEASE}" \
+    "${VPNSTACK_ACCEPTANCE_FILE}"
+}
+
+legacy_paths() {
+  printf '%s\n' \
+    "${LEGACY_SYNC_SCRIPT_PATH}" \
+    "${LEGACY_HEALTH_SCRIPT_PATH}" \
+    "${LEGACY_GUARD_SCRIPT_PATH}" \
+    "${LEGACY_SYNC_SERVICE_PATH}" \
+    "${LEGACY_SYNC_TIMER_PATH}" \
+    "${LEGACY_GUARD_SERVICE_PATH}" \
+    "${LEGACY_GUARD_TIMER_PATH}"
+}
+
+rollback_paths() {
+  managed_paths
+  legacy_paths
 }
 
 backup_target_path() {
@@ -443,7 +411,7 @@ create_baseline_backup() {
   write_service_state_file "${VPNSTACK_BASELINE_DIR}/service-state.env"
   while IFS= read -r path; do
     backup_path_if_present "${VPNSTACK_BASELINE_DIR}" "${path}"
-  done < <(managed_paths)
+  done < <(rollback_paths)
   backup_rule_directory_if_present "${VPNSTACK_BASELINE_DIR}"
 }
 
@@ -454,7 +422,7 @@ create_revision_snapshot() {
   write_service_state_file "${snapshot_dir}/service-state.env"
   while IFS= read -r path; do
     backup_path_if_present "${snapshot_dir}" "${path}"
-  done < <(managed_paths)
+  done < <(rollback_paths)
   backup_rule_directory_if_present "${snapshot_dir}"
 }
 
@@ -510,9 +478,13 @@ restore_service_state() {
 }
 
 cleanup_role_artifacts() {
+  if [[ -n "${PREPARED_ARTIFACTS_DIR:-}" && "${PREPARED_ARTIFACTS_DIR}" == /tmp/* ]]; then
+    rm -rf "${PREPARED_ARTIFACTS_DIR}"
+  fi
   if [[ -n "${ROLE_ARTIFACTS_DIR:-}" && "${ROLE_ARTIFACTS_DIR}" == /tmp/* ]]; then
     rm -rf "${ROLE_ARTIFACTS_DIR}"
   fi
+  rm -f "${NORMALIZED_ENV_FILE:-}"
 }
 
 restore_install_state_on_error() {
@@ -528,7 +500,7 @@ restore_install_state_on_error() {
   echo "Install failed after applying changes started; restoring previous files and services." >&2
   while IFS= read -r path; do
     restore_path_from_backup "${CURRENT_ROLLBACK_DIR}" "${path}"
-  done < <(managed_paths)
+  done < <(rollback_paths)
   restore_path_from_backup "${CURRENT_ROLLBACK_DIR}" "${RULESET_DIR}"
   sysctl --system >/dev/null 2>&1 || true
   restore_service_state "${CURRENT_ROLLBACK_DIR}/service-state.env"
@@ -546,12 +518,9 @@ stop_managed_services() {
   systemctl stop sing-box >/dev/null 2>&1 || true
   systemctl stop vpn-stack-xray.service >/dev/null 2>&1 || true
   systemctl stop "wg-quick@${WG_INTERFACE}" >/dev/null 2>&1 || true
-  systemctl stop vpn-stack-sync.service >/dev/null 2>&1 || true
-  systemctl stop vpn-stack-sync.timer >/dev/null 2>&1 || true
   systemctl stop vpn-stack-health.service >/dev/null 2>&1 || true
   systemctl stop vpn-stack-health.timer >/dev/null 2>&1 || true
-  systemctl stop vpn-stack-guard.service >/dev/null 2>&1 || true
-  systemctl stop vpn-stack-guard.timer >/dev/null 2>&1 || true
+  systemctl stop vpn-stack-sync.service vpn-stack-sync.timer vpn-stack-guard.service vpn-stack-guard.timer >/dev/null 2>&1 || true
   systemctl stop vpn-stack-admin.service >/dev/null 2>&1 || true
   systemctl stop vpn-stack-subscription.service >/dev/null 2>&1 || true
   systemctl stop nftables >/dev/null 2>&1 || true
@@ -591,21 +560,6 @@ restart_wireguard_service() {
   systemctl start "wg-quick@${WG_INTERFACE}"
 }
 
-cleanup_failed_rc_local() {
-  if ! systemctl --quiet is-failed rc-local.service 2>/dev/null; then
-    return 0
-  fi
-  if [[ ! -f /etc/rc.local || -x /etc/rc.local ]]; then
-    systemctl reset-failed rc-local.service >/dev/null 2>&1 || true
-    return 0
-  fi
-  if head -n 1 /etc/rc.local 2>/dev/null | grep -q '^#!'; then
-    echo "Fixing failed rc-local.service caused by non-executable /etc/rc.local." >&2
-    chmod 0755 /etc/rc.local >/dev/null 2>&1 || true
-  fi
-  systemctl reset-failed rc-local.service >/dev/null 2>&1 || true
-}
-
 disable_legacy_proxy_services() {
   local legacy_units=(xray-vpnstack.service xray.service v2ray.service)
   local found="0"
@@ -624,16 +578,6 @@ disable_legacy_proxy_services() {
     done
   fi
 
-  if [[ "$ROLE" != "ru-gateway" ]] || ! command -v ss >/dev/null 2>&1; then
-    return 0
-  fi
-  if ss -H -ltnp "sport = :${RU_LISTEN_PORT}" 2>/dev/null | grep -q 'xray'; then
-    pkill -TERM -x xray >/dev/null 2>&1 || true
-    sleep 2
-  fi
-  if ss -H -ltnp "sport = :${RU_LISTEN_PORT}" 2>/dev/null | grep -q 'xray'; then
-    pkill -KILL -x xray >/dev/null 2>&1 || true
-  fi
 }
 
 dpkg_lock_holders() {
@@ -679,9 +623,8 @@ disable_managed_services() {
   systemctl disable sing-box >/dev/null 2>&1 || true
   systemctl disable vpn-stack-xray.service >/dev/null 2>&1 || true
   systemctl disable "wg-quick@${WG_INTERFACE}" >/dev/null 2>&1 || true
-  systemctl disable vpn-stack-sync.timer >/dev/null 2>&1 || true
   systemctl disable vpn-stack-health.timer >/dev/null 2>&1 || true
-  systemctl disable vpn-stack-guard.timer >/dev/null 2>&1 || true
+  systemctl disable vpn-stack-sync.timer vpn-stack-guard.timer >/dev/null 2>&1 || true
   systemctl disable vpn-stack-admin.service >/dev/null 2>&1 || true
   systemctl disable vpn-stack-subscription.service >/dev/null 2>&1 || true
   systemctl disable nftables >/dev/null 2>&1 || true
@@ -696,17 +639,17 @@ remove_managed_files() {
     "${WG_CONFIG_PATH}" \
     "${NFTABLES_PATH}" \
     "${SSHD_CONFIG_PATH}" \
-    "${RULE_SYNC_SCRIPT}" \
-    "${HEALTH_SCRIPT_PATH}" \
-    "${GUARD_SCRIPT_PATH}" \
     "${ADMIN_WEB_SCRIPT_PATH}" \
     "${ADMIN_APPLY_SCRIPT_PATH}" \
-    "${SYNC_SERVICE_PATH}" \
-    "${SYNC_TIMER_PATH}" \
     "${HEALTH_SERVICE_PATH}" \
     "${HEALTH_TIMER_PATH}" \
-    "${GUARD_SERVICE_PATH}" \
-    "${GUARD_TIMER_PATH}" \
+    "${LEGACY_SYNC_SCRIPT_PATH}" \
+    "${LEGACY_HEALTH_SCRIPT_PATH}" \
+    "${LEGACY_GUARD_SCRIPT_PATH}" \
+    "${LEGACY_SYNC_SERVICE_PATH}" \
+    "${LEGACY_SYNC_TIMER_PATH}" \
+    "${LEGACY_GUARD_SERVICE_PATH}" \
+    "${LEGACY_GUARD_TIMER_PATH}" \
     "${ADMIN_WEB_SERVICE_PATH}" \
     "${SUBSCRIPTION_SERVICE_PATH}" \
     "${SYSCTL_PATH}" \
@@ -726,73 +669,12 @@ reset_install_runtime_state() {
 
 record_install_metadata() {
   mkdir -p "${VPNSTACK_ROOT}"
-  if [[ -n "${ENV_FILE:-}" ]]; then
-    {
-      local seen_ru_listen_port="0"
-      local seen_reality_empty_short_id="0"
-      local seen_reality_time="0"
-      local seen_journal_limit_enabled="0"
-      local seen_journal_system_max_use="0"
-      local seen_journal_max_retention_sec="0"
-      local line=""
-      while IFS= read -r line || [[ -n "${line}" ]]; do
-        case "${line}" in
-          RU_LISTEN_PORT=*)
-            printf 'RU_LISTEN_PORT="%s"\n' "${RU_LISTEN_PORT}"
-            seen_ru_listen_port="1"
-            ;;
-          RU_COMPAT_LISTEN_PORTS=*)
-            :
-            ;;
-          RU_REALITY_MAX_TIME_DIFFERENCE=*)
-            printf 'RU_REALITY_MAX_TIME_DIFFERENCE="%s"\n' "${RU_REALITY_MAX_TIME_DIFFERENCE}"
-            seen_reality_time="1"
-            ;;
-          RU_REALITY_ACCEPT_EMPTY_SHORT_ID=*)
-            printf 'RU_REALITY_ACCEPT_EMPTY_SHORT_ID="%s"\n' "${RU_REALITY_ACCEPT_EMPTY_SHORT_ID}"
-            seen_reality_empty_short_id="1"
-            ;;
-          RU_LITERAL_POLICY=*|RU_IPV6_LITERAL_POLICY=*|RU_IPV6_POLICY=*|RU_GEOIP_DIRECT=*|TO_FOREIGN_CONNECT_TIMEOUT=*|TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT=*|TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT=*|HEALTH_ROUTE_FAIL_CACHE_TTL_SECONDS=*|HEALTH_ROUTE_FAIL_THRESHOLD=*|HEALTH_GOOD_CACHE_TTL_SECONDS=*|SSH_INPUT_RATE=*|SSH_INPUT_BURST=*|RU_HTTPS_INPUT_RATE=*|RU_HTTPS_INPUT_BURST=*|RU_DIRECT_DNS_SERVER=*|RU_DIRECT_DNS_PORT=*)
-            :
-            ;;
-          JOURNAL_LIMIT_ENABLED=*)
-            printf 'JOURNAL_LIMIT_ENABLED="%s"\n' "${JOURNAL_LIMIT_ENABLED}"
-            seen_journal_limit_enabled="1"
-            ;;
-          JOURNAL_SYSTEM_MAX_USE=*)
-            printf 'JOURNAL_SYSTEM_MAX_USE="%s"\n' "${JOURNAL_SYSTEM_MAX_USE}"
-            seen_journal_system_max_use="1"
-            ;;
-          JOURNAL_MAX_RETENTION_SEC=*)
-            printf 'JOURNAL_MAX_RETENTION_SEC="%s"\n' "${JOURNAL_MAX_RETENTION_SEC}"
-            seen_journal_max_retention_sec="1"
-            ;;
-          *)
-            printf '%s\n' "${line}"
-            ;;
-        esac
-      done <"${ENV_FILE}"
-      if [[ "${seen_ru_listen_port}" != "1" ]]; then
-        printf 'RU_LISTEN_PORT="%s"\n' "${RU_LISTEN_PORT}"
-      fi
-      if [[ "${seen_reality_empty_short_id}" != "1" ]]; then
-        printf 'RU_REALITY_ACCEPT_EMPTY_SHORT_ID="%s"\n' "${RU_REALITY_ACCEPT_EMPTY_SHORT_ID}"
-      fi
-      if [[ "${seen_reality_time}" != "1" && -n "${RU_REALITY_MAX_TIME_DIFFERENCE}" ]]; then
-        printf 'RU_REALITY_MAX_TIME_DIFFERENCE="%s"\n' "${RU_REALITY_MAX_TIME_DIFFERENCE}"
-      fi
-      if [[ "${seen_journal_limit_enabled}" != "1" ]]; then
-        printf 'JOURNAL_LIMIT_ENABLED="%s"\n' "${JOURNAL_LIMIT_ENABLED}"
-      fi
-      if [[ "${seen_journal_system_max_use}" != "1" ]]; then
-        printf 'JOURNAL_SYSTEM_MAX_USE="%s"\n' "${JOURNAL_SYSTEM_MAX_USE}"
-      fi
-      if [[ "${seen_journal_max_retention_sec}" != "1" ]]; then
-        printf 'JOURNAL_MAX_RETENTION_SEC="%s"\n' "${JOURNAL_MAX_RETENTION_SEC}"
-      fi
-    } | write_file "${VPNSTACK_DEPLOYMENT_FILE}"
-    chmod 0600 "${VPNSTACK_DEPLOYMENT_FILE}"
+  if [[ -z "${NORMALIZED_ENV_FILE:-}" || ! -s "${NORMALIZED_ENV_FILE}" ]]; then
+    echo "Normalized deployment env is missing; refusing to record ambiguous install metadata." >&2
+    return 1
   fi
+  copy_if_present "${NORMALIZED_ENV_FILE}" "${VPNSTACK_DEPLOYMENT_FILE}"
+  chmod 0600 "${VPNSTACK_DEPLOYMENT_FILE}"
   printf '%s\n' "${ROLE}" >"${VPNSTACK_ROLE_FILE}"
   date -u +"%Y-%m-%dT%H:%M:%SZ" >"${VPNSTACK_INSTALLED_AT_FILE}"
   rm -f "${VPNSTACK_REMOVED_AT_FILE}"
@@ -808,7 +690,7 @@ restore_baseline_or_cleanup() {
   if [[ -d "${VPNSTACK_BASELINE_DIR}" ]]; then
     while IFS= read -r path; do
       restore_path_from_backup "${VPNSTACK_BASELINE_DIR}" "${path}"
-    done < <(managed_paths)
+    done < <(rollback_paths)
     restore_path_from_backup "${VPNSTACK_BASELINE_DIR}" "${RULESET_DIR}"
   fi
 
@@ -828,112 +710,19 @@ purge_managed_state() {
 }
 
 print_status() {
-  local installed="0"
-  local installed_at=""
-  local removed_at=""
-  local baseline_present="0"
-  local snapshots_present="0"
-  local default_iface=""
-  local configured_wan_interface=""
-  local default_qdisc="-"
-  local tcp_cc="-"
-  local tcp_mtu_probing="-"
-  local netdev_backlog="-"
-  local iface_rx_drops="0"
-  local iface_tx_drops="0"
-  local wan_offload_gro="-"
-  local wan_offload_gso="-"
-  local wan_offload_tso="-"
-  local wg_transfer="-/-"
-  local wg_handshake="-"
-  local guard_state_path="/var/lib/vpn-stack/guard-state.env"
-  local guard_last_run="-"
-  local guard_ssh_blocked="-"
-  local guard_reality_blocked="-"
-  if is_currently_installed; then
-    installed="1"
-  fi
-  if [[ -f "${VPNSTACK_INSTALLED_AT_FILE}" ]]; then
-    installed_at="$(tr -d '\r\n' <"${VPNSTACK_INSTALLED_AT_FILE}")"
-  fi
-  if [[ -f "${VPNSTACK_REMOVED_AT_FILE}" ]]; then
-    removed_at="$(tr -d '\r\n' <"${VPNSTACK_REMOVED_AT_FILE}")"
-  fi
-  if [[ -d "${VPNSTACK_BASELINE_DIR}" ]]; then
-    baseline_present="1"
-  fi
-  if [[ -d "${VPNSTACK_SNAPSHOT_DIR}" ]]; then
-    snapshots_present="$(find "${VPNSTACK_SNAPSHOT_DIR}" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d '[:space:]')"
-  fi
-  if [[ -r "${VPNSTACK_DEPLOYMENT_FILE}" ]]; then
-    configured_wan_interface="$(grep -E '^WAN_INTERFACE=' "${VPNSTACK_DEPLOYMENT_FILE}" | head -n1 | cut -d= -f2- | sed 's/^"//; s/"$//')"
-  fi
-  default_iface="$(ip route show default 2>/dev/null | awk '/default/ {print $5; exit}')"
-  tcp_cc="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)"
-  tcp_mtu_probing="$(sysctl -n net.ipv4.tcp_mtu_probing 2>/dev/null || true)"
-  netdev_backlog="$(sysctl -n net.core.netdev_max_backlog 2>/dev/null || true)"
-  if [[ -n "${default_iface}" ]]; then
-    default_qdisc="$(tc qdisc show dev "${default_iface}" 2>/dev/null | awk 'NR==1 {print $2; exit}')"
-    proc_row="$(grep -E "^[[:space:]]*${default_iface}:" /proc/net/dev 2>/dev/null || true)"
-    if [[ -n "${proc_row}" ]]; then
-      iface_rx_drops="$(awk '{gsub(":", "", $1); print $5}' <<<"${proc_row}")"
-      iface_tx_drops="$(awk '{gsub(":", "", $1); print $13}' <<<"${proc_row}")"
-    fi
-    if command -v ethtool >/dev/null 2>&1; then
-      wan_offload_gro="$(ethtool -k "${default_iface}" 2>/dev/null | awk '/generic-receive-offload:/ {print $2; exit}')"
-      wan_offload_gso="$(ethtool -k "${default_iface}" 2>/dev/null | awk '/generic-segmentation-offload:/ {print $2; exit}')"
-      wan_offload_tso="$(ethtool -k "${default_iface}" 2>/dev/null | awk '/tcp-segmentation-offload:/ {print $2; exit}')"
-    fi
-  fi
-  if command -v wg >/dev/null 2>&1; then
-    transfer_row="$(wg show "${WG_INTERFACE}" transfer 2>/dev/null | awk 'NR==1')"
-    handshake_row="$(wg show "${WG_INTERFACE}" latest-handshakes 2>/dev/null | awk 'NR==1')"
-    if [[ -n "${transfer_row}" ]]; then
-      wg_transfer="$(awk '{print $2 "/" $3}' <<<"${transfer_row}")"
-    fi
-    if [[ -n "${handshake_row}" ]]; then
-      wg_handshake="$(awk '{print $2}' <<<"${handshake_row}")"
-    fi
-  fi
-  if [[ -r "${guard_state_path}" ]]; then
-    guard_last_run="$(grep -E '^GUARD_LAST_RUN_AT=' "${guard_state_path}" | head -n1 | cut -d= -f2- | sed 's/^"//; s/"$//')"
-    guard_ssh_blocked="$(grep -E '^GUARD_SSH_BLOCKED_COUNT=' "${guard_state_path}" | head -n1 | cut -d= -f2- | sed 's/^"//; s/"$//')"
-    guard_reality_blocked="$(grep -E '^GUARD_REALITY_BLOCKED_COUNT=' "${guard_state_path}" | head -n1 | cut -d= -f2- | sed 's/^"//; s/"$//')"
+  if [[ -x "${AGENT_SCRIPT_PATH}" ]] && command -v python3 >/dev/null 2>&1; then
+    exec python3 "${AGENT_SCRIPT_PATH}" snapshot
   fi
 
-  echo "role=${ROLE}"
-  echo "installed=${installed}"
-  echo "current_role=$(current_install_role)"
-  echo "deployment=$(current_install_deployment)"
-  echo "installed_at=${installed_at}"
-  echo "removed_at=${removed_at}"
-  echo "baseline_present=${baseline_present}"
-  echo "snapshots_present=${snapshots_present}"
-  echo "default_iface=${default_iface}"
-  echo "configured_wan_interface=${configured_wan_interface}"
-  echo "default_qdisc=${default_qdisc}"
-  echo "wan_offload_gro=${wan_offload_gro}"
-  echo "wan_offload_gso=${wan_offload_gso}"
-  echo "wan_offload_tso=${wan_offload_tso}"
-  echo "tcp_cc=${tcp_cc}"
-  echo "tcp_mtu_probing=${tcp_mtu_probing}"
-  echo "netdev_backlog=${netdev_backlog}"
-  echo "iface_rx_drops=${iface_rx_drops}"
-  echo "iface_tx_drops=${iface_tx_drops}"
-  echo "wireguard_transfer=${wg_transfer}"
-  echo "wireguard_latest_handshake=${wg_handshake}"
-  echo "nftables_active=$(service_active_flag nftables)"
-  echo "wireguard_active=$(service_active_flag "wg-quick@${WG_INTERFACE}")"
-  echo "sync_timer_active=$(service_active_flag vpn-stack-sync.timer)"
-  echo "health_timer_active=$(service_active_flag vpn-stack-health.timer)"
-  echo "guard_timer_active=$(service_active_flag vpn-stack-guard.timer)"
-  echo "guard_last_run=${guard_last_run}"
-  echo "guard_ssh_blocked_count=${guard_ssh_blocked}"
-  echo "guard_reality_blocked_count=${guard_reality_blocked}"
-  echo "sing_box_active=$(service_active_flag sing-box)"
-  echo "xray_active=$(service_active_flag vpn-stack-xray.service)"
+  printf 'role=%s\n' "${ROLE}"
+  printf 'installed=%s\n' "$(is_currently_installed && echo 1 || echo 0)"
+  printf 'current_role=%s\n' "$(current_install_role)"
+  printf 'deployment=%s\n' "$(current_install_deployment)"
+  printf 'wireguard=%s\n' "$(service_active_flag "wg-quick@${WG_INTERFACE}")"
+  printf 'nftables=%s\n' "$(service_active_flag nftables)"
+  printf 'sing_box=%s\n' "$(service_active_flag sing-box)"
+  printf 'xray=%s\n' "$(service_active_flag vpn-stack-xray.service)"
 }
-
 python_candidate_works() {
   local candidate="$1"
   [[ -n "${candidate}" ]] || return 1
@@ -988,6 +777,9 @@ render_role_with_python() {
   if [[ "$ROLE" == "foreign-exit" && -n "${WAN_INTERFACE:-}" ]]; then
     args+=(--set "WAN_INTERFACE=${WAN_INTERFACE}")
   fi
+  if [[ -n "${ASSETS_DIR:-}" && -d "${ASSETS_DIR}" ]]; then
+    args+=(--assets-dir "${ASSETS_DIR}")
+  fi
   "${python_bin}" -c 'import sys; sys.path.insert(0, sys.argv[1]); from vpn_installer.install_support import main; raise SystemExit(main(sys.argv[2:]))' \
     "${SCRIPT_DIR}" \
     render-role \
@@ -1001,59 +793,6 @@ detect_primary_interface() {
   ip route show default | awk '/default/ {print $5; exit}'
 }
 
-apply_runtime_qdisc() {
-  local iface="$1"
-  if [[ -z "${iface}" ]]; then
-    return 0
-  fi
-  if ! command -v tc >/dev/null 2>&1; then
-    return 0
-  fi
-  case "${RUNTIME_QDISC:-fq}" in
-    fq)
-      tc qdisc replace dev "${iface}" root fq >/dev/null 2>&1 ||
-        tc qdisc replace dev "${iface}" root fq_codel >/dev/null 2>&1 ||
-        true
-      ;;
-    fq_codel)
-      tc qdisc replace dev "${iface}" root fq_codel >/dev/null 2>&1 || true
-      ;;
-    none|off|disabled)
-      return 0
-      ;;
-    *)
-      tc qdisc replace dev "${iface}" root fq >/dev/null 2>&1 ||
-        tc qdisc replace dev "${iface}" root fq_codel >/dev/null 2>&1 ||
-        true
-      ;;
-  esac
-}
-
-configure_interface_offloads() {
-  local iface="$1"
-  if [[ -z "${iface}" ]]; then
-    return 0
-  fi
-  if ! command -v ethtool >/dev/null 2>&1; then
-    return 0
-  fi
-  if [[ "${DISABLE_NIC_OFFLOADS}" == "1" ]]; then
-    ethtool -K "${iface}" gro off >/dev/null 2>&1 || true
-    ethtool -K "${iface}" gso off >/dev/null 2>&1 || true
-    ethtool -K "${iface}" tso off >/dev/null 2>&1 || true
-  else
-    ethtool -K "${iface}" gro on >/dev/null 2>&1 || true
-    ethtool -K "${iface}" gso on >/dev/null 2>&1 || true
-    ethtool -K "${iface}" tso on >/dev/null 2>&1 || true
-  fi
-}
-
-apply_runtime_interface_tuning() {
-  local iface="$1"
-  apply_runtime_qdisc "${iface}"
-  configure_interface_offloads "${iface}"
-}
-
 configure_ssh_daemon_mode() {
   systemctl disable --now ssh.socket >/dev/null 2>&1 || true
   systemctl enable ssh.service >/dev/null 2>&1 || true
@@ -1061,20 +800,16 @@ configure_ssh_daemon_mode() {
 }
 
 configure_journald_limits() {
+  systemctl restart systemd-journald >/dev/null 2>&1 || true
   if [[ "${JOURNAL_LIMIT_ENABLED,,}" == "0" || "${JOURNAL_LIMIT_ENABLED,,}" == "false" || "${JOURNAL_LIMIT_ENABLED,,}" == "no" || "${JOURNAL_LIMIT_ENABLED,,}" == "off" ]]; then
-    rm -f "${JOURNALD_DROPIN_PATH}"
-    systemctl restart systemd-journald >/dev/null 2>&1 || true
     return 0
   fi
-  mkdir -p "$(dirname "${JOURNALD_DROPIN_PATH}")"
-  cat >"${JOURNALD_DROPIN_PATH}" <<EOF
-[Journal]
-SystemMaxUse=${JOURNAL_SYSTEM_MAX_USE}
-MaxRetentionSec=${JOURNAL_MAX_RETENTION_SEC}
-EOF
-  systemctl restart systemd-journald >/dev/null 2>&1 || true
   journalctl --vacuum-size="${JOURNAL_SYSTEM_MAX_USE}" >/dev/null 2>&1 || true
   journalctl --vacuum-time="${JOURNAL_MAX_RETENTION_SEC}" >/dev/null 2>&1 || true
+}
+
+configure_unattended_security_updates() {
+  systemctl enable --now apt-daily.timer apt-daily-upgrade.timer >/dev/null 2>&1 || true
 }
 
 find_rendered_role_dir() {
@@ -1112,6 +847,7 @@ copy_role_artifacts() {
   copy_if_present "${source_dir}/sing-box.json" "${SINGBOX_CONFIG_PATH}" || { echo "Missing sing-box.json in ${source_dir}" >&2; exit 1; }
   copy_if_present "${source_dir}/sing-box.json" "${SINGBOX_BASE_CONFIG_PATH}" || { echo "Missing sing-box.json in ${source_dir}" >&2; exit 1; }
   copy_if_present "${source_dir}/render-manifest.json" "${VPNSTACK_RENDER_MANIFEST_FILE}" || { echo "Missing render-manifest.json in ${source_dir}" >&2; exit 1; }
+  copy_if_present "${source_dir}/vpn-stack-agent.py" "${AGENT_SCRIPT_PATH}" || { echo "Missing vpn-stack-agent.py in ${source_dir}" >&2; exit 1; }
   if [[ "$ROLE" == "ru-gateway" ]]; then
     mkdir -p "$(dirname "${XRAY_CONFIG_PATH}")"
     copy_if_present "${source_dir}/xray.json" "${XRAY_CONFIG_PATH}" || { echo "Missing xray.json in ${source_dir}" >&2; exit 1; }
@@ -1126,15 +862,15 @@ copy_role_artifacts() {
   copy_if_present "${source_dir}/${WG_INTERFACE}.conf" "${WG_CONFIG_PATH}" || { echo "Missing ${WG_INTERFACE}.conf in ${source_dir}" >&2; exit 1; }
   copy_if_present "${source_dir}/nftables.conf" "${NFTABLES_PATH}" || { echo "Missing nftables.conf in ${source_dir}" >&2; exit 1; }
   copy_if_present "${source_dir}/sshd-vpn-stack.conf" "${SSHD_CONFIG_PATH}" || { echo "Missing sshd-vpn-stack.conf in ${source_dir}" >&2; exit 1; }
-  copy_if_present "${source_dir}/sync-state.sh" "${RULE_SYNC_SCRIPT}" || { echo "Missing sync-state.sh in ${source_dir}" >&2; exit 1; }
-  copy_if_present "${source_dir}/health-check.sh" "${HEALTH_SCRIPT_PATH}" || { echo "Missing health-check.sh in ${source_dir}" >&2; exit 1; }
-  copy_if_present "${source_dir}/guard.sh" "${GUARD_SCRIPT_PATH}" || { echo "Missing guard.sh in ${source_dir}" >&2; exit 1; }
-  copy_if_present "${source_dir}/vpn-stack-sync.service" "${SYNC_SERVICE_PATH}" || { echo "Missing vpn-stack-sync.service in ${source_dir}" >&2; exit 1; }
-  copy_if_present "${source_dir}/vpn-stack-sync.timer" "${SYNC_TIMER_PATH}" || { echo "Missing vpn-stack-sync.timer in ${source_dir}" >&2; exit 1; }
+  copy_if_present "${source_dir}/sysctl-vpn-stack.conf" "${SYSCTL_PATH}" || { echo "Missing sysctl-vpn-stack.conf in ${source_dir}" >&2; exit 1; }
+  copy_if_present "${source_dir}/apt-vpn-stack-unattended.conf" "${APT_PERIODIC_DROPIN_PATH}" || { echo "Missing apt-vpn-stack-unattended.conf in ${source_dir}" >&2; exit 1; }
+  if [[ -f "${source_dir}/journald-vpn-stack.conf" ]]; then
+    copy_if_present "${source_dir}/journald-vpn-stack.conf" "${JOURNALD_DROPIN_PATH}"
+  else
+    rm -f "${JOURNALD_DROPIN_PATH}"
+  fi
   copy_if_present "${source_dir}/vpn-stack-health.service" "${HEALTH_SERVICE_PATH}" || { echo "Missing vpn-stack-health.service in ${source_dir}" >&2; exit 1; }
   copy_if_present "${source_dir}/vpn-stack-health.timer" "${HEALTH_TIMER_PATH}" || { echo "Missing vpn-stack-health.timer in ${source_dir}" >&2; exit 1; }
-  copy_if_present "${source_dir}/vpn-stack-guard.service" "${GUARD_SERVICE_PATH}" || { echo "Missing vpn-stack-guard.service in ${source_dir}" >&2; exit 1; }
-  copy_if_present "${source_dir}/vpn-stack-guard.timer" "${GUARD_TIMER_PATH}" || { echo "Missing vpn-stack-guard.timer in ${source_dir}" >&2; exit 1; }
   rm -f "${SUBSCRIPTION_SERVICE_PATH}"
   rm -rf "${SUBSCRIPTION_ROOT}"
   chmod 0644 "${SSHD_CONFIG_PATH}"
@@ -1143,7 +879,115 @@ copy_role_artifacts() {
     chmod 0644 "${ADMIN_WEB_SERVICE_PATH}"
     chmod 0755 "${ADMIN_WEB_SCRIPT_PATH}" "${ADMIN_APPLY_SCRIPT_PATH}"
   fi
-  chmod 0755 "${RULE_SYNC_SCRIPT}" "${HEALTH_SCRIPT_PATH}" "${GUARD_SCRIPT_PATH}"
+  rm -f "${LEGACY_SYNC_SCRIPT_PATH}" "${LEGACY_HEALTH_SCRIPT_PATH}" "${LEGACY_GUARD_SCRIPT_PATH}" "${LEGACY_SYNC_SERVICE_PATH}" "${LEGACY_SYNC_TIMER_PATH}" "${LEGACY_GUARD_SERVICE_PATH}" "${LEGACY_GUARD_TIMER_PATH}"
+  chmod 0755 "${AGENT_SCRIPT_PATH}"
+}
+
+release_id_from_manifest() {
+  local source_dir="$1"
+  sed -n 's/.*"release_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${source_dir}/render-manifest.json" | head -n1
+}
+
+stage_release() {
+  local source_dir="$1"
+  local release_id=""
+  local release_dir=""
+  release_id="$(release_id_from_manifest "${source_dir}")"
+  if [[ -z "${release_id}" ]]; then
+    echo "render-manifest.json is missing release_id" >&2
+    return 1
+  fi
+  release_dir="${VPNSTACK_RELEASES_DIR}/${release_id}"
+  mkdir -p "${VPNSTACK_RELEASES_DIR}"
+  rm -rf "${release_dir}"
+  mkdir -p "${release_dir}"
+  cp -a "${source_dir}/." "${release_dir}/"
+  if [[ -n "${ASSETS_DIR:-}" && -d "${ASSETS_DIR}" ]]; then
+    mkdir -p "${release_dir}/assets"
+    cp -a "${ASSETS_DIR}/." "${release_dir}/assets/"
+  fi
+  normalize_staged_release_permissions "${release_dir}"
+  printf '%s' "${release_dir}"
+}
+
+normalize_staged_release_permissions() {
+  local source_dir="$1"
+  find "${source_dir}" -type d -exec chmod 0755 {} +
+  find "${source_dir}" -type f -exec chmod 0644 {} +
+  chmod 0600 "${source_dir}/${WG_INTERFACE}.conf"
+  if [[ "${ROLE}" == "ru-gateway" ]]; then
+    chmod 0600 "${source_dir}/xray.json"
+  fi
+}
+
+validate_staged_release() {
+  local source_dir="$1"
+  local xray_config="${source_dir}/xray.json"
+  [[ -s "${source_dir}/render-manifest.json" ]] || { echo "missing render manifest" >&2; return 1; }
+  [[ -s "${source_dir}/vpn-stack-agent.py" ]] || { echo "missing server agent" >&2; return 1; }
+  python3 - "${source_dir}" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+manifest = json.loads((root / "render-manifest.json").read_text(encoding="utf-8"))
+if int(manifest.get("schema_version", 0)) < 2:
+    raise SystemExit("unsupported render manifest")
+for name, entry in manifest.get("assets", {}).items():
+    asset = root / "assets" / name
+    if not asset.is_file():
+        raise SystemExit(f"missing staged asset: {name}")
+    digest = hashlib.sha256(asset.read_bytes()).hexdigest()
+    if digest != entry.get("sha256"):
+        raise SystemExit(f"staged asset digest mismatch: {name}")
+PY
+  sing-box check -c "${source_dir}/sing-box.json"
+  nft -c -f "${source_dir}/nftables.conf"
+  if [[ "${ROLE}" == "ru-gateway" ]]; then
+    [[ -s "${xray_config}" ]] || { echo "missing Xray config" >&2; return 1; }
+    xray run -test -c "${xray_config}"
+  fi
+  wg-quick strip "${source_dir}/${WG_INTERFACE}.conf" >/dev/null
+  systemd-analyze verify "${source_dir}/vpn-stack-health.service" "${source_dir}/vpn-stack-health.timer" >/dev/null
+}
+
+activate_staged_release() {
+  local release_dir="$1"
+  local link_tmp="${VPNSTACK_ROOT}/.current.$$.tmp"
+  local previous_tmp="${VPNSTACK_ROOT}/.previous.$$.tmp"
+  local previous_release=""
+  if [[ -L "${VPNSTACK_CURRENT_RELEASE}" ]]; then
+    previous_release="$(readlink -f "${VPNSTACK_CURRENT_RELEASE}" 2>/dev/null || true)"
+  fi
+  if [[ -n "${previous_release}" && -d "${previous_release}" ]]; then
+    ln -s "${previous_release}" "${previous_tmp}"
+    mv -Tf "${previous_tmp}" "${VPNSTACK_PREVIOUS_RELEASE}"
+  fi
+  ln -s "${release_dir}" "${link_tmp}"
+  mv -Tf "${link_tmp}" "${VPNSTACK_CURRENT_RELEASE}"
+  copy_role_artifacts "${release_dir}"
+}
+
+verify_active_release() {
+  local report_tmp="${VPNSTACK_ROOT}/.acceptance.$$.json"
+  python3 "${AGENT_SCRIPT_PATH}" snapshot --live-probes --profile acceptance >"${report_tmp}"
+  python3 - "${report_tmp}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+verdicts = payload.get("verdicts", {})
+if verdicts.get("server_path") != "verified":
+    raise SystemExit(f"post-activation server path failed: {verdicts.get('reasons', [])}")
+if payload.get("role") == "ru-gateway" and verdicts.get("public_front") != "verified":
+    raise SystemExit("post-activation public VLESS front is not verified")
+if payload.get("artifacts", {}).get("drift") != "none":
+    raise SystemExit("post-activation artifact drift detected")
+PY
+  mv -f "${report_tmp}" "${VPNSTACK_ACCEPTANCE_FILE}"
 }
 
 write_preview_files() {
@@ -1152,18 +996,19 @@ write_preview_files() {
 }
 
 stage_preseed_assets() {
-  if [[ -z "${ASSETS_DIR:-}" || ! -d "${ASSETS_DIR}" ]]; then
+  local source_assets="${1:-${ASSETS_DIR:-}}"
+  if [[ -z "${source_assets}" || ! -d "${source_assets}" ]]; then
     return 0
   fi
 
   mkdir -p "${RULESET_DIR}"
 
   if [[ "$ROLE" == "ru-gateway" ]]; then
-    copy_if_present "${ASSETS_DIR}/geosite-ru.srs" "${RULESET_DIR}/geosite-ru.srs" || true
-    copy_if_present "${ASSETS_DIR}/geoip-ru.srs" "${RULESET_DIR}/geoip-ru.srs" || true
+    copy_if_present "${source_assets}/geosite-ru.srs" "${RULESET_DIR}/geosite-ru.srs" || true
+    copy_if_present "${source_assets}/geoip-ru.srs" "${RULESET_DIR}/geoip-ru.srs" || true
   else
-    copy_if_present "${ASSETS_DIR}/ru-ipv4.zone" "${RULESET_DIR}/ru-ipv4.zone" || true
-    copy_if_present "${ASSETS_DIR}/ru-ipv6.zone" "${RULESET_DIR}/ru-ipv6.zone" || true
+    copy_if_present "${source_assets}/ru-ipv4.zone" "${RULESET_DIR}/ru-ipv4.zone" || true
+    copy_if_present "${source_assets}/ru-ipv6.zone" "${RULESET_DIR}/ru-ipv6.zone" || true
   fi
 }
 
@@ -1266,6 +1111,11 @@ else
   create_revision_snapshot
 fi
 
+ROLE_ARTIFACTS_DIR="$(prepare_role_artifacts)"
+PREPARED_ARTIFACTS_DIR="${ROLE_ARTIFACTS_DIR}"
+trap 'exit_code=$?; install_exit_trap "${exit_code}"; trap - EXIT; exit "${exit_code}"' EXIT
+INSTALL_MUTATION_STARTED=1
+
 run_apt_get update
 run_apt_get install -y \
   apt-transport-https \
@@ -1295,11 +1145,19 @@ current_singbox_version() {
 }
 
 install_xray() {
-  if [[ -n "${XRAY_REQUIRED_VERSION}" ]]; then
-    curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh | bash -s -- install --version "${XRAY_REQUIRED_VERSION}"
-  else
-    curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh | bash -s -- install
+  local archive=""
+  local temp_dir=""
+  if [[ "$(uname -m)" != "x86_64" ]]; then
+    echo "Pinned Xray package currently supports x86_64 only." >&2
+    return 1
   fi
+  temp_dir="$(mktemp -d)"
+  archive="${temp_dir}/Xray-linux-64.zip"
+  curl -fsSL --connect-timeout 10 --max-time 120 "https://github.com/XTLS/Xray-core/releases/download/v${XRAY_REQUIRED_VERSION}/Xray-linux-64.zip" -o "${archive}"
+  echo "${XRAY_LINUX_AMD64_SHA256}  ${archive}" | sha256sum -c -
+  unzip -q "${archive}" xray -d "${temp_dir}"
+  install -m 0755 "${temp_dir}/xray" /usr/local/bin/xray
+  rm -rf "${temp_dir}"
 }
 
 current_xray_version() {
@@ -1309,91 +1167,91 @@ current_xray_version() {
   xray version 2>/dev/null | awk 'NR == 1 {print $2}'
 }
 
+record_binary_digests() {
+  local source_dir="$1"
+  local singbox_bin=""
+  local xray_bin=""
+  singbox_bin="$(command -v sing-box)"
+  if [[ "$ROLE" == "ru-gateway" ]]; then
+    xray_bin="$(command -v xray)"
+  fi
+  python3 - "${source_dir}/render-manifest.json" "${singbox_bin}" "${xray_bin}" <<'PY'
+import hashlib
+import json
+import os
+import sys
+from pathlib import Path
+
+manifest_path = Path(sys.argv[1])
+paths = {"sing-box": sys.argv[2], "xray": sys.argv[3]}
+manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+for name, path_text in paths.items():
+    entry = manifest.get("binaries", {}).get(name)
+    if entry is None:
+        continue
+    path = Path(path_text)
+    if not path.is_file():
+        raise SystemExit(f"required binary is missing: {name}")
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    digest = digest.hexdigest()
+    entry.update({"path": str(path), "sha256": digest})
+os_release = {}
+try:
+    for line in Path("/etc/os-release").read_text(encoding="utf-8").splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            os_release[key] = value.strip().strip('"')
+except OSError:
+    pass
+manifest["runtime"] = {
+    "kernel": os.uname().release,
+    "os_id": os_release.get("ID", ""),
+    "os_version": os_release.get("VERSION_ID", ""),
+}
+tmp = manifest_path.with_suffix(".tmp")
+tmp.write_text(json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+os.replace(tmp, manifest_path)
+PY
+}
+
 if [[ "$(current_singbox_version || true)" != "${SINGBOX_REQUIRED_VERSION}" ]]; then
   install_sing_box
 fi
-if [[ "$ROLE" == "ru-gateway" && ! -x /usr/local/bin/xray && -z "$(command -v xray 2>/dev/null)" ]]; then
+if [[ "$ROLE" == "ru-gateway" && "$(current_xray_version || true)" != "${XRAY_REQUIRED_VERSION}" ]]; then
   install_xray
 fi
 
 mkdir -p "${VPNSTACK_ROOT}" /etc/sing-box /etc/xray /etc/wireguard /etc/ssh/sshd_config.d "${RULESET_DIR}" /usr/local/lib/vpn-stack /etc/systemd/system
 
-RUNTIME_QDISC_INTERFACE="$(detect_primary_interface)"
+PRIMARY_INTERFACE="$(detect_primary_interface)"
 
 if [[ "$ROLE" == "foreign-exit" ]]; then
-  WAN_INTERFACE="${WAN_INTERFACE:-${RUNTIME_QDISC_INTERFACE}}"
+  WAN_INTERFACE="${WAN_INTERFACE:-${PRIMARY_INTERFACE}}"
   if [[ -z "${WAN_INTERFACE:-}" ]]; then
     echo "Unable to detect WAN interface. Set WAN_INTERFACE in the env file." >&2
     exit 1
   fi
 fi
 
-ROLE_ARTIFACTS_DIR="$(prepare_role_artifacts)"
-trap 'exit_code=$?; install_exit_trap "${exit_code}"; trap - EXIT; exit "${exit_code}"' EXIT
-INSTALL_MUTATION_STARTED=1
+ROLE_ARTIFACTS_DIR="$(stage_release "${ROLE_ARTIFACTS_DIR}")"
+record_binary_digests "${ROLE_ARTIFACTS_DIR}"
+stage_preseed_assets "${ROLE_ARTIFACTS_DIR}/assets"
+validate_staged_release "${ROLE_ARTIFACTS_DIR}"
 if [[ "$ACTION" == "reinstall" ]]; then
   stop_managed_services
 fi
 reset_install_runtime_state
-copy_role_artifacts "${ROLE_ARTIFACTS_DIR}"
+activate_staged_release "${ROLE_ARTIFACTS_DIR}"
 
-if [[ "$ROLE" == "ru-gateway" ]]; then
-  cat >"${SYSCTL_PATH}" <<EOF
-net.core.default_qdisc=fq
-net.core.somaxconn=4096
-net.core.netdev_max_backlog=8192
-net.core.netdev_budget=600
-net.core.netdev_budget_usecs=6000
-net.core.rmem_default=1048576
-net.core.wmem_default=1048576
-net.core.rmem_max=8388608
-net.core.wmem_max=8388608
-net.ipv4.tcp_syncookies=1
-net.ipv4.tcp_congestion_control=bbr
-net.ipv4.tcp_mtu_probing=1
-net.netfilter.nf_conntrack_tcp_be_liberal=1
-net.ipv4.tcp_max_syn_backlog=2048
-net.ipv4.udp_rmem_min=16384
-net.ipv4.udp_wmem_min=16384
-net.ipv4.conf.all.src_valid_mark=1
-EOF
-else
-  cat >"${SYSCTL_PATH}" <<EOF
-net.core.default_qdisc=fq
-net.core.somaxconn=4096
-net.core.netdev_max_backlog=8192
-net.core.netdev_budget=600
-net.core.netdev_budget_usecs=6000
-net.core.rmem_default=1048576
-net.core.wmem_default=1048576
-net.core.rmem_max=8388608
-net.core.wmem_max=8388608
-net.ipv4.tcp_syncookies=1
-net.ipv4.tcp_congestion_control=bbr
-net.ipv4.tcp_mtu_probing=1
-net.netfilter.nf_conntrack_tcp_be_liberal=1
-net.ipv4.tcp_max_syn_backlog=2048
-net.ipv4.udp_rmem_min=16384
-net.ipv4.udp_wmem_min=16384
-net.ipv4.ip_forward=1
-net.ipv6.conf.all.forwarding=1
-EOF
-fi
-
-stage_preseed_assets
 record_install_metadata
 
 sysctl --system >/dev/null
-apply_runtime_interface_tuning "${RUNTIME_QDISC_INTERFACE}"
-if [[ -n "${WAN_INTERFACE:-}" && "${WAN_INTERFACE}" != "${RUNTIME_QDISC_INTERFACE}" ]]; then
-  apply_runtime_interface_tuning "${WAN_INTERFACE}"
-fi
-if [[ -n "${WG_INTERFACE:-}" ]]; then
-  apply_runtime_qdisc "${WG_INTERFACE}"
-fi
 configure_journald_limits
+configure_unattended_security_updates
 systemctl daemon-reload
-cleanup_failed_rc_local
 disable_legacy_proxy_services
 configure_ssh_daemon_mode
 systemctl enable nftables
@@ -1402,21 +1260,11 @@ if [[ "$ROLE" == "foreign-exit" ]]; then
   apply_foreign_ru_block_from_local_assets
 fi
 restart_wireguard_service
-systemctl enable vpn-stack-sync.timer
-systemctl restart vpn-stack-sync.timer
-if ! timeout 60s systemctl start vpn-stack-sync.service; then
-  if ! have_bootstrap_assets; then
-    echo "vpn-stack-sync.service failed and no bootstrap assets are present." >&2
-    exit 1
-  fi
-  echo "vpn-stack-sync.service did not complete during install, continuing with bootstrap assets." >&2
-fi
+systemctl disable --now vpn-stack-sync.timer vpn-stack-sync.service >/dev/null 2>&1 || true
+systemctl disable --now vpn-stack-guard.timer vpn-stack-guard.service >/dev/null 2>&1 || true
 systemctl enable vpn-stack-health.timer
 systemctl restart vpn-stack-health.timer
 systemctl reset-failed vpn-stack-health.service >/dev/null 2>&1 || true
-systemctl enable vpn-stack-guard.timer
-systemctl restart vpn-stack-guard.timer
-systemctl start vpn-stack-guard.service || true
 
 if [[ "$ROLE" == "ru-gateway" ]]; then
   if [[ ! -f "${VPNSTACK_ROOT}/admin-auth.json" || "${ADMIN_WEB_USERNAME}" != "user" || "${ADMIN_WEB_PASSWORD}" != "password" ]]; then
@@ -1439,6 +1287,8 @@ if [[ "$ROLE" == "ru-gateway" ]]; then
     systemctl stop vpn-stack-admin.service >/dev/null 2>&1 || true
   fi
 fi
+
+verify_active_release
 
 chmod 0600 "${SINGBOX_CONFIG_PATH}" "${WG_CONFIG_PATH}"
 if [[ "$ROLE" == "ru-gateway" ]]; then

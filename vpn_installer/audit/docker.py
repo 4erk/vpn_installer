@@ -134,6 +134,23 @@ def prepare_mock_state(runner: AuditRunner, action: str) -> tuple[Path, Path]:
 def write_mock_ssh_scripts(base_dir: Path, *, allow_foreign: bool = False) -> tuple[Path, Path]:
     fakebin = base_dir / "fakebin"
     fakebin.mkdir(parents=True, exist_ok=True)
+    ru_agent_snapshot = json.dumps(
+        {
+            "schema_version": 2,
+            "deployment": "mock",
+            "role": "ru-gateway",
+            "release": {"release_id": "mock-release", "policy_version": "0.11.0", "installed_at": "2026-04-11T00:00:00Z"},
+            "host": {"hostname": "ru-host", "login_user": "root", "is_root": True, "has_sudo": True, "os_id": "ubuntu", "os_version": "24.04", "default_interface": "eth0"},
+            "services": {"sing-box": "active", "xray": "active", "nftables": "active", "wireguard": "active", "health_timer": "active", "admin": "active"},
+            "artifacts": {"drift": "none", "files": {}},
+            "wireguard": {"peers": []},
+            "network": {"interfaces": {"eth0": {}}},
+            "front": {"listening": True, "state_counts": {}, "socket_retransmissions": 0, "rtt_ms": {}},
+            "logs": {"fresh": {"window_minutes": 5, "counts": {}, "top_destinations": {}}, "windows_minutes": {"1440": {"counts": {}}}},
+            "verdicts": {"server_path": "verified", "public_front": "verified", "client_observation": "observed", "overall": "verified", "reasons": []},
+        },
+        ensure_ascii=True,
+    )
     ssh_script = textwrap.dedent(
         """\
         #!/usr/bin/env bash
@@ -149,6 +166,14 @@ def write_mock_ssh_scripts(base_dir: Path, *, allow_foreign: bool = False) -> tu
           esac
         done
         if [[ "$host" == "ru.example" ]]; then
+          if [[ "$*" == *"vpn-stack-agent.py snapshot"* ]]; then
+            cat <<'EOF'
+        """
+    ) + ru_agent_snapshot + textwrap.dedent(
+        """
+        EOF
+            exit 0
+          fi
           cat <<'EOF'
         login_user=root
         is_root=1
@@ -164,7 +189,7 @@ def write_mock_ssh_scripts(base_dir: Path, *, allow_foreign: bool = False) -> tu
         sing_box=active
         nftables=active
         wireguard=active
-        sync_timer=active
+        health_timer=active
         EOF
           exit 0
         fi
@@ -256,7 +281,7 @@ def test_status_readonly_role(runner: AuditRunner) -> dict[str, str]:
                 if grep -q "foreign.example" /work/calls.log; then
                   exit 41
                 fi
-                grep -q "wg-quick@wg-test" /work/calls.log
+                grep -q "vpn-stack-agent.py snapshot" /work/calls.log
                 """
             ),
         )
@@ -324,7 +349,7 @@ def test_remote_action_role(runner: AuditRunner, action: str) -> dict[str, str]:
                 if grep -q "foreign.example" /work/calls.log; then
                   exit 42
                 fi
-                grep -q "wg-quick@wg-test" /work/calls.log
+                grep -q "vpn-stack-agent.py snapshot" /work/calls.log
                 """
             ),
         )

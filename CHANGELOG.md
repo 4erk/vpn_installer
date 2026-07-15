@@ -6,6 +6,26 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.11.0] - 2026-07-15
+
+### Changed
+
+- Введены типизированные `DeploymentSpec`, `RoleSpec` и `RoutingPolicy`. Все классы RU traffic, outbounds, resolver и route order определяются одной Python-моделью; renderer только сериализует её.
+- Серверная диагностика сведена к stdlib-only `vpn-stack-agent` и snapshot schema 2. Статус, health, diagnose и verify используют один structured payload с разделёнными окнами `fresh`, `30m` и `24h`.
+- Парные `dns: lookup failed` и `router: lookup` строки одного sing-box request дедуплицируются по request ID и классифицируются как DNS, а не ложный `unclassified_error`.
+- `vpn verify live` теперь строит эфемерный sing-box client непосредственно из главного `vless-uri.txt` и проверяет public `RU:443 -> Reality/Xray -> sing-box -> WireGuard -> foreign` path. Acceptance требует обе identity: RU direct IP-check и foreign Cloudflare trace; локальные client profiles и deployment env при status/verify/diagnose не изменяются.
+- `vpn verify live --throughput-seconds 600` добавляет controlled десятиминутный VLESS throughput gate: range-capable download держится на 12 Mbit/s и проверяется минимум 10 Mbit/s без короткого synthetic burst.
+- Server-side acceptance разделяет наблюдаемую прямую доступность RU и обязательные пользовательские пути: foreign-домены и IPv4 literal проверяются через WG и router, IPv6 literal через router и foreign egress. Недоступность заблокированного прямого RU Telegram или IPv6 bind на `wg0` больше не даёт ложный rollback.
+- Install/reinstall доставляет staged release в `/etc/vpn-stack/releases`, валидирует конфиги и manifest до atomic switch `current`, а при server-side acceptance failure возвращает предыдущие artifacts и service state.
+- Runtime health стал state machine с двухцикловым hard-failure gate, 15-minute recovery cooldown и обязательным post-check. Soft degradation не перезапускает dataplane.
+- `vpn maintain` отделяет отчёт об APT/security/reboot от применения обновлений; обновление roles и refresh assets выполняются только транзакционно и последовательно.
+- Web-admin сохранён. Его правила остаются единственным поддерживаемым server-side runtime overlay; CLI `vpn routes` использует тот же backend.
+
+### Removed
+
+- Удалены log-based guard, `abuse_ipv4`, background asset sync, adaptive route cache и ручные runtime knobs qdisc/offload/timeout. Они меняли состояние без независимого egress и не могли надёжно восстановить route.
+- Удалены дублирующие Bash collectors, legacy health wrapper и модульный coverage-loop: полный audit запускает один branch-coverage test run вместо повторного запуска каждого test module.
+
 ## [0.10.0] - 2026-07-14
 
 ### Changed

@@ -25,16 +25,7 @@ from .config import (
     ensure_deployment_env,
 )
 from .error_logging import log_exception
-from .health import (
-    collect_role_preflights,
-    current_wg_interface,
-    deployment_health_snapshot,
-    deployment_is_healthy,
-    health_failure_message,
-    is_hard_health_verdict,
-    is_soft_health_verdict,
-    print_deployment_health,
-)
+from .diagnostics import DiagnosticsSnapshot
 from .localnet import assert_server_route_not_self_tunneled, local_route_to_server, route_uses_self_tunnel
 from .models import AppError, ROLE_FOREIGN, ROLE_META, ROLE_RU, RemoteTarget, UserCancelled
 from .prompts import (
@@ -49,11 +40,12 @@ from .prompts import (
     select_role_for_menu,
     validate_target_settings,
 )
-from .remote import ensure_remote_privilege, fetch_remote_deployment_env, print_preflight, remote_preflight, scp_upload, ssh_stream
+from .remote import ensure_remote_privilege, fetch_remote_deployment_env, print_preflight, remote_agent_snapshot, remote_preflight, scp_upload, ssh_capture, ssh_stream
 from .roles import execution_roles, requested_roles
-from .client_artifacts import client_artifact_paths, render_client_profiles
-from .render import deployment_out_dir, render_all_artifacts, render_config_artifacts
+from .client_artifacts import client_artifact_paths
+from .render import deployment_out_dir, package_bundle, render_all_artifacts, render_config_artifacts
 from .state import load_state, state_json_path, state_legacy_path, write_state
+from .status_output import format_snapshot_summary
 from .targets import (
     apply_env_connection_overrides,
     build_target,
@@ -106,110 +98,9 @@ def load_remote_authoritative_env(
     if source_env == env:
         return env, False
     write_text(env_path, render_env_text(source_env))
-    render_client_profiles(source_env)
     sync_targets_from_env(source_env, targets)
     print("Локальный deployment env синхронизирован из установленного сервера.")
     return source_env, True
-
-
-def nonblocking_systemd_restart_command(*units: str) -> str:
-    quoted_units = " ".join(shlex.quote(unit) for unit in units)
-    return (
-        f"systemctl reset-failed {quoted_units} >/dev/null 2>&1 || true; "
-        f"systemctl restart --no-block {quoted_units}"
-    )
-
-
-def run_dataplane_repair_cycle(target_map: dict[str, RemoteTarget], wg_interface: str) -> None:
-    print_header("Dataplane repair")
-    print(f"{target_map[ROLE_FOREIGN].label}: перезапускаю подтверждённо неисправный WireGuard path")
-    ssh_stream(
-        target_map[ROLE_FOREIGN],
-        nonblocking_systemd_restart_command(f"wg-quick@{wg_interface}"),
-        as_root=True,
-    )
-    print(f"{target_map[ROLE_RU].label}: перезапускаю подтверждённо неисправный WireGuard path")
-    ssh_stream(
-        target_map[ROLE_RU],
-        nonblocking_systemd_restart_command(f"wg-quick@{wg_interface}"),
-        as_root=True,
-    )
-    print("Repair-команды отправлены, жду восстановления dataplane.")
-
-
-def health_verdict_is_repairable(verdict: str) -> bool:
-    return verdict in {
-        "ru_wg_egress_failed",
-        "foreign_ru_ip_mismatch",
-        "wg_handshake_stale",
-    }
-
-
-def prime_runtime_health(targets: list[RemoteTarget]) -> None:
-    print_header("Runtime health")
-    for target in targets:
-        if not target.ssh_host:
-            continue
-        try:
-            ssh_stream(target, "/usr/local/lib/vpn-stack/health-check.sh", as_root=True)
-        except Exception as exc:  # noqa: BLE001
-            warn(f"{target.label}: runtime health reported a problem, продолжаю deployment-level проверку: {exc}")
-
-
-def wait_for_dataplane_health(
-    env: dict[str, str],
-    targets: list[RemoteTarget],
-    *,
-    timeout_sec: int = 45,
-    interval_sec: int = 5,
-    allow_soft_degraded: bool = False,
-) -> tuple[dict[str, dict[str, str]], dict[str, str]]:
-    deadline = time.time() + timeout_sec
-    wg_interface = current_wg_interface(env)
-    latest_preflights: dict[str, dict[str, str]] = {}
-    latest_health = deployment_health_snapshot(env, latest_preflights)
-    while time.time() < deadline:
-        latest_preflights = collect_role_preflights(targets, wg_interface)
-        healthy, latest_health = deployment_is_healthy(env, latest_preflights)
-        if healthy or (allow_soft_degraded and not is_hard_health_verdict(latest_health["health_verdict"])):
-            return latest_preflights, latest_health
-        time.sleep(interval_sec)
-    return latest_preflights, latest_health
-
-
-def ensure_deployment_health(
-    env: dict[str, str],
-    targets: list[RemoteTarget],
-    *,
-    auto_repair: bool,
-) -> dict[str, dict[str, str]]:
-    if {target.role for target in targets} != {ROLE_RU, ROLE_FOREIGN}:
-        return {}
-    if auto_repair:
-        prime_runtime_health(targets)
-    preflights, health = wait_for_dataplane_health(env, targets, timeout_sec=20, interval_sec=5, allow_soft_degraded=True)
-    print_deployment_health(health)
-    if health["health_verdict"] == "ok":
-        return preflights
-    if is_soft_health_verdict(health["health_verdict"]):
-        warn(f"Dataplane degraded but operational: {health_failure_message(health)}")
-        return preflights
-    if not auto_repair:
-        return preflights
-    if not health_verdict_is_repairable(health["health_verdict"]):
-        raise AppError(f"Dataplane health check failed without a safe automatic repair: {health_failure_message(health)}")
-    target_map = {target.role: target for target in targets}
-    run_dataplane_repair_cycle(target_map, current_wg_interface(env))
-    repaired_preflights, repaired_health = wait_for_dataplane_health(env, targets, allow_soft_degraded=True)
-    print_deployment_health(repaired_health)
-    if repaired_health["health_verdict"] == "ok":
-        return repaired_preflights
-    if is_soft_health_verdict(repaired_health["health_verdict"]):
-        warn(f"Dataplane degraded but operational after repair: {health_failure_message(repaired_health)}")
-        return repaired_preflights
-    if is_hard_health_verdict(repaired_health["health_verdict"]):
-        raise AppError(f"Dataplane health check failed after repair: {health_failure_message(repaired_health)}")
-    return repaired_preflights
 
 
 def ensure_foreign_wan_interface(env: dict[str, str], foreign_preflight: dict[str, str]) -> None:
@@ -360,6 +251,7 @@ def prepare_remote_session(
     enforce_safe_route: bool = True,
     fresh_since_epoch: int | None = None,
     run_live_probes: bool = False,
+    sync_remote_env: bool = False,
 ) -> tuple[str, Path, dict[str, str], dict[str, Any], list[RemoteTarget], dict[str, dict[str, str]]]:
     if allow_create or persist_local:
         ensure_directories()
@@ -375,7 +267,7 @@ def prepare_remote_session(
     print(f"deployment: {deployment_name}")
     targets: list[RemoteTarget] = []
     preflights: dict[str, dict[str, str]] = {}
-    wg_interface = current_wg_interface(env)
+    wg_interface = (env.get("WG_INTERFACE", "").strip() or "wg0")
     for role in roles:
         target = apply_env_connection_overrides(build_target(role, env, state))
         if non_interactive:
@@ -404,7 +296,9 @@ def prepare_remote_session(
         targets.append(target)
         preflights[role] = preflight
     update_env_with_targets(env, targets)
-    env, synced_from_remote = load_remote_authoritative_env(deployment_name, env_path, env, targets, preflights)
+    synced_from_remote = False
+    if sync_remote_env:
+        env, synced_from_remote = load_remote_authoritative_env(deployment_name, env_path, env, targets, preflights)
     if persist_local or synced_from_remote:
         write_text(env_path, render_env_text(env))
     if persist_local:
@@ -458,9 +352,9 @@ def postcheck_command(role: str, wg_interface: str) -> str:
           exit 1
         }}
         check_service_active nftables nftables
-        check_service_active vpn-stack-sync.timer vpn-stack-sync.timer
         check_service_active vpn-stack-health.timer vpn-stack-health.timer
         check_service_active wg-quick@{wg_interface} wg-quick@{wg_interface}
+        test -x /usr/local/lib/vpn-stack/vpn-stack-agent.py
         {ru_service_checks}
         printf 'role='
         cat /etc/vpn-stack/role
@@ -578,7 +472,7 @@ def finalize_install_output(env: dict[str, str], deployment_name: str) -> None:
     print("Что делать дальше:")
     print(f"1. Сначала импортируй простой {paths['vless_uri'].name}. Это основной контракт: обычный VLESS/Reality tunnel, маршрутизация на сервере.")
     print(f"2. JSON-файлы используй только как fallback, если конкретный клиент не умеет нормально импортировать URI.")
-    print(f"3. Если клиент отправляет private/fake IP вместо домена, vpn status покажет это в sing-box recent blocked destinations.")
+    print("3. Если клиент отправляет private/fake IP вместо домена, vpn status покажет это в bucket blocked_private_fake.")
     print(f"4. Для Hiddify сначала пробуй URI {paths['hiddify_uri_compat'].name}; JSON оставлен как запасной вариант.")
     print(f"5. Если сайты висят, сначала проверь серверные группы ошибок: vpn status --deployment {deployment_name} --role ru-gateway")
     print(f"6. Если включён TUN/full VPN и client-check показывает self-tunnel, запусти PowerShell от администратора: .\\{paths['windows_route_bypass'].name}")
@@ -605,7 +499,7 @@ def run_selected_remote_action(
     target_map = {target.role: target for target in targets}
     requested = requested_roles(role_arg)
     available_roles = [role for role in requested if role in target_map]
-    wg_interface = current_wg_interface(env)
+    wg_interface = (env.get("WG_INTERFACE", "").strip() or "wg0")
     if action in {"install", "reinstall"}:
         print_header("Локальная сборка артефактов")
         render_all_artifacts(env_path, env)
@@ -642,6 +536,7 @@ def install_workflow(deployment: str | None, *, non_interactive: bool = False, y
         persist_local=True,
         confirm_existing_connections=not non_interactive,
         non_interactive=non_interactive,
+        sync_remote_env=True,
     )
     ensure_foreign_wan_interface(env, preflights[ROLE_FOREIGN])
     write_text(env_path, render_env_text(env))
@@ -671,9 +566,8 @@ def install_workflow(deployment: str | None, *, non_interactive: bool = False, y
         install_remote_role(target_map[role], deployment_name, env, action)
         step += 1
         print_step(step, total_steps, f"{ROLE_META[role]['label']}: пост-проверка")
-        postcheck_remote_role(target_map[role], current_wg_interface(env))
+        postcheck_remote_role(target_map[role], (env.get("WG_INTERFACE", "").strip() or "wg0"))
         step += 1
-    ensure_deployment_health(env, targets, auto_repair=True)
     finalize_install_output(env, deployment_name)
     print(f"Deployment env: {env_path}")
     print(f"Локальное состояние: {state_json_path(deployment_name)}")
@@ -682,7 +576,7 @@ def install_workflow(deployment: str | None, *, non_interactive: bool = False, y
 
 def status_workflow(deployment: str | None, role: str, *, non_interactive: bool = False) -> int:
     roles = requested_roles(role)
-    deployment_name, env_path, env, _state, targets, preflights = prepare_remote_session(
+    deployment_name, env_path, env, _state, targets, _preflights = prepare_remote_session(
         deployment,
         roles=roles,
         require_privilege=False,
@@ -694,9 +588,135 @@ def status_workflow(deployment: str | None, role: str, *, non_interactive: bool 
         enforce_safe_route=False,
     )
     print_summary(deployment_name, env, targets)
-    if set(roles) == {ROLE_RU, ROLE_FOREIGN} and {target.role for target in targets} == {ROLE_RU, ROLE_FOREIGN}:
-        print_deployment_health(deployment_health_snapshot(env, preflights))
+    failures = 0
+    for target in targets:
+        try:
+            snapshot = DiagnosticsSnapshot.from_agent(remote_agent_snapshot(target))
+        except Exception as exc:  # noqa: BLE001
+            warn(f"{target.label}: structured snapshot unavailable: {exc}")
+            failures += 1
+            continue
+        print_header(f"Snapshot {target.label}")
+        for line in format_snapshot_summary(snapshot):
+            print(line)
     print(f"Deployment env: {env_path}")
+    return 1 if failures else 0
+
+
+def maintain_workflow(
+    deployment: str | None,
+    *,
+    apply_updates: bool,
+    refresh_assets: bool,
+    reboot: bool,
+    non_interactive: bool = False,
+    yes: bool = False,
+) -> int:
+    """Apply OS maintenance in egress-first order with a live acceptance gate."""
+    roles = requested_roles("all")
+    deployment_name, _env_path, env, _state, targets, _preflights = prepare_remote_session(
+        deployment,
+        roles=roles,
+        require_privilege=True,
+        validate_os=False,
+        allow_create=False,
+        persist_local=False,
+        confirm_existing_connections=False,
+        non_interactive=non_interactive,
+        enforce_safe_route=False,
+        sync_remote_env=refresh_assets,
+    )
+    target_map = {target.role: target for target in targets}
+    if not apply_updates and not refresh_assets:
+        print_header("Обслуживание серверов")
+        for role in execution_roles("install", roles):
+            target = target_map[role]
+            snapshot = remote_agent_snapshot(target)
+            maintenance = snapshot.get("maintenance", {})
+            print(
+                f"{target.label}: updates={maintenance.get('upgradable', 0)}, "
+                f"security={maintenance.get('security_upgradable', 0)}, "
+                f"reboot_required={maintenance.get('reboot_required', False)}"
+            )
+        print("Для применения обновлений используй vpn maintain --apply --yes; для rule assets добавь --refresh-assets.")
+        return 0
+
+    if not yes and not prompt_yes_no("Применить выбранное обслуживание по очереди с live acceptance после каждой роли?", default=False):
+        print("Остановлено пользователем.")
+        return 0
+
+    if refresh_assets:
+        print_header("Транзакционное обновление rule assets")
+        render_config_artifacts(_env_path, env, fetch_assets_first=True)
+        package_bundle(env)
+        for role in execution_roles("install", roles):
+            target = target_map[role]
+            install_remote_role(target, deployment_name, env, "reinstall")
+            postcheck_remote_role(target, env.get("WG_INTERFACE", "wg0") or "wg0")
+
+    for role in execution_roles("install", roles) if apply_updates else ():
+        target = target_map[role]
+        print_header(f"Обслуживание {target.label}")
+        ssh_stream(
+            target,
+            "DEBIAN_FRONTEND=noninteractive apt-get update && "
+            "DEBIAN_FRONTEND=noninteractive apt-get -y --with-new-pkgs upgrade",
+            as_root=True,
+        )
+        snapshot = remote_agent_snapshot(target, live_probes=True, profile="acceptance")
+        verdicts = snapshot.get("verdicts", {})
+        if verdicts.get("server_path") != "verified" or (role == ROLE_RU and verdicts.get("public_front") != "verified"):
+            raise AppError(f"{target.label}: maintenance acceptance failed: {verdicts.get('reasons', [])}")
+        if reboot and snapshot.get("maintenance", {}).get("reboot_required"):
+            ssh_stream(target, "systemctl reboot", as_root=True)
+            wait_for_remote_recovery(target, env.get("WG_INTERFACE", "wg0") or "wg0", timeout_sec=300)
+            recovered = remote_agent_snapshot(target, live_probes=True, profile="acceptance")
+            if recovered.get("verdicts", {}).get("server_path") != "verified":
+                raise AppError(f"{target.label}: acceptance after reboot failed")
+
+    from .verify import verify_live_workflow
+
+    return verify_live_workflow(deployment_name, non_interactive=True)
+
+
+def routes_workflow(
+    deployment: str | None,
+    action: str,
+    *,
+    value: str = "",
+    outbound: str = "",
+    rule_type: str = "domain",
+    include_subdomains: bool = False,
+    rule_id: str = "",
+    non_interactive: bool = False,
+) -> int:
+    import json
+    import shlex
+
+    deployment_name, _env_path, _env, _state, targets, _preflights = prepare_remote_session(
+        deployment,
+        roles=[ROLE_RU],
+        require_privilege=True,
+        validate_os=False,
+        allow_create=False,
+        persist_local=False,
+        confirm_existing_connections=False,
+        non_interactive=non_interactive,
+        enforce_safe_route=False,
+    )
+    target = targets[0]
+    command = ["/usr/bin/python3", "/usr/local/lib/vpn-stack/vpn-stack-agent.py", "routes", action]
+    if action == "add":
+        command.extend(["--type", rule_type, "--value", value, "--outbound", outbound])
+        if include_subdomains:
+            command.append("--include-subdomains")
+    elif action == "remove":
+        command.extend(["--id", rule_id])
+    payload = json.loads(ssh_capture(target, " ".join(shlex.quote(part) for part in command), as_root=True, command_timeout=60))
+    print_header("Маршруты web-админки")
+    print(f"deployment: {deployment_name}")
+    for rule in payload.get("rules", []):
+        print(f"{rule['id']} {rule['type']} {rule['value']} -> {rule['outbound']} enabled={rule['enabled']}")
     return 0
 
 
@@ -710,6 +730,7 @@ def remote_action_workflow(deployment: str | None, role: str, action: str, *, no
         persist_local=True,
         confirm_existing_connections=not non_interactive,
         non_interactive=non_interactive,
+        sync_remote_env=action in {"install", "reinstall"},
     )
     if action in {"install", "reinstall"} and ROLE_FOREIGN in roles:
         ensure_foreign_wan_interface(env, preflights[ROLE_FOREIGN])
@@ -726,8 +747,6 @@ def remote_action_workflow(deployment: str | None, role: str, action: str, *, no
         return 0
     run_selected_remote_action(action, deployment_name, env_path, env, targets, role_arg=role)
     if action in {"install", "reinstall"}:
-        if {target.role for target in targets} == {ROLE_RU, ROLE_FOREIGN}:
-            ensure_deployment_health(env, targets, auto_repair=True)
         finalize_install_output(env, deployment_name)
     else:
         print_header("Готово")

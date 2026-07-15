@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import logging
 import tempfile
 import unittest
@@ -20,6 +21,7 @@ from vpn_installer.remote import (
     paramiko_stream,
     paramiko_upload,
     preflight_script,
+    bootstrap_from_snapshot,
     print_preflight,
     remote_preflight,
     scp_base_args,
@@ -32,86 +34,22 @@ from vpn_installer.remote import (
 
 
 class RemoteTests(unittest.TestCase):
-    def test_preflight_uses_configured_interface(self) -> None:
+    def test_preflight_bootstrap_collects_only_install_prerequisites(self) -> None:
         script = preflight_script("wg-test")
-        self.assertIn('run_live_probes="0"', script)
-        self.assertIn("wg-quick@wg-test", script)
+        self.assertIn("WG_INTERFACE=wg-test", script)
+        self.assertIn("wg-quick@${WG_INTERFACE}.service", script)
+        self.assertIn("os_id", script)
+        self.assertIn("deployment_name", script)
         self.assertIn("wg_latest_handshake_age_s", script)
-        self.assertIn("observed_ipv4", script)
-        self.assertIn("wg_observed_ipv4", script)
-        self.assertIn("direct_download_bps", script)
-        self.assertIn("wg_download_bps", script)
-        self.assertIn("deep_probe_verdict", script)
-        self.assertIn("deep_foreign_direct_download_bps", script)
-        self.assertIn("deep_ru_wg_upload_bps", script)
-        self.assertIn("wan_offload_gro", script)
-        self.assertIn("wan_offload_tso", script)
-        self.assertGreaterEqual(script.count("latest-handshakes"), 2)
-        self.assertIn("reality_invalid_recent_count", script)
-        self.assertIn("nft_port_packets", script)
-        self.assertIn("nft_vless_drop_packets", script)
-        self.assertIn('nft_vless_drop_packets="0"', script)
-        self.assertIn("head -n1 || true", script)
-        self.assertIn("dns: (lookup|exchange) failed", script)
-        self.assertIn("exchange failed for", script)
+        self.assertNotIn("journalctl", script)
+        self.assertNotIn("curl", script)
+        self.assertNotIn("probe_target_urls", script)
 
-    def test_preflight_enables_expensive_probes_only_for_live_verification(self) -> None:
-        script = preflight_script("wg0", run_live_probes=True)
-        self.assertIn('run_live_probes="1"', script)
-        self.assertIn('if [[ "${run_live_probes}" == "1"', script)
-
-    def test_preflight_treats_missing_deprecated_env_as_normal(self) -> None:
-        script = preflight_script("wg0")
-        self.assertIn("paste -sd, - || true", script)
-
-    def test_target_probe_uses_header_probe_with_short_range_fallback(self) -> None:
-        script = preflight_script("wg-test")
-        self.assertIn("curl -4kIsS", script)
-        self.assertIn("--range 0-0", script)
-        self.assertNotIn("curl -4kLsS --interface \"${bind_iface}\" --connect-timeout 8 --max-time 20", script)
-        self.assertNotIn("curl -4kLsS --connect-timeout 8 --max-time 20", script)
-
-    def test_target_probe_uses_path_specific_lists_and_short_timeouts(self) -> None:
-        script = preflight_script("wg0")
-        self.assertIn('ru_direct_target_probe_urls="$(env_value HEALTH_RU_DIRECT_TARGET_PROBE_URLS)"', script)
-        self.assertIn('target_probe_connect_timeout="$(env_value HEALTH_TARGET_CONNECT_TIMEOUT_SECONDS)"', script)
-        self.assertIn('target_probe_max_time="$(env_value HEALTH_TARGET_MAX_TIME_SECONDS)"', script)
-        self.assertIn('ru_router_listen_port="$(env_value RU_ROUTER_LISTEN_PORT)"', script)
-        self.assertIn('probe_target_urls "" "${target_probe_urls}" "${target_probe_connect_timeout}" "${target_probe_max_time}" ""', script)
-        self.assertIn('probe_target_urls "" "${ru_direct_target_probe_urls}" "${target_probe_connect_timeout}" "${target_probe_max_time}" "socks5h://127.0.0.1:${ru_router_listen_port}"', script)
-        self.assertIn('probe_target_urls "" "${target_probe_urls}" "${target_probe_connect_timeout}" "${target_probe_max_time}" "socks5h://127.0.0.1:${ru_router_listen_port}"', script)
-        self.assertIn('probe_download_bps "" "${throughput_url}" "socks5h://127.0.0.1:${ru_router_listen_port}"', script)
-        self.assertIn('ipv6_literal_tcp_probe="$(probe_ipv6_literal_tcp_path "wg0")"', script)
-        self.assertIn('"cloudflare_v6=https://[2606:4700:4700::1111]/cdn-cgi/trace"', script)
-        self.assertIn('route_mark="$(env_value APP_ROUTE_MARK)"', script)
-        self.assertIn('"routing_mark": ${route_mark}', script)
-        self.assertIn('curl -kLsS --proxy "socks5h://127.0.0.1:${port}"', script)
-        self.assertNotIn('curl -6kLsS --proxy "socks5h://127.0.0.1:${port}"', script)
-        self.assertIn("target_probe_needs_body_fallback", script)
-        self.assertIn('--proxy "${proxy_url}"', script)
-        self.assertIn('--connect-timeout "${connect_timeout}" --max-time "${max_time}"', script)
-        self.assertNotIn("--connect-timeout 6 --max-time 10", script)
-        self.assertNotIn("printf '000|curl_failed||0'", script)
-
-    def test_preflight_log_grouping_does_not_fail_on_pipe_sigpipe(self) -> None:
-        script = preflight_script("wg0")
-        self.assertIn("set -euo pipefail", script)
-        self.assertIn("set +o pipefail", script)
-        self.assertIn("set -o pipefail\n\nprintf 'login_user=%s", script)
-
-    def test_preflight_reuses_effective_xray_window_for_invalid_reality_counter(self) -> None:
-        script = preflight_script("wg0")
-        self.assertIn('xray_recent_log="$(journalctl -u vpn-stack-xray.service --since "${xray_recent_effective_since}"', script)
-        self.assertIn('reality_invalid_lines="$(printf \'%s', script)
-        self.assertIn('"${xray_recent_log}" | grep \'REALITY: processed invalid connection\' || true)"', script)
-        self.assertNotIn("journalctl -u vpn-stack-xray.service --since '-30 minutes'", script)
-
-    def test_preflight_can_anchor_fresh_log_window_for_live_verify(self) -> None:
-        script = preflight_script("wg0", fresh_since_epoch=1783733000)
-        self.assertIn('verify_fresh_since_epoch="1783733000"', script)
-        self.assertIn('singbox_recent_effective_since="@${verify_fresh_since_epoch}"', script)
-        self.assertIn('xray_recent_effective_since="@${verify_fresh_since_epoch}"', script)
-
+    def test_preflight_bootstrap_ignores_live_probe_options(self) -> None:
+        script = preflight_script("wg0", fresh_since_epoch=1783733000, run_live_probes=True)
+        self.assertIn("WG_INTERFACE=wg0", script)
+        self.assertNotIn("run_live_probes", script)
+        self.assertNotIn("1783733000", script)
     def test_password_mode_forces_python_backend(self) -> None:
         target = RemoteTarget(role=ROLE_RU, auth_mode="password")
         self.assertTrue(use_python_ssh_backend(target))
@@ -387,23 +325,43 @@ class RemoteTests(unittest.TestCase):
         self.assertEqual(parse_kv_output(payload), {"a": "1", "b": "2"})
 
     def test_remote_preflight_uses_ssh_capture(self) -> None:
-        with patch("vpn_installer.remote.ssh_capture", return_value="host=demo\nrole=ru-gateway\n") as mocked:
+        snapshot = {"schema_version": 2, "role": "ru-gateway", "services": {}, "artifacts": {}, "logs": {"fresh": {}, "windows_minutes": {}}, "release": {}, "wireguard": {}, "network": {}, "front": {}}
+        with patch("vpn_installer.remote.ssh_capture", return_value=json.dumps(snapshot)) as mocked:
             payload = remote_preflight(RemoteTarget(role=ROLE_RU), "wgx")
         mocked.assert_called_once()
         self.assertEqual(payload["role"], "ru-gateway")
 
-    def test_remote_preflight_passes_fresh_log_anchor(self) -> None:
+    def test_remote_preflight_uses_compact_bootstrap_when_agent_is_unavailable(self) -> None:
         with patch("vpn_installer.remote.ssh_capture", return_value="role=ru-gateway\n") as mocked:
             remote_preflight(RemoteTarget(role=ROLE_RU), "wgx", fresh_since_epoch=1783733001)
-        self.assertIn('verify_fresh_since_epoch="1783733001"', mocked.call_args.args[1])
+        self.assertEqual(mocked.call_count, 2)
+        self.assertIn("WG_INTERFACE=wgx", mocked.call_args.args[1])
 
     def test_fetch_remote_deployment_env_uses_root_capture(self) -> None:
         with patch("vpn_installer.remote.ssh_capture", return_value='DEPLOY_NAME="demo"\n') as mocked:
             payload = fetch_remote_deployment_env(RemoteTarget(role=ROLE_RU))
         self.assertEqual(payload, 'DEPLOY_NAME="demo"\n')
         mocked.assert_called_once_with(unittest.mock.ANY, "cat /etc/vpn-stack/deployment.env", as_root=True)
+    def test_bootstrap_from_snapshot_uses_agent_host_and_lifecycle_fields(self) -> None:
+        preflight = bootstrap_from_snapshot(
+            {
+                "schema_version": 2,
+                "deployment": "demo",
+                "role": ROLE_RU,
+                "release": {"release_id": "release-1", "installed_at": "2026-07-15T00:00:00Z", "policy_version": "0.11.0"},
+                "host": {"hostname": "demo", "login_user": "root", "is_root": True, "has_sudo": True, "os_id": "ubuntu", "os_version": "24.04", "default_interface": "eth0"},
+                "services": {"wireguard": "active", "nftables": "active", "sing-box": "active", "xray": "active", "health_timer": "active"},
+                "artifacts": {"drift": "none", "files": {}},
+                "wireguard": {"peers": []},
+                "network": {"interfaces": {"eth0": {}}},
+                "front": {"rtt_ms": {"p95": 40}, "socket_retransmissions": 3, "state_counts": {"FIN-WAIT-1": 0}},
+            }
+        )
+        self.assertEqual(preflight["is_root"], "1")
+        self.assertEqual(preflight["installed"], "1")
+        self.assertEqual(preflight["default_iface"], "eth0")
 
-    def test_print_preflight_emits_expected_lines(self) -> None:
+    def test_print_preflight_emits_lifecycle_summary(self) -> None:
         with patch("sys.stdout", new_callable=io.StringIO) as stream:
             print_preflight(
                 RemoteTarget(role=ROLE_RU),
@@ -413,193 +371,28 @@ class RemoteTests(unittest.TestCase):
                     "os_id": "ubuntu",
                     "os_version": "24.04",
                     "default_iface": "eth0",
-                    "configured_wan_interface": "eth0",
-                    "singbox_configured_log_level": "warn",
-                    "global_doh_server": "8.8.8.8",
-                    "global_doh_server_name": "dns.google",
-                    "ru_ipv6_literal_policy": "route-with-budget",
-                    "wan_mtu": "1500",
-                    "default_qdisc": "fq_codel",
-                    "wan_offload_gro": "off",
-                    "wan_offload_gso": "off",
-                    "wan_offload_tso": "off",
-                    "tcp_cc": "bbr",
-                    "tcp_mtu_probing": "1",
-                    "netdev_backlog": "8192",
-                    "rmem_max": "8388608",
-                    "wmem_max": "8388608",
-                    "udp_rmem_min": "16384",
-                    "udp_wmem_min": "16384",
-                    "iface_rx_drops": "0",
-                    "iface_tx_drops": "0",
                     "installed": "1",
-                    "role": "ru-gateway",
                     "deployment_name": "demo",
-                    "sing_box": "active",
-                    "nftables": "active",
-                    "nft_ssh_accept_packets": "10",
-                    "nft_ssh_drop_packets": "1",
-                    "nft_vless_accept_packets": "200",
-                    "nft_vless_drop_packets": "5",
+                    "role": "ru-gateway",
+                    "drift": "none",
                     "wireguard": "active",
+                    "nftables": "active",
+                    "sing_box": "active",
+                    "xray": "active",
+                    "health_timer": "active",
+                    "wg_latest_handshake_age_s": "4",
                     "wg_transfer_rx": "1",
                     "wg_transfer_tx": "2",
-                    "wg_latest_handshake": "3",
-                    "wg_latest_handshake_age_s": "4",
-                    "observed_ipv4": "198.51.100.20",
-                    "wg_observed_ipv4": "198.51.100.20",
-                    "direct_download_bps": "6000000",
-                    "wg_download_bps": "700000",
-                    "target_probe_direct": "chatgpt.com:reachable:403:0:172.64.0.1:0.1;github.com:reachable:200:0:140.82.0.1:0.2",
-                    "target_probe_wg": "chatgpt.com:reachable:403:0:172.64.0.1:0.1;github.com:reachable:200:0:140.82.0.1:0.2",
-                    "ipv6_literal_tcp_probe": "cloudflare_v6:reachable:200:0:2606:4700:4700::1111:0.08;google_v6:reachable:204:0:2a00:1450:400f:807::200e:0.09",
-                    "deep_probe_at": "2026-04-24T12:00:00+00:00",
-                    "deep_probe_verdict": "degraded",
-                    "deep_probe_reasons": "ru_wg_download=120000",
-                    "deep_foreign_direct_download_bps": "300000",
-                    "deep_foreign_direct_upload_bps": "900000",
-                    "deep_foreign_gateway_ping_loss_pct": "15",
-                    "deep_foreign_ru_ping_loss_pct": "10",
-                    "deep_foreign_internet_ping_loss_pct": "5",
-                    "deep_ru_wg_download_bps": "120000",
-                    "deep_ru_wg_upload_bps": "800000",
-                    "profile_updated_at": "2026-06-17T19:00:00+00:00",
-                    "profile_handshake_age_s": "130",
-                    "profile_handshake_grace_s": "200",
-                    "profile_wg_path_ok": "1",
-                    "profile_stale_handshake_live_path_s": "130",
-                    "self_heal_last_reason": "soft:wireguard_path",
-                    "self_heal_consecutive": "2",
-                    "self_heal_last_action": "restart-wireguard",
-                    "self_heal_last_action_result": "scheduled",
-                    "self_heal_last_action_reason": "soft:wireguard_path",
-                    "self_heal_last_action_age_s": "3600",
-                    "reality_invalid_recent_count": "7",
-                    "reality_invalid_recent_sources": "178.66.129.100=7",
-                    "singbox_to_foreign_timeout_count": "11",
-                    "singbox_to_foreign_ip_literal_timeout_count": "4",
-                    "singbox_to_foreign_ipv6_literal_timeout_count": "5",
-                    "singbox_direct_ru_timeout_count": "2",
-                    "singbox_dns_timeout_count": "1",
-                    "singbox_recent_timeout_sample": "connection: open connection to [2001:db8::1]:443 using outbound/direct[to-foreign]: i/o timeout",
-                    "singbox_start_count_24h": "1",
-                    "singbox_start_count_since_install": "1",
-                    "singbox_log_window_minutes": "30",
-                    "singbox_recent_effective_since": "@1783600000",
-                    "singbox_recent_blocked_count": "22",
-                    "singbox_recent_mux_closed_count": "36",
-                    "singbox_recent_eof_count": "38",
-                    "singbox_recent_dns_failed_count": "0",
-                    "singbox_recent_dns_timeout_count": "1",
-                    "singbox_recent_dns_nxdomain_count": "2",
-                    "singbox_recent_timeout_count": "0",
-                    "singbox_recent_invalid_reality_count": "3",
-                    "singbox_recent_private_dns_leak_count": "1",
-                    "singbox_recent_private_dns_leak_destinations": "172.19.0.2:853=1",
-                    "singbox_recent_to_foreign_timeout_count": "2",
-                    "singbox_recent_to_foreign_ip_literal_timeout_count": "4",
-                    "singbox_recent_to_foreign_ipv6_literal_timeout_count": "5",
-                    "singbox_recent_direct_ru_timeout_count": "1",
-                    "singbox_recent_sources": "91.193.149.187=36,193.46.56.226=2",
-                    "singbox_recent_blocked_destinations": "[fdfd::1ad5:632a]:55517=6,172.19.0.2:853=1",
-                    "singbox_recent_mux_sources": "91.193.149.187=36",
-                    "singbox_recent_to_foreign_count": "44",
-                    "singbox_recent_to_foreign_ip_literal_count": "9",
-                    "singbox_recent_to_foreign_ipv6_literal_count": "7",
-                    "singbox_recent_direct_ru_count": "12",
-                    "singbox_recent_to_foreign_destinations": "20.42.65.94:443=5,8.8.8.8:443=1",
-                    "singbox_recent_to_foreign_ip_literal_destinations": "91.108.56.103:443=4",
-                    "singbox_recent_to_foreign_ipv6_literal_destinations": "[2400:52e0:1e00::722:1]:443=4",
-                    "singbox_recent_direct_ru_destinations": "142.251.143.131:80=2",
-                    "singbox_recent_timeout_destinations": "[185.234.59.121]=2,ipv6.msftncsi.com:AAAA=1",
-                    "singbox_recent_ip_literal_timeout_destinations": "91.108.56.103:443=4",
-                    "singbox_fresh_timeout_destinations": "ipv6.msftconnecttest.com:AAAA=2",
-                    "singbox_fresh_domain_timeout_context": "rr2---sn-aj5go5-5i.googlevideo.com:443->[173.194.160.162]=1",
-                    "singbox_recent_ipv6_literal_count": "7",
-                    "singbox_recent_ipv6_literal_destinations": "[2400:52e0:1e00::722:1]:443=4,[fdfd::1ad5:632a]:55517=3",
-                    "singbox_recent_inbound_destinations": "chatgpt.com:443=2,[2606:4700::6810:5c12]:443=1",
-                    "singbox_recent_error_sample": "connection: listen packet connection using outbound/block[blocked]: operation not permitted",
-                    "xray_log_window_minutes": "30",
-                    "xray_recent_effective_since": "@1783600000",
-                    "xray_recent_error_count": "1",
-                    "xray_recent_invalid_reality_count": "0",
-                    "xray_recent_disabled_invalid_count": "3",
-                    "xray_recent_accepted_count": "55",
-                    "xray_recent_sources": "178.66.131.179=44,213.109.48.231=11",
-                    "xray_recent_accepted_destinations": "chatgpt.com:443=10,8.8.8.8:53=5",
-                    "xray_recent_ipv6_literal_count": "2",
-                    "xray_recent_ipv6_literal_destinations": "[2001:4860:4860::8888]:443=2",
-                    "xray_recent_error_sample": "REALITY: processed invalid connection from 203.0.113.20:12345",
-                    "sync_timer": "active",
+                    "front_rtt_p95_ms": "40",
+                    "front_retransmissions": "3",
+                    "front_fin_wait_1": "0",
                 },
             )
         output = stream.getvalue()
         self.assertIn("host: demo", output)
-        self.assertIn("configured WAN iface: eth0", output)
-        self.assertIn("warning: sing-box log level is warn; routed diagnostics need info-level connection logs.", output)
-        self.assertIn("wan offloads gro/gso/tso: off/off/off", output)
-        self.assertIn("tcp cc: bbr", output)
-        self.assertIn("wireguard transfer rx/tx: 1/2", output)
-        self.assertIn("nft SSH accept/drop packets: 10/1", output)
-        self.assertIn("nft VLESS accept/drop packets: 200/5", output)
-        self.assertIn("wireguard handshake age (s): 4", output)
-        self.assertIn("observed IPv4: 198.51.100.20", output)
-        self.assertIn("RU over wg IPv4: 198.51.100.20", output)
-        self.assertIn("direct download B/s: 6000000", output)
-        self.assertIn("RU over wg download B/s: 700000", output)
-        self.assertIn("target probes direct: chatgpt.com:reachable:403:0", output)
-        self.assertIn("target probes RU over wg: chatgpt.com:reachable:403:0", output)
-        self.assertIn("IPv6 literal TCP path: cloudflare_v6:reachable:200:0", output)
-        self.assertIn("deep probe verdict: degraded", output)
-        self.assertIn("foreign direct usable download B/s: 300000", output)
-        self.assertIn("RU over wg upload B/s: 800000", output)
-        self.assertIn("foreign ping loss to gateway (%): 15", output)
-        self.assertIn("runtime profile at: 2026-06-17T19:00:00+00:00", output)
-        self.assertIn("profile handshake age/grace (s): 130/200", output)
-        self.assertIn("profile wg path ok: 1", output)
-        self.assertIn("profile stale handshake with live path (s): 130", output)
-        self.assertIn("self-heal last action: restart-wireguard/scheduled age=3600s", output)
-        self.assertIn("recent invalid Reality handshakes: 7", output)
-        self.assertIn("invalid Reality sources: 178.66.129.100=7", output)
-        self.assertIn("diagnosis: invalid Reality happens before routing", output)
-        self.assertIn("sing-box to-foreign timeouts / 4h: 11", output)
-        self.assertIn("sing-box IPv4-literal to-foreign timeouts / 4h: 4", output)
-        self.assertIn("sing-box IPv6-literal to-foreign timeouts / 4h: 5", output)
-        self.assertIn("sing-box direct-ru timeouts / 4h: 2", output)
-        self.assertIn("sing-box DNS timeouts / 4h: 1", output)
-        self.assertIn("sing-box starts since install: 1", output)
-        self.assertIn("sing-box starts historical / 24h: 1", output)
-        self.assertIn("sing-box global DoH: 8.8.8.8/dns.google", output)
-        self.assertIn("sing-box IP-literal timeout destinations / 4h: 91.108.56.103:443=4", output)
-        self.assertIn("sing-box timeout destinations / 4h: [185.234.59.121]=2,ipv6.msftncsi.com:AAAA=1", output)
-        self.assertIn("sing-box last timeout sample: connection: open connection to [2001:db8::1]:443", output)
-        self.assertIn("Xray front recent window (min): 30", output)
-        self.assertIn("Xray front recent since: @1783600000", output)
-        self.assertIn("Xray front recent: accepted=55, errors=1, invalid_reality=0, disabled_invalid=3, ipv6_literals=2", output)
-        self.assertIn("Xray front recent sources: 178.66.131.179=44,213.109.48.231=11", output)
-        self.assertIn("Xray front recent destinations: chatgpt.com:443=10,8.8.8.8:53=5", output)
-        self.assertIn("Xray front recent IPv6 literal destinations: [2001:4860:4860::8888]:443=2", output)
-        self.assertIn("Xray front recent sample: REALITY: processed invalid connection from 203.0.113.20:12345", output)
-        self.assertIn("sing-box recent window (min): 30", output)
-        self.assertIn("sing-box recent since: @1783600000", output)
-        self.assertIn("sing-box recent grouped errors: blocked=22, mux_closed=36, eof=38, dns_timeout=1, dns_nxdomain=2, dns_other=0, timeout=0, invalid_reality=3, private_dns_leak=1", output)
-        self.assertIn("sing-box recent timeout classes: domain_to_foreign=2, ipv4_literal=4, ipv6_literal=5, direct_ru=1", output)
-        self.assertIn("sing-box recent timeout destinations: ipv6.msftconnecttest.com:AAAA=2", output)
-        self.assertIn("sing-box recent domain timeout context: rr2---sn-aj5go5-5i.googlevideo.com:443->[173.194.160.162]=1", output)
-        self.assertIn("sing-box recent sources: 91.193.149.187=36,193.46.56.226=2", output)
-        self.assertIn("sing-box recent blocked destinations: [fdfd::1ad5:632a]:55517=6,172.19.0.2:853=1", output)
-        self.assertIn("sing-box recent private DNS leaks: 172.19.0.2:853=1", output)
-        self.assertIn("sing-box recent mux sources: 91.193.149.187=36", output)
-        self.assertIn("sing-box recent sample: connection: listen packet connection using outbound/block[blocked]: operation not permitted", output)
-        self.assertIn("sing-box recent routed: to_foreign=44, to_foreign_ip_literal=9, to_foreign_ipv6_literal=7, direct_ru=12, ipv6_literals=7", output)
-        self.assertIn("sing-box recent to-foreign destinations: 20.42.65.94:443=5,8.8.8.8:443=1", output)
-        self.assertIn("sing-box recent IPv4-literal to-foreign destinations: 91.108.56.103:443=4", output)
-        self.assertIn("sing-box recent IPv6-literal to-foreign destinations: [2400:52e0:1e00::722:1]:443=4", output)
-        self.assertIn("sing-box recent direct-ru destinations: 142.251.143.131:80=2", output)
-        self.assertIn("sing-box recent IPv6 literal destinations: [2400:52e0:1e00::722:1]:443=4,[fdfd::1ad5:632a]:55517=3", output)
-        self.assertIn("diagnosis: client sent IPv6 literal destinations; public IPv6 literals use the same foreign WireGuard egress as ordinary foreign traffic.", output)
-        self.assertIn("sing-box recent inbound destinations: chatgpt.com:443=2,[2606:4700::6810:5c12]:443=1", output)
-
+        self.assertIn("services: wg=active, nft=active, sing-box=active, xray=active, health=active", output)
+        self.assertIn("wireguard: handshake_age_s=4, transfer_rx_tx=1/2", output)
+        self.assertIn("front: rtt_p95_ms=40, retransmissions=3, fin_wait_1=0", output)
     def test_ensure_remote_privilege_paths(self) -> None:
         target = RemoteTarget(role=ROLE_RU)
         ensure_remote_privilege(target, {"is_root": "1"}, prompt_yes_no=lambda *_args, **_kwargs: True, prompt_secret=lambda *_args, **_kwargs: "x")

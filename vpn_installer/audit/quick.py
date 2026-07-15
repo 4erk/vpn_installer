@@ -18,7 +18,7 @@ from ..runtime_deps import ensure_python_package
 from ..targets import build_target
 from .runner import AUDIT_IMAGE, VPN_PS1, AuditFailure, AuditRunner, powershell_executable, python_cmd, write_bytes
 
-COVERAGE_THRESHOLD = 90
+COVERAGE_THRESHOLD = 80
 COVERAGE_OMIT = "vpn_installer/audit/*"
 
 
@@ -32,11 +32,7 @@ def coverage_command(*args: str) -> list[str]:
     return python_cmd() + ["-c", runner, *args]
 
 
-def unit_test_modules() -> list[str]:
-    return sorted(f"tests.{path.stem}" for path in (ROOT_DIR / "tests").glob("test_*.py"))
-
-
-def unittest_driver_text() -> str:
+def coverage_driver_text() -> str:
     return textwrap.dedent(
         f"""
         import pathlib
@@ -45,16 +41,11 @@ def unittest_driver_text() -> str:
 
         repo = pathlib.Path({str(ROOT_DIR)!r}).resolve()
         sys.path.insert(0, str(repo))
-        module_name = sys.argv[1]
-        suite = unittest.defaultTestLoader.loadTestsFromName(module_name)
-        result = unittest.TextTestRunner(verbosity=2).run(suite)
+        suite = unittest.defaultTestLoader.discover(str(repo / "tests"), pattern="test_*.py")
+        result = unittest.TextTestRunner(verbosity=1).run(suite)
         raise SystemExit(0 if result.wasSuccessful() else 1)
         """
     ).strip() + "\n"
-
-
-def coverage_driver_text() -> str:
-    return unittest_driver_text()
 
 
 def docker_readiness() -> tuple[bool, str]:
@@ -86,7 +77,7 @@ def run(runner: AuditRunner) -> None:
     ps_env = {"VPN_NO_PAUSE": "1"}
 
     if dev_mode:
-        runner.record("quick-unittest", lambda: test_unittest_modules(runner))
+        runner.skip("quick-unittest", "full audit uses one instrumented branch-coverage run")
         runner.record("quick-coverage", lambda: test_coverage(runner))
     else:
         runner.skip("quick-unittest", "dev-only: unit-тесты запускаются только в полном аудите")
@@ -115,6 +106,12 @@ def run(runner: AuditRunner) -> None:
                 str(ROOT_DIR / "vpn_installer" / "targets.py"),
                 str(ROOT_DIR / "vpn_installer" / "workflows.py"),
                 str(ROOT_DIR / "vpn_installer" / "render.py"),
+                str(ROOT_DIR / "vpn_installer" / "specs.py"),
+                str(ROOT_DIR / "vpn_installer" / "routing_policy.py"),
+                str(ROOT_DIR / "vpn_installer" / "server_agent.py"),
+                str(ROOT_DIR / "vpn_installer" / "vless_verify.py"),
+                str(ROOT_DIR / "vpn_installer" / "verify.py"),
+                str(ROOT_DIR / "vpn_installer" / "manifest.py"),
                 str(ROOT_DIR / "vpn_installer" / "audit" / "runner.py"),
                 str(ROOT_DIR / "vpn_installer" / "audit" / "quick.py"),
                 str(ROOT_DIR / "vpn_installer" / "audit" / "docker.py"),
@@ -199,30 +196,16 @@ def run_interop(runner: AuditRunner) -> None:
     runner.record("quick-xray-reality-interop", lambda: test_xray_reality_interop(runner, out_dir))
 
 
-def test_unittest_modules(runner: AuditRunner) -> dict[str, str]:
-    driver = runner.run_dir / "unittest_driver.py"
-    driver.write_text(unittest_driver_text(), encoding="utf-8")
-    modules = unit_test_modules()
-    for module_name in modules:
-        short_name = module_name.split(".")[-1]
-        runner.run_command(f"unittest-{short_name}", python_cmd() + [str(driver), module_name])
-    return {"modules": str(len(modules))}
-
-
 def test_coverage(runner: AuditRunner) -> dict[str, str]:
     ensure_python_package("coverage", "coverage>=7,<8")
     coverage_data = runner.run_dir / "coverage.json"
     coverage_driver = runner.run_dir / "coverage_driver.py"
     coverage_driver.write_text(coverage_driver_text(), encoding="utf-8")
-    modules = unit_test_modules()
     runner.run_command("coverage-erase", coverage_command("erase"))
-    for index, module_name in enumerate(modules):
-        short_name = module_name.split(".")[-1]
-        args = ["run", "--source", "vpn_installer"]
-        if index > 0:
-            args.append("--append")
-        args.extend([str(coverage_driver), module_name])
-        runner.run_command(f"coverage-run-{short_name}", coverage_command(*args))
+    runner.run_command(
+        "coverage-branch-run",
+        coverage_command("run", "--branch", "--source", "vpn_installer", str(coverage_driver)),
+    )
     runner.run_command(
         "coverage-report",
         coverage_command("report", f"--fail-under={COVERAGE_THRESHOLD}", f"--omit={COVERAGE_OMIT}"),
@@ -235,7 +218,7 @@ def test_coverage(runner: AuditRunner) -> dict[str, str]:
         "coverage_json": str(coverage_data),
         "threshold": str(COVERAGE_THRESHOLD),
         "omit": COVERAGE_OMIT,
-        "modules": str(len(modules)),
+        "modules": "all",
     }
 
 
@@ -382,11 +365,11 @@ def test_validate_bundle(out_dir: Path) -> dict[str, str]:
             "assets/geoip-ru.srs",
             "rendered/sing-box.json",
             "rendered/xray.json",
-            "rendered/sync-state.sh",
+            "rendered/vpn-stack-agent.py",
             "rendered/vpn-stack-xray.service",
             "vpn_installer/install_support.py",
         },
-        "foreign-exit.tar.gz": {"install.sh", "deployment.env", "rendered/sing-box.json", "rendered/sync-state.sh", "vpn_installer/install_support.py"},
+        "foreign-exit.tar.gz": {"install.sh", "deployment.env", "rendered/sing-box.json", "rendered/vpn-stack-agent.py", "vpn_installer/install_support.py"},
     }
     for tarball in tarballs:
         if not tarball.is_file():

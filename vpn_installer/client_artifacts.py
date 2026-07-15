@@ -314,7 +314,7 @@ def render_next_steps(env: dict[str, str], *, out_dir: Path | None = None) -> st
             "Что делать дальше:",
             f"1. Сначала импортируй простой {paths['vless_uri'].name}. Это основной контракт: клиент делает обычный VLESS/Reality tunnel, а маршрутизация остаётся на сервере.",
             f"2. Если клиенту нужен JSON-импорт, используй {paths['windows_xray_json'].name} или {paths['android_xray_json'].name} как fallback, а не как обязательный путь.",
-            f"3. Если клиентский JSON/TUN начинает отправлять на сервер private/fake IP вместо домена, `vpn status` покажет это в `sing-box recent blocked destinations`.",
+            f"3. Если клиентский JSON/TUN начинает отправлять на сервер private/fake IP вместо домена, `vpn status` покажет это в отдельном bucket `blocked_private_fake`.",
             f"4. Если нужен Hiddify, сначала пробуй URI {paths['hiddify_uri_compat'].name}; локальные JSON {paths['hiddify_json'].name} и {paths['android_hiddify_json'].name} остаются запасным вариантом.",
             f"5. Если сайты висят, сначала смотри серверные группы ошибок: vpn status --deployment {env['DEPLOY_NAME']} --role ru-gateway",
             f"6. Если включён TUN/full VPN и client-check показывает self-tunnel, запусти PowerShell от администратора: .\\{paths['windows_route_bypass'].name}",
