@@ -74,6 +74,17 @@ class LogClassifierTests(unittest.TestCase):
         self.assertEqual(summary["top_destinations"]["ipv4_literal_timeout"]["91.108.56.103:443"], 2)
         self.assertEqual(summary["top_destinations"]["dns_timeout"]["ipv6.msftconnecttest.com:AAAA"], 1)
 
+    def test_direct_ru_timeout_keeps_original_domain_from_request_trace(self) -> None:
+        lines = [
+            "+0000 2026-07-17 12:03:59 INFO [3121755475 1ms] inbound/mixed[router-in]: inbound connection to lk.rosreestr.ru:8000",
+            "+0000 2026-07-17 12:03:59 INFO [3121755475 1ms] dns: lookup succeed for lk.rosreestr.ru: 217.77.104.136",
+            "+0000 2026-07-17 12:04:04 ERROR [3121755475 5.0s] connection: open connection to [217.77.104.136] using outbound/direct[direct-ru]: dial tcp 217.77.104.136:8000: i/o timeout",
+        ]
+        summary = summarize_lines(lines)
+        self.assertEqual(summary["counts"]["direct_ru_timeout"], 1)
+        self.assertEqual(summary["counts"]["ipv4_literal_timeout"], 0)
+        self.assertEqual(summary["top_destinations"]["direct_ru_timeout"], {"lk.rosreestr.ru:8000": 1})
+
 
 if __name__ == "__main__":
     unittest.main()

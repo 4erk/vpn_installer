@@ -38,7 +38,7 @@ ENV_SECTIONS = [
     ("# Xray public VLESS/REALITY front + sing-box local router", ["CLIENT_UUID", "CLIENT_FLOW", "RU_LISTEN_PORT", "RU_ROUTER_LISTEN_PORT", "RU_REALITY_SERVER_NAME", "RU_REALITY_HANDSHAKE_SERVER", "RU_REALITY_HANDSHAKE_PORT", "RU_REALITY_PRIVATE_KEY", "RU_REALITY_PUBLIC_KEY", "RU_REALITY_SHORT_ID", "RU_REALITY_ACCEPT_EMPTY_SHORT_ID", "RU_REALITY_MAX_TIME_DIFFERENCE", "UTLS_FINGERPRINT", "SING_BOX_LOG_LEVEL", "RU_SNIFF_TIMEOUT"]),
     ("# WireGuard between RU and foreign", ["WG_INTERFACE", "WG_PORT", "WG_MTU", "WG_KEEPALIVE", "WG_ROUTE_TABLE", "APP_ROUTE_MARK", "WG_TUNNEL_FWMARK", "WG_RU_ADDRESS", "WG_FOREIGN_ADDRESS", "WG_RU_ADDRESS_V6", "WG_FOREIGN_ADDRESS_V6", "WG_IPV6_PREFIX", "WG_RU_PRIVATE_KEY", "WG_RU_PUBLIC_KEY", "WG_FOREIGN_PRIVATE_KEY", "WG_FOREIGN_PUBLIC_KEY", "WG_PRESHARED_KEY"]),
     ("# DNS policy", ["GLOBAL_DOH_SERVER", "GLOBAL_DOH_SERVER_NAME", "GLOBAL_DOH_PATH"]),
-    ("# Forced policy rules for the Russian server: Russian APIs, reachability checks, IP-check services", ["RU_FORCE_DIRECT_DOMAIN", "RU_FORCE_DIRECT_DOMAIN_SUFFIX", "RU_FORCE_DIRECT_IP_CIDR", "RU_BLOCK_IP_CIDR", "RU_BLOCK_QUIC"]),
+    ("# Forced policy rules for the Russian server: Russian APIs, reachability checks, IP-check services", ["RU_FORCE_DIRECT_DOMAIN", "RU_FORCE_DIRECT_DOMAIN_SUFFIX", "RU_FORCE_DIRECT_IP_CIDR", "RU_BLOCK_IP_CIDR"]),
     ("# Rule assets for the RU server. Several source URLs can be listed through spaces.", ["RULESET_DIR", "RU_GEOSITE_URL", "RU_GEOIP_URL"]),
     ("# Optional RU egress deny list on the foreign server. Several source URLs can be listed through spaces.", ["FOREIGN_BLOCK_RU", "FOREIGN_RU_IPV4_LIST_URL", "FOREIGN_RU_IPV6_LIST_URL"]),
     (
@@ -104,6 +104,7 @@ class RemoteTarget:
     ssh_user: str = "root"
     auth_mode: str = "key"
     identity_path: str = ""
+    ssh_bind_address: str = ""
     ssh_password: str = ""
     sudo_mode: str = "unknown"
     sudo_password: str = ""

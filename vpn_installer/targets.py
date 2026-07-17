@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import ipaddress
 from typing import Any
 
 from .models import AppError, ROLE_META, ROLE_RU, RemoteTarget
@@ -38,6 +39,7 @@ def apply_env_connection_overrides(target: RemoteTarget) -> RemoteTarget:
     ssh_user = os.environ.get(f"{prefix}_SSH_USER", "").strip()
     auth_mode = os.environ.get(f"{prefix}_SSH_AUTH_MODE", "").strip()
     identity_path = os.environ.get(f"{prefix}_SSH_IDENTITY_PATH", "").strip()
+    bind_address = os.environ.get("VPN_SSH_BIND_ADDRESS", "").strip()
     password = os.environ.get(f"{prefix}_SSH_PASSWORD", "") or os.environ.get("VPN_SSH_PASSWORD", "")
 
     if public_ip:
@@ -55,6 +57,11 @@ def apply_env_connection_overrides(target: RemoteTarget) -> RemoteTarget:
         target.auth_mode = auth_mode
     if identity_path:
         target.identity_path = identity_path
+    if bind_address:
+        try:
+            target.ssh_bind_address = str(ipaddress.ip_address(bind_address))
+        except ValueError as exc:
+            raise AppError(f"Некорректный VPN_SSH_BIND_ADDRESS={bind_address}") from exc
     if password:
         target.auth_mode = "password"
         target.identity_path = ""

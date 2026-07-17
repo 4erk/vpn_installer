@@ -89,6 +89,7 @@ DEPRECATED_ENV_KEYS = {
     "HEALTH_TARGET_CONNECT_TIMEOUT_SECONDS",
     "HEALTH_TARGET_MAX_TIME_SECONDS",
     "HEALTH_CHECK_INTERVAL_MINUTES",
+    "RU_BLOCK_QUIC",
 }
 
 REMOTE_ENV_CRITICAL_KEYS = {
@@ -110,7 +111,6 @@ REMOTE_ENV_CRITICAL_KEYS = {
     "RU_FORCE_DIRECT_DOMAIN_SUFFIX",
     "RU_FORCE_DIRECT_IP_CIDR",
     "RU_BLOCK_IP_CIDR",
-    "RU_BLOCK_QUIC",
     "RU_GEOSITE_URL",
     "RU_GEOIP_URL",
     "FOREIGN_BLOCK_RU",
@@ -263,7 +263,6 @@ def generate_default_env(deploy_name: str) -> dict[str, str]:
         "RU_FORCE_DIRECT_DOMAIN_SUFFIX": ".gstatic.com,.gosuslugi.ru,.ipify.org,.ipinfo.io,.ident.me,.tnedi.me,.icanhazip.com",
         "RU_FORCE_DIRECT_IP_CIDR": "",
         "RU_BLOCK_IP_CIDR": "",
-        "RU_BLOCK_QUIC": "1",
         "RULESET_DIR": "/var/lib/vpn-stack/rules",
         "RU_GEOSITE_URL": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ru.srs https://cdn.jsdelivr.net/gh/SagerNet/sing-geosite@rule-set/geosite-category-ru.srs https://github.com/SagerNet/sing-geosite/raw/rule-set/geosite-category-ru.srs",
         "RU_GEOIP_URL": "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-ru.srs https://cdn.jsdelivr.net/gh/SagerNet/sing-geoip@rule-set/geoip-ru.srs https://github.com/SagerNet/sing-geoip/raw/rule-set/geoip-ru.srs",

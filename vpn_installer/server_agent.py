@@ -12,10 +12,15 @@ import sys
 import tempfile
 import time
 from collections import Counter
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
+
+try:
+    from .log_classifier import BUCKETS, source_from_line, summarize_lines
+except ImportError:  # Installed agent runs as a standalone script.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from log_classifier import BUCKETS, source_from_line, summarize_lines
 
 try:
     import fcntl
@@ -30,6 +35,9 @@ except ImportError:  # pragma: no cover - local Windows tests only
     fcntl = _NoopFcntl()  # type: ignore[assignment]
 
 SCHEMA_VERSION = 2
+ACCEPTANCE_REQUIRED_TARGETS = ("https://github.com/", "https://www.google.com/generate_204")
+ACCEPTANCE_OBSERVED_TARGETS = ("https://telegram.org/",)
+PROBE_CONFIRMATION_DELAY_SECONDS = 2
 ROOT = Path("/etc/vpn-stack")
 MANIFEST_PATH = ROOT / "render-manifest.json"
 ENV_PATH = ROOT / "deployment.env"
@@ -38,32 +46,6 @@ HEALTH_STATE_PATH = STATE_DIR / "health-state.json"
 LOCK_PATH = Path("/run/vpn-stack-agent.lock")
 SINGBOX_CONFIG_PATH = Path("/etc/sing-box/config.json")
 
-BUCKETS = (
-    "client_front_connect_failed",
-    "dns_timeout",
-    "dns_nxdomain",
-    "dns_failed",
-    "domain_to_foreign_timeout",
-    "ipv4_literal_timeout",
-    "ipv6_literal_timeout",
-    "direct_ru_timeout",
-    "blocked_private_fake",
-    "client_reset_eof",
-    "invalid_reality",
-    "disabled_invalid",
-    "unclassified_error",
-)
-
-_OPEN_CONNECTION_RE = re.compile(r"open connection to (?P<dst>\[[^\]]+\]:\d+|[^ ]+) using outbound/(?:direct|block)\[(?P<tag>[^\]]+)\]")
-_OUTBOUND_CONNECTION_RE = re.compile(r"outbound/(?:direct|block)\[(?P<tag>[^\]]+)\]: outbound connection to (?P<dst>\[[^\]]+\]:\d+|[^ ]+)")
-_ACCEPTED_RE = re.compile(r"accepted tcp:(?P<dst>\[[^\]]+\]:\d+|[^ ]+)")
-_SOURCE_RE = re.compile(r"(?:from|process connection from) (?P<src>\[[^\]]+\]|[^: ]+):\d+")
-_DNS_LOOKUP_FAILED_RE = re.compile(r"dns: lookup failed for (?P<dst>[^: ]+):")
-_DNS_EXCHANGE_FAILED_RE = re.compile(r"dns: exchange failed for (?P<dst>[^ ]+)\. IN (?P<qtype>[A-Z0-9]+):")
-_ROUTER_LOOKUP_RE = re.compile(r"router: lookup (?P<dst>[^: ]+):")
-_PROXY_DIAL_FAILED_RE = re.compile(r"using outbound/vless\[[^\]]+\]: dial tcp (?P<dst>\[[^\]]+\]:\d+|[^: ]+:\d+): i/o timeout")
-_PROXY_READ_FAILED_RE = re.compile(r"using outbound/vless\[[^\]]+\]: read tcp [^ ]+->(?P<dst>\[[^\]]+\]:\d+|[^: ]+:\d+):")
-_LOG_EVENT_ID_RE = re.compile(r"ERROR\s+\[(?P<event_id>\d+)\b")
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -127,118 +109,6 @@ def parse_env(path: Path = ENV_PATH) -> dict[str, str]:
             value = value[1:-1]
         values[key.strip()] = value
     return values
-
-
-@dataclass(frozen=True)
-class ClassifiedLogLine:
-    bucket: str
-    destination: str = ""
-    source: str = ""
-    event_id: str = ""
-
-
-def _destination(line: str) -> str:
-    for pattern in (_PROXY_DIAL_FAILED_RE, _PROXY_READ_FAILED_RE, _OPEN_CONNECTION_RE, _OUTBOUND_CONNECTION_RE, _ACCEPTED_RE):
-        match = pattern.search(line)
-        if match:
-            return match.group("dst")
-    match = _DNS_LOOKUP_FAILED_RE.search(line)
-    if match:
-        return match.group("dst")
-    match = _DNS_EXCHANGE_FAILED_RE.search(line)
-    if match:
-        return f"{match.group('dst')}:{match.group('qtype')}"
-    match = _ROUTER_LOOKUP_RE.search(line)
-    if match:
-        return match.group("dst")
-    return ""
-
-
-def _source(line: str) -> str:
-    match = _SOURCE_RE.search(line)
-    return match.group("src") if match else ""
-
-
-def _event_id(line: str) -> str:
-    match = _LOG_EVENT_ID_RE.search(line)
-    return match.group("event_id") if match else ""
-
-
-def _destination_ip_version(destination: str) -> int | None:
-    host = destination
-    if host.startswith("["):
-        host = host[1 : host.find("]")]
-    elif host.count(":") == 1:
-        host = host.rsplit(":", 1)[0]
-    try:
-        return ipaddress.ip_address(host).version
-    except ValueError:
-        return None
-
-
-def classify_line(line: str) -> ClassifiedLogLine | None:
-    destination = _destination(line)
-    source = _source(line)
-    event_id = _event_id(line)
-    if "accepted tcp:disabled.invalid" in line:
-        return ClassifiedLogLine("disabled_invalid", destination, source, event_id)
-    if "REALITY: processed invalid connection" in line:
-        return ClassifiedLogLine("invalid_reality", destination, source, event_id)
-    if "using outbound/vless[" in line and any(token in line for token in ("dial tcp", "wsarecv", "connected host has failed to respond")):
-        return ClassifiedLogLine("client_front_connect_failed", destination, source, event_id)
-    dns_failure = any(token in line for token in ("dns: exchange failed", "exchange failed for ", "dns: lookup failed", "lookup failed for ", "router: lookup "))
-    if dns_failure and any(token in line for token in ("context deadline exceeded", "i/o timeout")):
-        return ClassifiedLogLine("dns_timeout", destination, source, event_id)
-    if dns_failure and "NXDOMAIN" in line.upper():
-        return ClassifiedLogLine("dns_nxdomain", destination, source, event_id)
-    if dns_failure:
-        return ClassifiedLogLine("dns_failed", destination, source, event_id)
-    if any(token in line for token in ("outbound/block[blocked]", "using outbound/block[blocked]", "connection rejected")):
-        return ClassifiedLogLine("blocked_private_fake", destination, source, event_id)
-    if "i/o timeout" in line or "context deadline exceeded" in line:
-        version = _destination_ip_version(destination)
-        if version == 6:
-            return ClassifiedLogLine("ipv6_literal_timeout", destination, source, event_id)
-        if version == 4:
-            return ClassifiedLogLine("ipv4_literal_timeout", destination, source, event_id)
-        if "direct-ru" in line:
-            return ClassifiedLogLine("direct_ru_timeout", destination, source, event_id)
-        if "to-foreign" in line:
-            return ClassifiedLogLine("domain_to_foreign_timeout", destination, source, event_id)
-    if any(token in line for token in ("mux connection closed", "EOF", "connection reset")):
-        return ClassifiedLogLine("client_reset_eof", destination, source, event_id)
-    if "ERROR" in line:
-        return ClassifiedLogLine("unclassified_error", destination, source, event_id)
-    return None
-
-
-def summarize_lines(lines: Iterable[str], *, top_n: int = 12) -> dict[str, Any]:
-    counts: Counter[str] = Counter()
-    destinations: dict[str, Counter[str]] = {bucket: Counter() for bucket in BUCKETS}
-    sources: dict[str, Counter[str]] = {bucket: Counter() for bucket in BUCKETS}
-    samples: dict[str, str] = {}
-    seen_events: set[tuple[str, str]] = set()
-    for line in lines:
-        item = classify_line(line)
-        if item is None:
-            continue
-        event_key = (item.bucket, item.event_id)
-        if item.event_id and event_key in seen_events:
-            continue
-        if item.event_id:
-            seen_events.add(event_key)
-        counts[item.bucket] += 1
-        samples.setdefault(item.bucket, line.strip()[:320])
-        if item.destination:
-            destinations[item.bucket][item.destination] += 1
-        if item.source:
-            sources[item.bucket][item.source] += 1
-    return {
-        "counts": {bucket: counts.get(bucket, 0) for bucket in BUCKETS},
-        "top_destinations": {bucket: dict(counter.most_common(top_n)) for bucket, counter in destinations.items() if counter},
-        "top_sources": {bucket: dict(counter.most_common(top_n)) for bucket, counter in sources.items() if counter},
-        "samples": samples,
-    }
 
 
 def service_state(name: str) -> str:
@@ -421,11 +291,11 @@ def tcp_front_snapshot(port: int) -> dict[str, Any]:
         if unacked:
             current_client["unacked"] += int(unacked.group(1))
         current_client["idle_ms"].extend(idle)
-    client_metrics: dict[str, dict[str, Any]] = {}
-    for source, values in sorted(per_client.items(), key=lambda item: (-item[1]["connections"], item[0]))[:20]:
+    all_client_metrics: dict[str, dict[str, Any]] = {}
+    for source, values in per_client.items():
         rtts = values["rtts"]
         idle = values["idle_ms"]
-        client_metrics[source] = {
+        all_client_metrics[source] = {
             "connections": values["connections"],
             "states": dict(values["states"]),
             "rtt_ms": {"median": percentile(rtts, 50), "p95": percentile(rtts, 95)},
@@ -433,9 +303,18 @@ def tcp_front_snapshot(port: int) -> dict[str, Any]:
             "unacked": values["unacked"],
             "idle_ms_p95": percentile(idle, 95),
         }
-    rtts = [value["rtt_ms"]["p95"] for value in client_metrics.values() if value["rtt_ms"]["p95"] is not None]
-    retrans = sum(int(value["retransmissions"]) for value in client_metrics.values())
-    unacked = sum(int(value["unacked"]) for value in client_metrics.values())
+    client_metrics = {
+        source: all_client_metrics[source]
+        for source, _metrics in sorted(all_client_metrics.items(), key=lambda item: (-item[1]["connections"], item[0]))[:20]
+    }
+    rtts = [rtt for values in per_client.values() for rtt in values["rtts"]]
+    retrans = sum(int(value["retransmissions"]) for value in all_client_metrics.values())
+    unacked = sum(int(value["unacked"]) for value in all_client_metrics.values())
+    fin_wait_sources = sorted(
+        source
+        for source, values in all_client_metrics.items()
+        if int(values["states"].get("FIN-WAIT-1", 0)) >= 25
+    )
     listener = run(["ss", "-Hln", f"sport = :{port}"], timeout=5)
     return {
         "port": port,
@@ -446,32 +325,56 @@ def tcp_front_snapshot(port: int) -> dict[str, Any]:
         "clients": client_metrics,
         "rtt_ms": {"min": min(rtts) if rtts else None, "median": percentile(rtts, 50), "p95": percentile(rtts, 95), "max": max(rtts) if rtts else None},
         "socket_retransmissions": retrans,
+        "socket_retransmissions_scope": "lifetime counters of currently open sockets",
         "unacked": unacked,
+        "fin_wait_1_sources": fin_wait_sources,
     }
 
 
 def front_observation(front: dict[str, Any]) -> str:
-    """Separate an isolated client churn pattern from a shared front failure."""
-    clients = front.get("clients", {})
-    fin_wait_sources = [
-        source
-        for source, metrics in clients.items()
-        if int(metrics.get("states", {}).get("FIN-WAIT-1", 0)) >= 25
-    ]
-    retransmission_sources = [
-        source
-        for source, metrics in clients.items()
-        if int(metrics.get("retransmissions", 0)) >= 25
-    ]
-    if len(fin_wait_sources) >= 3 or len(retransmission_sources) >= 3:
+    """Report only present socket churn; ss retransmission values are lifetime counters."""
+    fin_wait_sources = front.get("fin_wait_1_sources")
+    if not isinstance(fin_wait_sources, list):
+        clients = front.get("clients", {})
+        fin_wait_sources = [
+            source
+            for source, metrics in clients.items()
+            if int(metrics.get("states", {}).get("FIN-WAIT-1", 0)) >= 25
+        ]
+    if len(fin_wait_sources) >= 3:
         return "degraded"
-    if fin_wait_sources or retransmission_sources:
+    if fin_wait_sources:
         return "client_specific"
     return "observed"
 
 
 def source_in_log_line(line: str, source: str) -> bool:
     return f"from {source}:" in line or f"from [{source}]:" in line
+
+
+def udp_443_policy() -> str:
+    config = read_json(SINGBOX_CONFIG_PATH, {})
+    rules = config.get("route", {}).get("rules", []) if isinstance(config, dict) else []
+    for rule in rules if isinstance(rules, list) else []:
+        if not isinstance(rule, dict):
+            continue
+        network = rule.get("network")
+        networks = [network] if isinstance(network, str) else network if isinstance(network, list) else []
+        port = rule.get("port")
+        if network is None and port is None:
+            continue
+        if network is not None and "udp" not in networks:
+            continue
+        ports = [port] if isinstance(port, (str, int)) else port if isinstance(port, list) else []
+        if port is not None and 443 not in {int(value) for value in ports if str(value).isdigit()}:
+            continue
+        selector_keys = set(rule) - {
+            "action", "network", "port", "outbound", "override_address", "override_port", "server", "strategy",
+        }
+        if selector_keys:
+            continue
+        return "rejected" if rule.get("action") == "reject" else "overridden"
+    return "routed"
 
 
 def public_front_snapshot(minutes: int, source: str | None = None) -> dict[str, Any]:
@@ -485,13 +388,15 @@ def public_front_snapshot(minutes: int, source: str | None = None) -> dict[str, 
     env = parse_env()
     port = int(env.get("RU_LISTEN_PORT", "443") or 443)
     xray_lines = journal_lines("vpn-stack-xray.service", minutes)
-    accepted_total = sum("accepted tcp:" in line for line in xray_lines)
+    accepted_tcp = sum("accepted tcp:" in line for line in xray_lines)
+    accepted_udp = sum("accepted udp:" in line for line in xray_lines)
+    udp_443 = sum("accepted udp:" in line and (":443 " in line or ":443[" in line) for line in xray_lines)
     invalid_total = sum("REALITY: processed invalid connection" in line for line in xray_lines)
     disabled_total = sum("accepted tcp:disabled.invalid" in line for line in xray_lines)
     source_counts: Counter[str] = Counter()
     for line in xray_lines:
-        if "accepted tcp:" in line or "REALITY: processed invalid connection" in line:
-            origin = _source(line)
+        if "accepted tcp:" in line or "accepted udp:" in line or "REALITY: processed invalid connection" in line:
+            origin = source_from_line(line)
             if origin:
                 source_counts[origin] += 1
     front = tcp_front_snapshot(port)
@@ -502,17 +407,28 @@ def public_front_snapshot(minutes: int, source: str | None = None) -> dict[str, 
         "window_minutes": minutes,
         "services": services,
         "front": front,
-        "events": {"accepted": accepted_total, "invalid_reality": invalid_total, "disabled_invalid": disabled_total},
+        "events": {
+            "accepted": accepted_tcp + accepted_udp,
+            "accepted_tcp": accepted_tcp,
+            "accepted_udp": accepted_udp,
+            "udp_443": udp_443,
+            "invalid_reality": invalid_total,
+            "disabled_invalid": disabled_total,
+        },
+        "transport": {"udp_443_policy": udp_443_policy()},
         "top_sources": dict(source_counts.most_common(20)),
         "verdict": "verified" if services["xray"] == "active" and front["listening"] else "failed",
     }
     if source is None:
         return payload
     source_events = {
-        "accepted": sum("accepted tcp:" in line and source_in_log_line(line, source) for line in xray_lines),
+        "accepted_tcp": sum("accepted tcp:" in line and source_in_log_line(line, source) for line in xray_lines),
+        "accepted_udp": sum("accepted udp:" in line and source_in_log_line(line, source) for line in xray_lines),
+        "udp_443": sum("accepted udp:" in line and source_in_log_line(line, source) and (":443 " in line or ":443[" in line) for line in xray_lines),
         "invalid_reality": sum("REALITY: processed invalid connection" in line and source_in_log_line(line, source) for line in xray_lines),
         "disabled_invalid": sum("accepted tcp:disabled.invalid" in line and source_in_log_line(line, source) for line in xray_lines),
     }
+    source_events["accepted"] = source_events["accepted_tcp"] + source_events["accepted_udp"]
     client = front.get("clients", {}).get(source, {})
     if source_events["accepted"]:
         source_verdict = "reached_xray"
@@ -536,6 +452,7 @@ def front_client_snapshot(source: str, minutes: int) -> dict[str, Any]:
         "services": payload["services"],
         "front": {"port": payload["front"].get("port", 0), "listening": payload["front"].get("listening", False), "client": payload["source_client"]},
         "events": payload["source_events"],
+        "transport": payload["transport"],
         "verdict": payload["source_verdict"],
     }
 
@@ -612,15 +529,47 @@ def probe_private_reject(proxy: str) -> dict[str, Any]:
     }
 
 
+def failed_requirements(probes: dict[str, Any]) -> list[str]:
+    requirements = probes.get("requirements", {})
+    if not isinstance(requirements, dict):
+        return []
+    return sorted(str(name) for name, passed in requirements.items() if passed is not True)
+
+
 def run_probes(env: dict[str, str], role: str, profile: str) -> dict[str, Any]:
     wg_interface = env.get("WG_INTERFACE", "wg0")
     targets = ["https://www.google.com/generate_204"]
+    required_targets = tuple(targets)
+    observed_targets: tuple[str, ...] = ()
     if profile == "acceptance":
-        targets = ["https://github.com/", "https://telegram.org/", "https://www.google.com/generate_204"]
+        required_targets = ACCEPTANCE_REQUIRED_TARGETS
+        observed_targets = ACCEPTANCE_OBSERVED_TARGETS
+        targets = [*required_targets, *observed_targets]
     direct = [probe_url(url) for url in targets]
     via_wg = [probe_url(url, interface=wg_interface) for url in targets] if role == "ru-gateway" else []
     router = [probe_url(url, proxy="socks5h://127.0.0.1:2080") for url in targets] if role == "ru-gateway" else []
-    result: dict[str, Any] = {"profile": profile, "direct": direct, "via_wg": via_wg, "router": router}
+    by_target = lambda values: {str(item.get("target", "")): item for item in values}
+    direct_by_target = by_target(direct)
+    wg_by_target = by_target(via_wg)
+    router_by_target = by_target(router)
+    required_domain_results = lambda values: [item for item in values if item.get("target") in required_targets]
+    observations = {
+        target: {
+            "direct": direct_by_target.get(target),
+            "via_wg": wg_by_target.get(target),
+            "router": router_by_target.get(target),
+        }
+        for target in observed_targets
+    }
+    result: dict[str, Any] = {
+        "profile": profile,
+        "required_targets": list(required_targets),
+        "observed_targets": list(observed_targets),
+        "observations": observations,
+        "direct": direct,
+        "via_wg": via_wg,
+        "router": router,
+    }
     if profile != "acceptance":
         required_paths = {"foreign_direct": direct} if role != "ru-gateway" else {"via_wg": via_wg, "router": router}
         result["requirements"] = {name: all(item["ok"] for item in items) for name, items in required_paths.items()}
@@ -639,8 +588,8 @@ def run_probes(env: dict[str, str], role: str, profile: str) -> dict[str, Any]:
     if role == "ru-gateway":
         required_paths: dict[str, list[dict[str, Any]]] = {
             "ru_direct_identity": [identities["direct"]],
-            "foreign_domains_via_wg": via_wg,
-            "foreign_domains_via_router": router,
+            "foreign_domains_via_wg": required_domain_results(via_wg),
+            "foreign_domains_via_router": required_domain_results(router),
             "ipv4_literal_via_foreign": [literal_wg[0], literal_router[0]],
             "ipv6_literal_via_router": [literal_router[1]],
             "egress_identities": [identities["via_wg"], identities["router"]],
@@ -648,7 +597,7 @@ def run_probes(env: dict[str, str], role: str, profile: str) -> dict[str, Any]:
         }
     else:
         required_paths = {
-            "foreign_domains": direct,
+            "foreign_domains": required_domain_results(direct),
             "ipv4_literal": [literal_direct[0]],
             "ipv6_literal": [literal_direct[1]],
             "foreign_identity": [identities["direct"]],
@@ -665,6 +614,25 @@ def run_probes(env: dict[str, str], role: str, profile: str) -> dict[str, Any]:
         }
     )
     return result
+
+
+def run_confirmed_probes(env: dict[str, str], role: str, profile: str) -> dict[str, Any]:
+    """Confirm an acceptance failure before it can reject or roll back a release."""
+
+    first = run_probes(env, role, profile)
+    if profile != "acceptance" or first.get("ok") is True:
+        first["confirmation"] = {"cycles": 1, "confirmed_failure": False, "recovered_on_retry": False}
+        return first
+    time.sleep(PROBE_CONFIRMATION_DELAY_SECONDS)
+    retry = run_probes(env, role, profile)
+    retry["confirmation"] = {
+        "cycles": 2,
+        "confirmed_failure": retry.get("ok") is not True,
+        "recovered_on_retry": retry.get("ok") is True,
+        "initial_failed_requirements": failed_requirements(first),
+        "failed_requirements": failed_requirements(retry),
+    }
+    return retry
 
 
 def maintenance_snapshot() -> dict[str, Any]:
@@ -730,13 +698,16 @@ def snapshot(*, live_probes: bool = False, profile: str = "light", full_logs: bo
     logs = {str(minutes): summarize_lines(journal_lines("sing-box.service", minutes) + journal_lines("vpn-stack-xray.service", minutes)) for minutes in log_windows}
     fresh_logs = summarize_lines(journal_lines_since("sing-box.service", fresh_since) + journal_lines_since("vpn-stack-xray.service", fresh_since))
     front = tcp_front_snapshot(port) if role == "ru-gateway" else {}
-    probes = run_probes(env, role, profile) if live_probes else {"profile": "none", "ok": None}
+    transport = {"udp_443_policy": udp_443_policy()} if role == "ru-gateway" else {}
+    probes = run_confirmed_probes(env, role, profile) if live_probes else {"profile": "none", "ok": None}
     required = ["wireguard", "nftables"] + (["sing-box", "xray"] if role == "ru-gateway" else [])
     reasons = [f"{name}={services[name]}" for name in required if services.get(name) != "active"]
     if manifest_data["drift"] != "none":
         reasons.append(f"drift={manifest_data['drift']}")
     if live_probes and not probes.get("ok"):
         reasons.append("live_probes_failed")
+    if role == "ru-gateway" and transport.get("udp_443_policy") != "routed":
+        reasons.append(f"udp_443_policy={transport.get('udp_443_policy')}")
     server_path = "failed" if reasons else "verified" if live_probes else "inconclusive"
     public_front = "not-applicable"
     if role == "ru-gateway":
@@ -762,6 +733,7 @@ def snapshot(*, live_probes: bool = False, profile: str = "light", full_logs: bo
         "wireguard": wireguard_snapshot(wg_interface),
         "network": {"interfaces": interface_counters((public_iface, wg_interface)), "conntrack": conntrack_snapshot()},
         "front": front,
+        "transport": transport,
         "probes": probes,
         "logs": {"fresh": {"since": fresh_since, "window_minutes": fresh_window_minutes, **fresh_logs}, "windows_minutes": logs},
         "maintenance": maintenance,
@@ -880,7 +852,7 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "probe":
         env = parse_env()
         manifest = read_json(MANIFEST_PATH, {})
-        payload = run_probes(env, str(manifest.get("role", "unknown")), args.profile)
+        payload = run_confirmed_probes(env, str(manifest.get("role", "unknown")), args.profile)
     elif args.command == "client":
         payload = front_client_snapshot(args.source, args.since)
     elif args.command == "front":

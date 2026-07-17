@@ -68,12 +68,9 @@ class RenderTests(unittest.TestCase):
         )
         self.assertEqual(
             payload["routing"]["rules"][1],
-            {"type": "field", "network": "udp", "port": 443, "outboundTag": "block"},
-        )
-        self.assertEqual(
-            payload["routing"]["rules"][2],
             {"type": "field", "ip": [f"{env['RU_PUBLIC_IP']}/32", f"{env['FOREIGN_PUBLIC_IP']}/32"], "outboundTag": "direct"},
         )
+        self.assertFalse(any(rule.get("network") == "udp" and rule.get("port") == 443 for rule in payload["routing"]["rules"]))
 
     def test_client_profile_is_simple_ru_tunnel(self) -> None:
         env = self.make_env()
@@ -86,7 +83,8 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(payload["route"]["default_domain_resolver"]["server"], "dns-remote")
         self.assertEqual(payload["route"]["rules"][0], {"inbound": ["tun-in"], "action": "sniff", "timeout": "1s"})
         self.assertEqual(payload["route"]["rules"][1]["ip_version"], 6)
-        self.assertEqual(payload["route"]["rules"][2], {"network": "udp", "port": 443, "action": "route", "outbound": "block"})
+        self.assertEqual(payload["route"]["rules"][2], {"protocol": "dns", "action": "hijack-dns"})
+        self.assertFalse(any(rule.get("network") == "udp" and rule.get("port") == 443 for rule in payload["route"]["rules"]))
         self.assertEqual(payload["inbounds"][0]["address"], [env["CLIENT_TUN_ADDRESS_V4"]])
         self.assertNotIn("sniff", payload["inbounds"][0])
         self.assertNotIn("sniff_override_destination", payload["inbounds"][0])
@@ -222,12 +220,11 @@ class RenderTests(unittest.TestCase):
         payload = json.loads(render.render_ru_singbox(env))
         self.assertEqual(payload["route"]["rules"][0]["timeout"], "1500ms")
 
-    def test_ru_server_can_block_quic_when_explicitly_requested(self) -> None:
+    def test_ru_server_never_globally_blocks_quic_from_legacy_env(self) -> None:
         env = self.make_env()
         env["RU_BLOCK_QUIC"] = "1"
         payload = json.loads(render.render_ru_singbox(env))
-        quic_rule = next(rule for rule in payload["route"]["rules"] if rule.get("network") == "udp" and rule.get("port") == 443)
-        self.assertEqual(quic_rule["action"], "reject")
+        self.assertFalse(any(rule.get("network") == "udp" and rule.get("port") == 443 for rule in payload["route"]["rules"]))
 
     def test_ru_server_redirects_client_tun_dot_to_foreign_dns(self) -> None:
         env = self.make_env()
@@ -511,6 +508,7 @@ class RenderTests(unittest.TestCase):
         self.assertIn("journald-vpn-stack.conf", files)
         self.assertIn("apt-vpn-stack-unattended.conf", files)
         self.assertIn("vpn-stack-agent.py", files)
+        self.assertIn("log_classifier.py", files)
         self.assertNotIn("guard.sh", files)
         self.assertNotIn("sync-state.sh", files)
         self.assertNotIn("vpn-stack-sync.service", files)

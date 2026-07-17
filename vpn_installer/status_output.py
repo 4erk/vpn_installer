@@ -11,6 +11,8 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
         f"fresh window: {snapshot.fresh_window_minutes}m",
         f"historical window: {snapshot.historical_window_hours}h",
     ]
+    if snapshot.verdict == "inconclusive" and snapshot.route_probes.get("profile") == "none":
+        lines.append("live probes: not run by read-only status; use vpn verify live for route acceptance")
     if snapshot.log_buckets:
         fresh = ", ".join(f"{key}={value}" for key, value in sorted(snapshot.log_buckets.items()))
         lines.append(f"log buckets: {fresh}")

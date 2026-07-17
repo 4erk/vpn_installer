@@ -33,6 +33,7 @@ def installed_artifact_paths(role: str) -> dict[str, str]:
         "journald-vpn-stack.conf": "/etc/systemd/journald.conf.d/90-vpn-stack.conf",
         "apt-vpn-stack-unattended.conf": "/etc/apt/apt.conf.d/90-vpn-stack-unattended",
         "vpn-stack-agent.py": "/usr/local/lib/vpn-stack/vpn-stack-agent.py",
+        "log_classifier.py": "/usr/local/lib/vpn-stack/log_classifier.py",
         "vpn-stack-health.service": "/etc/systemd/system/vpn-stack-health.service",
         "vpn-stack-health.timer": "/etc/systemd/system/vpn-stack-health.timer",
     }

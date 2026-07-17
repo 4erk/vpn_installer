@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import json
 import shlex
+import socket
 import sys
 import time
 from pathlib import Path
@@ -46,6 +47,8 @@ def use_python_ssh_backend(target: RemoteTarget) -> bool:
 
 def ssh_base_args(target: RemoteTarget) -> list[str]:
     args = ["ssh", "-o", "StrictHostKeyChecking=accept-new", "-p", str(target.ssh_port)]
+    if target.ssh_bind_address:
+        args.extend(["-o", f"BindAddress={target.ssh_bind_address}"])
     if target.identity_path:
         args.extend(["-i", target.identity_path])
     args.append(f"{target.ssh_user}@{target.ssh_host}")
@@ -54,6 +57,8 @@ def ssh_base_args(target: RemoteTarget) -> list[str]:
 
 def scp_base_args(target: RemoteTarget) -> list[str]:
     args = ["scp", "-o", "StrictHostKeyChecking=accept-new", "-P", str(target.ssh_port)]
+    if target.ssh_bind_address:
+        args.extend(["-o", f"BindAddress={target.ssh_bind_address}"])
     if target.identity_path:
         args.extend(["-i", target.identity_path])
     return args
@@ -71,6 +76,25 @@ def build_remote_command(command_body: str, target: RemoteTarget, as_root: bool)
         else:
             fail(f"Для {target.label} не подтверждён root/sudo доступ.")
     return shell_command, input_text
+
+
+def open_bound_ssh_socket(target: RemoteTarget) -> socket.socket:
+    """Open an explicitly bound SSH transport without changing the client route table."""
+    try:
+        source_info = socket.getaddrinfo(target.ssh_bind_address, 0, type=socket.SOCK_STREAM)[0]
+        family = source_info[0]
+        destination = socket.getaddrinfo(target.ssh_host, target.ssh_port, family=family, type=socket.SOCK_STREAM)[0][4]
+    except OSError as exc:
+        raise AppError(f"Не удалось подготовить SSH bind {target.ssh_bind_address} для {target.label}: {exc}") from exc
+    sock = socket.socket(family, socket.SOCK_STREAM)
+    try:
+        sock.settimeout(SSH_CONNECT_TIMEOUT)
+        sock.bind(source_info[4])
+        sock.connect(destination)
+        return sock
+    except OSError as exc:
+        sock.close()
+        raise AppError(f"Прямой SSH через {target.ssh_bind_address} к {target.label} недоступен: {exc}") from exc
 
 
 def paramiko_connect(target: RemoteTarget):
@@ -101,11 +125,18 @@ def paramiko_connect(target: RemoteTarget):
     for attempt in range(1, attempts + 1):
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        bound_socket: socket.socket | None = None
         try:
-            client.connect(**connect_kwargs)
+            attempt_kwargs = connect_kwargs.copy()
+            if target.ssh_bind_address:
+                bound_socket = open_bound_ssh_socket(target)
+                attempt_kwargs["sock"] = bound_socket
+            client.connect(**attempt_kwargs)
             return client
         except Exception as exc:  # noqa: BLE001
             client.close()
+            if bound_socket is not None:
+                bound_socket.close()
             last_exc = exc
             retryable_auth_timeout = (
                 target.auth_mode == "password"
@@ -445,7 +476,8 @@ def bootstrap_from_snapshot(snapshot: dict[str, Any]) -> dict[str, str]:
         "wg_latest_handshake_age_s": str(peer.get("handshake_age_s", "")),
         "wg_transfer_rx": str(peer.get("transfer_rx", "")),
         "wg_transfer_tx": str(peer.get("transfer_tx", "")),
-        "front_retransmissions": str(front.get("socket_retransmissions", 0)),
+        "front_retransmissions_lifetime": str(front.get("socket_retransmissions", 0)),
+        "front_retransmissions_scope": str(front.get("socket_retransmissions_scope", "lifetime counters of currently open sockets")),
         "front_fin_wait_1": str(front.get("state_counts", {}).get("FIN-WAIT-1", 0)),
         "front_rtt_p95_ms": str(front.get("rtt_ms", {}).get("p95", "")),
     }
@@ -473,9 +505,10 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
     print(
         "front: "
         f"rtt_p95_ms={preflight.get('front_rtt_p95_ms', '-')}, "
-        f"retransmissions={preflight.get('front_retransmissions', '0')}, "
+        f"retransmissions_lifetime={preflight.get('front_retransmissions_lifetime', '0')}, "
         f"fin_wait_1={preflight.get('front_fin_wait_1', '0')}"
     )
+    print(f"front retransmission scope: {preflight.get('front_retransmissions_scope', 'unknown')}")
 def ensure_remote_privilege(target: RemoteTarget, preflight: dict[str, str], *, prompt_yes_no, prompt_secret) -> None:
     if preflight.get("is_root") == "1":
         target.sudo_mode = "root"

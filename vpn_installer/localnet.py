@@ -92,15 +92,19 @@ def assert_server_route_not_self_tunneled(target: RemoteTarget, env: dict[str, s
     route = local_route_to_server(target)
     if route is None:
         return None
-    if os.environ.get(ALLOW_TUNNELED_ROUTE_ENV) == "1":
-        return route
     if route_uses_self_tunnel(route, client_tun_name=env.get("CLIENT_TUN_NAME", "")):
+        if target.ssh_bind_address:
+            # SSH validates this separately bound management path before mutation.
+            return route
+        if os.environ.get(ALLOW_TUNNELED_ROUTE_ENV) == "1":
+            return route
         raise AppError(
             "\n".join(
                 [
                     f"Локальный маршрут до {target.label} ({route.target_ip}) идёт через VPN-интерфейс {route.interface_alias}.",
                     "Так клиент заворачивает подключение к самому VPN-серверу внутрь VPN, из-за чего ломаются SSH, reinstall и Reality handshake.",
-                    "Исправление: отключи текущий VPN перед обслуживанием серверов или импортируй route-safe JSON из out/<deployment>/client вместо сырого URI в TUN/full VPN режиме.",
+                    "Для независимого management-пути задай VPN_SSH_BIND_ADDRESS на адрес физического интерфейса; это не меняет клиент или серверный dataplane.",
+                    "Либо отключи текущий VPN перед обслуживанием серверов.",
                     f"Экстренный override для опытной диагностики: {ALLOW_TUNNELED_ROUTE_ENV}=1",
                 ]
             )

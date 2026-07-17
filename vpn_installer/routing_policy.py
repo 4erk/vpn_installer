@@ -7,7 +7,7 @@ from typing import Any, Iterable
 
 from .dns_policy import CONNECTIVITY_CHECK_DIRECT_DOMAINS, CONNECTIVITY_CHECK_IPV6_ONLY_DOMAINS, merged_domains
 
-POLICY_VERSION = "0.11.0"
+POLICY_VERSION = "0.11.2"
 
 TRAFFIC_CLASSES = (
     "ru_direct_domain",
@@ -27,10 +27,6 @@ TRAFFIC_CLASSES = (
 
 def _env_list(env: dict[str, str], key: str) -> list[str]:
     return [item.strip() for item in textwrap.dedent(env.get(key, "")).replace("\n", ",").split(",") if item.strip()]
-
-
-def _enabled(raw_value: str) -> bool:
-    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _ip_network_or_raw(raw_value: str) -> str:
@@ -132,8 +128,6 @@ def build_ru_routing_policy(env: dict[str, str]) -> RoutingPolicy:
         {"action": "route-options", "udp_disable_domain_unmapping": True},
         {"protocol": "dns", "action": "hijack-dns"},
     ]
-    if _enabled(env.get("RU_BLOCK_QUIC", "0")):
-        control_rules.append({"network": "udp", "port": 443, "action": "reject"})
 
     traffic = (
         _traffic_class(
@@ -213,6 +207,7 @@ def build_ru_routing_policy(env: dict[str, str]) -> RoutingPolicy:
         for key in (
             "RU_LITERAL_POLICY", "RU_IPV6_LITERAL_POLICY", "RU_IPV6_POLICY", "RU_GEOIP_DIRECT",
             "TO_FOREIGN_CONNECT_TIMEOUT", "TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT", "TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT",
+            "RU_BLOCK_QUIC",
         )
         if key in env
     )

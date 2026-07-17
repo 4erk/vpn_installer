@@ -37,6 +37,7 @@ class DiagnosticsSnapshot:
     artifacts: dict[str, Any] = field(default_factory=dict)
     network: dict[str, Any] = field(default_factory=dict)
     front: dict[str, Any] = field(default_factory=dict)
+    transport: dict[str, Any] = field(default_factory=dict)
     maintenance: dict[str, Any] = field(default_factory=dict)
     component_verdicts: dict[str, str] = field(default_factory=dict)
 
@@ -88,6 +89,7 @@ class DiagnosticsSnapshot:
             artifacts=artifacts,
             network=payload.get("network", {}),
             front=payload.get("front", {}),
+            transport=payload.get("transport", {}),
             maintenance=payload.get("maintenance", {}),
             component_verdicts={key: str(value) for key, value in verdicts.items() if key != "reasons"},
         )

@@ -29,6 +29,7 @@ class WorkflowTests(unittest.TestCase):
                 "VPN_RU_SSH_PORT": "2222",
                 "VPN_RU_SSH_USER": "root",
                 "VPN_RU_SSH_PASSWORD": "secret",
+                "VPN_SSH_BIND_ADDRESS": "192.168.0.101",
             },
             clear=False,
         ):
@@ -40,6 +41,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(updated.ssh_user, "root")
         self.assertEqual(updated.auth_mode, "password")
         self.assertEqual(updated.ssh_password, "secret")
+        self.assertEqual(updated.ssh_bind_address, "192.168.0.101")
 
     def test_update_env_with_targets(self) -> None:
         env = {}

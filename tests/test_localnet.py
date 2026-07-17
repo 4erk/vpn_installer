@@ -67,6 +67,12 @@ class LocalNetTests(unittest.TestCase):
         with patch("vpn_installer.localnet.local_route_to_server", return_value=route):
             self.assertEqual(assert_server_route_not_self_tunneled(target, {"CLIENT_TUN_NAME": "singbox_tun"}), route)
 
+    def test_assert_server_route_allows_explicitly_bound_management_path(self) -> None:
+        target = RemoteTarget(role=ROLE_RU, public_ip="203.0.113.10", ssh_bind_address="192.168.0.101")
+        route = LocalRoute(target_ip="203.0.113.10", interface_alias="singbox_tun")
+        with patch("vpn_installer.localnet.local_route_to_server", return_value=route):
+            self.assertEqual(assert_server_route_not_self_tunneled(target, {"CLIENT_TUN_NAME": "singbox_tun"}), route)
+
 
 if __name__ == "__main__":
     unittest.main()

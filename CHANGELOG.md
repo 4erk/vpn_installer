@@ -6,6 +6,39 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.11.3] - 2026-07-17
+
+### Fixed
+
+- Внешний VLESS throughput gate переведён с расчёта размера range на фиксированное окно наблюдения. Он суммирует реально переданные байты до deadline, повторяет завершённый range, ограниченно завершает ephemeral sing-box и отдаёт фазу runner при ошибке. Controlled load составляет 15 Мбит/с, что на 50% выше acceptance floor 10 Мбит/с и не создаёт многогигабайтную нагрузку на действующих пользователей.
+- Bash runner теперь доставляется байт-в-байт с LF из Windows control host; CRLF не может сломать remote Bash. Тесты проверяют исполняемый runner, syntax и структуру его JSON-метрик.
+- Длительный public VLESS runner отделён от SSH control-plane: он запускается в собственной session/process group, пишет result/stderr на foreign role, а локальный workflow читает короткие status snapshots. Зависший HTTP origin больше не удерживает один Paramiko exec channel; timeout удаляет всю группу runner и возвращает диагностическую фазу.
+- Acceptance больше не делает rollback по одному краткому failed probe cycle. Первый failure обязательных route-инвариантов подтверждается вторым независимым циклом. Telegram остаётся в structured observations, но его изолированная внешняя недоступность не объявляет конфигурацию регрессивной и не откатывает рабочий release.
+- Добавлен self-contained `tests/run_tests.py`: unit suite теперь одинаково запускается системным и isolated portable Python без неявной зависимости от `PYTHONPATH`.
+- Read-only `vpn status` теперь явно объясняет `inconclusive`, когда live route probes намеренно не запускались; это не маскируется под серверный failure.
+
+## [0.11.2] - 2026-07-17
+
+### Fixed
+
+- Уточнён acceptance predicate UDP/443: он анализирует только правила, которые явно ограничивают `network` или `port`. Обычное DNS `resolve` rule без transport selector больше не может ложно объявить release небезопасным; реальный глобальный UDP/443 reject по-прежнему останавливает activation и возвращает предыдущий release.
+
+## [0.11.1] - 2026-07-17
+
+### Fixed
+
+- Убран legacy-запрет всего UDP/443 из RU `sing-box` и из вновь генерируемых fallback JSON-профилей. Он конфликтовал с основным VLESS/Reality контрактом: живые Xray access logs подтверждали принятый UDP/443, а router затем намеренно его отклонял. Обычный `vless-uri.txt` не менялся, установленный локальный клиент не модифицируется.
+- `RU_BLOCK_QUIC` стал deprecated migration key и удаляется при следующем штатном `install/reinstall`; он больше не может включить глобальный reject транспорта.
+- `vpn verify live` теперь доказывает полный URI-путь для HTTP, UDP DNS и TCP IPv6 literal. RU acceptance также проверяет, что policy UDP/443 находится в состоянии `routed`.
+- Исправлена классификация sing-box timeout: ошибки `direct-ru` больше не попадают в IPv4-literal bucket только потому, что после DNS в строке оказался IP. Если request trace сохранил домен, status показывает исходное имя и порт.
+- TCP front больше не объявляет старые lifetime `ss retrans` свежей деградацией. Суммарные метрики считаются по всем активным источникам, а source-specific verdict использует только текущее socket churn.
+
+### Changed
+
+- `log_classifier.py` стал самостоятельным stdlib-модулем, который используют локальная диагностика и server agent. Он доставляется вместе с agent и фиксируется в release manifest, поэтому формат buckets не зависит от случайного порядка скриптов на сервере.
+- `vpn diagnose front` и `vpn diagnose client` показывают раздельно accepted TCP, UDP и UDP/443, а также фактическую policy UDP/443.
+- SSH control plane умеет явно привязать исходящий сокет к физическому адресу через временную `VPN_SSH_BIND_ADDRESS`. Это позволяет обслуживать серверы при активном TUN, не меняя VPN-клиент, его профиль или локальную route table.
+
 ## [0.11.0] - 2026-07-15
 
 ### Changed

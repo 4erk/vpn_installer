@@ -30,10 +30,12 @@ class PackageTests(unittest.TestCase):
     def test_installer_uses_staged_release_agent_and_pinned_xray(self) -> None:
         script = (Path(__file__).resolve().parents[1] / "install.sh").read_text(encoding="utf-8")
         self.assertIn('AGENT_SCRIPT_PATH="/usr/local/lib/vpn-stack/vpn-stack-agent.py"', script)
+        self.assertIn('AGENT_LOG_CLASSIFIER_PATH="/usr/local/lib/vpn-stack/log_classifier.py"', script)
         self.assertIn("stage_release()", script)
         self.assertIn("normalize_staged_release_permissions", script)
         self.assertIn('chmod 0600 "${source_dir}/${WG_INTERFACE}.conf"', script)
         self.assertIn("validate_staged_release()", script)
+        self.assertIn('python3 "${source_dir}/vpn-stack-agent.py" --help', script)
         self.assertIn("activate_staged_release", script)
         self.assertIn("mv -Tf", script)
         self.assertIn("vpn-stack-sync.timer vpn-stack-sync.service", script)
@@ -58,7 +60,7 @@ class PackageTests(unittest.TestCase):
 
     def test_package_exposes_version_via_getattr(self) -> None:
         package = importlib.import_module("vpn_installer")
-        self.assertEqual(package.__version__, "0.11.0")
+        self.assertEqual(package.__version__, "0.11.3")
         with self.assertRaises(AttributeError):
             package.__getattr__("nope")
 

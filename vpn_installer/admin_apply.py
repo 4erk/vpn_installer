@@ -112,8 +112,6 @@ def route_insert_index(rules: list[dict[str, Any]]) -> int:
             index = i + 1
         elif rule.get("protocol") == "dns":
             index = i + 1
-        elif rule.get("network") == "udp" and rule.get("port") == 443:
-            index = i + 1
     return index
 
 

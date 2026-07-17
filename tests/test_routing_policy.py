@@ -65,13 +65,13 @@ class RoutingPolicyTests(unittest.TestCase):
     def test_legacy_knobs_are_reported_but_cannot_change_routes(self) -> None:
         baseline = build_ru_routing_policy(self.make_env())
         env = self.make_env()
-        env.update({"RU_LITERAL_POLICY": "reject", "RU_IPV6_LITERAL_POLICY": "reject", "TO_FOREIGN_CONNECT_TIMEOUT": "5s"})
+        env.update({"RU_LITERAL_POLICY": "reject", "RU_IPV6_LITERAL_POLICY": "reject", "TO_FOREIGN_CONNECT_TIMEOUT": "5s", "RU_BLOCK_QUIC": "1"})
         legacy = build_ru_routing_policy(env)
         self.assertEqual(legacy.route_rules, baseline.route_rules)
         self.assertEqual(legacy.outbounds, baseline.outbounds)
         self.assertEqual(
             set(legacy.deprecated_overrides),
-            {"RU_LITERAL_POLICY", "RU_IPV6_LITERAL_POLICY", "TO_FOREIGN_CONNECT_TIMEOUT"},
+            {"RU_LITERAL_POLICY", "RU_IPV6_LITERAL_POLICY", "TO_FOREIGN_CONNECT_TIMEOUT", "RU_BLOCK_QUIC"},
         )
 
 

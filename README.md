@@ -66,6 +66,15 @@ $env:VPN_NO_PAUSE="1"
 
 Пароли из этих переменных используются только в текущем запуске и не сохраняются в `deployments` или `state`.
 
+Если активный TUN направляет IP серверов в самого себя, но у компьютера есть физический интернет-адрес, можно оставить VPN-клиент нетронутым и привязать только SSH control plane к нему:
+
+```powershell
+$env:VPN_SSH_BIND_ADDRESS="192.168.0.101"
+.\vpn.cmd reinstall --deployment 1 --role all --non-interactive --yes
+```
+
+Переменная действует только на текущий запуск и не меняет серверный dataplane, профиль клиента или таблицу маршрутов Windows.
+
 ## Что спросит мастер
 
 Сначала всегда проверяется `российский сервер`, потом `зарубежный сервер`.
@@ -139,7 +148,7 @@ $env:VPN_NO_PAUSE="1"
 .\vpn.cmd client-check --deployment 1
 ```
 
-Если команда пишет `BAD: self-tunnel`, отключи текущий VPN перед обслуживанием серверов или импортируй route-safe JSON из `out/<deployment>/client`.
+Если команда пишет `BAD: self-tunnel`, сначала попробуй временно задать `VPN_SSH_BIND_ADDRESS` на IPv4 физического интерфейса. Если отдельного физического пути нет, отключи VPN перед обслуживанием серверов или используй route-safe JSON из `out/<deployment>/client`.
 
 Если нужно быстро починить именно Windows TUN/full VPN маршрут, запусти PowerShell от администратора:
 
@@ -223,9 +232,9 @@ SSH-туннель остаётся запасным способом админ
 .\vpn.cmd verify live --deployment my-vpn --non-interactive
 ```
 
-`status` читает services, manifest, WireGuard, TCP front и журналы без нагрузочных скачиваний. `verify live` дополнительно запускает свежие DNS/domain/literal probes и эфемерный sing-box клиент из `vless-uri.txt`; этот клиент проходит публичный Reality front. Только он может подтвердить dataplane после переустановки.
+`status` читает services, manifest, WireGuard, public front и журналы без нагрузочных скачиваний. `verify live` дополнительно запускает свежие DNS/domain/literal probes и эфемерный sing-box client из `vless-uri.txt`; он проходит публичный Reality front и подтверждает HTTP, UDP DNS и TCP IPv6 literal. Только он может подтвердить dataplane после переустановки.
 
-Для release throughput acceptance запусти десятиминутное измерение через тот же VLESS path. Оно использует range-capable 1 GB test file, rate limit 12 Mbit/s и требует не менее 10 Mbit/s:
+Для release throughput acceptance запусти десятиминутное измерение через тот же VLESS path. Runner держит фиксированное окно, суммирует переданные байты и повторяет завершённый range; он работает в отдельной remote process group, а SSH только читает короткие status snapshots. Controlled load 15 Mbit/s не мешает действующим пользователям, а acceptance по-прежнему требует не менее 10 Mbit/s:
 
 ```powershell
 .\vpn.cmd verify live --deployment my-vpn --non-interactive --throughput-seconds 600
@@ -237,7 +246,7 @@ SSH-туннель остаётся запасным способом админ
 .\vpn.cmd diagnose path --deployment my-vpn
 ```
 
-Отчёт сохраняется в `out/diagnostics` как JSON. Для конкретного устройства используй `vpn diagnose client --source <public-ip>`: он группирует TCP RTT, retransmit, socket state и Xray events именно по этому source IP.
+Отчёт сохраняется в `out/diagnostics` как JSON. Для конкретного устройства используй `vpn diagnose client --source <public-ip>`: он группирует текущие TCP socket state, lifetime retransmit с явной областью измерения и Xray TCP/UDP events именно по этому source IP.
 
 Для самопроверки на обычном пользовательском ПК:
 

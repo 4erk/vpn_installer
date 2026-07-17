@@ -146,6 +146,7 @@ WG_CONFIG_PATH="/etc/wireguard/${WG_INTERFACE:-wg0}.conf"
 NFTABLES_PATH="/etc/nftables.conf"
 SSHD_CONFIG_PATH="/etc/ssh/sshd_config.d/90-vpn-stack.conf"
 AGENT_SCRIPT_PATH="/usr/local/lib/vpn-stack/vpn-stack-agent.py"
+AGENT_LOG_CLASSIFIER_PATH="/usr/local/lib/vpn-stack/log_classifier.py"
 ADMIN_WEB_SCRIPT_PATH="/usr/local/lib/vpn-stack/admin_web.py"
 ADMIN_APPLY_SCRIPT_PATH="/usr/local/lib/vpn-stack/admin_apply.py"
 HEALTH_SERVICE_PATH="/etc/systemd/system/vpn-stack-health.service"
@@ -342,6 +343,7 @@ managed_paths() {
     "${NFTABLES_PATH}" \
     "${SSHD_CONFIG_PATH}" \
     "${AGENT_SCRIPT_PATH}" \
+    "${AGENT_LOG_CLASSIFIER_PATH}" \
     "${ADMIN_WEB_SCRIPT_PATH}" \
     "${ADMIN_APPLY_SCRIPT_PATH}" \
     "${HEALTH_SERVICE_PATH}" \
@@ -848,6 +850,7 @@ copy_role_artifacts() {
   copy_if_present "${source_dir}/sing-box.json" "${SINGBOX_BASE_CONFIG_PATH}" || { echo "Missing sing-box.json in ${source_dir}" >&2; exit 1; }
   copy_if_present "${source_dir}/render-manifest.json" "${VPNSTACK_RENDER_MANIFEST_FILE}" || { echo "Missing render-manifest.json in ${source_dir}" >&2; exit 1; }
   copy_if_present "${source_dir}/vpn-stack-agent.py" "${AGENT_SCRIPT_PATH}" || { echo "Missing vpn-stack-agent.py in ${source_dir}" >&2; exit 1; }
+  copy_if_present "${source_dir}/log_classifier.py" "${AGENT_LOG_CLASSIFIER_PATH}" || { echo "Missing log_classifier.py in ${source_dir}" >&2; exit 1; }
   if [[ "$ROLE" == "ru-gateway" ]]; then
     mkdir -p "$(dirname "${XRAY_CONFIG_PATH}")"
     copy_if_present "${source_dir}/xray.json" "${XRAY_CONFIG_PATH}" || { echo "Missing xray.json in ${source_dir}" >&2; exit 1; }
@@ -925,6 +928,9 @@ validate_staged_release() {
   local xray_config="${source_dir}/xray.json"
   [[ -s "${source_dir}/render-manifest.json" ]] || { echo "missing render manifest" >&2; return 1; }
   [[ -s "${source_dir}/vpn-stack-agent.py" ]] || { echo "missing server agent" >&2; return 1; }
+  [[ -s "${source_dir}/log_classifier.py" ]] || { echo "missing log classifier" >&2; return 1; }
+  python3 -m py_compile "${source_dir}/vpn-stack-agent.py" "${source_dir}/log_classifier.py"
+  PYTHONPATH="${source_dir}${PYTHONPATH:+:${PYTHONPATH}}" python3 "${source_dir}/vpn-stack-agent.py" --help >/dev/null
   python3 - "${source_dir}" <<'PY'
 import hashlib
 import json

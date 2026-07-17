@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shlex
 import tempfile
+import time
 from pathlib import Path
 from . import workflows
 from .common import OUT_DIR, print_header
@@ -10,7 +11,24 @@ from .diagnostics import DiagnosticsSnapshot
 from .models import ROLE_FOREIGN, ROLE_RU
 from .remote import remote_agent_snapshot, scp_upload, ssh_capture
 from .roles import requested_roles
-from .vless_verify import parse_vless_uri, render_ephemeral_singbox_client
+from .vless_verify import (
+    RUNNER_HTTP_PROBE_COUNT,
+    RUNNER_HTTP_TIMEOUT_SECONDS,
+    RUNNER_CURL_WATCHDOG_KILL_SECONDS,
+    RUNNER_REPORT_SECONDS,
+    RUNNER_SHUTDOWN_SECONDS,
+    RUNNER_STARTUP_SECONDS,
+    RUNNER_THROUGHPUT_CLOCK_SKEW_SECONDS,
+    RUNNER_TRANSPORT_DRAIN_SECONDS,
+    RUNNER_UDP_TIMEOUT_SECONDS,
+    parse_vless_uri,
+    render_ephemeral_singbox_client,
+    render_socks5_udp_dns_probe,
+    render_vless_runner,
+)
+
+
+VLESS_RUNNER_POLL_INTERVAL_SECONDS = 15
 
 
 def _verify_snapshot(snapshot: DiagnosticsSnapshot) -> DiagnosticsSnapshot:
@@ -77,21 +95,97 @@ def _validate_public_vless_result(result: dict[str, object], uri, foreign_target
         return {"verdict": "failed", "reason": f"public VLESS foreign identity mismatch: expected {expected_foreign_ip}, got {result.get('foreign_egress_ip', '')}", "result": result}
     if not statuses.issubset({"200", "204", "301", "302", "403"}):
         return {"verdict": "failed", "reason": f"public VLESS path returned invalid probes: {result}", "result": result}
+    udp_dns = result.get("udp_dns", {})
+    if not isinstance(udp_dns, dict) or udp_dns.get("ok") is not True:
+        return {"verdict": "failed", "reason": f"public VLESS UDP probe failed: {result}", "result": result}
+    if str(result.get("ipv6_literal_status", "")) != "200":
+        return {"verdict": "failed", "reason": f"public VLESS IPv6 literal probe failed: {result}", "result": result}
     if throughput_seconds:
         measurement = result.get("throughput", {})
         if not isinstance(measurement, dict):
             return {"verdict": "failed", "reason": "public VLESS throughput measurement is missing", "result": result}
-        speed_bps = float(measurement.get("bytes_per_second", 0) or 0)
-        duration = float(measurement.get("duration_seconds", 0) or 0)
+        try:
+            speed_bps = float(measurement.get("bytes_per_second", 0) or 0)
+            duration = float(measurement.get("duration_seconds", 0) or 0)
+            failures = int(measurement.get("failures", 0) or 0)
+        except (TypeError, ValueError):
+            return {"verdict": "failed", "reason": f"public VLESS throughput measurement is malformed: {measurement}", "result": result}
+        if failures:
+            return {"verdict": "failed", "reason": f"public VLESS throughput had {failures} transfer failures", "result": result}
         if speed_bps < 1_250_000:
             return {"verdict": "failed", "reason": f"public VLESS throughput below 10 Mbit/s: {speed_bps * 8 / 1_000_000:.2f} Mbit/s", "result": result}
-        if duration < throughput_seconds * 0.9:
+        if duration < throughput_seconds:
             return {"verdict": "failed", "reason": f"public VLESS throughput window too short: {duration:.1f}s of {throughput_seconds}s", "result": result}
     return {"verdict": "verified", "result": result}
 
 
 def _vless_runner_timeout(throughput_seconds: int) -> int:
-    return max(60, throughput_seconds + 60)
+    """Return the runner's explicit network/process upper bound plus SSH drain."""
+
+    return (
+        RUNNER_STARTUP_SECONDS
+        + RUNNER_HTTP_PROBE_COUNT * RUNNER_HTTP_TIMEOUT_SECONDS
+        + RUNNER_UDP_TIMEOUT_SECONDS
+        + throughput_seconds
+        + RUNNER_THROUGHPUT_CLOCK_SKEW_SECONDS
+        + (RUNNER_CURL_WATCHDOG_KILL_SECONDS if throughput_seconds else 0)
+        + RUNNER_SHUTDOWN_SECONDS
+        + RUNNER_REPORT_SECONDS
+        + RUNNER_TRANSPORT_DRAIN_SECONDS
+    )
+
+
+def _start_vless_runner(target, remote_runner: str, remote_config: str, remote_udp_probe: str, *, throughput_seconds: int, result_path: str, error_path: str) -> str:
+    command = (
+        f"setsid bash {shlex.quote(remote_runner)} {shlex.quote(remote_config)} {shlex.quote(remote_udp_probe)} {throughput_seconds} "
+        f"> {shlex.quote(result_path)} 2> {shlex.quote(error_path)} < /dev/null & printf '%s\\n' \"$!\""
+    )
+    pid = ssh_capture(target, command, command_timeout=20).strip()
+    if not pid.isdecimal():
+        raise RuntimeError(f"external VLESS runner did not return a PID: {pid!r}")
+    return pid
+
+
+def _vless_runner_state_command(pid: str, result_path: str, error_path: str) -> str:
+    return (
+        f"if test -s {shlex.quote(result_path)}; then printf '%s\\n' completed; cat {shlex.quote(result_path)}; "
+        f"elif kill -0 {shlex.quote(pid)} 2>/dev/null; then printf '%s\\n' running; "
+        f"else printf '%s\\n' exited; tail -n 40 {shlex.quote(error_path)} 2>/dev/null || true; fi"
+    )
+
+
+def _stop_vless_runner(target, pid: str, error_path: str) -> str:
+    command = (
+        f"if kill -0 {shlex.quote(pid)} 2>/dev/null; then "
+        f"kill -TERM -- -{shlex.quote(pid)} 2>/dev/null || kill -TERM {shlex.quote(pid)} 2>/dev/null || true; "
+        f"sleep 2; kill -KILL -- -{shlex.quote(pid)} 2>/dev/null || kill -KILL {shlex.quote(pid)} 2>/dev/null || true; fi; "
+        f"tail -n 40 {shlex.quote(error_path)} 2>/dev/null || true"
+    )
+    try:
+        return ssh_capture(target, command, command_timeout=15).strip()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _wait_for_vless_runner(target, pid: str, result_path: str, error_path: str, *, throughput_seconds: int) -> dict[str, object]:
+    deadline = time.monotonic() + _vless_runner_timeout(throughput_seconds)
+    while True:
+        response = ssh_capture(target, _vless_runner_state_command(pid, result_path, error_path), command_timeout=20)
+        state, separator, payload = response.partition("\n")
+        if state == "completed":
+            if not separator:
+                raise RuntimeError("external VLESS runner completed without a result payload")
+            return json.loads(payload)
+        if state == "exited":
+            detail = payload.strip()
+            raise RuntimeError(f"external VLESS runner exited before result{f': {detail}' if detail else ''}")
+        if state != "running":
+            raise RuntimeError(f"external VLESS runner returned an invalid state: {state!r}")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            detail = _stop_vless_runner(target, pid, error_path)
+            raise RuntimeError(f"external VLESS runner exceeded its {_vless_runner_timeout(throughput_seconds)}s budget{f': {detail}' if detail else ''}")
+        time.sleep(min(VLESS_RUNNER_POLL_INTERVAL_SECONDS, remaining))
 
 
 def _verify_public_vless_uri(uri_path: Path, foreign_target, *, throughput_seconds: int = 0) -> dict[str, object]:
@@ -112,52 +206,45 @@ def _verify_public_vless_uri(uri_path: Path, foreign_target, *, throughput_secon
     listen_port = 18080
     with tempfile.TemporaryDirectory(prefix="vpn-stack-vless-") as temp_dir:
         local_config = Path(temp_dir) / "sing-box.json"
+        local_udp_probe = Path(temp_dir) / "udp-probe.py"
+        local_runner = Path(temp_dir) / "runner.sh"
         local_config.write_text(render_ephemeral_singbox_client(uri, listen_port=listen_port), encoding="utf-8")
+        local_udp_probe.write_text(render_socks5_udp_dns_probe(listen_port=listen_port), encoding="utf-8")
+        # Bash must retain LF on a Windows control host; write bytes deliberately.
+        local_runner.write_bytes(render_vless_runner(listen_port=listen_port).encode("utf-8"))
         remote_config = f"{remote_dir}/sing-box.json"
+        remote_udp_probe = f"{remote_dir}/udp-probe.py"
+        remote_runner = f"{remote_dir}/runner.sh"
+        remote_result = f"{remote_dir}/result.json"
+        remote_error = f"{remote_dir}/runner.stderr"
+        runner_pid = ""
+        runner_completed = False
         try:
             scp_upload(foreign_target, local_config, remote_config)
-            commands = [
-                    "set -euo pipefail",
-                    f"cd {shlex.quote(remote_dir)}",
-                    "sing-box check -c sing-box.json",
-                    "sing-box run -c sing-box.json >sing-box.log 2>&1 &",
-                    "pid=$!",
-                    "cleanup() { kill \"$pid\" >/dev/null 2>&1 || true; wait \"$pid\" >/dev/null 2>&1 || true; }",
-                    "trap cleanup EXIT",
-                    "sleep 1",
-                    "kill -0 \"$pid\"",
-                    f"ru_ip=$(curl -4fsS --proxy socks5h://127.0.0.1:{listen_port} --connect-timeout 5 --max-time 15 https://api.ipify.org)",
-                    f"foreign_ip=$(curl -4fsS --proxy socks5h://127.0.0.1:{listen_port} --connect-timeout 5 --max-time 15 https://www.cloudflare.com/cdn-cgi/trace | awk -F= '/^ip=/{{print $2; exit}}')",
-                    f"github=$(curl -4sS -o /dev/null -w '%{{http_code}}' --proxy socks5h://127.0.0.1:{listen_port} --connect-timeout 5 --max-time 15 https://github.com/)",
-                    f"google=$(curl -4sS -o /dev/null -w '%{{http_code}}' --proxy socks5h://127.0.0.1:{listen_port} --connect-timeout 5 --max-time 15 https://www.google.com/generate_204)",
-            ]
-            if throughput_seconds:
-                throughput_bytes = throughput_seconds * 1_500_000
-                commands.extend(
-                    [
-                        f"throughput=$(curl -4fsS --proxy socks5h://127.0.0.1:{listen_port} --connect-timeout 5 --max-time {throughput_seconds + 20} --limit-rate 1500k --range 0-{throughput_bytes - 1} -o /dev/null -w '%{{speed_download}}|%{{time_total}}' https://download.thinkbroadband.com/1GB.zip)",
-                        "throughput_speed=${throughput%%|*}",
-                        "throughput_duration=${throughput#*|}",
-                    ]
-                )
-            else:
-                commands.extend(["throughput_speed=", "throughput_duration="])
-            commands.extend(
-                [
-                    "python3 - \"$ru_ip\" \"$foreign_ip\" \"$github\" \"$google\" \"$throughput_speed\" \"$throughput_duration\" <<'PY'",
-                    "import json, sys",
-                    "def number(value):",
-                    "    try: return float(value)",
-                    "    except ValueError: return 0.0",
-                    "print(json.dumps({'ru_egress_ip': sys.argv[1], 'foreign_egress_ip': sys.argv[2], 'github_status': sys.argv[3], 'google_status': sys.argv[4], 'throughput': {'bytes_per_second': number(sys.argv[5]), 'duration_seconds': number(sys.argv[6])}}))",
-                    "PY",
-                ]
+            scp_upload(foreign_target, local_udp_probe, remote_udp_probe)
+            scp_upload(foreign_target, local_runner, remote_runner)
+            runner_pid = _start_vless_runner(
+                foreign_target,
+                remote_runner,
+                remote_config,
+                remote_udp_probe,
+                throughput_seconds=throughput_seconds,
+                result_path=remote_result,
+                error_path=remote_error,
             )
-            command = "\n".join(commands)
-            result = json.loads(ssh_capture(foreign_target, command, command_timeout=_vless_runner_timeout(throughput_seconds)))
+            result = _wait_for_vless_runner(
+                foreign_target,
+                runner_pid,
+                remote_result,
+                remote_error,
+                throughput_seconds=throughput_seconds,
+            )
+            runner_completed = True
         except (ValueError, OSError, RuntimeError) as exc:
             return {"verdict": "failed", "reason": f"public VLESS path failed: {exc}"}
         finally:
+            if runner_pid and not runner_completed:
+                _stop_vless_runner(foreign_target, runner_pid, remote_error)
             try:
                 ssh_capture(foreign_target, f"rm -rf {shlex.quote(remote_dir)}", command_timeout=15)
             except Exception:  # noqa: BLE001

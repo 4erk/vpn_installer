@@ -7,6 +7,15 @@ from vpn_installer.status_output import format_snapshot_summary
 
 
 class StatusOutputTests(unittest.TestCase):
+    def test_explains_when_read_only_status_skips_live_probes(self) -> None:
+        lines = format_snapshot_summary(
+            DiagnosticsSnapshot(
+                verdict="inconclusive",
+                route_probes={"profile": "none", "ok": None},
+            )
+        )
+        self.assertIn("live probes: not run by read-only status; use vpn verify live for route acceptance", lines)
+
     def test_formats_snapshot_windows_buckets_destinations_and_reasons(self) -> None:
         lines = format_snapshot_summary(
             DiagnosticsSnapshot(

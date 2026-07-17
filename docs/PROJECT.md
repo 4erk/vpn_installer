@@ -12,6 +12,7 @@
 - Xray владеет публичным VLESS/Reality front. `sing-box` на RU является только локальным router.
 - Routing policy, health и проверка не меняют локальные VPN-клиенты и их профили.
 - Web-admin на RU сохраняется. Он управляет только явными operator rules; rules проходят validation и применяются атомарно.
+- `VPN_SSH_BIND_ADDRESS` - временный control-plane input, не часть deployment env. Он привязывает SSH/SFTP к физическому локальному адресу, когда default route клиента находится в TUN, и не меняет client/server dataplane.
 
 Роли:
 
@@ -44,7 +45,7 @@ Domain routing использует глобальный DNS и затем на�
 
 ## Server agent и диагностика
 
-`vpn-stack-agent` - stdlib-only серверный executable. Он предоставляет команды `snapshot`, `probe`, `health`, `front`, `client`, `routes` и `assets`.
+`vpn-stack-agent` - stdlib-only серверный executable. Он предоставляет команды `snapshot`, `probe`, `health`, `front`, `client`, `routes` и `assets`. Нормализация log buckets вынесена в отдельный `log_classifier.py`, который поставляется и хешируется вместе с agent.
 
 Snapshot schema 2 содержит:
 
@@ -77,19 +78,19 @@ Journald ограничивается managed drop-in. APT periodic settings в�
 
 ## Live verification
 
-`vpn verify live --deployment <name>` обязателен после install/reinstall. Он собирает agent acceptance snapshots на обеих ролях и запускает эфемерный sing-box client, построенный напрямую из `vless-uri.txt`. Этот client соединяется с RU `:443`, проходит VLESS/Reality/Xray/sing-box/WireGuard path и проверяет egress identity, GitHub и Google.
+`vpn verify live --deployment <name>` обязателен после install/reinstall. Он собирает agent acceptance snapshots на обеих ролях и запускает эфемерный sing-box client, построенный напрямую из `vless-uri.txt`. Этот client соединяется с RU `:443`, проходит VLESS/Reality/Xray/sing-box/WireGuard path и проверяет egress identity, GitHub, Google, UDP DNS и TCP IPv6 literal.
 
 Дополнительно проверяются DNS, direct/domain routes, IPv4 literal, IPv6 literal и reject private/fake. Итог только один из `verified`, `degraded`, `failed`, `inconclusive`; зелёный `status` не является acceptance доказательством.
 
 Для RU acceptance прямой egress подтверждается отдельной identity-проверкой. Foreign-домены обязаны пройти через `wg0` и local router, IPv4 literal через оба пути, а IPv6 literal через router и проверенный IPv6 egress foreign. Прямой запрос RU к заблокированному foreign-домену и raw `curl --interface wg0 -6` не являются пользовательским dataplane и записываются как наблюдения, но не вызывают ложный rollback.
 
-`verify live --throughput-seconds 600` дополнительно держит public VLESS path десять минут на range-capable, rate-limited 12 Mbit/s download и требует не менее 10 Mbit/s. Эта нагрузка не входит в health timer.
+`verify live --throughput-seconds 600` дополнительно держит public VLESS path десять минут на range-capable controlled 15 Mbit/s download и требует не менее 10 Mbit/s. Runner считает реальные байты в фиксированном окне и повторяет завершённый range; он запускается в отдельной remote process group, а SSH control-plane читает только короткие status snapshots и при deadline завершает всю runner group. Эта нагрузка не входит в health timer.
 
 Проверяющий runner сейчас запускается на foreign role, поэтому он проверяет полный публичный VLESS path, но не заменяет наблюдение с независимой внешней сети. Этот предел явно указывается в release verification.
 
 ## CLI
 
-- `status`: read-only agent snapshot.
+- `status`: read-only agent snapshot. Без live probes его `inconclusive` означает только отсутствие route acceptance; это явно выводится вместе с командой `verify live`.
 - `verify live`: full server acceptance plus public VLESS contract.
 - `diagnose path|front|client`: structured incident evidence.
 - `routes list|add|remove`: CLI к тому же backend, который использует web-admin.
@@ -98,10 +99,10 @@ Journald ограничивается managed drop-in. APT periodic settings в�
 
 ## Проверки релиза
 
-1. `unittest discover -s tests -p "test_*.py"`.
+1. `python tests/run_tests.py` (на Windows с bundled runtime: `& .\.runtime\python\windows\python.exe tests\run_tests.py`). Runner сам добавляет repo root до discovery, поэтому portable embedded Python не зависит от `PYTHONPATH`.
 2. `vpn audit quick`, затем `vpn audit all`.
 3. Reinstall foreign, затем RU только штатным workflow.
-4. `vpn verify live --deployment <name> --non-interactive`.
+4. `vpn verify live --deployment <name> --non-interactive`. Acceptance подтверждает первую ошибку обязательного route-инварианта повторным циклом; Telegram и другие проблемные направления выводятся отдельно как observations.
 5. Проверить 30-minute fresh logs, front retransmit telemetry, manifest drift, идентичности обоих egress и проблемные destinations.
 
 Локальный audit не доказывает provider path, конкретную сеть клиента или IPv6 availability. Такие ограничения фиксируются как `degraded`/`inconclusive`, а не маскируются restart или timeout override.

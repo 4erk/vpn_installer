@@ -97,6 +97,7 @@ class ConfigTests(unittest.TestCase):
                 "RU_HTTPS_INPUT_BURST": "60",
                 "RU_DIRECT_DNS_SERVER": "77.88.8.8",
                 "RU_DIRECT_DNS_PORT": "53",
+                "RU_BLOCK_QUIC": "1",
             },
             "sample",
         )
@@ -116,7 +117,6 @@ class ConfigTests(unittest.TestCase):
                 "SSH_MAX_STARTUPS": "5:30:20",
                 "SSH_PER_SOURCE_MAX_STARTUPS": "2",
                 "WG_MTU": "1380",
-                "RU_BLOCK_QUIC": "0",
                 "RU_LISTEN_PORT": "8443",
                 "RU_BLOCK_IP_CIDR": "91.108.56.0/22",
             },
@@ -134,7 +134,6 @@ class ConfigTests(unittest.TestCase):
             "SSH_MAX_STARTUPS": "5:30:20",
             "SSH_PER_SOURCE_MAX_STARTUPS": "2",
             "WG_MTU": "1380",
-            "RU_BLOCK_QUIC": "0",
             "RU_LISTEN_PORT": "8443",
             "RU_BLOCK_IP_CIDR": "91.108.56.0/22",
         }.items():
@@ -143,7 +142,7 @@ class ConfigTests(unittest.TestCase):
     def test_default_network_contract_keeps_only_stable_wireguard_settings(self) -> None:
         env = config.generate_default_env("sample")
         self.assertEqual(env["WG_MTU"], "1360")
-        self.assertEqual(env["RU_BLOCK_QUIC"], "1")
+        self.assertNotIn("RU_BLOCK_QUIC", env)
         self.assertNotIn("RUNTIME_QDISC", env)
         self.assertNotIn("DISABLE_NIC_OFFLOADS", env)
 
@@ -191,7 +190,7 @@ class ConfigTests(unittest.TestCase):
         self.assertIn(".ipify.org", env["RU_FORCE_DIRECT_DOMAIN_SUFFIX"])
         self.assertIn(".ipinfo.io", env["RU_FORCE_DIRECT_DOMAIN_SUFFIX"])
         self.assertEqual(env["RU_BLOCK_IP_CIDR"], "")
-        self.assertEqual(env["RU_BLOCK_QUIC"], "1")
+        self.assertNotIn("RU_BLOCK_QUIC", env)
         self.assertEqual(env["CLIENT_ENABLE_IPV6"], "0")
         self.assertNotIn("GUARD_REALITY_BLOCK_ENABLED", env)
         self.assertNotIn("HEALTH_TARGET_PROBE_URLS", env)

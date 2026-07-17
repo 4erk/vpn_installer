@@ -73,15 +73,17 @@ def diagnose_front_workflow(deployment: str | None, *, source_ip: str | None = N
     print(f"xray/nftables: {payload.get('services', {}).get('xray', '-')}/{payload.get('services', {}).get('nftables', '-')}")
     print(
         "events: "
-        f"accepted={events.get('accepted', 0)}, invalid_reality={events.get('invalid_reality', 0)}, "
+        f"accepted={events.get('accepted', 0)}, udp={events.get('accepted_udp', 0)}, udp443={events.get('udp_443', 0)}, invalid_reality={events.get('invalid_reality', 0)}, "
         f"disabled_invalid={events.get('disabled_invalid', 0)}"
     )
     print(
         "front: "
         f"listening={front.get('listening', False)}, connections={front.get('connections', 0)}, "
-        f"rtt_p95_ms={front.get('rtt_ms', {}).get('p95', '-')}, retransmissions={front.get('socket_retransmissions', 0)}"
+        f"rtt_p95_ms={front.get('rtt_ms', {}).get('p95', '-')}, retransmissions_lifetime={front.get('socket_retransmissions', 0)}"
     )
+    print(f"front retransmission scope: {front.get('socket_retransmissions_scope', 'unknown')}")
     print(f"verdict: {payload.get('verdict', 'inconclusive')}")
+    print(f"udp/443 policy: {payload.get('transport', {}).get('udp_443_policy', '-')}")
     print(f"report: {report_path}")
     return 1 if payload.get("verdict") == "failed" else 0
 
@@ -122,16 +124,17 @@ def diagnose_server_client_workflow(deployment: str | None, *, source_ip: str, m
     print(f"xray/nftables: {payload.get('services', {}).get('xray', '-')}/{payload.get('services', {}).get('nftables', '-')}")
     print(
         "events: "
-        f"accepted={events.get('accepted', 0)}, invalid_reality={events.get('invalid_reality', 0)}, "
+        f"accepted={events.get('accepted', 0)}, udp={events.get('accepted_udp', 0)}, udp443={events.get('udp_443', 0)}, invalid_reality={events.get('invalid_reality', 0)}, "
         f"disabled_invalid={events.get('disabled_invalid', 0)}"
     )
     if client:
         print(
             "active sockets: "
             f"connections={client.get('connections', 0)}, rtt_p95_ms={client.get('rtt_ms', {}).get('p95', '-')}, "
-            f"retransmissions={client.get('retransmissions', 0)}, unacked={client.get('unacked', 0)}"
+            f"retransmissions_lifetime={client.get('retransmissions', 0)}, unacked={client.get('unacked', 0)}"
         )
     print(f"verdict: {payload.get('verdict', 'inconclusive')}")
+    print(f"udp/443 policy: {payload.get('transport', {}).get('udp_443_policy', '-')}")
     print(f"report: {report_path}")
     return 1 if payload.get("verdict") in {"rejected_by_front", "tcp_reached_no_xray_accept", "not_seen_on_server"} else 0
 

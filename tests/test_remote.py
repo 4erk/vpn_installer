@@ -17,6 +17,7 @@ from vpn_installer.remote import (
     fetch_remote_deployment_env,
     parse_kv_output,
     paramiko_connect,
+    open_bound_ssh_socket,
     paramiko_exec,
     paramiko_stream,
     paramiko_upload,
@@ -80,6 +81,11 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("/tmp/id", ssh_base_args(target))
         self.assertIn("-P", scp_base_args(target))
 
+    def test_ssh_and_scp_base_args_include_explicit_bind_address(self) -> None:
+        target = RemoteTarget(role=ROLE_RU, ssh_host="203.0.113.10", ssh_bind_address="192.168.0.101")
+        self.assertIn("BindAddress=192.168.0.101", ssh_base_args(target))
+        self.assertIn("BindAddress=192.168.0.101", scp_base_args(target))
+
     def test_ssh_capture_passes_timeout_to_system_ssh_backend(self) -> None:
         target = RemoteTarget(role=ROLE_RU, ssh_host="203.0.113.10", ssh_user="root", auth_mode="key")
         completed = SimpleNamespace(stdout="ok")
@@ -112,6 +118,26 @@ class RemoteTests(unittest.TestCase):
         kwargs = fake_client.connect.call_args.kwargs
         self.assertEqual(kwargs["password"], "secret")
         self.assertFalse(kwargs["look_for_keys"])
+
+    def test_paramiko_connect_uses_bound_socket_when_requested(self) -> None:
+        fake_client = Mock()
+        fake_paramiko = Mock(SSHClient=Mock(return_value=fake_client), AutoAddPolicy=Mock(return_value="policy"))
+        bound_socket = Mock()
+        target = RemoteTarget(role=ROLE_RU, ssh_host="203.0.113.10", auth_mode="password", ssh_password="secret", ssh_bind_address="192.168.0.101")
+        with patch("vpn_installer.remote.ensure_paramiko_installed", return_value=fake_paramiko), patch("vpn_installer.remote.open_bound_ssh_socket", return_value=bound_socket) as opener:
+            client = paramiko_connect(target)
+        self.assertIs(client, fake_client)
+        opener.assert_called_once_with(target)
+        self.assertIs(fake_client.connect.call_args.kwargs["sock"], bound_socket)
+
+    def test_open_bound_ssh_socket_closes_socket_after_connect_error(self) -> None:
+        fake_socket = Mock()
+        fake_socket.connect.side_effect = OSError("blocked")
+        target = RemoteTarget(role=ROLE_RU, ssh_host="203.0.113.10", ssh_bind_address="192.168.0.101")
+        with patch("vpn_installer.remote.socket.getaddrinfo", side_effect=[[(2, 1, 6, "", ("192.168.0.101", 0))], [(2, 1, 6, "", ("203.0.113.10", 22))]]), patch("vpn_installer.remote.socket.socket", return_value=fake_socket):
+            with self.assertRaises(AppError):
+                open_bound_ssh_socket(target)
+        fake_socket.close.assert_called_once()
 
     def test_paramiko_connect_raises_on_failure(self) -> None:
         fake_client = Mock()
@@ -384,7 +410,8 @@ class RemoteTests(unittest.TestCase):
                     "wg_transfer_rx": "1",
                     "wg_transfer_tx": "2",
                     "front_rtt_p95_ms": "40",
-                    "front_retransmissions": "3",
+                    "front_retransmissions_lifetime": "3",
+                    "front_retransmissions_scope": "lifetime counters of currently open sockets",
                     "front_fin_wait_1": "0",
                 },
             )
@@ -392,7 +419,8 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("host: demo", output)
         self.assertIn("services: wg=active, nft=active, sing-box=active, xray=active, health=active", output)
         self.assertIn("wireguard: handshake_age_s=4, transfer_rx_tx=1/2", output)
-        self.assertIn("front: rtt_p95_ms=40, retransmissions=3, fin_wait_1=0", output)
+        self.assertIn("front: rtt_p95_ms=40, retransmissions_lifetime=3, fin_wait_1=0", output)
+        self.assertIn("front retransmission scope: lifetime counters of currently open sockets", output)
     def test_ensure_remote_privilege_paths(self) -> None:
         target = RemoteTarget(role=ROLE_RU)
         ensure_remote_privilege(target, {"is_root": "1"}, prompt_yes_no=lambda *_args, **_kwargs: True, prompt_secret=lambda *_args, **_kwargs: "x")

@@ -1,25 +1,28 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from vpn_installer import server_agent
+from vpn_installer.log_classifier import classify_line
 
 
 class ServerAgentTests(unittest.TestCase):
     def test_classifier_assigns_timeout_to_one_bucket(self) -> None:
         line = "ERROR dns: exchange failed for www.msftconnecttest.com. IN A: context deadline exceeded"
-        classified = server_agent.classify_line(line)
+        classified = classify_line(line)
         self.assertIsNotNone(classified)
         self.assertEqual(classified.bucket, "dns_timeout")
 
     def test_classifier_separates_ipv6_literal_from_domain_timeout(self) -> None:
         line = "ERROR open connection to [2a0a:f280:203:a:5000::100]:443 using outbound/direct[to-foreign]: i/o timeout"
-        classified = server_agent.classify_line(line)
+        classified = classify_line(line)
         self.assertIsNotNone(classified)
         self.assertEqual(classified.bucket, "ipv6_literal_timeout")
 
@@ -129,6 +132,34 @@ class ServerAgentTests(unittest.TestCase):
         self.assertEqual(server_agent.front_observation(isolated), "client_specific")
         self.assertEqual(server_agent.front_observation(shared), "degraded")
 
+    def test_front_observation_does_not_treat_lifetime_retransmissions_as_fresh_failure(self) -> None:
+        front = {"clients": {"203.0.113.20": {"states": {"ESTAB": 1}, "retransmissions": 200}}}
+        self.assertEqual(server_agent.front_observation(front), "observed")
+
+    def test_udp_443_policy_rejects_only_global_transport_override(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "sing-box.json"
+            config_path.write_text(json.dumps({"route": {"rules": [{"network": ["udp"], "port": [443], "action": "reject"}]}}), encoding="utf-8")
+            with patch.object(server_agent, "SINGBOX_CONFIG_PATH", config_path):
+                self.assertEqual(server_agent.udp_443_policy(), "rejected")
+            config_path.write_text(json.dumps({"route": {"rules": [{"network": "udp", "port": 443, "domain": ["private.example"], "action": "reject"}]}}), encoding="utf-8")
+            with patch.object(server_agent, "SINGBOX_CONFIG_PATH", config_path):
+                self.assertEqual(server_agent.udp_443_policy(), "routed")
+            config_path.write_text(json.dumps({"route": {"rules": [{"action": "resolve", "server": "dns-global", "strategy": "ipv4_only"}]}}), encoding="utf-8")
+            with patch.object(server_agent, "SINGBOX_CONFIG_PATH", config_path):
+                self.assertEqual(server_agent.udp_443_policy(), "routed")
+
+    def test_standalone_agent_loads_bundled_log_classifier(self) -> None:
+        source_root = Path(__file__).resolve().parents[1] / "vpn_installer"
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            agent = target / "vpn-stack-agent.py"
+            shutil.copy2(source_root / "server_agent.py", agent)
+            shutil.copy2(source_root / "log_classifier.py", target / "log_classifier.py")
+            result = subprocess.run([sys.executable, str(agent), "--help"], text=True, capture_output=True, check=False, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("vpn-stack-agent", result.stdout)
+
     def test_client_snapshot_prefers_accepted_xray_event_over_socket_state(self) -> None:
         front = {"listening": True, "clients": {"203.0.113.20": {"connections": 1}}, "top_sources": {"203.0.113.20": 1}}
         completed = subprocess.CompletedProcess(["nft"], 0, "", "")
@@ -142,13 +173,15 @@ class ServerAgentTests(unittest.TestCase):
             payload = server_agent.front_client_snapshot("203.0.113.20", 15)
 
         self.assertEqual(payload["events"]["accepted"], 1)
+        self.assertEqual(payload["events"]["accepted_tcp"], 1)
+        self.assertEqual(payload["events"]["accepted_udp"], 0)
         self.assertEqual(payload["verdict"], "reached_xray")
 
     def test_ru_acceptance_requires_router_paths_not_direct_foreign_access(self) -> None:
         def probe(url: str, *, interface: str = "", proxy: str = "", **_kwargs: object) -> dict[str, object]:
-            blocked_direct_telegram = url == "https://telegram.org/" and not interface and not proxy
+            blocked_telegram = url == "https://telegram.org/"
             unavailable_wg_ipv6 = "2606:4700:4700::1111" in url and interface == "wg0"
-            return {"target": url, "ok": not (blocked_direct_telegram or unavailable_wg_ipv6)}
+            return {"target": url, "ok": not (blocked_telegram or unavailable_wg_ipv6)}
 
         with (
             patch.object(server_agent, "probe_url", side_effect=probe),
@@ -157,11 +190,39 @@ class ServerAgentTests(unittest.TestCase):
         ):
             result = server_agent.run_probes({"WG_INTERFACE": "wg0"}, "ru-gateway", "acceptance")
 
-        self.assertFalse(result["direct"][1]["ok"])
+        telegram = next(item for item in result["direct"] if item["target"] == "https://telegram.org/")
+        self.assertFalse(telegram["ok"])
+        self.assertEqual(result["required_targets"], ["https://github.com/", "https://www.google.com/generate_204"])
+        self.assertEqual(result["observations"]["https://telegram.org/"]["direct"], telegram)
+        self.assertFalse(result["observations"]["https://telegram.org/"]["via_wg"]["ok"])
+        self.assertFalse(result["observations"]["https://telegram.org/"]["router"]["ok"])
         self.assertFalse(result["ipv6_literal"]["via_wg"]["ok"])
         self.assertTrue(result["requirements"]["foreign_domains_via_wg"])
         self.assertTrue(result["requirements"]["ipv6_literal_via_router"])
         self.assertTrue(result["ok"])
+
+    def test_acceptance_retries_one_failed_cycle_without_declaring_hard_failure(self) -> None:
+        failed = {"profile": "acceptance", "ok": False, "requirements": {"foreign_domains_via_wg": False}}
+        recovered = {"profile": "acceptance", "ok": True, "requirements": {"foreign_domains_via_wg": True}}
+        with patch.object(server_agent, "run_probes", side_effect=[failed, recovered]), patch.object(server_agent.time, "sleep") as sleep:
+            result = server_agent.run_confirmed_probes({}, "ru-gateway", "acceptance")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["confirmation"]["cycles"], 2)
+        self.assertTrue(result["confirmation"]["recovered_on_retry"])
+        self.assertFalse(result["confirmation"]["confirmed_failure"])
+        self.assertEqual(result["confirmation"]["initial_failed_requirements"], ["foreign_domains_via_wg"])
+        sleep.assert_called_once_with(server_agent.PROBE_CONFIRMATION_DELAY_SECONDS)
+
+    def test_acceptance_reports_confirmed_failure_after_two_cycles(self) -> None:
+        failed = {"profile": "acceptance", "ok": False, "requirements": {"foreign_domains_via_wg": False}}
+        with patch.object(server_agent, "run_probes", side_effect=[failed, failed]), patch.object(server_agent.time, "sleep"):
+            result = server_agent.run_confirmed_probes({}, "ru-gateway", "acceptance")
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["confirmation"]["cycles"], 2)
+        self.assertTrue(result["confirmation"]["confirmed_failure"])
+        self.assertFalse(result["confirmation"]["recovered_on_retry"])
 
 
 if __name__ == "__main__":
