@@ -6,6 +6,16 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.11.7] - 2026-07-18
+
+### Fixed
+
+- Восстановлен удалённый при рефакторинге `0.11.0` kernel PLPMTUD (`net.ipv4.tcp_mtu_probing=1`). TCP-потоки снова адаптируют MSS при ICMP/PMTU black hole и штатно перепроверяют больший размер вместо зависания на длинных retransmission timeout. Фиксированный MSS, новый timeout и старые неподтверждённые buffer sysctl не добавлялись.
+- Front diagnostics теперь разбирает `bytes_sent`, `bytes_retrans`, PMTU, MSS, cwnd, delivery rate и reordering из `ss -ti`. Измеренная retransmit-доля не маскируется общим `verified`: один плохой source получает `client_specific/degraded`, а деградация нескольких источников становится общей.
+- `status` и `verify live` показывают фактические congestion control, qdisc, PLPMTUD state и probe interval. Отключённая runtime-адаптация даёт `degraded`, даже если services и route probes формально зелёные.
+- Явный throughput-run больше не ограничивает сам себя 15 Мбит/с и проверяет фактическую пропускную способность полного VLESS path с floor 50 Мбит/с. Обычный `verify live` по-прежнему не создаёт нагрузку без `--throughput-seconds`.
+- Client front quality учитывает подтверждённое раздувание RTT вместе с RTO от 1 секунды. Длинные зависания одного source теперь дают `client_specific/degraded`, даже если короткоживущие сокеты ещё не передали мегабайт данных.
+
 ## [0.11.6] - 2026-07-18
 
 ### Fixed

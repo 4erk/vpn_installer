@@ -114,6 +114,7 @@ class ServerAgentTests(unittest.TestCase):
             patch.object(server_agent, "wireguard_snapshot", return_value={"peers": []}),
             patch.object(server_agent, "default_interface", return_value="ens3"),
             patch.object(server_agent, "interface_counters", return_value={"ens3": {}}),
+            patch.object(server_agent, "tcp_adaptation_snapshot", return_value={"congestion_control": "bbr", "qdisc": "fq", "mtu_probing": 1}),
             patch.object(server_agent, "conntrack_snapshot", return_value={}),
             patch.object(server_agent, "host_snapshot", return_value={"hostname": "ru-host", "login_user": "root", "is_root": True, "has_sudo": True, "os_id": "ubuntu", "os_version": "24.04", "default_interface": "ens3"}) as host_snapshot,
             patch.object(server_agent, "installed_at_value", return_value="2026-07-15T00:00:00Z"),
@@ -123,6 +124,22 @@ class ServerAgentTests(unittest.TestCase):
         self.assertTrue(snapshot["host"]["is_root"])
         host_snapshot.assert_called_once_with("ens3")
         self.assertEqual(snapshot["release"]["installed_at"], "2026-07-15T00:00:00Z")
+        self.assertEqual(snapshot["network"]["tcp_adaptation"]["mtu_probing"], 1)
+
+    def test_tcp_adaptation_snapshot_reads_runtime_kernel_state(self) -> None:
+        def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            values = {
+                "net.ipv4.tcp_congestion_control": "bbr\n",
+                "net.ipv4.tcp_mtu_probing": "1\n",
+                "net.ipv4.tcp_probe_interval": "600\n",
+            }
+            if args[0] == "sysctl":
+                return subprocess.CompletedProcess(args, 0, values[args[-1]], "")
+            return subprocess.CompletedProcess(args, 0, "qdisc fq 0: root\n", "")
+
+        with patch.object(server_agent, "run", side_effect=fake_run):
+            snapshot = server_agent.tcp_adaptation_snapshot("ens3")
+        self.assertEqual(snapshot, {"congestion_control": "bbr", "mtu_probing": 1, "probe_interval_seconds": 600, "qdisc": "fq"})
 
     def test_front_snapshot_groups_tcp_metrics_by_client_source(self) -> None:
         def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -132,7 +149,7 @@ class ServerAgentTests(unittest.TestCase):
                 return subprocess.CompletedProcess(
                     args,
                     0,
-                    "ESTAB 0 0 94.232.248.35:443 203.0.113.20:50123\n\t cubic rtt:45.2/3.1 retrans:0/3 unacked:2 lastsnd:100 lastrcv:200\n",
+                    "ESTAB 0 0 94.232.248.35:443 203.0.113.20:50123\n\t cubic rtt:45.2/3.1 mss:1428 pmtu:1500 cwnd:12 bytes_sent:2000000 bytes_retrans:80000 data_segs_out:1400 delivery_rate 12000000bps retrans:0/3 reord_seen:7 unacked:2 lastsnd:100 lastrcv:200\n",
                     "",
                 )
             return subprocess.CompletedProcess(args, 0, "LISTEN 0 4096 94.232.248.35:443 0.0.0.0:*\n", "")
@@ -144,8 +161,14 @@ class ServerAgentTests(unittest.TestCase):
         self.assertEqual(front["top_sources"], {"203.0.113.20": 1})
         client = front["clients"]["203.0.113.20"]
         self.assertEqual(client["retransmissions"], 3)
+        self.assertEqual(client["bytes_retrans"], 80000)
+        self.assertEqual(client["retransmit_ratio_pct"], 4.0)
+        self.assertEqual(client["quality"], "degraded")
+        self.assertEqual(client["pmtu"], 1500)
+        self.assertEqual(client["reord_seen"], 7)
         self.assertEqual(client["unacked"], 2)
         self.assertEqual(client["rtt_ms"]["p95"], 45.2)
+        self.assertEqual(client["rtt_ms"]["samples"], 1)
 
     def test_front_snapshot_normalizes_ipv4_mapped_socket_source(self) -> None:
         def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -190,6 +213,41 @@ class ServerAgentTests(unittest.TestCase):
     def test_front_observation_does_not_treat_lifetime_retransmissions_as_fresh_failure(self) -> None:
         front = {"clients": {"203.0.113.20": {"states": {"ESTAB": 1}, "retransmissions": 200}}}
         self.assertEqual(server_agent.front_observation(front), "observed")
+
+    def test_front_observation_reports_measured_loss_for_one_client(self) -> None:
+        front = {"clients": {"203.0.113.20": {"states": {"ESTAB": 1}, "bytes_sent": 5_000_000, "retransmit_ratio_pct": 4.5, "quality": "degraded"}}}
+        self.assertEqual(server_agent.front_observation(front), "client_specific")
+
+    def test_client_quality_detects_rto_backed_rtt_inflation(self) -> None:
+        metrics = {
+            "bytes_sent": 200_000,
+            "retransmit_ratio_pct": 0.5,
+            "rtt_ms": {"samples": 4, "min": 24.0, "median": 70.0, "p95": 385.0},
+            "rto_ms": {"max": 1_183},
+        }
+        self.assertEqual(server_agent.client_front_quality(metrics), "degraded")
+
+    def test_client_quality_keeps_stable_high_rtt_as_observation(self) -> None:
+        metrics = {
+            "bytes_sent": 5_000_000,
+            "retransmit_ratio_pct": 0.5,
+            "rtt_ms": {"samples": 4, "min": 280.0, "median": 310.0, "p95": 350.0},
+            "rto_ms": {"max": 1_200},
+        }
+        self.assertEqual(server_agent.client_front_quality(metrics), "observed")
+
+    def test_client_snapshot_reports_degraded_after_xray_accept(self) -> None:
+        front = {"listening": True, "clients": {"203.0.113.20": {"connections": 1, "quality": "degraded"}}, "top_sources": {"203.0.113.20": 1}}
+        completed = subprocess.CompletedProcess(["nft"], 0, "", "")
+        with (
+            patch.object(server_agent, "parse_env", return_value={"RU_LISTEN_PORT": "443"}),
+            patch.object(server_agent, "journal_lines", return_value=["from 203.0.113.20:50123 accepted tcp:example.org:443"]),
+            patch.object(server_agent, "tcp_front_snapshot", return_value=front),
+            patch.object(server_agent, "service_state", return_value="active"),
+            patch.object(server_agent, "run", return_value=completed),
+        ):
+            payload = server_agent.front_client_snapshot("203.0.113.20", 15)
+        self.assertEqual(payload["verdict"], "degraded")
 
     def test_udp_443_policy_rejects_only_global_transport_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

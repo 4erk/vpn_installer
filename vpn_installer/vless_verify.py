@@ -18,8 +18,6 @@ RUNNER_REPORT_SECONDS = 1
 RUNNER_TRANSPORT_DRAIN_SECONDS = 10
 THROUGHPUT_SOURCE_URL = "https://download.thinkbroadband.com/1GB.zip"
 THROUGHPUT_RANGE_END = 1_073_741_823
-# Keep acceptance load above the 10 Mbit/s floor without saturating production.
-THROUGHPUT_ACCEPTANCE_LOAD_BYTES_PER_SECOND = 1_875_000
 
 
 @dataclass(frozen=True)
@@ -185,9 +183,9 @@ def render_vless_runner(*, listen_port: int, throughput_url: str = THROUGHPUT_SO
 
     The throughput phase measures aggregate transferred bytes over a fixed wall
     clock window. A completed range is requested again until the deadline, so
-    fast paths do not turn a ten-minute check into a short burst. Its controlled
-    15 Mbit/s load stays above the 10 Mbit/s acceptance floor without saturating
-    production traffic.
+    fast paths do not turn a ten-minute check into a short burst. Throughput is
+    intentionally uncapped because this phase runs only when the operator asks
+    for a measurement; a rate-limited transfer cannot verify capacity.
     """
 
     template = r'''
@@ -291,7 +289,7 @@ if (( throughput_seconds > 0 )); then
         remaining_seconds=$(((remaining_ns + 999999999) / 1000000000))
         event "throughput-attempt-$throughput_attempts-remaining-$remaining_seconds"
         throughput_count_file=$(mktemp)
-        timeout --foreground --signal=TERM --kill-after=__CURL_WATCHDOG_KILL_SECONDS__s "${remaining_seconds}s" curl -4fsS --proxy "$proxy" --connect-timeout 5 --limit-rate __THROUGHPUT_ACCEPTANCE_LOAD_BYTES_PER_SECOND__ --range 0-__THROUGHPUT_RANGE_END__ -o - "$throughput_url" 2>>runner-curl.log | wc -c >"$throughput_count_file"
+        timeout --foreground --signal=TERM --kill-after=__CURL_WATCHDOG_KILL_SECONDS__s "${remaining_seconds}s" curl -4fsS --proxy "$proxy" --connect-timeout 5 --range 0-__THROUGHPUT_RANGE_END__ -o - "$throughput_url" 2>>runner-curl.log | wc -c >"$throughput_count_file"
         pipeline_status=("${PIPESTATUS[@]}")
         curl_status=${pipeline_status[0]}
         counter_status=${pipeline_status[1]}
@@ -356,8 +354,6 @@ PY
         "__STARTUP_SECONDS__", str(RUNNER_STARTUP_SECONDS)
     ).replace("__THROUGHPUT_RANGE_END__", str(THROUGHPUT_RANGE_END)).replace(
         "__SHUTDOWN_POLLS__", str(RUNNER_SHUTDOWN_SECONDS * 10)
-    ).replace(
-        "__THROUGHPUT_ACCEPTANCE_LOAD_BYTES_PER_SECOND__", str(THROUGHPUT_ACCEPTANCE_LOAD_BYTES_PER_SECOND)
     ).replace(
         "__CURL_WATCHDOG_KILL_SECONDS__", str(RUNNER_CURL_WATCHDOG_KILL_SECONDS)
     )

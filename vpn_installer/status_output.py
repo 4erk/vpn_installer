@@ -26,6 +26,13 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
         overrides = ", ".join(f"{key}={value}" for key, value in sorted(snapshot.runtime_overrides.items()) if value)
         if overrides:
             lines.append(f"runtime overrides: {overrides}")
+    tcp_adaptation = snapshot.network.get("tcp_adaptation", {})
+    if tcp_adaptation:
+        lines.append(
+            "tcp adaptation: "
+            f"cc={tcp_adaptation.get('congestion_control', '-')}, qdisc={tcp_adaptation.get('qdisc', '-')}, "
+            f"mtu_probing={tcp_adaptation.get('mtu_probing', '-')}, probe_interval_s={tcp_adaptation.get('probe_interval_seconds', '-')}"
+        )
     if snapshot.reasons:
         lines.append("reasons: " + "; ".join(snapshot.reasons))
     return lines

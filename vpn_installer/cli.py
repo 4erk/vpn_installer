@@ -139,7 +139,7 @@ def build_parser() -> argparse.ArgumentParser:
     live = verify_subparsers.add_parser("live", help="Свежая live-проверка installed config, маршрутов и логов.")
     live.add_argument("--deployment", help="Имя deployment.")
     live.add_argument("--non-interactive", action="store_true", help="Не задавать вопросы; брать подключение из state/env.")
-    live.add_argument("--throughput-seconds", type=int, default=0, help="0 отключает нагрузку; 600 проверяет VLESS throughput 10 минут.")
+    live.add_argument("--throughput-seconds", type=int, default=0, help="0 отключает нагрузку; 600 измеряет доступный VLESS throughput 10 минут без искусственного rate limit.")
     live.set_defaults(func=lambda args: verify_live_workflow(args.deployment, non_interactive=args.non_interactive, throughput_seconds=args.throughput_seconds))
 
     return parser

@@ -46,6 +46,16 @@ class VerifyTests(unittest.TestCase):
         self.assertEqual(verified.verdict, "degraded")
         self.assertIn("public TCP front shows retransmission or socket churn", verified.reasons)
 
+    def test_verify_snapshot_degrades_for_one_measured_lossy_client(self) -> None:
+        verdicts = {"server_path": "verified", "public_front": "verified", "client_observation": "client_specific"}
+        verified = _verify_snapshot(acceptance_snapshot(ROLE_RU, component_verdicts=verdicts))
+        self.assertEqual(verified.verdict, "degraded")
+
+    def test_verify_snapshot_degrades_when_plpmtud_is_disabled(self) -> None:
+        verified = _verify_snapshot(acceptance_snapshot(ROLE_RU, network={"tcp_adaptation": {"mtu_probing": 0}}))
+        self.assertEqual(verified.verdict, "degraded")
+        self.assertIn("TCP PLPMTUD adaptation is disabled", verified.reasons)
+
     def test_verify_snapshot_requires_acceptance_probes(self) -> None:
         verified = _verify_snapshot(acceptance_snapshot(ROLE_FOREIGN, route_probes={"profile": "light", "ok": True}))
         self.assertEqual(verified.verdict, "failed")
@@ -101,10 +111,10 @@ class VerifyTests(unittest.TestCase):
     def test_public_vless_throughput_requires_rate_and_duration(self) -> None:
         uri = parse_vless_uri("vless://00000000-0000-0000-0000-000000000000@203.0.113.10:443?security=reality&sni=www.bing.com&pbk=public-key&sid=0123456789abcdef&fp=chrome&type=tcp&flow=xtls-rprx-vision")
         foreign = RemoteTarget(role=ROLE_FOREIGN, public_ip="198.51.100.20", ssh_host="198.51.100.20")
-        result = {"ru_egress_ip": "203.0.113.10", "foreign_egress_ip": "198.51.100.20", "github_status": "200", "google_status": "204", "udp_dns": {"ok": True, "private_reject": {"ok": True}}, "ipv6_literal_status": "200", "throughput": {"bytes_per_second": 1_500_000, "duration_seconds": 60, "failures": 0}}
+        result = {"ru_egress_ip": "203.0.113.10", "foreign_egress_ip": "198.51.100.20", "github_status": "200", "google_status": "204", "udp_dns": {"ok": True, "private_reject": {"ok": True}}, "ipv6_literal_status": "200", "throughput": {"bytes_per_second": 7_000_000, "duration_seconds": 60, "failures": 0}}
         self.assertEqual(_validate_public_vless_result(result, uri, foreign, throughput_seconds=60)["verdict"], "verified")
-        self.assertEqual(_validate_public_vless_result({**result, "throughput": {"bytes_per_second": 1_000_000, "duration_seconds": 60, "failures": 0}}, uri, foreign, throughput_seconds=60)["verdict"], "failed")
-        self.assertEqual(_validate_public_vless_result({**result, "throughput": {"bytes_per_second": 1_500_000, "duration_seconds": 60, "failures": 1}}, uri, foreign, throughput_seconds=60)["verdict"], "failed")
+        self.assertEqual(_validate_public_vless_result({**result, "throughput": {"bytes_per_second": 5_000_000, "duration_seconds": 60, "failures": 0}}, uri, foreign, throughput_seconds=60)["verdict"], "failed")
+        self.assertEqual(_validate_public_vless_result({**result, "throughput": {"bytes_per_second": 7_000_000, "duration_seconds": 60, "failures": 1}}, uri, foreign, throughput_seconds=60)["verdict"], "failed")
         self.assertEqual(_vless_runner_timeout(0), 117)
         self.assertEqual(_vless_runner_timeout(600), 722)
 

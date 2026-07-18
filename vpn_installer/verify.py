@@ -29,6 +29,7 @@ from .vless_verify import (
 
 
 VLESS_RUNNER_POLL_INTERVAL_SECONDS = 15
+VLESS_CAPACITY_FLOOR_BYTES_PER_SECOND = 6_250_000
 
 
 def _verify_snapshot(snapshot: DiagnosticsSnapshot) -> DiagnosticsSnapshot:
@@ -46,6 +47,9 @@ def _verify_snapshot(snapshot: DiagnosticsSnapshot) -> DiagnosticsSnapshot:
         hard_failures.append("installed config hash differs from render manifest")
     elif snapshot.drift == "unknown":
         degradations.append("render manifest is missing or incomplete")
+    tcp_adaptation = snapshot.network.get("tcp_adaptation", {})
+    if tcp_adaptation and str(tcp_adaptation.get("mtu_probing", "")).strip() != "1":
+        degradations.append("TCP PLPMTUD adaptation is disabled")
     required_verdicts = {"server_path", "public_front", "client_observation"}
     if not required_verdicts.issubset(snapshot.component_verdicts):
         hard_failures.append("agent verdict fields are incomplete")
@@ -60,7 +64,7 @@ def _verify_snapshot(snapshot: DiagnosticsSnapshot) -> DiagnosticsSnapshot:
         hard_failures.append("agent public_front failed")
     elif snapshot.role == ROLE_RU and public_front != "verified":
         degradations.append(f"agent public_front={public_front}")
-    if client_observation == "degraded":
+    if client_observation in {"client_specific", "degraded"}:
         degradations.append("public TCP front shows retransmission or socket churn")
     if snapshot.route_probes.get("profile") != "acceptance":
         hard_failures.append("acceptance probes did not run")
@@ -115,8 +119,8 @@ def _validate_public_vless_result(result: dict[str, object], uri, foreign_target
             return {"verdict": "failed", "reason": f"public VLESS throughput measurement is malformed: {measurement}", "result": result}
         if failures:
             return {"verdict": "failed", "reason": f"public VLESS throughput had {failures} transfer failures", "result": result}
-        if speed_bps < 1_250_000:
-            return {"verdict": "failed", "reason": f"public VLESS throughput below 10 Mbit/s: {speed_bps * 8 / 1_000_000:.2f} Mbit/s", "result": result}
+        if speed_bps < VLESS_CAPACITY_FLOOR_BYTES_PER_SECOND:
+            return {"verdict": "failed", "reason": f"public VLESS throughput below 50 Mbit/s: {speed_bps * 8 / 1_000_000:.2f} Mbit/s", "result": result}
         if duration < throughput_seconds:
             return {"verdict": "failed", "reason": f"public VLESS throughput window too short: {duration:.1f}s of {throughput_seconds}s", "result": result}
     return {"verdict": "verified", "result": result}

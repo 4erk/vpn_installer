@@ -79,9 +79,11 @@ def diagnose_front_workflow(deployment: str | None, *, source_ip: str | None = N
     print(
         "front: "
         f"listening={front.get('listening', False)}, connections={front.get('connections', 0)}, "
-        f"rtt_p95_ms={front.get('rtt_ms', {}).get('p95', '-')}, retransmissions_lifetime={front.get('socket_retransmissions', 0)}"
+        f"rtt_p95_ms={front.get('rtt_ms', {}).get('p95', '-')}, retransmissions_lifetime={front.get('socket_retransmissions', 0)}, "
+        f"retransmitted_bytes={front.get('bytes_retrans', 0)}, retransmit_ratio_pct={front.get('retransmit_ratio_pct', 0)}"
     )
     print(f"front retransmission scope: {front.get('socket_retransmissions_scope', 'unknown')}")
+    print(f"front observation: {payload.get('observation', 'unknown')}; degraded_sources={len(front.get('degraded_sources', []))}")
     print(f"verdict: {payload.get('verdict', 'inconclusive')}")
     print(f"udp/443 policy: {payload.get('transport', {}).get('udp_443_policy', '-')}")
     print(f"report: {report_path}")
@@ -131,12 +133,15 @@ def diagnose_server_client_workflow(deployment: str | None, *, source_ip: str, m
         print(
             "active sockets: "
             f"connections={client.get('connections', 0)}, rtt_p95_ms={client.get('rtt_ms', {}).get('p95', '-')}, "
-            f"retransmissions_lifetime={client.get('retransmissions', 0)}, unacked={client.get('unacked', 0)}"
+            f"rto_max_ms={client.get('rto_ms', {}).get('max', '-')}, "
+            f"retransmissions_lifetime={client.get('retransmissions', 0)}, retransmitted_bytes={client.get('bytes_retrans', 0)}, "
+            f"retransmit_ratio_pct={client.get('retransmit_ratio_pct', 0)}, pmtu={client.get('pmtu', '-')}, "
+            f"reord_seen={client.get('reord_seen', 0)}, unacked={client.get('unacked', 0)}"
         )
     print(f"verdict: {payload.get('verdict', 'inconclusive')}")
     print(f"udp/443 policy: {payload.get('transport', {}).get('udp_443_policy', '-')}")
     print(f"report: {report_path}")
-    return 1 if payload.get("verdict") in {"rejected_by_front", "tcp_reached_no_xray_accept", "not_seen_on_server"} else 0
+    return 1 if payload.get("verdict") in {"degraded", "rejected_by_front", "tcp_reached_no_xray_accept", "not_seen_on_server"} else 0
 
 def _cleanup_iperf_rules(foreign: RemoteTarget) -> None:
     ssh_capture(

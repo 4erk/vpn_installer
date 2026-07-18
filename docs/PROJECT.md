@@ -29,6 +29,16 @@
 
 Серверные runtime rules web-admin хранятся отдельно в `/etc/vpn-stack/admin-routing-rules.json`. Это единственный поддерживаемый overlay. Автоматических learned-routes, timeout promotion, qdisc/offload mutation и log-based blocking нет.
 
+## Network adaptation
+
+- Public Reality TCP и оба серверных WAN используют BBR с `fq`; это pacing, а не route policy.
+- `net.ipv4.tcp_mtu_probing=1` является обязательным runtime-инвариантом. Linux включает PLPMTUD для конкретного TCP-потока после признаков ICMP black hole и с системным `tcp_probe_interval` периодически пробует восстановить больший PMTU. См. [Linux IP sysctl](https://www.kernel.org/doc/html/latest/networking/ip-sysctl.html) и [RFC 4821](https://datatracker.ietf.org/doc/html/rfc4821).
+- WireGuard MTU не меняется по журналам или одиночному endpoint. Он остаётся частью deployment spec и меняется только сравнительным acceptance-тестом.
+- Buffer/backlog sysctl не применяются без `softnet`, UDP buffer или interface delta evidence. Это не публичные ручки для оперативного лечения.
+- CAKE/HTB не включаются по одному высокому RTT. CAKE управляет очередью только перед известным общим bottleneck и для egress требует обоснованного bandwidth; его `autorate-ingress` не оценивает участок сети ниже qdisc. При source-specific деградации глобальный shaper урежет исправных клиентов, не исправляя удалённую очередь. См. [tc-cake(8)](https://man7.org/linux/man-pages/man8/tc-cake.8.html).
+- URLTest активируется только при двух независимых foreign egress. Он выбирает выход для новых соединений и не прерывает существующие; при одном сервере snapshot честно сообщает `redundancy: unavailable`. См. [sing-box URLTest](https://sing-box.sagernet.org/configuration/outbound/urltest/).
+- Один статический VLESS URI не может автоматически сменить публичный AS, TCP port или transport. Для отказоустойчивости client-to-RU path нужен второй независимый RU ingress либо новый клиентский transport contract. RAW/Reality/Vision не заменяется на XHTTP вслепую: полевые отчёты показывают и обход ISP policing, и отдельные compatibility/latency regressions ([net4people/bbs #546](https://github.com/net4people/bbs/issues/546), [Xray-core #5332](https://github.com/XTLS/Xray-core/issues/5332)).
+
 ## Routing policy
 
 Policy явно различает следующие классы:
@@ -51,7 +61,7 @@ Snapshot schema 2 содержит:
 
 - service state, manifest drift и hashes всех managed artifacts;
 - WireGuard и interface/conntrack counters;
-- TCP front telemetry: socket states, RTT, retransmits, unacked и source grouping с canonical IPv4/IPv6 адресом, включая kernel-формат `::ffff:<IPv4>`;
+- TCP front telemetry: socket states, RTT, retransmitted bytes/ratio, PMTU, MSS, cwnd, delivery rate, reordering, unacked и source grouping с canonical IPv4/IPv6 адресом, включая kernel-формат `::ffff:<IPv4>`;
 - fresh, 30-minute и 24-hour log windows;
 - mutually exclusive buckets: DNS timeout, domain timeout, IPv4 literal timeout, IPv6 literal timeout, private/fake block, client reset/EOF, invalid Reality и disabled-invalid;
 - парные DNS/router сообщения sing-box одного request ID дедуплицируются в одном DNS bucket;
@@ -84,9 +94,9 @@ Journald ограничивается managed drop-in. APT periodic settings в�
 
 Для RU acceptance прямой egress подтверждается отдельной identity-проверкой. Foreign-домены обязаны пройти через `wg0` и local router, IPv4 literal через оба пути, а IPv6 literal через router и проверенный IPv6 egress foreign. Прямой запрос RU к заблокированному foreign-домену и raw `curl --interface wg0 -6` не являются пользовательским dataplane и записываются как наблюдения, но не вызывают ложный rollback.
 
-`verify live --throughput-seconds 600` дополнительно держит public VLESS path десять минут на range-capable controlled 15 Mbit/s download и требует не менее 10 Mbit/s. Runner считает реальные байты в фиксированном окне и повторяет завершённый range; он запускается в отдельной remote process group, а SSH control-plane читает только короткие status snapshots и при deadline завершает всю runner group. Эта нагрузка не входит в health timer.
+`verify live --throughput-seconds 600` дополнительно держит public VLESS path десять минут на range-capable download и требует не менее 50 Mbit/s. Runner считает реальные байты в фиксированном окне, повторяет завершённый range и не ограничивает сам измеряемую скорость; он запускается в отдельной remote process group, а SSH control-plane читает только короткие status snapshots и при deadline завершает всю runner group. Нагрузка запускается только явным флагом, использует доступную production-полосу и не входит в health timer.
 
-Проверяющий runner сейчас запускается на foreign role, поэтому он проверяет полный публичный VLESS path, но не заменяет наблюдение с независимой внешней сети. Этот предел явно указывается в release verification.
+Проверяющий runner сейчас запускается на foreign role, поэтому он проверяет полный публичный VLESS path и server capacity, но не измеряет маршрут конкретного пользователя до RU. Одновременный `client_specific/degraded` не маскируется успешным runner: это два разных component verdict.
 
 ## CLI
 

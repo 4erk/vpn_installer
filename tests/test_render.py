@@ -523,6 +523,8 @@ class RenderTests(unittest.TestCase):
         env = self.make_env()
         ru_files = render.rendered_files_for_role(env, render.ROLE_RU)
         foreign_files = render.rendered_files_for_role(env, render.ROLE_FOREIGN)
+        self.assertIn("net.ipv4.tcp_mtu_probing=1", ru_files["sysctl-vpn-stack.conf"])
+        self.assertIn("net.ipv4.tcp_mtu_probing=1", foreign_files["sysctl-vpn-stack.conf"])
         self.assertIn("net.ipv4.conf.all.src_valid_mark=1", ru_files["sysctl-vpn-stack.conf"])
         self.assertIn("net.ipv4.ip_forward=1", foreign_files["sysctl-vpn-stack.conf"])
         self.assertIn('APT::Periodic::Unattended-Upgrade "1";', ru_files["apt-vpn-stack-unattended.conf"])

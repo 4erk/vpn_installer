@@ -38,6 +38,12 @@ SCHEMA_VERSION = 2
 ACCEPTANCE_REQUIRED_TARGETS = ("https://github.com/", "https://www.google.com/generate_204")
 ACCEPTANCE_OBSERVED_TARGETS = ("https://telegram.org/",)
 PROBE_CONFIRMATION_DELAY_SECONDS = 2
+FRONT_LOSS_MIN_BYTES = 1_000_000
+FRONT_LOSS_DEGRADED_PERCENT = 2.0
+FRONT_RTT_MIN_SAMPLES = 3
+FRONT_RTT_DEGRADED_MS = 250
+FRONT_RTT_INFLATION_FACTOR = 3
+FRONT_RTO_DEGRADED_MS = 1_000
 ROOT = Path("/etc/vpn-stack")
 MANIFEST_PATH = ROOT / "render-manifest.json"
 ENV_PATH = ROOT / "deployment.env"
@@ -249,6 +255,22 @@ def default_interface() -> str:
     return str(routes[0].get("dev", "")) if routes else ""
 
 
+def tcp_adaptation_snapshot(interface: str) -> dict[str, Any]:
+    values: dict[str, Any] = {}
+    for field, name in (
+        ("congestion_control", "net.ipv4.tcp_congestion_control"),
+        ("mtu_probing", "net.ipv4.tcp_mtu_probing"),
+        ("probe_interval_seconds", "net.ipv4.tcp_probe_interval"),
+    ):
+        result = run(["sysctl", "-n", name], timeout=3)
+        value = result.stdout.strip()
+        values[field] = int(value) if value.isdigit() else value
+    qdisc = run(["tc", "qdisc", "show", "dev", interface], timeout=3) if interface else None
+    fields = qdisc.stdout.split() if qdisc and qdisc.returncode == 0 else []
+    values["qdisc"] = fields[1] if len(fields) > 1 else ""
+    return values
+
+
 def socket_source(peer: str) -> str:
     if peer.startswith("["):
         return normalize_source(peer[1 : peer.find("]")])
@@ -274,20 +296,66 @@ def tcp_front_snapshot(port: int) -> dict[str, Any]:
         fields = line.split()
         if len(fields) >= 5 and fields[0] in {"ESTAB", "SYN-RECV", "FIN-WAIT-1", "FIN-WAIT-2", "CLOSE-WAIT", "LAST-ACK", "CLOSING", "TIME-WAIT"}:
             source = socket_source(fields[-1])
-            current_client = per_client.setdefault(source, {"connections": 0, "states": Counter(), "rtts": [], "retransmissions": 0, "unacked": 0, "idle_ms": []})
+            current_client = per_client.setdefault(
+                source,
+                {
+                    "connections": 0,
+                    "states": Counter(),
+                    "rtts": [],
+                    "rtos": [],
+                    "retransmissions": 0,
+                    "bytes_sent": 0,
+                    "bytes_retrans": 0,
+                    "data_segs_out": 0,
+                    "reord_seen": 0,
+                    "pmtus": [],
+                    "msses": [],
+                    "cwnds": [],
+                    "delivery_rates_bps": [],
+                    "unacked": 0,
+                    "idle_ms": [],
+                },
+            )
             current_client["connections"] += 1
             current_client["states"][fields[0]] += 1
             continue
         if current_client is None:
             continue
         rtt = re.search(r"\brtt:([0-9.]+)", line)
+        rto = re.search(r"\brto:(\d+)", line)
         retrans = re.search(r"\bretrans:\d+/(\d+)", line)
+        bytes_sent = re.search(r"\bbytes_sent:(\d+)", line)
+        bytes_retrans = re.search(r"\bbytes_retrans:(\d+)", line)
+        data_segs_out = re.search(r"\bdata_segs_out:(\d+)", line)
+        reord_seen = re.search(r"\breord_seen:(\d+)", line)
+        pmtu = re.search(r"\bpmtu:(\d+)", line)
+        mss = re.search(r"\bmss:(\d+)", line)
+        cwnd = re.search(r"\bcwnd:(\d+)", line)
+        delivery_rate = re.search(r"\bdelivery_rate (\d+)bps", line)
         unacked = re.search(r"\bunacked:(\d+)", line)
         idle = [int(value) for value in re.findall(r"\b(?:lastsnd|lastrcv|lastack):(\d+)", line)]
         if rtt:
             current_client["rtts"].append(float(rtt.group(1)))
+        if rto:
+            current_client["rtos"].append(int(rto.group(1)))
         if retrans:
             current_client["retransmissions"] += int(retrans.group(1))
+        for match, key in (
+            (bytes_sent, "bytes_sent"),
+            (bytes_retrans, "bytes_retrans"),
+            (data_segs_out, "data_segs_out"),
+            (reord_seen, "reord_seen"),
+        ):
+            if match:
+                current_client[key] += int(match.group(1))
+        for match, key in (
+            (pmtu, "pmtus"),
+            (mss, "msses"),
+            (cwnd, "cwnds"),
+            (delivery_rate, "delivery_rates_bps"),
+        ):
+            if match:
+                current_client[key].append(int(match.group(1)))
         if unacked:
             current_client["unacked"] += int(unacked.group(1))
         current_client["idle_ms"].extend(idle)
@@ -295,20 +363,45 @@ def tcp_front_snapshot(port: int) -> dict[str, Any]:
     for source, values in per_client.items():
         rtts = values["rtts"]
         idle = values["idle_ms"]
+        bytes_sent = int(values["bytes_sent"])
+        bytes_retrans = int(values["bytes_retrans"])
+        retransmit_ratio_pct = round(bytes_retrans * 100 / bytes_sent, 3) if bytes_sent else 0.0
         all_client_metrics[source] = {
             "connections": values["connections"],
             "states": dict(values["states"]),
-            "rtt_ms": {"median": percentile(rtts, 50), "p95": percentile(rtts, 95)},
+            "rtt_ms": {
+                "min": min(rtts) if rtts else None,
+                "median": percentile(rtts, 50),
+                "p95": percentile(rtts, 95),
+                "max": max(rtts) if rtts else None,
+                "samples": len(rtts),
+            },
+            "rto_ms": {
+                "p95": percentile(values["rtos"], 95),
+                "max": max(values["rtos"]) if values["rtos"] else None,
+            },
             "retransmissions": values["retransmissions"],
+            "bytes_sent": bytes_sent,
+            "bytes_retrans": bytes_retrans,
+            "retransmit_ratio_pct": retransmit_ratio_pct,
+            "data_segs_out": values["data_segs_out"],
+            "reord_seen": values["reord_seen"],
+            "pmtu": min(values["pmtus"]) if values["pmtus"] else None,
+            "mss": min(values["msses"]) if values["msses"] else None,
+            "cwnd": {"median": percentile(values["cwnds"], 50), "max": max(values["cwnds"]) if values["cwnds"] else None},
+            "delivery_rate_bps": {"median": percentile(values["delivery_rates_bps"], 50), "max": max(values["delivery_rates_bps"]) if values["delivery_rates_bps"] else None},
             "unacked": values["unacked"],
             "idle_ms_p95": percentile(idle, 95),
         }
+        all_client_metrics[source]["quality"] = client_front_quality(all_client_metrics[source])
     client_metrics = {
         source: all_client_metrics[source]
         for source, _metrics in sorted(all_client_metrics.items(), key=lambda item: (-item[1]["connections"], item[0]))[:20]
     }
     rtts = [rtt for values in per_client.values() for rtt in values["rtts"]]
     retrans = sum(int(value["retransmissions"]) for value in all_client_metrics.values())
+    bytes_sent = sum(int(value["bytes_sent"]) for value in all_client_metrics.values())
+    bytes_retrans = sum(int(value["bytes_retrans"]) for value in all_client_metrics.values())
     unacked = sum(int(value["unacked"]) for value in all_client_metrics.values())
     fin_wait_sources = sorted(
         source
@@ -326,13 +419,39 @@ def tcp_front_snapshot(port: int) -> dict[str, Any]:
         "rtt_ms": {"min": min(rtts) if rtts else None, "median": percentile(rtts, 50), "p95": percentile(rtts, 95), "max": max(rtts) if rtts else None},
         "socket_retransmissions": retrans,
         "socket_retransmissions_scope": "lifetime counters of currently open sockets",
+        "bytes_sent": bytes_sent,
+        "bytes_retrans": bytes_retrans,
+        "retransmit_ratio_pct": round(bytes_retrans * 100 / bytes_sent, 3) if bytes_sent else 0.0,
+        "degraded_sources": sorted(source for source, metrics in all_client_metrics.items() if metrics["quality"] == "degraded"),
         "unacked": unacked,
         "fin_wait_1_sources": fin_wait_sources,
     }
 
 
+def client_front_quality(metrics: dict[str, Any]) -> str:
+    bytes_sent = int(metrics.get("bytes_sent", 0))
+    retransmit_ratio_pct = float(metrics.get("retransmit_ratio_pct", 0.0))
+    if bytes_sent >= FRONT_LOSS_MIN_BYTES and retransmit_ratio_pct >= FRONT_LOSS_DEGRADED_PERCENT:
+        return "degraded"
+    rtt = metrics.get("rtt_ms", {})
+    rto = metrics.get("rto_ms", {})
+    samples = int(rtt.get("samples", 0) or 0)
+    minimum = float(rtt.get("min", 0) or 0)
+    p95 = float(rtt.get("p95", 0) or 0)
+    max_rto = float(rto.get("max", 0) or 0)
+    if (
+        samples >= FRONT_RTT_MIN_SAMPLES
+        and minimum > 0
+        and p95 >= FRONT_RTT_DEGRADED_MS
+        and p95 >= minimum * FRONT_RTT_INFLATION_FACTOR
+        and max_rto >= FRONT_RTO_DEGRADED_MS
+    ):
+        return "degraded"
+    return "observed"
+
+
 def front_observation(front: dict[str, Any]) -> str:
-    """Report only present socket churn; ss retransmission values are lifetime counters."""
+    """Separate one lossy source from degradation shared by several clients."""
     fin_wait_sources = front.get("fin_wait_1_sources")
     if not isinstance(fin_wait_sources, list):
         clients = front.get("clients", {})
@@ -341,9 +460,13 @@ def front_observation(front: dict[str, Any]) -> str:
             for source, metrics in clients.items()
             if int(metrics.get("states", {}).get("FIN-WAIT-1", 0)) >= 25
         ]
-    if len(fin_wait_sources) >= 3:
+    clients = front.get("clients", {})
+    degraded_sources = set(front.get("degraded_sources", []))
+    degraded_sources.update(source for source, metrics in clients.items() if metrics.get("quality") == "degraded")
+    noisy_sources = degraded_sources | set(fin_wait_sources)
+    if len(noisy_sources) >= 3:
         return "degraded"
-    if fin_wait_sources:
+    if noisy_sources:
         return "client_specific"
     return "observed"
 
@@ -402,6 +525,8 @@ def public_front_snapshot(minutes: int, source: str | None = None) -> dict[str, 
                 source_counts[origin] += 1
     front = tcp_front_snapshot(port)
     services = {"xray": service_state("vpn-stack-xray.service"), "nftables": service_state("nftables.service")}
+    observation = front_observation(front)
+    front_verdict = "failed" if services["xray"] != "active" or not front["listening"] else "degraded" if observation in {"client_specific", "degraded"} else "verified"
     payload = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": utc_now(),
@@ -418,7 +543,8 @@ def public_front_snapshot(minutes: int, source: str | None = None) -> dict[str, 
         },
         "transport": {"udp_443_policy": udp_443_policy()},
         "top_sources": dict(source_counts.most_common(20)),
-        "verdict": "verified" if services["xray"] == "active" and front["listening"] else "failed",
+        "observation": observation,
+        "verdict": front_verdict,
     }
     if source is None:
         return payload
@@ -431,7 +557,9 @@ def public_front_snapshot(minutes: int, source: str | None = None) -> dict[str, 
     }
     source_events["accepted"] = source_events["accepted_tcp"] + source_events["accepted_udp"]
     client = front.get("clients", {}).get(source, {})
-    if source_events["accepted"]:
+    if source_events["accepted"] and client.get("quality") == "degraded":
+        source_verdict = "degraded"
+    elif source_events["accepted"]:
         source_verdict = "reached_xray"
     elif source_events["invalid_reality"] or source_events["disabled_invalid"]:
         source_verdict = "rejected_by_front"
@@ -724,7 +852,7 @@ def snapshot(*, live_probes: bool = False, profile: str = "light", full_logs: bo
     if role == "ru-gateway":
         public_front = "verified" if services["xray"] == "active" and front.get("listening") else "failed"
     client_observation = front_observation(front) if front else "not-applicable"
-    overall = "failed" if "failed" in {server_path, public_front} else "degraded" if client_observation == "degraded" else "verified" if server_path == "verified" else "inconclusive"
+    overall = "failed" if "failed" in {server_path, public_front} else "degraded" if client_observation in {"client_specific", "degraded"} else "verified" if server_path == "verified" else "inconclusive"
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": utc_now(),
@@ -742,7 +870,11 @@ def snapshot(*, live_probes: bool = False, profile: str = "light", full_logs: bo
         "services": services,
         "artifacts": manifest_data,
         "wireguard": wireguard_snapshot(wg_interface),
-        "network": {"interfaces": interface_counters((public_iface, wg_interface)), "conntrack": conntrack_snapshot()},
+        "network": {
+            "interfaces": interface_counters((public_iface, wg_interface)),
+            "conntrack": conntrack_snapshot(),
+            "tcp_adaptation": tcp_adaptation_snapshot(public_iface),
+        },
         "front": front,
         "transport": transport,
         "probes": probes,

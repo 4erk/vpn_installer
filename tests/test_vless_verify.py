@@ -128,7 +128,7 @@ class VlessVerifyTests(unittest.TestCase):
         self.assertTrue(result["private_reject"]["ok"])
         self.assertTrue(all(target["ok"] for target in result["private_reject"]["targets"]))
 
-    def test_runner_measures_fixed_time_with_bounded_acceptance_load(self) -> None:
+    def test_runner_measures_uncapped_capacity_for_explicit_throughput_run(self) -> None:
         runner = render_vless_runner(listen_port=18080)
         self.assertTrue(runner.startswith("#!/usr/bin/env bash\n"))
         self.assertNotIn("\r", runner)
@@ -138,7 +138,7 @@ class VlessVerifyTests(unittest.TestCase):
         self.assertIn("event private-reject", runner)
         self.assertIn("fail private-reject", runner)
         self.assertIn("kill -KILL", runner)
-        self.assertIn("--limit-rate 1875000", runner)
+        self.assertNotIn("--limit-rate", runner)
         self.assertIn("timeout --foreground --signal=TERM --kill-after=5s", runner)
         self.assertIn("wc -c", runner)
         self.assertNotIn("--max-time \"$remaining_seconds\"", runner)

@@ -379,8 +379,8 @@ class RemoteTests(unittest.TestCase):
                 "services": {"wireguard": "active", "nftables": "active", "sing-box": "active", "xray": "active", "health_timer": "active"},
                 "artifacts": {"drift": "none", "files": {}},
                 "wireguard": {"peers": []},
-                "network": {"interfaces": {"eth0": {}}},
-                "front": {"rtt_ms": {"p95": 40}, "socket_retransmissions": 3, "state_counts": {"FIN-WAIT-1": 0}},
+                "network": {"interfaces": {"eth0": {}}, "tcp_adaptation": {"congestion_control": "bbr", "qdisc": "fq", "mtu_probing": 1, "probe_interval_seconds": 600}},
+                "front": {"rtt_ms": {"p95": 40}, "socket_retransmissions": 3, "bytes_retrans": 1200, "retransmit_ratio_pct": 1.2, "state_counts": {"FIN-WAIT-1": 0}},
             }
         )
         self.assertEqual(preflight["is_root"], "1")
@@ -411,16 +411,22 @@ class RemoteTests(unittest.TestCase):
                     "wg_transfer_tx": "2",
                     "front_rtt_p95_ms": "40",
                     "front_retransmissions_lifetime": "3",
+                    "front_retransmit_ratio_pct": "1.2",
                     "front_retransmissions_scope": "lifetime counters of currently open sockets",
                     "front_fin_wait_1": "0",
+                    "tcp_congestion_control": "bbr",
+                    "tcp_default_qdisc": "fq",
+                    "tcp_mtu_probing": "1",
+                    "tcp_probe_interval_seconds": "600",
                 },
             )
         output = stream.getvalue()
         self.assertIn("host: demo", output)
         self.assertIn("services: wg=active, nft=active, sing-box=active, xray=active, health=active", output)
         self.assertIn("wireguard: handshake_age_s=4, transfer_rx_tx=1/2", output)
-        self.assertIn("front: rtt_p95_ms=40, retransmissions_lifetime=3, fin_wait_1=0", output)
+        self.assertIn("front: rtt_p95_ms=40, retransmissions_lifetime=3, retransmit_ratio_pct=1.2, fin_wait_1=0", output)
         self.assertIn("front retransmission scope: lifetime counters of currently open sockets", output)
+        self.assertIn("tcp adaptation: cc=bbr, qdisc=fq, mtu_probing=1, probe_interval_s=600", output)
     def test_ensure_remote_privilege_paths(self) -> None:
         target = RemoteTarget(role=ROLE_RU)
         ensure_remote_privilege(target, {"is_root": "1"}, prompt_yes_no=lambda *_args, **_kwargs: True, prompt_secret=lambda *_args, **_kwargs: "x")

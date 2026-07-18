@@ -28,6 +28,7 @@ class StatusOutputTests(unittest.TestCase):
                 historical_log_buckets={"ipv4_literal_timeout": 9},
                 top_destinations={"ipv4_literal_timeout": "91.108.56.103:443=2"},
                 runtime_overrides={"admin_routing_rules_count": "2"},
+                network={"tcp_adaptation": {"congestion_control": "bbr", "qdisc": "fq", "mtu_probing": 1, "probe_interval_seconds": 600}},
                 reasons=["domain_to_foreign_timeout present"],
             )
         )
@@ -42,6 +43,7 @@ class StatusOutputTests(unittest.TestCase):
         self.assertIn("runtime overrides:", rendered)
         self.assertIn("admin_routing_rules_count=2", rendered)
         self.assertIn("domain_to_foreign_timeout present", rendered)
+        self.assertIn("tcp adaptation: cc=bbr, qdisc=fq, mtu_probing=1, probe_interval_s=600", rendered)
 
 
 if __name__ == "__main__":
