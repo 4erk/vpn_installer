@@ -525,6 +525,8 @@ class RenderTests(unittest.TestCase):
         foreign_files = render.rendered_files_for_role(env, render.ROLE_FOREIGN)
         self.assertIn("net.ipv4.tcp_mtu_probing=1", ru_files["sysctl-vpn-stack.conf"])
         self.assertIn("net.ipv4.tcp_mtu_probing=1", foreign_files["sysctl-vpn-stack.conf"])
+        self.assertIn("net.core.rmem_default=4194304", ru_files["sysctl-vpn-stack.conf"])
+        self.assertIn("net.core.rmem_max=16777216", foreign_files["sysctl-vpn-stack.conf"])
         self.assertIn("net.ipv4.conf.all.src_valid_mark=1", ru_files["sysctl-vpn-stack.conf"])
         self.assertIn("net.ipv4.ip_forward=1", foreign_files["sysctl-vpn-stack.conf"])
         self.assertIn('APT::Periodic::Unattended-Upgrade "1";', ru_files["apt-vpn-stack-unattended.conf"])
@@ -709,6 +711,13 @@ class RenderTests(unittest.TestCase):
             foreign_manifest = json.loads(render.rendered_files_for_role(env, render.ROLE_FOREIGN, assets=assets)["render-manifest.json"])
         self.assertEqual(set(ru_manifest["assets"]), {"geoip-ru.srs", "geosite-ru.srs"})
         self.assertEqual(set(foreign_manifest["assets"]), {"ru-ipv4.zone", "ru-ipv6.zone"})
+
+    def test_role_manifest_is_deterministic(self) -> None:
+        env = self.make_env()
+        first = render.rendered_files_for_role(env, render.ROLE_RU)["render-manifest.json"]
+        second = render.rendered_files_for_role(env, render.ROLE_RU)["render-manifest.json"]
+        self.assertEqual(first, second)
+        self.assertNotIn("generated_at", json.loads(first))
 
     @unittest.skipUnless(preferred_bash(), "bash is required for install.sh render-only test")
     def test_install_sh_render_only_contains_forced_direct_rules(self) -> None:

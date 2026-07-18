@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from vpn_installer.diagnostics import DiagnosticsSnapshot
 from vpn_installer.models import ROLE_FOREIGN, ROLE_RU, RemoteTarget
-from vpn_installer.verify import _validate_public_vless_result, _verify_public_vless_uri, _verify_snapshot, _vless_runner_timeout, _wait_for_vless_runner, verify_live_workflow
+from vpn_installer.verify import _reconcile_public_capabilities, _validate_public_vless_result, _verify_public_vless_uri, _verify_snapshot, _vless_runner_timeout, _wait_for_vless_runner, verify_live_workflow
 from vpn_installer.vless_verify import parse_vless_uri
 
 
@@ -22,6 +22,15 @@ def acceptance_snapshot(role: str, **overrides: object) -> DiagnosticsSnapshot:
         "role": role,
         "services": services,
         "drift": "none",
+        "network": {
+            "tcp_adaptation": {
+                "congestion_control": "bbr",
+                "qdisc": "fq",
+                "mtu_probing": 1,
+                "udp_rmem_default": 4_194_304,
+                "udp_rmem_max": 16_777_216,
+            }
+        },
         "route_probes": {"profile": "acceptance", "ok": True},
         "component_verdicts": verdicts,
     }
@@ -52,14 +61,63 @@ class VerifyTests(unittest.TestCase):
         self.assertEqual(verified.verdict, "degraded")
 
     def test_verify_snapshot_degrades_when_plpmtud_is_disabled(self) -> None:
-        verified = _verify_snapshot(acceptance_snapshot(ROLE_RU, network={"tcp_adaptation": {"mtu_probing": 0}}))
+        verified = _verify_snapshot(
+            acceptance_snapshot(
+                ROLE_RU,
+                network={"tcp_adaptation": {"mtu_probing": 0, "udp_rmem_default": 4_194_304, "udp_rmem_max": 16_777_216}},
+            )
+        )
         self.assertEqual(verified.verdict, "degraded")
         self.assertIn("TCP PLPMTUD adaptation is disabled", verified.reasons)
+
+    def test_verify_snapshot_degrades_when_udp_receive_profile_is_inactive(self) -> None:
+        verified = _verify_snapshot(
+            acceptance_snapshot(
+                ROLE_FOREIGN,
+                network={"tcp_adaptation": {"mtu_probing": 1, "udp_rmem_default": 212_992, "udp_rmem_max": 212_992}},
+            )
+        )
+        self.assertEqual(verified.verdict, "degraded")
+        self.assertIn("UDP receive buffer profile is not active", verified.reasons)
 
     def test_verify_snapshot_requires_acceptance_probes(self) -> None:
         verified = _verify_snapshot(acceptance_snapshot(ROLE_FOREIGN, route_probes={"profile": "light", "ok": True}))
         self.assertEqual(verified.verdict, "failed")
         self.assertIn("acceptance probes did not run", verified.reasons)
+
+    def test_verify_snapshot_degrades_external_capability_without_failing_release_gate(self) -> None:
+        verified = _verify_snapshot(
+            acceptance_snapshot(
+                ROLE_RU,
+                route_probes={"profile": "acceptance", "ok": False, "release_gate_ok": True},
+            )
+        )
+        self.assertEqual(verified.verdict, "degraded")
+        self.assertIn("external capability probe failed", verified.reasons)
+
+    def test_verify_snapshot_fails_when_release_gate_fails(self) -> None:
+        verified = _verify_snapshot(
+            acceptance_snapshot(
+                ROLE_RU,
+                route_probes={"profile": "acceptance", "ok": False, "release_gate_ok": False},
+            )
+        )
+        self.assertEqual(verified.verdict, "failed")
+        self.assertIn("acceptance release gate failed", verified.reasons)
+
+    def test_public_vless_supersedes_only_matching_external_capability_degradation(self) -> None:
+        snapshot = acceptance_snapshot(ROLE_RU)
+        snapshot.verdict = "degraded"
+        snapshot.reasons = ["external capability probe failed"]
+        reconciled = _reconcile_public_capabilities(snapshot, {"verdict": "verified"})
+        self.assertEqual(reconciled.verdict, "verified")
+        self.assertEqual(reconciled.reasons, [])
+
+        snapshot.verdict = "degraded"
+        snapshot.reasons = ["external capability probe failed", "public TCP front shows retransmission or socket churn"]
+        reconciled = _reconcile_public_capabilities(snapshot, {"verdict": "verified"})
+        self.assertEqual(reconciled.verdict, "degraded")
+        self.assertEqual(reconciled.reasons, ["public TCP front shows retransmission or socket churn"])
 
     def test_verify_snapshot_allows_inactive_foreign_singbox(self) -> None:
         verified = _verify_snapshot(acceptance_snapshot(ROLE_FOREIGN, services={"sing-box": "inactive", "wireguard": "active", "nftables": "active"}))

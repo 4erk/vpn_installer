@@ -12,15 +12,16 @@ import sys
 import tempfile
 import time
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
 try:
-    from .log_classifier import BUCKETS, normalize_source, source_from_line, summarize_lines
+    from .log_classifier import BUCKETS, accepted_destination_from_line, normalize_source, source_endpoint_from_line, source_from_line, split_endpoint, summarize_lines
 except ImportError:  # Installed agent runs as a standalone script.
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from log_classifier import BUCKETS, normalize_source, source_from_line, summarize_lines
+    from log_classifier import BUCKETS, accepted_destination_from_line, normalize_source, source_endpoint_from_line, source_from_line, split_endpoint, summarize_lines
 
 try:
     import fcntl
@@ -38,12 +39,18 @@ SCHEMA_VERSION = 2
 ACCEPTANCE_REQUIRED_TARGETS = ("https://github.com/", "https://www.google.com/generate_204")
 ACCEPTANCE_OBSERVED_TARGETS = ("https://telegram.org/",)
 PROBE_CONFIRMATION_DELAY_SECONDS = 2
+EXTERNAL_CAPABILITY_REQUIREMENTS = frozenset({"ipv6_literal", "ipv6_literal_via_router"})
 FRONT_LOSS_MIN_BYTES = 1_000_000
 FRONT_LOSS_DEGRADED_PERCENT = 2.0
 FRONT_RTT_MIN_SAMPLES = 3
 FRONT_RTT_DEGRADED_MS = 250
 FRONT_RTT_INFLATION_FACTOR = 3
 FRONT_RTO_DEGRADED_MS = 1_000
+PROBLEM_LOG_GREP = (
+    "ERROR|FATAL|processed invalid connection|accepted tcp:disabled[.]invalid|"
+    "connection rejected|mux connection closed|EOF|connection reset|using outbound/vless"
+)
+XRAY_FRONT_LOG_GREP = "accepted (tcp|udp):|REALITY: processed invalid connection"
 ROOT = Path("/etc/vpn-stack")
 MANIFEST_PATH = ROOT / "render-manifest.json"
 ENV_PATH = ROOT / "deployment.env"
@@ -51,6 +58,7 @@ STATE_DIR = Path("/var/lib/vpn-stack")
 HEALTH_STATE_PATH = STATE_DIR / "health-state.json"
 LOCK_PATH = Path("/run/vpn-stack-agent.lock")
 SINGBOX_CONFIG_PATH = Path("/etc/sing-box/config.json")
+SYSCTL_PATH = Path("/etc/sysctl.d/90-vpn-stack.conf")
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -129,6 +137,59 @@ def journal_lines_since(unit: str, since: str) -> list[str]:
 
 def journal_lines(unit: str, minutes: int) -> list[str]:
     return journal_lines_since(unit, f"{minutes} minutes ago")
+
+
+def journal_filtered_lines(unit: str, minutes: int, pattern: str) -> list[str]:
+    result = run(
+        ["journalctl", "-u", unit, "--since", f"{minutes} minutes ago", "--no-pager", "-o", "short-iso", f"--grep={pattern}"],
+        timeout=30,
+    )
+    return result.stdout.splitlines() if result.returncode == 0 else []
+
+
+def journal_problem_events(minutes: int) -> list[tuple[float, str]]:
+    result = run(
+        [
+            "journalctl",
+            "-u",
+            "sing-box.service",
+            "-u",
+            "vpn-stack-xray.service",
+            "--since",
+            f"{minutes} minutes ago",
+            "--no-pager",
+            "-o",
+            "short-unix",
+            f"--grep={PROBLEM_LOG_GREP}",
+        ],
+        timeout=30,
+    )
+    events: list[tuple[float, str]] = []
+    for raw_line in result.stdout.splitlines():
+        timestamp, separator, message = raw_line.partition(" ")
+        if not separator:
+            continue
+        try:
+            events.append((float(timestamp), message))
+        except ValueError:
+            continue
+    return events
+
+
+def summarize_problem_windows(*, full_logs: bool, fresh_since: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    windows = (5, 30, 1440) if full_logs else (5,)
+    now = time.time()
+    events = journal_problem_events(max(windows))
+    summaries = {
+        str(minutes): summarize_lines(line for timestamp, line in events if timestamp >= now - minutes * 60)
+        for minutes in windows
+    }
+    try:
+        fresh_epoch = datetime.fromisoformat(fresh_since.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        fresh_epoch = now - 300
+    fresh = summarize_lines(line for timestamp, line in events if timestamp >= fresh_epoch)
+    return summaries, fresh
 
 
 def fresh_log_since() -> tuple[str, int]:
@@ -236,7 +297,19 @@ def read_json_text(payload: str, default: Any) -> Any:
 
 
 def interface_counters(names: Iterable[str]) -> dict[str, dict[str, int]]:
-    fields = ("rx_bytes", "rx_packets", "rx_dropped", "rx_errors", "tx_bytes", "tx_packets", "tx_dropped", "tx_errors")
+    fields = (
+        "rx_bytes",
+        "rx_packets",
+        "rx_dropped",
+        "rx_errors",
+        "rx_missed_errors",
+        "rx_nohandler",
+        "rx_otherhost_dropped",
+        "tx_bytes",
+        "tx_packets",
+        "tx_dropped",
+        "tx_errors",
+    )
     result: dict[str, dict[str, int]] = {}
     for name in dict.fromkeys(value for value in names if value):
         stats: dict[str, int] = {}
@@ -261,6 +334,8 @@ def tcp_adaptation_snapshot(interface: str) -> dict[str, Any]:
         ("congestion_control", "net.ipv4.tcp_congestion_control"),
         ("mtu_probing", "net.ipv4.tcp_mtu_probing"),
         ("probe_interval_seconds", "net.ipv4.tcp_probe_interval"),
+        ("udp_rmem_default", "net.core.rmem_default"),
+        ("udp_rmem_max", "net.core.rmem_max"),
     ):
         result = run(["sysctl", "-n", name], timeout=3)
         value = result.stdout.strip()
@@ -271,10 +346,181 @@ def tcp_adaptation_snapshot(interface: str) -> dict[str, Any]:
     return values
 
 
-def socket_source(peer: str) -> str:
-    if peer.startswith("["):
-        return normalize_source(peer[1 : peer.find("]")])
-    return normalize_source(peer.rsplit(":", 1)[0] if ":" in peer else peer)
+def managed_network_profile(path: Path = SYSCTL_PATH) -> dict[str, int]:
+    field_names = {
+        "net.core.rmem_default": "udp_rmem_default",
+        "net.core.rmem_max": "udp_rmem_max",
+    }
+    values: dict[str, int] = {}
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return values
+    for raw_line in lines:
+        key, separator, raw_value = raw_line.partition("=")
+        field = field_names.get(key.strip())
+        if not separator or not field:
+            continue
+        try:
+            values[field] = int(raw_value.strip())
+        except ValueError:
+            continue
+    return values
+
+
+def network_profile_mismatches(actual: dict[str, Any], expected: dict[str, int]) -> list[str]:
+    return sorted(name for name, value in expected.items() if actual.get(name) != value)
+
+
+def protocol_counters_snapshot() -> dict[str, int]:
+    tracked = {
+        "IpInDiscards",
+        "IpOutNoRoutes",
+        "Ip6InDiscards",
+        "Ip6OutNoRoutes",
+        "TcpRetransSegs",
+        "TcpExtListenDrops",
+        "TcpExtListenOverflows",
+        "UdpInErrors",
+        "UdpRcvbufErrors",
+        "UdpSndbufErrors",
+        "Udp6InErrors",
+        "Udp6RcvbufErrors",
+        "Udp6SndbufErrors",
+    }
+    result = run(["nstat", "-az"], timeout=5)
+    counters: dict[str, int] = {}
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if len(fields) >= 2 and fields[0] in tracked:
+            try:
+                counters[fields[0]] = int(fields[1])
+            except ValueError:
+                continue
+    return {name: counters.get(name, 0) for name in sorted(tracked)}
+
+
+def softnet_counters_snapshot() -> dict[str, int]:
+    totals = {"processed": 0, "dropped": 0, "time_squeeze": 0}
+    try:
+        lines = Path("/proc/net/softnet_stat").read_text(encoding="ascii").splitlines()
+    except OSError:
+        return totals
+    for line in lines:
+        fields = line.split()
+        if len(fields) < 3:
+            continue
+        for index, name in enumerate(("processed", "dropped", "time_squeeze")):
+            try:
+                totals[name] += int(fields[index], 16)
+            except ValueError:
+                pass
+    return totals
+
+
+def socket_endpoint(peer: str) -> tuple[str, int | None]:
+    return split_endpoint(peer)
+
+
+def endpoint_key(source: str, port: int | None) -> str:
+    host = f"[{source}]" if ":" in source else source
+    return f"{host}:{port}" if port is not None else host
+
+
+def empty_tcp_metrics() -> dict[str, Any]:
+    return {
+        "connections": 0,
+        "states": Counter(),
+        "rtts": [],
+        "rtos": [],
+        "retransmissions": 0,
+        "bytes_sent": 0,
+        "bytes_retrans": 0,
+        "data_segs_out": 0,
+        "reord_seen": 0,
+        "pmtus": [],
+        "msses": [],
+        "cwnds": [],
+        "delivery_rates_bps": [],
+        "unacked": 0,
+        "idle_ms": [],
+    }
+
+
+def add_tcp_info(metrics: dict[str, Any], line: str) -> None:
+    float_values = ((r"\brtt:([0-9.]+)", "rtts"),)
+    scalar_values = (
+        (r"\bretrans:\d+/(\d+)", "retransmissions"),
+        (r"\bbytes_sent:(\d+)", "bytes_sent"),
+        (r"\bbytes_retrans:(\d+)", "bytes_retrans"),
+        (r"\bdata_segs_out:(\d+)", "data_segs_out"),
+        (r"\breord_seen:(\d+)", "reord_seen"),
+        (r"\bunacked:(\d+)", "unacked"),
+    )
+    list_values = (
+        (r"\brto:(\d+)", "rtos"),
+        (r"\bpmtu:(\d+)", "pmtus"),
+        (r"\bmss:(\d+)", "msses"),
+        (r"\bcwnd:(\d+)", "cwnds"),
+        (r"\bdelivery_rate (\d+)bps", "delivery_rates_bps"),
+    )
+    for pattern, key in float_values:
+        match = re.search(pattern, line)
+        if match:
+            metrics[key].append(float(match.group(1)))
+    for pattern, key in scalar_values:
+        match = re.search(pattern, line)
+        if match:
+            metrics[key] += int(match.group(1))
+    for pattern, key in list_values:
+        match = re.search(pattern, line)
+        if match:
+            metrics[key].append(int(match.group(1)))
+    metrics["idle_ms"].extend(int(value) for value in re.findall(r"\b(?:lastsnd|lastrcv|lastack):(\d+)", line))
+
+
+def merge_tcp_metrics(target: dict[str, Any], source: dict[str, Any]) -> None:
+    target["connections"] += source["connections"]
+    target["states"].update(source["states"])
+    for key in ("retransmissions", "bytes_sent", "bytes_retrans", "data_segs_out", "reord_seen", "unacked"):
+        target[key] += source[key]
+    for key in ("rtts", "rtos", "pmtus", "msses", "cwnds", "delivery_rates_bps", "idle_ms"):
+        target[key].extend(source[key])
+
+
+def render_tcp_metrics(values: dict[str, Any]) -> dict[str, Any]:
+    rtts = values["rtts"]
+    bytes_sent = int(values["bytes_sent"])
+    bytes_retrans = int(values["bytes_retrans"])
+    rendered = {
+        "connections": values["connections"],
+        "states": dict(values["states"]),
+        "rtt_ms": {
+            "min": min(rtts) if rtts else None,
+            "median": percentile(rtts, 50),
+            "p95": percentile(rtts, 95),
+            "max": max(rtts) if rtts else None,
+            "samples": len(rtts),
+        },
+        "rto_ms": {"p95": percentile(values["rtos"], 95), "max": max(values["rtos"]) if values["rtos"] else None},
+        "retransmissions": values["retransmissions"],
+        "bytes_sent": bytes_sent,
+        "bytes_retrans": bytes_retrans,
+        "retransmit_ratio_pct": round(bytes_retrans * 100 / bytes_sent, 3) if bytes_sent else 0.0,
+        "data_segs_out": values["data_segs_out"],
+        "reord_seen": values["reord_seen"],
+        "pmtu": min(values["pmtus"]) if values["pmtus"] else None,
+        "mss": min(values["msses"]) if values["msses"] else None,
+        "cwnd": {"median": percentile(values["cwnds"], 50), "max": max(values["cwnds"]) if values["cwnds"] else None},
+        "delivery_rate_bps": {
+            "median": percentile(values["delivery_rates_bps"], 50),
+            "max": max(values["delivery_rates_bps"]) if values["delivery_rates_bps"] else None,
+        },
+        "unacked": values["unacked"],
+        "idle_ms_p95": percentile(values["idle_ms"], 95),
+    }
+    rendered["quality"] = client_front_quality(rendered)
+    return rendered
 
 
 def tcp_front_snapshot(port: int) -> dict[str, Any]:
@@ -286,119 +532,47 @@ def tcp_front_snapshot(port: int) -> dict[str, Any]:
         if len(fields) < 5:
             continue
         states[fields[0]] += 1
-        host = socket_source(fields[-1])
+        host, _source_port = socket_endpoint(fields[-1])
         if host:
             clients[host] += 1
-    per_client: dict[str, dict[str, Any]] = {}
-    current_client: dict[str, Any] | None = None
+    per_flow: dict[str, dict[str, Any]] = {}
+    current_flow: dict[str, Any] | None = None
     for raw_line in run(["ss", "-Htin", f"sport = :{port}"], timeout=8).stdout.splitlines():
         line = raw_line.strip()
         fields = line.split()
         if len(fields) >= 5 and fields[0] in {"ESTAB", "SYN-RECV", "FIN-WAIT-1", "FIN-WAIT-2", "CLOSE-WAIT", "LAST-ACK", "CLOSING", "TIME-WAIT"}:
-            source = socket_source(fields[-1])
-            current_client = per_client.setdefault(
-                source,
-                {
-                    "connections": 0,
-                    "states": Counter(),
-                    "rtts": [],
-                    "rtos": [],
-                    "retransmissions": 0,
-                    "bytes_sent": 0,
-                    "bytes_retrans": 0,
-                    "data_segs_out": 0,
-                    "reord_seen": 0,
-                    "pmtus": [],
-                    "msses": [],
-                    "cwnds": [],
-                    "delivery_rates_bps": [],
-                    "unacked": 0,
-                    "idle_ms": [],
-                },
-            )
-            current_client["connections"] += 1
-            current_client["states"][fields[0]] += 1
+            source, source_port = socket_endpoint(fields[-1])
+            if not source:
+                current_flow = None
+                continue
+            current_flow = empty_tcp_metrics()
+            current_flow.update({"source": source, "source_port": source_port})
+            current_flow["connections"] = 1
+            current_flow["states"][fields[0]] = 1
+            per_flow[endpoint_key(source, source_port)] = current_flow
             continue
-        if current_client is None:
+        if current_flow is None:
             continue
-        rtt = re.search(r"\brtt:([0-9.]+)", line)
-        rto = re.search(r"\brto:(\d+)", line)
-        retrans = re.search(r"\bretrans:\d+/(\d+)", line)
-        bytes_sent = re.search(r"\bbytes_sent:(\d+)", line)
-        bytes_retrans = re.search(r"\bbytes_retrans:(\d+)", line)
-        data_segs_out = re.search(r"\bdata_segs_out:(\d+)", line)
-        reord_seen = re.search(r"\breord_seen:(\d+)", line)
-        pmtu = re.search(r"\bpmtu:(\d+)", line)
-        mss = re.search(r"\bmss:(\d+)", line)
-        cwnd = re.search(r"\bcwnd:(\d+)", line)
-        delivery_rate = re.search(r"\bdelivery_rate (\d+)bps", line)
-        unacked = re.search(r"\bunacked:(\d+)", line)
-        idle = [int(value) for value in re.findall(r"\b(?:lastsnd|lastrcv|lastack):(\d+)", line)]
-        if rtt:
-            current_client["rtts"].append(float(rtt.group(1)))
-        if rto:
-            current_client["rtos"].append(int(rto.group(1)))
-        if retrans:
-            current_client["retransmissions"] += int(retrans.group(1))
-        for match, key in (
-            (bytes_sent, "bytes_sent"),
-            (bytes_retrans, "bytes_retrans"),
-            (data_segs_out, "data_segs_out"),
-            (reord_seen, "reord_seen"),
-        ):
-            if match:
-                current_client[key] += int(match.group(1))
-        for match, key in (
-            (pmtu, "pmtus"),
-            (mss, "msses"),
-            (cwnd, "cwnds"),
-            (delivery_rate, "delivery_rates_bps"),
-        ):
-            if match:
-                current_client[key].append(int(match.group(1)))
-        if unacked:
-            current_client["unacked"] += int(unacked.group(1))
-        current_client["idle_ms"].extend(idle)
-    all_client_metrics: dict[str, dict[str, Any]] = {}
-    for source, values in per_client.items():
-        rtts = values["rtts"]
-        idle = values["idle_ms"]
-        bytes_sent = int(values["bytes_sent"])
-        bytes_retrans = int(values["bytes_retrans"])
-        retransmit_ratio_pct = round(bytes_retrans * 100 / bytes_sent, 3) if bytes_sent else 0.0
-        all_client_metrics[source] = {
-            "connections": values["connections"],
-            "states": dict(values["states"]),
-            "rtt_ms": {
-                "min": min(rtts) if rtts else None,
-                "median": percentile(rtts, 50),
-                "p95": percentile(rtts, 95),
-                "max": max(rtts) if rtts else None,
-                "samples": len(rtts),
-            },
-            "rto_ms": {
-                "p95": percentile(values["rtos"], 95),
-                "max": max(values["rtos"]) if values["rtos"] else None,
-            },
-            "retransmissions": values["retransmissions"],
-            "bytes_sent": bytes_sent,
-            "bytes_retrans": bytes_retrans,
-            "retransmit_ratio_pct": retransmit_ratio_pct,
-            "data_segs_out": values["data_segs_out"],
-            "reord_seen": values["reord_seen"],
-            "pmtu": min(values["pmtus"]) if values["pmtus"] else None,
-            "mss": min(values["msses"]) if values["msses"] else None,
-            "cwnd": {"median": percentile(values["cwnds"], 50), "max": max(values["cwnds"]) if values["cwnds"] else None},
-            "delivery_rate_bps": {"median": percentile(values["delivery_rates_bps"], 50), "max": max(values["delivery_rates_bps"]) if values["delivery_rates_bps"] else None},
-            "unacked": values["unacked"],
-            "idle_ms_p95": percentile(idle, 95),
-        }
-        all_client_metrics[source]["quality"] = client_front_quality(all_client_metrics[source])
+        add_tcp_info(current_flow, line)
+    per_client: dict[str, dict[str, Any]] = {}
+    for values in per_flow.values():
+        merge_tcp_metrics(per_client.setdefault(values["source"], empty_tcp_metrics()), values)
+    all_client_metrics = {source: render_tcp_metrics(values) for source, values in per_client.items()}
+    all_flow_metrics = {
+        key: {"source": values["source"], "source_port": values["source_port"], **render_tcp_metrics(values)}
+        for key, values in per_flow.items()
+    }
     client_metrics = {
         source: all_client_metrics[source]
         for source, _metrics in sorted(all_client_metrics.items(), key=lambda item: (-item[1]["connections"], item[0]))[:20]
     }
-    rtts = [rtt for values in per_client.values() for rtt in values["rtts"]]
+    flow_metrics = dict(
+        sorted(
+            all_flow_metrics.items(),
+            key=lambda item: (item[1]["quality"] != "degraded", -int(item[1]["bytes_retrans"]), item[0]),
+        )[:100]
+    )
+    rtts = [rtt for values in per_flow.values() for rtt in values["rtts"]]
     retrans = sum(int(value["retransmissions"]) for value in all_client_metrics.values())
     bytes_sent = sum(int(value["bytes_sent"]) for value in all_client_metrics.values())
     bytes_retrans = sum(int(value["bytes_retrans"]) for value in all_client_metrics.values())
@@ -416,6 +590,7 @@ def tcp_front_snapshot(port: int) -> dict[str, Any]:
         "connections": sum(states.values()),
         "top_sources": dict(clients.most_common(20)),
         "clients": client_metrics,
+        "flows": flow_metrics,
         "rtt_ms": {"min": min(rtts) if rtts else None, "median": percentile(rtts, 50), "p95": percentile(rtts, 95), "max": max(rtts) if rtts else None},
         "socket_retransmissions": retrans,
         "socket_retransmissions_scope": "lifetime counters of currently open sockets",
@@ -500,7 +675,7 @@ def udp_443_policy() -> str:
     return "routed"
 
 
-def public_front_snapshot(minutes: int, source: str | None = None) -> dict[str, Any]:
+def public_front_snapshot(minutes: int, source: str | None = None, *, live_probes: bool = False) -> dict[str, Any]:
     if not 5 <= minutes <= 1440:
         raise ValueError("since must be in range 5..1440 minutes")
     if source:
@@ -511,7 +686,7 @@ def public_front_snapshot(minutes: int, source: str | None = None) -> dict[str, 
             raise ValueError("source must be an IP address") from exc
     env = parse_env()
     port = int(env.get("RU_LISTEN_PORT", "443") or 443)
-    xray_lines = journal_lines("vpn-stack-xray.service", minutes)
+    xray_lines = journal_filtered_lines("vpn-stack-xray.service", minutes, XRAY_FRONT_LOG_GREP)
     accepted_tcp = sum("accepted tcp:" in line for line in xray_lines)
     accepted_udp = sum("accepted udp:" in line for line in xray_lines)
     udp_443 = sum("accepted udp:" in line and (":443 " in line or ":443[" in line) for line in xray_lines)
@@ -527,6 +702,9 @@ def public_front_snapshot(minutes: int, source: str | None = None) -> dict[str, 
     services = {"xray": service_state("vpn-stack-xray.service"), "nftables": service_state("nftables.service")}
     observation = front_observation(front)
     front_verdict = "failed" if services["xray"] != "active" or not front["listening"] else "degraded" if observation in {"client_specific", "degraded"} else "verified"
+    probes = run_probes(env, "ru-gateway", "light") if live_probes else {"profile": "none", "ok": None, "requirements": {}}
+    path_verdict = "verified" if probes.get("ok") is True else "failed" if probes.get("ok") is False else "inconclusive"
+    overall = "failed" if "failed" in {front_verdict, path_verdict} else "degraded" if front_verdict == "degraded" else front_verdict
     payload = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": utc_now(),
@@ -544,7 +722,9 @@ def public_front_snapshot(minutes: int, source: str | None = None) -> dict[str, 
         "transport": {"udp_443_policy": udp_443_policy()},
         "top_sources": dict(source_counts.most_common(20)),
         "observation": observation,
-        "verdict": front_verdict,
+        "probes": probes,
+        "verdicts": {"public_front": front_verdict, "server_path": path_verdict, "overall": overall},
+        "verdict": overall,
     }
     if source is None:
         return payload
@@ -557,6 +737,18 @@ def public_front_snapshot(minutes: int, source: str | None = None) -> dict[str, 
     }
     source_events["accepted"] = source_events["accepted_tcp"] + source_events["accepted_udp"]
     client = front.get("clients", {}).get(source, {})
+    flow_events: dict[str, Counter[str]] = {}
+    for line in xray_lines:
+        event_source, event_port = source_endpoint_from_line(line)
+        destination = accepted_destination_from_line(line)
+        if event_source != source or event_port is None or not destination:
+            continue
+        flow_events.setdefault(endpoint_key(event_source, event_port), Counter())[destination] += 1
+    source_flows = {
+        key: {**metrics, "accepted_destinations": dict(flow_events.get(key, Counter()).most_common(10))}
+        for key, metrics in front.get("flows", {}).items()
+        if metrics.get("source") == source
+    }
     if source_events["accepted"] and client.get("quality") == "degraded":
         source_verdict = "degraded"
     elif source_events["accepted"]:
@@ -567,7 +759,16 @@ def public_front_snapshot(minutes: int, source: str | None = None) -> dict[str, 
         source_verdict = "tcp_reached_no_xray_accept"
     else:
         source_verdict = "not_seen_on_server"
-    payload.update({"source": source, "source_events": source_events, "source_client": client, "source_verdict": source_verdict})
+    payload.update(
+        {
+            "source": source,
+            "source_events": source_events,
+            "source_client": client,
+            "source_flows": source_flows,
+            "source_flow_events": {key: dict(counter.most_common(10)) for key, counter in flow_events.items()},
+            "source_verdict": source_verdict,
+        }
+    )
     return payload
 
 
@@ -579,8 +780,14 @@ def front_client_snapshot(source: str, minutes: int) -> dict[str, Any]:
         "source": source,
         "window_minutes": minutes,
         "services": payload["services"],
-        "front": {"port": payload["front"].get("port", 0), "listening": payload["front"].get("listening", False), "client": payload["source_client"]},
+        "front": {
+            "port": payload["front"].get("port", 0),
+            "listening": payload["front"].get("listening", False),
+            "client": payload["source_client"],
+            "flows": payload["source_flows"],
+        },
         "events": payload["source_events"],
+        "flow_events": payload["source_flow_events"],
         "transport": payload["transport"],
         "verdict": payload["source_verdict"],
     }
@@ -607,7 +814,10 @@ def conntrack_snapshot() -> dict[str, int | float]:
 
 
 def probe_url(url: str, *, interface: str = "", proxy: str = "", timeout: int = 6, ip_version: int = 4, insecure: bool = False) -> dict[str, Any]:
-    args = ["curl", f"-{ip_version}", "-L", "-sS", "-o", "/dev/null", "-w", "%{http_code}|%{time_connect}|%{time_total}|%{remote_ip}", "--connect-timeout", "2", "--max-time", str(timeout)]
+    args = ["curl"]
+    if not proxy:
+        args.append(f"-{ip_version}")
+    args.extend(["-L", "--head", "-sS", "-o", "/dev/null", "-w", "%{http_code}|%{time_connect}|%{time_total}|%{remote_ip}", "--connect-timeout", "2", "--max-time", str(timeout)])
     if insecure:
         args.append("-k")
     if interface:
@@ -626,6 +836,19 @@ def probe_url(url: str, *, interface: str = "", proxy: str = "", timeout: int = 
         "remote_ip": fields[3] if len(fields) > 3 else "",
         "error": result.stderr.strip()[:240],
     }
+
+
+def probe_url_matrix(targets: list[tuple[str, dict[str, Any]]], paths: dict[str, dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    results: dict[str, list[dict[str, Any] | None]] = {name: [None] * len(targets) for name in paths}
+    with ThreadPoolExecutor(max_workers=max(1, min(12, len(targets) * len(paths)))) as executor:
+        futures = {
+            executor.submit(probe_url, url, **target_options, **path_options): (path_name, index)
+            for path_name, path_options in paths.items()
+            for index, (url, target_options) in enumerate(targets)
+        }
+        for future, (path_name, index) in futures.items():
+            results[path_name][index] = future.result()
+    return {name: [item for item in values if item is not None] for name, values in results.items()}
 
 
 def probe_identity(*, interface: str = "", proxy: str = "", timeout: int = 8) -> dict[str, Any]:
@@ -675,6 +898,16 @@ def failed_requirements(probes: dict[str, Any]) -> list[str]:
     return sorted(str(name) for name, passed in requirements.items() if passed is not True)
 
 
+def release_gate_requirements(requirements: dict[str, bool]) -> dict[str, bool]:
+    return {name: passed for name, passed in requirements.items() if name not in EXTERNAL_CAPABILITY_REQUIREMENTS}
+
+
+def release_gate_ok(probes: dict[str, Any]) -> bool:
+    if probes.get("profile") == "acceptance":
+        return probes.get("release_gate_ok") is True
+    return probes.get("ok") is True
+
+
 def run_probes(env: dict[str, str], role: str, profile: str) -> dict[str, Any]:
     wg_interface = env.get("WG_INTERFACE", "wg0")
     targets = ["https://www.google.com/generate_204"]
@@ -684,9 +917,13 @@ def run_probes(env: dict[str, str], role: str, profile: str) -> dict[str, Any]:
         required_targets = ACCEPTANCE_REQUIRED_TARGETS
         observed_targets = ACCEPTANCE_OBSERVED_TARGETS
         targets = [*required_targets, *observed_targets]
-    direct = [probe_url(url) for url in targets]
-    via_wg = [probe_url(url, interface=wg_interface) for url in targets] if role == "ru-gateway" else []
-    router = [probe_url(url, proxy="socks5h://127.0.0.1:2080") for url in targets] if role == "ru-gateway" else []
+    paths = {"direct": {}}
+    if role == "ru-gateway":
+        paths.update({"via_wg": {"interface": wg_interface}, "router": {"proxy": "socks5h://127.0.0.1:2080"}})
+    domain_matrix = probe_url_matrix([(url, {}) for url in targets], paths)
+    direct = domain_matrix["direct"]
+    via_wg = domain_matrix.get("via_wg", [])
+    router = domain_matrix.get("router", [])
     by_target = lambda values: {str(item.get("target", "")): item for item in values}
     direct_by_target = by_target(direct)
     wg_by_target = by_target(via_wg)
@@ -710,15 +947,19 @@ def run_probes(env: dict[str, str], role: str, profile: str) -> dict[str, Any]:
         "router": router,
     }
     if profile != "acceptance":
-        required_paths = {"foreign_direct": direct} if role != "ru-gateway" else {"via_wg": via_wg, "router": router}
+        required_paths = {"foreign_direct": direct} if role != "ru-gateway" else {"ru_direct": direct, "via_wg": via_wg, "router": router}
         result["requirements"] = {name: all(item["ok"] for item in items) for name, items in required_paths.items()}
         result["ok"] = all(result["requirements"].values())
         return result
     ipv4_literal_url = "https://1.1.1.1/cdn-cgi/trace"
     ipv6_literal_url = "https://[2606:4700:4700::1111]/cdn-cgi/trace"
-    literal_direct = [probe_url(ipv4_literal_url, insecure=True), probe_url(ipv6_literal_url, ip_version=6, insecure=True)]
-    literal_wg = [probe_url(ipv4_literal_url, interface=wg_interface, insecure=True), probe_url(ipv6_literal_url, interface=wg_interface, ip_version=6, insecure=True)] if role == "ru-gateway" else []
-    literal_router = [probe_url(ipv4_literal_url, proxy="socks5h://127.0.0.1:2080", insecure=True), probe_url(ipv6_literal_url, proxy="socks5h://127.0.0.1:2080", insecure=True)] if role == "ru-gateway" else []
+    literal_matrix = probe_url_matrix(
+        [(ipv4_literal_url, {"insecure": True}), (ipv6_literal_url, {"ip_version": 6, "insecure": True})],
+        paths,
+    )
+    literal_direct = literal_matrix["direct"]
+    literal_wg = literal_matrix.get("via_wg", [])
+    literal_router = literal_matrix.get("router", [])
     identities: dict[str, dict[str, Any]] = {"direct": probe_identity()}
     if role == "ru-gateway":
         identities["via_wg"] = probe_identity(interface=wg_interface)
@@ -742,6 +983,7 @@ def run_probes(env: dict[str, str], role: str, profile: str) -> dict[str, Any]:
             "foreign_identity": [identities["direct"]],
         }
     requirements = {name: all(item["ok"] for item in items) for name, items in required_paths.items()}
+    gate_requirements = release_gate_requirements(requirements)
     result.update(
         {
             "identities": identities,
@@ -750,6 +992,8 @@ def run_probes(env: dict[str, str], role: str, profile: str) -> dict[str, Any]:
             "blocked_private_fake": private_reject,
             "requirements": requirements,
             "ok": all(requirements.values()),
+            "release_gate_requirements": gate_requirements,
+            "release_gate_ok": all(gate_requirements.values()),
         }
     )
     return result
@@ -815,6 +1059,11 @@ def host_snapshot(default_iface: str) -> dict[str, Any]:
     }
 
 
+def probe_requirement(probes: dict[str, Any], name: str) -> bool:
+    requirements = probes.get("requirements", {})
+    return isinstance(requirements, dict) and requirements.get(name) is True
+
+
 def snapshot(*, live_probes: bool = False, profile: str = "light", full_logs: bool = True, include_maintenance: bool = True) -> dict[str, Any]:
     env = parse_env()
     manifest_data = manifest_snapshot()
@@ -832,27 +1081,36 @@ def snapshot(*, live_probes: bool = False, profile: str = "light", full_logs: bo
         "health_timer": service_state("vpn-stack-health.timer"),
     }
     fresh_since, fresh_window_minutes = fresh_log_since()
+    if not full_logs:
+        fresh_since, fresh_window_minutes = "5 minutes ago", 5
     maintenance = maintenance_snapshot() if include_maintenance else {}
-    log_windows = (5, 30, 1440) if full_logs else (5,)
-    logs = {str(minutes): summarize_lines(journal_lines("sing-box.service", minutes) + journal_lines("vpn-stack-xray.service", minutes)) for minutes in log_windows}
-    fresh_logs = summarize_lines(journal_lines_since("sing-box.service", fresh_since) + journal_lines_since("vpn-stack-xray.service", fresh_since))
+    logs, fresh_logs = summarize_problem_windows(full_logs=full_logs, fresh_since=fresh_since)
     front = tcp_front_snapshot(port) if role == "ru-gateway" else {}
     transport = {"udp_443_policy": udp_443_policy()} if role == "ru-gateway" else {}
     probes = run_confirmed_probes(env, role, profile) if live_probes else {"profile": "none", "ok": None}
+    tcp_adaptation = tcp_adaptation_snapshot(public_iface)
+    expected_network_profile = managed_network_profile()
+    profile_mismatches = network_profile_mismatches(tcp_adaptation, expected_network_profile)
     required = ["wireguard", "nftables"] + (["sing-box", "xray"] if role == "ru-gateway" else [])
     reasons = [f"{name}={services[name]}" for name in required if services.get(name) != "active"]
     if manifest_data["drift"] != "none":
         reasons.append(f"drift={manifest_data['drift']}")
-    if live_probes and not probes.get("ok"):
-        reasons.append("live_probes_failed")
+    if profile_mismatches:
+        reasons.append(f"network_profile={','.join(profile_mismatches)}")
+    if live_probes and not release_gate_ok(probes):
+        failed = ",".join(failed_requirements(probes))
+        reasons.append(f"live_probes_failed:{failed}" if failed else "live_probes_failed")
     if role == "ru-gateway" and transport.get("udp_443_policy") != "routed":
         reasons.append(f"udp_443_policy={transport.get('udp_443_policy')}")
+    capability_failures = [name for name in failed_requirements(probes) if name in EXTERNAL_CAPABILITY_REQUIREMENTS] if live_probes else []
     server_path = "failed" if reasons else "verified" if live_probes else "inconclusive"
     public_front = "not-applicable"
     if role == "ru-gateway":
         public_front = "verified" if services["xray"] == "active" and front.get("listening") else "failed"
     client_observation = front_observation(front) if front else "not-applicable"
-    overall = "failed" if "failed" in {server_path, public_front} else "degraded" if client_observation in {"client_specific", "degraded"} else "verified" if server_path == "verified" else "inconclusive"
+    external_capabilities = "degraded" if capability_failures else "verified" if live_probes else "inconclusive"
+    degradations = ([f"external_capabilities_failed:{','.join(capability_failures)}"] if capability_failures else [])
+    overall = "failed" if "failed" in {server_path, public_front} else "degraded" if degradations or client_observation in {"client_specific", "degraded"} else "verified" if server_path == "verified" else "inconclusive"
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": utc_now(),
@@ -873,7 +1131,11 @@ def snapshot(*, live_probes: bool = False, profile: str = "light", full_logs: bo
         "network": {
             "interfaces": interface_counters((public_iface, wg_interface)),
             "conntrack": conntrack_snapshot(),
-            "tcp_adaptation": tcp_adaptation_snapshot(public_iface),
+            "tcp_adaptation": tcp_adaptation,
+            "managed_profile": expected_network_profile,
+            "profile_mismatches": profile_mismatches,
+            "protocol_counters": protocol_counters_snapshot(),
+            "softnet_counters": softnet_counters_snapshot(),
         },
         "front": front,
         "transport": transport,
@@ -881,7 +1143,7 @@ def snapshot(*, live_probes: bool = False, profile: str = "light", full_logs: bo
         "logs": {"fresh": {"since": fresh_since, "window_minutes": fresh_window_minutes, **fresh_logs}, "windows_minutes": logs},
         "maintenance": maintenance,
         "redundancy": {"available": False, "healthy_exits": 1 if services["wireguard"] == "active" else 0, "reason": "single foreign egress configured"},
-        "verdicts": {"server_path": server_path, "public_front": public_front, "client_observation": client_observation, "overall": overall, "reasons": reasons},
+        "verdicts": {"server_path": server_path, "public_front": public_front, "client_observation": client_observation, "external_capabilities": external_capabilities, "overall": overall, "reasons": reasons + degradations},
     }
 
 
@@ -893,8 +1155,16 @@ def health() -> dict[str, Any]:
         previous = read_json(HEALTH_STATE_PATH, {})
         hard_failure = current["verdicts"]["server_path"] == "failed"
         failures = int(previous.get("consecutive_failures", 0)) + 1 if hard_failure else 0
-        state = "healthy"
+        network_counters = {
+            "interfaces": current.get("network", {}).get("interfaces", {}),
+            "protocol": current.get("network", {}).get("protocol_counters", {}),
+            "softnet": current.get("network", {}).get("softnet_counters", {}),
+        }
+        network_deltas = positive_counter_deltas(network_counters, previous.get("network_counters", {}))
+        soft_reasons = network_soft_reasons(network_deltas)
+        state = "degraded" if soft_reasons else "healthy"
         action = "none"
+        postcheck: dict[str, Any] | None = None
         if hard_failure and failures == 1:
             state = "suspect"
         elif hard_failure:
@@ -905,12 +1175,13 @@ def health() -> dict[str, Any]:
                 if action != "none":
                     time.sleep(2)
                     postcheck = snapshot(live_probes=True, profile="light", full_logs=False, include_maintenance=False)
-                    if postcheck["verdicts"]["server_path"] != "failed":
+                    if postcheck["verdicts"]["server_path"] == "verified":
                         state = "healthy"
                         failures = 0
                     else:
                         state = "recovering"
-                    current["post_recovery"] = postcheck["verdicts"]
+        if postcheck is not None:
+            current["post_recovery"] = postcheck["verdicts"]
         payload = {
             "schema_version": SCHEMA_VERSION,
             "updated_at": utc_now(),
@@ -918,10 +1189,47 @@ def health() -> dict[str, Any]:
             "consecutive_failures": failures,
             "last_action": action,
             "last_action_epoch": int(time.time()) if action != "none" else int(previous.get("last_action_epoch", 0)),
-            "verdicts": current["verdicts"],
+            "probe_failures": failed_requirements((postcheck or current).get("probes", {})),
+            "probes": (postcheck or current).get("probes", {}),
+            "network_counters": network_counters,
+            "network_deltas": network_deltas,
+            "soft_reasons": soft_reasons,
+            "verdicts": (postcheck or current)["verdicts"],
         }
+        if postcheck is not None:
+            payload["post_recovery_verdicts"] = postcheck["verdicts"]
         write_json_atomic(HEALTH_STATE_PATH, payload)
         return payload
+
+
+def positive_counter_deltas(current: Any, previous: Any) -> Any:
+    if not isinstance(current, dict) or not isinstance(previous, dict):
+        return {}
+    deltas: dict[str, Any] = {}
+    for key, value in current.items():
+        old = previous.get(key)
+        if isinstance(value, dict):
+            nested = positive_counter_deltas(value, old)
+            if nested:
+                deltas[key] = nested
+        elif isinstance(value, int) and isinstance(old, int) and value >= old and value > old:
+            deltas[key] = value - old
+    return deltas
+
+
+def network_soft_reasons(deltas: dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    protocol = deltas.get("protocol", {})
+    softnet = deltas.get("softnet", {})
+    receive_errors = int(protocol.get("UdpRcvbufErrors", 0)) + int(protocol.get("Udp6RcvbufErrors", 0))
+    if receive_errors:
+        reasons.append(f"udp_receive_buffer_drops={receive_errors}")
+    if int(softnet.get("dropped", 0)):
+        reasons.append(f"softnet_drops={softnet['dropped']}")
+    missed = sum(int(values.get("rx_missed_errors", 0)) for values in deltas.get("interfaces", {}).values())
+    if missed:
+        reasons.append(f"interface_rx_missed={missed}")
+    return reasons
 
 
 def recover(current: dict[str, Any]) -> str:
@@ -931,6 +1239,11 @@ def recover(current: dict[str, Any]) -> str:
         if services.get(key) not in {None, "active", "inactive" if key in {"sing-box", "xray"} and current.get("role") == "foreign-exit" else "active"}:
             result = run(["systemctl", "restart", unit], timeout=30)
             return f"restart:{unit}:{'ok' if result.returncode == 0 else 'failed'}"
+    if current.get("role") == "ru-gateway":
+        probes = current.get("probes", {})
+        if probe_requirement(probes, "via_wg") and not probe_requirement(probes, "router"):
+            result = run(["systemctl", "restart", "sing-box.service"], timeout=30)
+            return f"restart:sing-box.service:{'ok' if result.returncode == 0 else 'failed'}"
     return "none"
 
 
@@ -966,6 +1279,7 @@ def build_parser() -> argparse.ArgumentParser:
     snap = sub.add_parser("snapshot")
     snap.add_argument("--live-probes", action="store_true")
     snap.add_argument("--profile", choices=["light", "acceptance"], default="light")
+    snap.add_argument("--compact", action="store_true")
     probe = sub.add_parser("probe")
     probe.add_argument("--profile", choices=["light", "acceptance"], default="light")
     client = sub.add_parser("client")
@@ -973,6 +1287,7 @@ def build_parser() -> argparse.ArgumentParser:
     client.add_argument("--since", type=int, default=15)
     front = sub.add_parser("front")
     front.add_argument("--since", type=int, default=30)
+    front.add_argument("--live-probes", action="store_true")
     sub.add_parser("health")
     routes = sub.add_parser("routes")
     route_sub = routes.add_subparsers(dest="routes_action", required=True)
@@ -991,7 +1306,12 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "snapshot":
-        payload = snapshot(live_probes=args.live_probes, profile=args.profile)
+        payload = snapshot(
+            live_probes=args.live_probes,
+            profile=args.profile,
+            full_logs=not args.compact,
+            include_maintenance=not args.compact,
+        )
     elif args.command == "probe":
         env = parse_env()
         manifest = read_json(MANIFEST_PATH, {})
@@ -999,7 +1319,7 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "client":
         payload = front_client_snapshot(args.source, args.since)
     elif args.command == "front":
-        payload = public_front_snapshot(args.since)
+        payload = public_front_snapshot(args.since, live_probes=args.live_probes)
     elif args.command == "health":
         payload = health()
     elif args.command == "routes":

@@ -34,7 +34,7 @@
 - Public Reality TCP и оба серверных WAN используют BBR с `fq`; это pacing, а не route policy.
 - `net.ipv4.tcp_mtu_probing=1` является обязательным runtime-инвариантом. Linux включает PLPMTUD для конкретного TCP-потока после признаков ICMP black hole и с системным `tcp_probe_interval` периодически пробует восстановить больший PMTU. См. [Linux IP sysctl](https://www.kernel.org/doc/html/latest/networking/ip-sysctl.html) и [RFC 4821](https://datatracker.ietf.org/doc/html/rfc4821).
 - WireGuard MTU не меняется по журналам или одиночному endpoint. Он остаётся частью deployment spec и меняется только сравнительным acceptance-тестом.
-- Buffer/backlog sysctl не применяются без `softnet`, UDP buffer или interface delta evidence. Это не публичные ручки для оперативного лечения.
+- Buffer/backlog sysctl не применяются без `softnet`, UDP buffer или interface delta evidence. После подтверждённых `UdpRcvbufErrors` WireGuard использует единый managed receive profile: `rmem_default=4 MiB`, `rmem_max=16 MiB`; send buffer и backlog не меняются без собственных drops. Это не публичные ручки для оперативного лечения. Семантика UDP receive limits описана в [Linux IP sysctl](https://www.kernel.org/doc/html/latest/networking/ip-sysctl.html).
 - CAKE/HTB не включаются по одному высокому RTT. CAKE управляет очередью только перед известным общим bottleneck и для egress требует обоснованного bandwidth; его `autorate-ingress` не оценивает участок сети ниже qdisc. При source-specific деградации глобальный shaper урежет исправных клиентов, не исправляя удалённую очередь. См. [tc-cake(8)](https://man7.org/linux/man-pages/man8/tc-cake.8.html).
 - URLTest активируется только при двух независимых foreign egress. Он выбирает выход для новых соединений и не прерывает существующие; при одном сервере snapshot честно сообщает `redundancy: unavailable`. См. [sing-box URLTest](https://sing-box.sagernet.org/configuration/outbound/urltest/).
 - Один статический VLESS URI не может автоматически сменить публичный AS, TCP port или transport. Для отказоустойчивости client-to-RU path нужен второй независимый RU ingress либо новый клиентский transport contract. RAW/Reality/Vision не заменяется на XHTTP вслепую: полевые отчёты показывают и обход ISP policing, и отдельные compatibility/latency regressions ([net4people/bbs #546](https://github.com/net4people/bbs/issues/546), [Xray-core #5332](https://github.com/XTLS/Xray-core/issues/5332)).
@@ -53,6 +53,8 @@ Policy явно различает следующие классы:
 
 Domain routing использует глобальный DNS и затем направляет DNS-resolved RU geoip обратно в `direct-ru`. Raw literals не подменяются доменными правилами. DNS cache sing-box имеет ёмкость 4096, а DNS failures классифицируются отдельно от route timeout.
 
+Foreign-классы всегда остаются на `to-foreign`. Health и recovery не имеют права переводить их в `direct-ru`: при отказе единственного foreign-egress состояние становится `failed` и трафик остаётся fail-closed. Автоматический route failover допустим только между независимыми foreign-egress.
+
 ## Server agent и диагностика
 
 `vpn-stack-agent` - stdlib-only серверный executable. Он предоставляет команды `snapshot`, `probe`, `health`, `front`, `client`, `routes` и `assets`. Нормализация log buckets вынесена в отдельный `log_classifier.py`, который поставляется и хешируется вместе с agent.
@@ -60,27 +62,29 @@ Domain routing использует глобальный DNS и затем на�
 Snapshot schema 2 содержит:
 
 - service state, manifest drift и hashes всех managed artifacts;
-- WireGuard и interface/conntrack counters;
-- TCP front telemetry: socket states, RTT, retransmitted bytes/ratio, PMTU, MSS, cwnd, delivery rate, reordering, unacked и source grouping с canonical IPv4/IPv6 адресом, включая kernel-формат `::ffff:<IPv4>`;
+- WireGuard, interface/conntrack, protocol и softnet counters; health хранит дельты UDP receive overflow, softnet drops и missed packets;
+- TCP front telemetry: socket states, RTT, retransmitted bytes/ratio, PMTU, MSS, cwnd, delivery rate, reordering и unacked по каждому `source IP:port` с последующей агрегацией по canonical IPv4/IPv6 адресу, включая kernel-формат `::ffff:<IPv4>`;
 - fresh, 30-minute и 24-hour log windows;
 - mutually exclusive buckets: DNS timeout, domain timeout, IPv4 literal timeout, IPv6 literal timeout, private/fake block, client reset/EOF, invalid Reality и disabled-invalid;
 - парные DNS/router сообщения sing-box одного request ID дедуплицируются в одном DNS bucket;
 - maintenance state и отдельные `server_path`, `public_front`, `client_observation` verdicts.
 
-`vpn status` только собирает этот snapshot. `vpn diagnose path` сохраняет structured JSON. `vpn diagnose client --source <public-ip>` показывает evidence именно для проблемного источника, не смешивая его с другими клиентами.
+`vpn status` собирает компактный snapshot за последние 5 минут без live probes и исторического сканирования. `vpn diagnose path` сохраняет полный structured JSON с окнами 5m/30m/24h. `vpn diagnose front` одновременно проверяет публичный listener и свежие RU/WG/router paths. `vpn diagnose client --source <public-ip>` показывает потоки и Xray destinations проблемного источника, не смешивая устройства за одним NAT.
 
 ## Health и восстановление
 
-Health выполняется раз в две минуты и имеет состояния `healthy -> suspect -> failed -> recovering`.
+Health выполняется раз в две минуты и имеет состояния `healthy|degraded -> suspect -> failed -> recovering`.
 
-- Soft degradation (packet loss, медленный источник или socket churn) не вызывает restart.
+- Soft degradation (новые UDP/softnet/interface drops, медленный источник или socket churn) не вызывает restart.
 - Hard failure требует двух свежих независимых failure cycles.
 - Recovery имеет 15-minute cooldown, перезапускает только inactive/failed required service и обязательно делает post-check.
 - Throughput tests не входят в периодический health. Они запускаются только явно через live verification или диагностику.
 
 ## Установка и обслуживание
 
-Install/reinstall собирает release в `/etc/vpn-stack/releases/<release-id>`, проверяет sing-box, Xray, nftables, WireGuard, systemd, manifest и assets до activation, затем атомарно переключает `current`. Неудачные service start или server-side acceptance возвращают прежние artifacts и service state.
+Install/reinstall собирает release во временном каталоге внутри `/etc/vpn-stack/releases`, проверяет sing-box, Xray, nftables, WireGuard, systemd, manifest и assets, затем публикует immutable content-addressed tree и атомарно переключает `current`. Revision snapshot охватывает manifest, configs, rules/assets, runtime health state, admin auth, `current`/`previous` и состояния всех затрагиваемых сервисов. Неудачные service start, drift или core route acceptance возвращают весь этот набор; уже опубликованный release не перезаписывается повторной установкой. Внешние capability probes выводятся отдельно: временный отказ raw IPv6 при исправном core path даёт `degraded` и проваливает полный live verify, но не откатывает тот же конфиг, который не может изменить состояние внешнего endpoint.
+
+Хранятся последние 10 revision snapshots плюс отдельный baseline. Snapshot текущей транзакции никогда не удаляется её собственным rollback; pruning выполняется до создания нового snapshot.
 
 `vpn maintain` по умолчанию только показывает APT/security/reboot state. С `--apply --yes` роли обновляются последовательно, после каждой выполняется fresh verification. `--refresh-assets` использует тот же транзакционный reinstall workflow; background asset mutation отсутствует.
 
@@ -91,6 +95,8 @@ Journald ограничивается managed drop-in. APT periodic settings в�
 `vpn verify live --deployment <name>` обязателен после install/reinstall. Он собирает agent acceptance snapshots на обеих ролях и запускает эфемерный sing-box client, построенный напрямую из `vless-uri.txt`. Этот client соединяется с RU `:443`, проходит VLESS/Reality/Xray/sing-box/WireGuard path и проверяет egress identity, GitHub, Google, UDP DNS, TCP IPv6 literal и быстрый SOCKS reject private/fake destinations.
 
 Дополнительно проверяются DNS, direct/domain routes, IPv4 literal, IPv6 literal и reject private/fake. Итог только один из `verified`, `degraded`, `failed`, `inconclusive`; зелёный `status` не является acceptance доказательством.
+
+Server-side route acceptance использует HTTP `HEAD`: его задача доказать DNS, TCP, TLS, HTTP и выбранный route, не скачивая неограниченное тело сторонней страницы внутри короткого health/activation окна. Полные GET, передача данных и скорость проверяются отдельным public VLESS runner.
 
 Для RU acceptance прямой egress подтверждается отдельной identity-проверкой. Foreign-домены обязаны пройти через `wg0` и local router, IPv4 literal через оба пути, а IPv6 literal через router и проверенный IPv6 egress foreign. Прямой запрос RU к заблокированному foreign-домену и raw `curl --interface wg0 -6` не являются пользовательским dataplane и записываются как наблюдения, но не вызывают ложный rollback.
 

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime, timezone
 from pathlib import Path
 
 from . import VERSION
@@ -86,7 +85,6 @@ def render_manifest(env_text: str, role: str, rendered_files: dict[str, str], *,
         "schema_version": 2,
         "version": VERSION,
         "release_id": release_id,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
         "role": role,
         "env_sha256": sha256_text(env_text),
         "config_sha256": artifacts.get("sing-box.json", {}).get("sha256", ""),

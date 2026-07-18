@@ -26,7 +26,7 @@ BUCKETS = (
 _OPEN_CONNECTION_RE = re.compile(r"open connection to (?P<dst>\[[^\]]+\]:\d+|[^ ]+) using outbound/(?:direct|block)\[(?P<tag>[^\]]+)\]")
 _OUTBOUND_CONNECTION_RE = re.compile(r"outbound/(?:direct|block)\[(?P<tag>[^\]]+)\]: outbound connection to (?P<dst>\[[^\]]+\]:\d+|[^ ]+)")
 _ACCEPTED_RE = re.compile(r"accepted (?:tcp|udp):(?P<dst>\[[^\]]+\]:\d+|[^ ]+)")
-_SOURCE_RE = re.compile(r"(?:from|process connection from) (?P<src>\[[^\]]+\]|[^ ]+):\d+")
+_SOURCE_ENDPOINT_RE = re.compile(r"(?:from|process connection from) (?P<endpoint>\S+)")
 _DNS_LOOKUP_FAILED_RE = re.compile(r"dns: lookup failed for (?P<dst>[^: ]+):")
 _DNS_EXCHANGE_FAILED_RE = re.compile(r"dns: exchange failed for (?P<dst>[^ ]+)\. IN (?P<qtype>[A-Z0-9]+):")
 _ROUTER_LOOKUP_RE = re.compile(r"router: lookup (?P<dst>[^: ]+):")
@@ -56,9 +56,34 @@ def normalize_source(value: str) -> str:
     return str(address)
 
 
+def split_endpoint(value: str) -> tuple[str, int | None]:
+    endpoint = value.strip().rstrip(",;")
+    if endpoint.startswith(("tcp:", "udp:")):
+        endpoint = endpoint.split(":", 1)[1]
+    if endpoint.startswith("["):
+        closing = endpoint.find("]")
+        host = endpoint[1:closing] if closing >= 0 else endpoint[1:]
+        suffix = endpoint[closing + 1 :] if closing >= 0 else ""
+        port = suffix[1:] if suffix.startswith(":") else ""
+    else:
+        host, separator, port = endpoint.rpartition(":")
+        if not separator:
+            host, port = endpoint, ""
+    return normalize_source(host), int(port) if port.isdigit() else None
+
+
+def source_endpoint_from_line(line: str) -> tuple[str, int | None]:
+    match = _SOURCE_ENDPOINT_RE.search(line)
+    return split_endpoint(match.group("endpoint")) if match else ("", None)
+
+
 def source_from_line(line: str) -> str:
-    match = _SOURCE_RE.search(line)
-    return normalize_source(match.group("src")) if match else ""
+    return source_endpoint_from_line(line)[0]
+
+
+def accepted_destination_from_line(line: str) -> str:
+    match = _ACCEPTED_RE.search(line)
+    return match.group("dst") if match else ""
 
 
 def event_id_from_line(line: str) -> str:

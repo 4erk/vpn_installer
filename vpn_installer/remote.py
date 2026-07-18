@@ -415,7 +415,7 @@ def remote_preflight(
     run_live_probes: bool = False,
 ) -> dict[str, str]:
     try:
-        return bootstrap_from_snapshot(remote_agent_snapshot(target, live_probes=run_live_probes))
+        return bootstrap_from_snapshot(remote_agent_snapshot(target, live_probes=run_live_probes, compact=not run_live_probes))
     except (AppError, ValueError, json.JSONDecodeError):
         # Bootstrap hosts predate the agent. The fallback is intentionally used
         # only until a managed release has installed a schema-2 agent.
@@ -428,10 +428,12 @@ def remote_preflight(
     )
 
 
-def remote_agent_snapshot(target: RemoteTarget, *, live_probes: bool = False, profile: str = "light") -> dict[str, Any]:
+def remote_agent_snapshot(target: RemoteTarget, *, live_probes: bool = False, profile: str = "light", compact: bool = False) -> dict[str, Any]:
     command = "test -x /usr/local/lib/vpn-stack/vpn-stack-agent.py && /usr/bin/python3 /usr/local/lib/vpn-stack/vpn-stack-agent.py snapshot"
     if live_probes:
         command += f" --live-probes --profile {shlex.quote(profile)}"
+    if compact:
+        command += " --compact"
     payload = json.loads(ssh_capture(target, command, command_timeout=180 if live_probes else 90))
     if int(payload.get("schema_version", 0)) != 2:
         raise AppError("vpn-stack-agent returned an unsupported snapshot schema")
@@ -487,6 +489,8 @@ def bootstrap_from_snapshot(snapshot: dict[str, Any]) -> dict[str, str]:
         "tcp_default_qdisc": str(tcp_adaptation.get("qdisc", "")),
         "tcp_mtu_probing": str(tcp_adaptation.get("mtu_probing", "")),
         "tcp_probe_interval_seconds": str(tcp_adaptation.get("probe_interval_seconds", "")),
+        "udp_rmem_default": str(tcp_adaptation.get("udp_rmem_default", "")),
+        "udp_rmem_max": str(tcp_adaptation.get("udp_rmem_max", "")),
     }
 
 def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
@@ -520,7 +524,8 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
     print(
         "tcp adaptation: "
         f"cc={preflight.get('tcp_congestion_control', '-')}, qdisc={preflight.get('tcp_default_qdisc', '-')}, "
-        f"mtu_probing={preflight.get('tcp_mtu_probing', '-')}, probe_interval_s={preflight.get('tcp_probe_interval_seconds', '-')}"
+        f"mtu_probing={preflight.get('tcp_mtu_probing', '-')}, probe_interval_s={preflight.get('tcp_probe_interval_seconds', '-')}, "
+        f"udp_rmem={preflight.get('udp_rmem_default', '-')}/{preflight.get('udp_rmem_max', '-')}"
     )
 
 

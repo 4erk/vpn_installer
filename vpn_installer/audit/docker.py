@@ -17,6 +17,7 @@ def run(runner: AuditRunner) -> None:
     runner.ensure_audit_image()
     runner.record("docker-unmanaged-remove-purge-render-only", lambda: test_unmanaged_remove_purge_render_only(runner))
     runner.record("docker-asset-fail-fast", lambda: test_asset_fail_fast(runner))
+    runner.record("docker-install-rollback-state", lambda: test_install_rollback_state(runner))
     runner.record("docker-status-readonly-role", lambda: test_status_readonly_role(runner))
     runner.record("docker-remote-action-reinstall-role", lambda: test_remote_action_role(runner, "reinstall"))
     runner.record("docker-remote-action-remove-role", lambda: test_remote_action_role(runner, "remove"))
@@ -91,6 +92,131 @@ def test_asset_fail_fast(runner: AuditRunner) -> dict[str, str]:
     with contextlib.redirect_stderr(io.StringIO()):
         render_all_artifacts(env_path, env)
     return {"env_path": str(env_path)}
+
+
+def test_install_rollback_state(runner: AuditRunner) -> dict[str, str]:
+    env_path, _env = runner.create_env("install-rollback", {"WG_INTERFACE": "wg-test"})
+    container = f"audit-install-rollback-{runner.run_id}"
+    with runner.docker_container(container, AUDIT_IMAGE):
+        runner.docker_exec(container, "mkdir -p /work")
+        runner.docker_copy(container, INSTALL_SCRIPT_PATH, "/work/install.sh")
+        runner.docker_copy(container, env_path, "/work/deployment.env")
+        runner.docker_copy(container, ROOT_DIR / "vpn_installer", "/work")
+        runner.docker_exec(
+            container,
+            textwrap.dedent(
+                """\
+                set -euo pipefail
+                export VPNSTACK_INSTALL_LIBRARY_ONLY=1
+                source /work/install.sh --role foreign-exit --env-file /work/deployment.env
+
+                test_root=/tmp/vpn-stack-transaction
+                VPNSTACK_ROOT="${test_root}/etc"
+                VPNSTACK_BACKUP_DIR="${VPNSTACK_ROOT}/backups"
+                VPNSTACK_BASELINE_DIR="${VPNSTACK_BACKUP_DIR}/baseline"
+                VPNSTACK_SNAPSHOT_DIR="${VPNSTACK_BACKUP_DIR}/snapshots"
+                VPNSTACK_RELEASES_DIR="${VPNSTACK_ROOT}/releases"
+                VPNSTACK_ROLE_FILE="${VPNSTACK_ROOT}/role"
+                VPNSTACK_DEPLOYMENT_FILE="${VPNSTACK_ROOT}/deployment.env"
+                VPNSTACK_INSTALLED_AT_FILE="${VPNSTACK_ROOT}/installed_at"
+                VPNSTACK_REMOVED_AT_FILE="${VPNSTACK_ROOT}/removed_at"
+                VPNSTACK_RENDER_MANIFEST_FILE="${VPNSTACK_ROOT}/render-manifest.json"
+                VPNSTACK_ADMIN_AUTH_FILE="${VPNSTACK_ROOT}/admin-auth.json"
+                VPNSTACK_CURRENT_RELEASE="${VPNSTACK_ROOT}/current"
+                VPNSTACK_PREVIOUS_RELEASE="${VPNSTACK_ROOT}/previous"
+                VPNSTACK_ACCEPTANCE_FILE="${VPNSTACK_ROOT}/acceptance.json"
+                VPNSTACK_FAILED_ACCEPTANCE_FILE="${VPNSTACK_ROOT}/last-failed-acceptance.json"
+                SINGBOX_CONFIG_PATH="${test_root}/sing-box/config.json"
+                SINGBOX_BASE_CONFIG_PATH="${VPNSTACK_ROOT}/sing-box.base.json"
+                WG_CONFIG_PATH="${test_root}/wireguard/wg-test.conf"
+                HEALTH_STATE_PATH="${test_root}/state/health-state.json"
+                LEGACY_ADAPTIVE_ROUTING_RULES_PATH="${test_root}/state/adaptive-routing-rules.json"
+                LEGACY_DATAPLANE_CACHE_PATH="${test_root}/state/dataplane-cache.env"
+                RULESET_DIR="${test_root}/state/rules"
+
+                systemctl() { return 1; }
+                sysctl() { return 0; }
+
+                paths="$(managed_paths)"
+                grep -Fxq "${VPNSTACK_RENDER_MANIFEST_FILE}" <<<"${paths}"
+                grep -Fxq "${VPNSTACK_ADMIN_AUTH_FILE}" <<<"${paths}"
+                grep -Fxq "${HEALTH_STATE_PATH}" <<<"${paths}"
+
+                mkdir -p "${VPNSTACK_RELEASES_DIR}/old" "${VPNSTACK_RELEASES_DIR}/new" "$(dirname "${SINGBOX_CONFIG_PATH}")" "$(dirname "${HEALTH_STATE_PATH}")" "${RULESET_DIR}"
+                printf 'old manifest\n' >"${VPNSTACK_RENDER_MANIFEST_FILE}"
+                printf 'old config\n' >"${SINGBOX_CONFIG_PATH}"
+                printf 'old health\n' >"${HEALTH_STATE_PATH}"
+                printf 'old auth\n' >"${VPNSTACK_ADMIN_AUTH_FILE}"
+                printf 'old rules\n' >"${RULESET_DIR}/rules.srs"
+                ln -s "${VPNSTACK_RELEASES_DIR}/old" "${VPNSTACK_CURRENT_RELEASE}"
+
+                create_revision_snapshot
+                printf 'new manifest\n' >"${VPNSTACK_RENDER_MANIFEST_FILE}"
+                printf 'new config\n' >"${SINGBOX_CONFIG_PATH}"
+                rm -f "${HEALTH_STATE_PATH}"
+                printf 'new auth\n' >"${VPNSTACK_ADMIN_AUTH_FILE}"
+                printf 'new rules\n' >"${RULESET_DIR}/rules.srs"
+                ln -s "${VPNSTACK_RELEASES_DIR}/new" "${VPNSTACK_ROOT}/.current.tmp"
+                mv -Tf "${VPNSTACK_ROOT}/.current.tmp" "${VPNSTACK_CURRENT_RELEASE}"
+                INSTALL_MUTATION_STARTED=1
+                restore_install_state_on_error
+
+                grep -Fxq 'old manifest' "${VPNSTACK_RENDER_MANIFEST_FILE}"
+                grep -Fxq 'old config' "${SINGBOX_CONFIG_PATH}"
+                grep -Fxq 'old health' "${HEALTH_STATE_PATH}"
+                grep -Fxq 'old auth' "${VPNSTACK_ADMIN_AUTH_FILE}"
+                grep -Fxq 'old rules' "${RULESET_DIR}/rules.srs"
+                test "$(readlink -f "${VPNSTACK_CURRENT_RELEASE}")" = "${VPNSTACK_RELEASES_DIR}/old"
+
+                rm -rf "${VPNSTACK_SNAPSHOT_DIR}"
+                mkdir -p "${VPNSTACK_SNAPSHOT_DIR}"
+                for i in $(seq 1 12); do
+                  mkdir "${VPNSTACK_SNAPSHOT_DIR}/snapshot-${i}"
+                  touch -d "@${i}" "${VPNSTACK_SNAPSHOT_DIR}/snapshot-${i}"
+                done
+                prune_revision_snapshots 3
+                test "$(find "${VPNSTACK_SNAPSHOT_DIR}" -mindepth 1 -maxdepth 1 -type d | wc -l)" = 3
+                test -d "${VPNSTACK_SNAPSHOT_DIR}/snapshot-12"
+                test ! -e "${VPNSTACK_SNAPSHOT_DIR}/snapshot-1"
+
+                source_dir="${test_root}/source"
+                mkdir -p "${source_dir}"
+                printf '{"release_id":"release-1"}\n' >"${source_dir}/render-manifest.json"
+                printf 'wg\n' >"${source_dir}/wg-test.conf"
+                printf 'payload\n' >"${source_dir}/payload"
+                mkdir -p "${VPNSTACK_RELEASES_DIR}/release-1"
+                printf 'legacy release\n' >"${VPNSTACK_RELEASES_DIR}/release-1/marker"
+                ASSETS_DIR=""
+                stage_release "${source_dir}"
+                test "$(cat "${VPNSTACK_RELEASES_DIR}/release-1/marker")" = 'legacy release'
+                staged="${STAGED_RELEASE_DIR}"
+                publish_staged_release "${staged}"
+                test -d "${PUBLISHED_RELEASE_DIR}"
+                test "${PUBLISHED_RELEASE_DIR}" != "${VPNSTACK_RELEASES_DIR}/release-1"
+
+                AGENT_SCRIPT_PATH="${test_root}/agent.py"
+                cat >"${AGENT_SCRIPT_PATH}" <<'PY'
+                import json
+                print(json.dumps({"role": "foreign-exit", "verdicts": {"server_path": "failed"}, "artifacts": {"drift": "none"}}))
+                PY
+                if verify_active_release; then
+                  exit 71
+                fi
+                test -s "${VPNSTACK_FAILED_ACCEPTANCE_FILE}"
+                ! find "${VPNSTACK_ROOT}" -maxdepth 1 -type f -name '.acceptance.*.json' | grep -q .
+
+                cat >"${AGENT_SCRIPT_PATH}" <<'PY'
+                import json
+                print(json.dumps({"role": "foreign-exit", "verdicts": {"server_path": "verified"}, "artifacts": {"drift": "none"}}))
+                PY
+                verify_active_release
+                test -s "${VPNSTACK_ACCEPTANCE_FILE}"
+                test ! -e "${VPNSTACK_FAILED_ACCEPTANCE_FILE}"
+                ! find "${VPNSTACK_ROOT}" -maxdepth 1 -type f -name '.acceptance.*.json' | grep -q .
+                """
+            ),
+        )
+    return {"container": container}
 
 
 def prepare_mock_state(runner: AuditRunner, action: str) -> tuple[Path, Path]:

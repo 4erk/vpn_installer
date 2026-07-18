@@ -21,7 +21,7 @@ from .client_artifacts import (
 from .common import INSTALL_SCRIPT_PATH, OUT_DIR, ROOT_DIR, ensure_file_parent, print_header, warn, write_text
 from .config import apply_ru_direct_overlays, download_asset, parse_env_text, render_env_text, require_env, split_asset_sources
 from .manifest import render_manifest
-from .models import DEFAULT_ASSET_TIMEOUT, REQUIRED_ENV_VARS, ROLE_FOREIGN, ROLE_RU
+from .models import DEFAULT_ASSET_TIMEOUT, REQUIRED_ENV_VARS, ROLE_FOREIGN, ROLE_RU, UDP_RMEM_DEFAULT, UDP_RMEM_MAX
 from .routing_policy import build_ru_routing_policy
 from .specs import DeploymentSpec
 
@@ -467,6 +467,8 @@ def render_sshd_hardening(env: dict[str, str]) -> str:
 def render_sysctl(role: str) -> str:
     lines = [
         "net.core.default_qdisc=fq",
+        f"net.core.rmem_max={UDP_RMEM_MAX}",
+        f"net.core.rmem_default={UDP_RMEM_DEFAULT}",
         "net.ipv4.tcp_syncookies=1",
         "net.ipv4.tcp_congestion_control=bbr",
         "net.ipv4.tcp_mtu_probing=1",

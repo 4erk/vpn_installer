@@ -537,9 +537,10 @@ class WorkflowTests(unittest.TestCase):
         env["FOREIGN_PUBLIC_IP"] = "198.51.100.20"
         ru = RemoteTarget(role=ROLE_RU)
         payload = {"schema_version": 2, "role": ROLE_RU, "services": {"sing-box": "active"}, "artifacts": {"drift": "none", "files": {}, "installed_env_sha256": ""}, "logs": {"fresh": {"window_minutes": 5, "counts": {}}, "windows_minutes": {"1440": {"counts": {}}}}, "verdicts": {"overall": "verified"}}
-        with patch("vpn_installer.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), env, {}, [ru], {})), patch("vpn_installer.workflows.print_summary") as mocked, patch("vpn_installer.workflows.remote_agent_snapshot", return_value=payload):
+        with patch("vpn_installer.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), env, {}, [ru], {})), patch("vpn_installer.workflows.print_summary") as mocked, patch("vpn_installer.workflows.remote_agent_snapshot", return_value=payload) as agent_snapshot:
             self.assertEqual(workflows.status_workflow("demo", ROLE_RU), 0)
         mocked.assert_called_once()
+        agent_snapshot.assert_called_once_with(ru, compact=True)
 
     def test_status_workflow_prints_one_structured_snapshot_per_role(self) -> None:
         env = generate_default_env("demo")
@@ -551,6 +552,8 @@ class WorkflowTests(unittest.TestCase):
         with patch("vpn_installer.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), env, {}, [ru, foreign], {})), patch("vpn_installer.workflows.print_summary"), patch("vpn_installer.workflows.remote_agent_snapshot", side_effect=[{**snapshot, "role": ROLE_RU}, {**snapshot, "role": ROLE_FOREIGN}]) as agent_snapshot:
             self.assertEqual(workflows.status_workflow("demo", "all"), 0)
         self.assertEqual(agent_snapshot.call_count, 2)
+        for call in agent_snapshot.call_args_list:
+            self.assertTrue(call.kwargs["compact"])
 
     def test_menu_workflow_dispatches_actions_and_returns_to_menu(self) -> None:
         with patch("vpn_installer.workflows.prompt_choice", side_effect=["audit", "quick", "back", "exit"]), patch("vpn_installer.audit.runner.main", return_value=0) as audit_main:

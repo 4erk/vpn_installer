@@ -172,15 +172,20 @@ VPNSTACK_DEPLOYMENT_FILE="${VPNSTACK_ROOT}/deployment.env"
 VPNSTACK_INSTALLED_AT_FILE="${VPNSTACK_ROOT}/installed_at"
 VPNSTACK_REMOVED_AT_FILE="${VPNSTACK_ROOT}/removed_at"
 VPNSTACK_RENDER_MANIFEST_FILE="${VPNSTACK_ROOT}/render-manifest.json"
+VPNSTACK_ADMIN_AUTH_FILE="${VPNSTACK_ROOT}/admin-auth.json"
 VPNSTACK_BASELINE_DIR="${VPNSTACK_BACKUP_DIR}/baseline"
 VPNSTACK_SNAPSHOT_DIR="${VPNSTACK_BACKUP_DIR}/snapshots"
 VPNSTACK_RELEASES_DIR="${VPNSTACK_ROOT}/releases"
 VPNSTACK_CURRENT_RELEASE="${VPNSTACK_ROOT}/current"
 VPNSTACK_PREVIOUS_RELEASE="${VPNSTACK_ROOT}/previous"
 VPNSTACK_ACCEPTANCE_FILE="${VPNSTACK_ROOT}/acceptance.json"
+VPNSTACK_FAILED_ACCEPTANCE_FILE="${VPNSTACK_ROOT}/last-failed-acceptance.json"
+VPNSTACK_REVISION_SNAPSHOT_RETENTION=10
 CURRENT_ROLLBACK_DIR=""
 INSTALL_MUTATION_STARTED=0
 PREPARED_ARTIFACTS_DIR=""
+STAGED_RELEASE_DIR=""
+PUBLISHED_RELEASE_DIR=""
 NORMALIZED_ENV_FILE="${NORMALIZED_ENV_FILE:-}"
 
 WG_RU_ADDRESS_HOST="${WG_RU_ADDRESS:-}"
@@ -324,8 +329,28 @@ SYNC_TIMER_ENABLED=$(service_enabled_flag vpn-stack-sync.timer)
 SYNC_TIMER_ACTIVE=$(service_active_flag vpn-stack-sync.timer)
 HEALTH_TIMER_ENABLED=$(service_enabled_flag vpn-stack-health.timer)
 HEALTH_TIMER_ACTIVE=$(service_active_flag vpn-stack-health.timer)
+HEALTH_SERVICE_ENABLED=$(service_enabled_flag vpn-stack-health.service)
+HEALTH_SERVICE_ACTIVE=$(service_active_flag vpn-stack-health.service)
 GUARD_TIMER_ENABLED=$(service_enabled_flag vpn-stack-guard.timer)
 GUARD_TIMER_ACTIVE=$(service_active_flag vpn-stack-guard.timer)
+SYNC_SERVICE_ENABLED=$(service_enabled_flag vpn-stack-sync.service)
+SYNC_SERVICE_ACTIVE=$(service_active_flag vpn-stack-sync.service)
+GUARD_SERVICE_ENABLED=$(service_enabled_flag vpn-stack-guard.service)
+GUARD_SERVICE_ACTIVE=$(service_active_flag vpn-stack-guard.service)
+SUBSCRIPTION_ENABLED=$(service_enabled_flag vpn-stack-subscription.service)
+SUBSCRIPTION_ACTIVE=$(service_active_flag vpn-stack-subscription.service)
+LEGACY_XRAY_VPNSTACK_ENABLED=$(service_enabled_flag xray-vpnstack.service)
+LEGACY_XRAY_VPNSTACK_ACTIVE=$(service_active_flag xray-vpnstack.service)
+LEGACY_XRAY_ENABLED=$(service_enabled_flag xray.service)
+LEGACY_XRAY_ACTIVE=$(service_active_flag xray.service)
+LEGACY_V2RAY_ENABLED=$(service_enabled_flag v2ray.service)
+LEGACY_V2RAY_ACTIVE=$(service_active_flag v2ray.service)
+APT_DAILY_TIMER_ENABLED=$(service_enabled_flag apt-daily.timer)
+APT_DAILY_TIMER_ACTIVE=$(service_active_flag apt-daily.timer)
+APT_UPGRADE_TIMER_ENABLED=$(service_enabled_flag apt-daily-upgrade.timer)
+APT_UPGRADE_TIMER_ACTIVE=$(service_active_flag apt-daily-upgrade.timer)
+UNATTENDED_UPGRADES_ENABLED=$(service_enabled_flag unattended-upgrades.service)
+UNATTENDED_UPGRADES_ACTIVE=$(service_active_flag unattended-upgrades.service)
 SSH_SERVICE_ENABLED=$(service_enabled_flag ssh.service)
 SSH_SERVICE_ACTIVE=$(service_active_flag ssh.service)
 SSH_SOCKET_ENABLED=$(service_enabled_flag ssh.socket)
@@ -354,10 +379,15 @@ managed_paths() {
     "${SYSCTL_PATH}" \
     "${JOURNALD_DROPIN_PATH}" \
     "${APT_PERIODIC_DROPIN_PATH}" \
+    "${LEGACY_ADAPTIVE_ROUTING_RULES_PATH}" \
+    "${LEGACY_DATAPLANE_CACHE_PATH}" \
+    "${HEALTH_STATE_PATH}" \
     "${VPNSTACK_DEPLOYMENT_FILE}" \
     "${VPNSTACK_ROLE_FILE}" \
     "${VPNSTACK_INSTALLED_AT_FILE}" \
     "${VPNSTACK_REMOVED_AT_FILE}" \
+    "${VPNSTACK_RENDER_MANIFEST_FILE}" \
+    "${VPNSTACK_ADMIN_AUTH_FILE}" \
     "${VPNSTACK_CURRENT_RELEASE}" \
     "${VPNSTACK_PREVIOUS_RELEASE}" \
     "${VPNSTACK_ACCEPTANCE_FILE}"
@@ -417,8 +447,25 @@ create_baseline_backup() {
   backup_rule_directory_if_present "${VPNSTACK_BASELINE_DIR}"
 }
 
+prune_revision_snapshots() {
+  local keep="${1:-${VPNSTACK_REVISION_SNAPSHOT_RETENTION}}"
+  local index=0
+  local entry=""
+  local snapshot=""
+  local snapshots=()
+  [[ -d "${VPNSTACK_SNAPSHOT_DIR}" ]] || return 0
+  while IFS= read -r -d '' entry; do
+    snapshots+=("${entry#* }")
+  done < <(find "${VPNSTACK_SNAPSHOT_DIR}" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\0' | sort -z -nr)
+  for ((index = keep; index < ${#snapshots[@]}; index++)); do
+    snapshot="${snapshots[index]}"
+    [[ "${snapshot}" == "${VPNSTACK_SNAPSHOT_DIR}/"* ]] && rm -rf -- "${snapshot}"
+  done
+}
+
 create_revision_snapshot() {
-  local snapshot_dir="${VPNSTACK_SNAPSHOT_DIR}/$(timestamp_utc)"
+  local snapshot_dir="${VPNSTACK_SNAPSHOT_DIR}/$(timestamp_utc)-$$"
+  prune_revision_snapshots "$((VPNSTACK_REVISION_SNAPSHOT_RETENTION - 1))"
   mkdir -p "${snapshot_dir}"
   CURRENT_ROLLBACK_DIR="${snapshot_dir}"
   write_service_state_file "${snapshot_dir}/service-state.env"
@@ -472,9 +519,19 @@ restore_service_state() {
   apply_service_restore_flags vpn-stack-sync.timer "${SYNC_TIMER_ENABLED:-0}" "${SYNC_TIMER_ACTIVE:-0}"
   apply_service_restore_flags vpn-stack-health.timer "${HEALTH_TIMER_ENABLED:-0}" "${HEALTH_TIMER_ACTIVE:-0}"
   apply_service_restore_flags vpn-stack-guard.timer "${GUARD_TIMER_ENABLED:-0}" "${GUARD_TIMER_ACTIVE:-0}"
+  apply_service_restore_flags vpn-stack-sync.service "${SYNC_SERVICE_ENABLED:-0}" "${SYNC_SERVICE_ACTIVE:-0}"
+  apply_service_restore_flags vpn-stack-health.service "${HEALTH_SERVICE_ENABLED:-0}" "${HEALTH_SERVICE_ACTIVE:-0}"
+  apply_service_restore_flags vpn-stack-guard.service "${GUARD_SERVICE_ENABLED:-0}" "${GUARD_SERVICE_ACTIVE:-0}"
+  apply_service_restore_flags vpn-stack-subscription.service "${SUBSCRIPTION_ENABLED:-0}" "${SUBSCRIPTION_ACTIVE:-0}"
   apply_service_restore_flags sing-box "${SINGBOX_ENABLED:-0}" "${SINGBOX_ACTIVE:-0}"
   apply_service_restore_flags vpn-stack-xray.service "${XRAY_ENABLED:-0}" "${XRAY_ACTIVE:-0}"
   apply_service_restore_flags vpn-stack-admin.service "${ADMIN_WEB_ENABLED_STATE:-0}" "${ADMIN_WEB_ACTIVE_STATE:-0}"
+  apply_service_restore_flags xray-vpnstack.service "${LEGACY_XRAY_VPNSTACK_ENABLED:-0}" "${LEGACY_XRAY_VPNSTACK_ACTIVE:-0}"
+  apply_service_restore_flags xray.service "${LEGACY_XRAY_ENABLED:-0}" "${LEGACY_XRAY_ACTIVE:-0}"
+  apply_service_restore_flags v2ray.service "${LEGACY_V2RAY_ENABLED:-0}" "${LEGACY_V2RAY_ACTIVE:-0}"
+  apply_service_restore_flags apt-daily.timer "${APT_DAILY_TIMER_ENABLED:-0}" "${APT_DAILY_TIMER_ACTIVE:-0}"
+  apply_service_restore_flags apt-daily-upgrade.timer "${APT_UPGRADE_TIMER_ENABLED:-0}" "${APT_UPGRADE_TIMER_ACTIVE:-0}"
+  apply_service_restore_flags unattended-upgrades.service "${UNATTENDED_UPGRADES_ENABLED:-0}" "${UNATTENDED_UPGRADES_ACTIVE:-0}"
   apply_service_restore_flags ssh.service "${SSH_SERVICE_ENABLED:-0}" "${SSH_SERVICE_ACTIVE:-0}"
   apply_service_restore_flags ssh.socket "${SSH_SOCKET_ENABLED:-0}" "${SSH_SOCKET_ACTIVE:-0}"
 }
@@ -485,6 +542,9 @@ cleanup_role_artifacts() {
   fi
   if [[ -n "${ROLE_ARTIFACTS_DIR:-}" && "${ROLE_ARTIFACTS_DIR}" == /tmp/* ]]; then
     rm -rf "${ROLE_ARTIFACTS_DIR}"
+  fi
+  if [[ -n "${STAGED_RELEASE_DIR:-}" && "${STAGED_RELEASE_DIR}" == "${VPNSTACK_RELEASES_DIR}/.staging-"* ]]; then
+    rm -rf "${STAGED_RELEASE_DIR}"
   fi
   rm -f "${NORMALIZED_ENV_FILE:-}"
 }
@@ -894,23 +954,57 @@ release_id_from_manifest() {
 stage_release() {
   local source_dir="$1"
   local release_id=""
-  local release_dir=""
+  local staging_dir=""
   release_id="$(release_id_from_manifest "${source_dir}")"
   if [[ -z "${release_id}" ]]; then
     echo "render-manifest.json is missing release_id" >&2
     return 1
   fi
-  release_dir="${VPNSTACK_RELEASES_DIR}/${release_id}"
-  mkdir -p "${VPNSTACK_RELEASES_DIR}"
-  rm -rf "${release_dir}"
-  mkdir -p "${release_dir}"
-  cp -a "${source_dir}/." "${release_dir}/"
-  if [[ -n "${ASSETS_DIR:-}" && -d "${ASSETS_DIR}" ]]; then
-    mkdir -p "${release_dir}/assets"
-    cp -a "${ASSETS_DIR}/." "${release_dir}/assets/"
+  if [[ ! "${release_id}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+    echo "render-manifest.json contains unsafe release_id: ${release_id}" >&2
+    return 1
   fi
-  normalize_staged_release_permissions "${release_dir}"
-  printf '%s' "${release_dir}"
+  staging_dir="${VPNSTACK_RELEASES_DIR}/.staging-${release_id}-$$"
+  STAGED_RELEASE_DIR="${staging_dir}"
+  mkdir -p "${VPNSTACK_RELEASES_DIR}"
+  rm -rf "${staging_dir}"
+  mkdir -p "${staging_dir}"
+  cp -a "${source_dir}/." "${staging_dir}/"
+  if [[ -n "${ASSETS_DIR:-}" && -d "${ASSETS_DIR}" ]]; then
+    mkdir -p "${staging_dir}/assets"
+    cp -a "${ASSETS_DIR}/." "${staging_dir}/assets/"
+  fi
+  normalize_staged_release_permissions "${staging_dir}"
+}
+
+release_tree_digest() {
+  local source_dir="$1"
+  (
+    cd "${source_dir}"
+    find . -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}'
+  )
+}
+
+publish_staged_release() {
+  local source_dir="$1"
+  local release_id=""
+  local tree_digest=""
+  local release_dir=""
+  release_id="$(release_id_from_manifest "${source_dir}")"
+  tree_digest="$(release_tree_digest "${source_dir}")"
+  [[ -n "${release_id}" && -n "${tree_digest}" ]] || { echo "Unable to identify staged release" >&2; return 1; }
+  release_dir="${VPNSTACK_RELEASES_DIR}/${release_id}-${tree_digest:0:12}"
+  if [[ -e "${release_dir}" ]]; then
+    if ! diff -qr "${source_dir}" "${release_dir}" >/dev/null; then
+      echo "Immutable release digest collision: ${release_dir}" >&2
+      return 1
+    fi
+    rm -rf "${source_dir}"
+  else
+    mv "${source_dir}" "${release_dir}"
+  fi
+  STAGED_RELEASE_DIR=""
+  PUBLISHED_RELEASE_DIR="${release_dir}"
 }
 
 normalize_staged_release_permissions() {
@@ -978,8 +1072,12 @@ activate_staged_release() {
 
 verify_active_release() {
   local report_tmp="${VPNSTACK_ROOT}/.acceptance.$$.json"
-  python3 "${AGENT_SCRIPT_PATH}" snapshot --live-probes --profile acceptance >"${report_tmp}"
-  python3 - "${report_tmp}" <<'PY'
+  rm -f "${VPNSTACK_ROOT}"/.acceptance.*.json
+  if ! python3 "${AGENT_SCRIPT_PATH}" snapshot --live-probes --profile acceptance >"${report_tmp}"; then
+    rm -f "${report_tmp}"
+    return 1
+  fi
+  if ! python3 - "${report_tmp}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -993,7 +1091,12 @@ if payload.get("role") == "ru-gateway" and verdicts.get("public_front") != "veri
 if payload.get("artifacts", {}).get("drift") != "none":
     raise SystemExit("post-activation artifact drift detected")
 PY
+  then
+    mv -f "${report_tmp}" "${VPNSTACK_FAILED_ACCEPTANCE_FILE}"
+    return 1
+  fi
   mv -f "${report_tmp}" "${VPNSTACK_ACCEPTANCE_FILE}"
+  rm -f "${VPNSTACK_FAILED_ACCEPTANCE_FILE}"
 }
 
 write_preview_files() {
@@ -1056,6 +1159,10 @@ apply_foreign_ru_block_from_local_assets() {
 
   nft -f "${RULESET_DIR}/nft-ru-block.nft"
 }
+
+if [[ "${VPNSTACK_INSTALL_LIBRARY_ONLY:-0}" == "1" ]]; then
+  return 0 2>/dev/null || exit 0
+fi
 
 if [[ "$ACTION" == "install" || "$ACTION" == "reinstall" || "$RENDER_ONLY" == "1" ]]; then
   if [[ "$ROLE" == "ru-gateway" ]]; then
@@ -1242,10 +1349,13 @@ if [[ "$ROLE" == "foreign-exit" ]]; then
   fi
 fi
 
-ROLE_ARTIFACTS_DIR="$(stage_release "${ROLE_ARTIFACTS_DIR}")"
+stage_release "${ROLE_ARTIFACTS_DIR}"
+ROLE_ARTIFACTS_DIR="${STAGED_RELEASE_DIR}"
 record_binary_digests "${ROLE_ARTIFACTS_DIR}"
 stage_preseed_assets "${ROLE_ARTIFACTS_DIR}/assets"
 validate_staged_release "${ROLE_ARTIFACTS_DIR}"
+publish_staged_release "${ROLE_ARTIFACTS_DIR}"
+ROLE_ARTIFACTS_DIR="${PUBLISHED_RELEASE_DIR}"
 if [[ "$ACTION" == "reinstall" ]]; then
   stop_managed_services
 fi

@@ -8,7 +8,7 @@ from pathlib import Path
 from . import workflows
 from .common import OUT_DIR, print_header
 from .diagnostics import DiagnosticsSnapshot
-from .models import ROLE_FOREIGN, ROLE_RU
+from .models import ROLE_FOREIGN, ROLE_RU, UDP_RMEM_DEFAULT, UDP_RMEM_MAX
 from .remote import remote_agent_snapshot, scp_upload, ssh_capture
 from .roles import requested_roles
 from .vless_verify import (
@@ -48,8 +48,17 @@ def _verify_snapshot(snapshot: DiagnosticsSnapshot) -> DiagnosticsSnapshot:
     elif snapshot.drift == "unknown":
         degradations.append("render manifest is missing or incomplete")
     tcp_adaptation = snapshot.network.get("tcp_adaptation", {})
-    if tcp_adaptation and str(tcp_adaptation.get("mtu_probing", "")).strip() != "1":
+    if not tcp_adaptation:
+        hard_failures.append("network adaptation fields are missing")
+    elif str(tcp_adaptation.get("mtu_probing", "")).strip() != "1":
         degradations.append("TCP PLPMTUD adaptation is disabled")
+    try:
+        rmem_default = int(tcp_adaptation.get("udp_rmem_default", 0))
+        rmem_max = int(tcp_adaptation.get("udp_rmem_max", 0))
+    except (TypeError, ValueError):
+        rmem_default = rmem_max = 0
+    if tcp_adaptation and (rmem_default < UDP_RMEM_DEFAULT or rmem_max < UDP_RMEM_MAX):
+        degradations.append("UDP receive buffer profile is not active")
     required_verdicts = {"server_path", "public_front", "client_observation"}
     if not required_verdicts.issubset(snapshot.component_verdicts):
         hard_failures.append("agent verdict fields are incomplete")
@@ -68,6 +77,11 @@ def _verify_snapshot(snapshot: DiagnosticsSnapshot) -> DiagnosticsSnapshot:
         degradations.append("public TCP front shows retransmission or socket churn")
     if snapshot.route_probes.get("profile") != "acceptance":
         hard_failures.append("acceptance probes did not run")
+    elif "release_gate_ok" in snapshot.route_probes:
+        if snapshot.route_probes.get("release_gate_ok") is not True:
+            hard_failures.append("acceptance release gate failed")
+        elif snapshot.route_probes.get("ok") is not True:
+            degradations.append("external capability probe failed")
     elif snapshot.route_probes.get("ok") is not True:
         hard_failures.append("acceptance probes failed")
     if hard_failures:
@@ -88,6 +102,15 @@ def _collect_agent_snapshot(target) -> DiagnosticsSnapshot:
         return DiagnosticsSnapshot.from_agent(payload)
     except (ValueError, TypeError, json.JSONDecodeError) as exc:
         raise RuntimeError(f"invalid vpn-stack-agent snapshot from {target.label}") from exc
+
+
+def _reconcile_public_capabilities(snapshot: DiagnosticsSnapshot, public_vless: dict[str, object]) -> DiagnosticsSnapshot:
+    if public_vless.get("verdict") != "verified":
+        return snapshot
+    snapshot.reasons = [reason for reason in snapshot.reasons if reason != "external capability probe failed"]
+    if snapshot.verdict == "degraded" and not snapshot.reasons:
+        snapshot.verdict = "verified"
+    return snapshot
 
 
 def _validate_public_vless_result(result: dict[str, object], uri, foreign_target, *, throughput_seconds: int = 0) -> dict[str, object]:
@@ -286,14 +309,14 @@ def verify_live_workflow(deployment: str | None, *, non_interactive: bool = Fals
         except Exception as exc:  # noqa: BLE001
             snapshot = DiagnosticsSnapshot(deployment=deployment_name, role=target.role, verdict="failed", reasons=[f"agent snapshot failed: {exc}"])
         snapshots.append(snapshot)
-        if rank[snapshot.verdict] > rank[worst]:
-            worst = snapshot.verdict
     foreign_target = next((target for target in targets if target.role == ROLE_FOREIGN), None)
     public_vless: dict[str, object] = {"verdict": "inconclusive", "reason": "foreign verifier is unavailable"}
     if foreign_target is not None:
         public_vless = _verify_public_vless_uri(OUT_DIR / deployment_name / "client" / "vless-uri.txt", foreign_target, throughput_seconds=throughput_seconds)
-        if rank[str(public_vless["verdict"])] > rank[worst]:
-            worst = str(public_vless["verdict"])
+    snapshots = [_reconcile_public_capabilities(snapshot, public_vless) for snapshot in snapshots]
+    for verdict in [*(snapshot.verdict for snapshot in snapshots), str(public_vless["verdict"])]:
+        if rank[verdict] > rank[worst]:
+            worst = verdict
     print_header("Live verification result")
     print(f"verify verdict: {worst}")
     for snapshot in snapshots:

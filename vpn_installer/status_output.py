@@ -9,8 +9,9 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
         f"drift: {snapshot.drift}",
         f"verdict: {snapshot.verdict}",
         f"fresh window: {snapshot.fresh_window_minutes}m",
-        f"historical window: {snapshot.historical_window_hours}h",
     ]
+    if snapshot.historical_window_hours:
+        lines.append(f"historical window: {snapshot.historical_window_hours}h")
     if snapshot.verdict == "inconclusive" and snapshot.route_probes.get("profile") == "none":
         lines.append("live probes: not run by read-only status; use vpn verify live for route acceptance")
     if snapshot.log_buckets:
@@ -31,8 +32,13 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
         lines.append(
             "tcp adaptation: "
             f"cc={tcp_adaptation.get('congestion_control', '-')}, qdisc={tcp_adaptation.get('qdisc', '-')}, "
-            f"mtu_probing={tcp_adaptation.get('mtu_probing', '-')}, probe_interval_s={tcp_adaptation.get('probe_interval_seconds', '-')}"
+            f"mtu_probing={tcp_adaptation.get('mtu_probing', '-')}, probe_interval_s={tcp_adaptation.get('probe_interval_seconds', '-')}, "
+            f"udp_rmem={tcp_adaptation.get('udp_rmem_default', '-')}/{tcp_adaptation.get('udp_rmem_max', '-')}"
         )
+    protocol = snapshot.network.get("protocol_counters", {})
+    protocol_errors = {key: value for key, value in protocol.items() if value and ("Error" in key or "Drop" in key or "Discard" in key)}
+    if protocol_errors:
+        lines.append("protocol counters: " + ", ".join(f"{key}={value}" for key, value in sorted(protocol_errors.items())))
     if snapshot.reasons:
         lines.append("reasons: " + "; ".join(snapshot.reasons))
     return lines

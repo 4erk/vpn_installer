@@ -100,6 +100,54 @@ class ServerAgentTests(unittest.TestCase):
         self.assertFalse(snapshot_mock.call_args_list[0].kwargs["full_logs"])
         self.assertFalse(snapshot_mock.call_args_list[0].kwargs["include_maintenance"])
 
+    def test_health_reports_udp_buffer_drops_as_degraded_without_recovery(self) -> None:
+        def healthy(udp_drops: int) -> dict[str, object]:
+            return {
+                "verdicts": {"server_path": "verified"},
+                "services": {},
+                "role": "foreign-exit",
+                "probes": {"requirements": {"foreign_direct": True}},
+                "network": {
+                    "interfaces": {"eth0": {"rx_missed_errors": 0}},
+                    "protocol_counters": {"UdpRcvbufErrors": udp_drops, "Udp6RcvbufErrors": 0},
+                    "softnet_counters": {"dropped": 0},
+                },
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "health.json"
+            lock = Path(tmp) / "lock"
+            with (
+                patch.object(server_agent, "HEALTH_STATE_PATH", state),
+                patch.object(server_agent, "LOCK_PATH", lock),
+                patch.object(server_agent, "snapshot", side_effect=[healthy(10), healthy(13)]),
+                patch.object(server_agent, "recover") as recover,
+            ):
+                first = server_agent.health()
+                second = server_agent.health()
+
+        self.assertEqual(first["state"], "healthy")
+        self.assertEqual(second["state"], "degraded")
+        self.assertEqual(second["soft_reasons"], ["udp_receive_buffer_drops=3"])
+        recover.assert_not_called()
+
+    def test_recovery_never_routes_foreign_traffic_through_ru(self) -> None:
+        current = {
+            "role": "ru-gateway",
+            "services": {"wireguard": "active", "nftables": "active", "sing-box": "active", "xray": "active"},
+            "wireguard": {"interface": "wg0"},
+            "probes": {"requirements": {"ru_direct": True, "via_wg": False, "router": False}},
+        }
+        with patch.object(server_agent, "run") as run_mock:
+            action = server_agent.recover(current)
+        self.assertEqual(action, "none")
+        run_mock.assert_not_called()
+
+    def test_positive_counter_deltas_ignore_first_sample_and_counter_reset(self) -> None:
+        self.assertEqual(server_agent.positive_counter_deltas({"UdpRcvbufErrors": 10}, {}), {})
+        self.assertEqual(server_agent.positive_counter_deltas({"UdpRcvbufErrors": 10}, {"UdpRcvbufErrors": 7}), {"UdpRcvbufErrors": 3})
+        self.assertEqual(server_agent.positive_counter_deltas({"UdpRcvbufErrors": 1}, {"UdpRcvbufErrors": 7}), {})
+
     def test_snapshot_includes_bootstrap_identity_for_lifecycle_preflight(self) -> None:
         manifest = {"role": "ru-gateway", "version": "0.11.0", "release_id": "release-1", "policy_version": "0.11.0", "schema_version": 2}
         with (
@@ -132,6 +180,8 @@ class ServerAgentTests(unittest.TestCase):
                 "net.ipv4.tcp_congestion_control": "bbr\n",
                 "net.ipv4.tcp_mtu_probing": "1\n",
                 "net.ipv4.tcp_probe_interval": "600\n",
+                "net.core.rmem_default": "4194304\n",
+                "net.core.rmem_max": "16777216\n",
             }
             if args[0] == "sysctl":
                 return subprocess.CompletedProcess(args, 0, values[args[-1]], "")
@@ -139,7 +189,25 @@ class ServerAgentTests(unittest.TestCase):
 
         with patch.object(server_agent, "run", side_effect=fake_run):
             snapshot = server_agent.tcp_adaptation_snapshot("ens3")
-        self.assertEqual(snapshot, {"congestion_control": "bbr", "mtu_probing": 1, "probe_interval_seconds": 600, "qdisc": "fq"})
+        self.assertEqual(
+            snapshot,
+            {
+                "congestion_control": "bbr",
+                "mtu_probing": 1,
+                "probe_interval_seconds": 600,
+                "udp_rmem_default": 4194304,
+                "udp_rmem_max": 16777216,
+                "qdisc": "fq",
+            },
+        )
+
+    def test_managed_network_profile_detects_runtime_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "sysctl.conf"
+            path.write_text("net.core.rmem_max=16777216\nnet.core.rmem_default=4194304\n", encoding="utf-8")
+            expected = server_agent.managed_network_profile(path)
+        self.assertEqual(expected, {"udp_rmem_default": 4_194_304, "udp_rmem_max": 16_777_216})
+        self.assertEqual(server_agent.network_profile_mismatches({"udp_rmem_default": 212_992, "udp_rmem_max": 16_777_216}, expected), ["udp_rmem_default"])
 
     def test_front_snapshot_groups_tcp_metrics_by_client_source(self) -> None:
         def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -169,6 +237,9 @@ class ServerAgentTests(unittest.TestCase):
         self.assertEqual(client["unacked"], 2)
         self.assertEqual(client["rtt_ms"]["p95"], 45.2)
         self.assertEqual(client["rtt_ms"]["samples"], 1)
+        flow = front["flows"]["203.0.113.20:50123"]
+        self.assertEqual(flow["source_port"], 50123)
+        self.assertEqual(flow["retransmit_ratio_pct"], 4.0)
 
     def test_front_snapshot_normalizes_ipv4_mapped_socket_source(self) -> None:
         def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -188,13 +259,38 @@ class ServerAgentTests(unittest.TestCase):
 
         self.assertEqual(front["top_sources"], {"203.0.113.20": 1})
         self.assertEqual(front["clients"]["203.0.113.20"]["retransmissions"], 3)
+        self.assertIn("203.0.113.20:50123", front["flows"])
+
+    def test_front_snapshot_keeps_flows_separate_behind_one_nat(self) -> None:
+        sockets = (
+            "ESTAB 0 0 94.232.248.35:443 203.0.113.20:50123\n"
+            "ESTAB 0 0 94.232.248.35:443 203.0.113.20:50124\n"
+        )
+        details = (
+            "ESTAB 0 0 94.232.248.35:443 203.0.113.20:50123\n\t cubic rtt:30/2 bytes_sent:2000000 bytes_retrans:0 retrans:0/0\n"
+            "ESTAB 0 0 94.232.248.35:443 203.0.113.20:50124\n\t cubic rtt:400/20 rto:1200 bytes_sent:2000000 bytes_retrans:100000 retrans:0/8\n"
+        )
+
+        def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            if "-Htan" in args:
+                return subprocess.CompletedProcess(args, 0, sockets, "")
+            if "-Htin" in args:
+                return subprocess.CompletedProcess(args, 0, details, "")
+            return subprocess.CompletedProcess(args, 0, "LISTEN 0 4096 94.232.248.35:443 0.0.0.0:*\n", "")
+
+        with patch.object(server_agent, "run", side_effect=fake_run):
+            front = server_agent.tcp_front_snapshot(443)
+
+        self.assertEqual(front["clients"]["203.0.113.20"]["connections"], 2)
+        self.assertEqual(front["flows"]["203.0.113.20:50123"]["quality"], "observed")
+        self.assertEqual(front["flows"]["203.0.113.20:50124"]["quality"], "degraded")
 
     def test_client_snapshot_matches_ipv4_mapped_xray_source(self) -> None:
         front = {"listening": True, "clients": {"203.0.113.20": {"connections": 1}}, "top_sources": {"203.0.113.20": 1}}
         completed = subprocess.CompletedProcess(["nft"], 0, "", "")
         with (
             patch.object(server_agent, "parse_env", return_value={"RU_LISTEN_PORT": "443"}),
-            patch.object(server_agent, "journal_lines", side_effect=[["from [::ffff:203.0.113.20]:50123 accepted tcp:example.org:443"], []]),
+            patch.object(server_agent, "journal_filtered_lines", return_value=["from [::ffff:203.0.113.20]:50123 accepted tcp:example.org:443"]),
             patch.object(server_agent, "tcp_front_snapshot", return_value=front),
             patch.object(server_agent, "service_state", return_value="active"),
             patch.object(server_agent, "run", return_value=completed),
@@ -217,6 +313,25 @@ class ServerAgentTests(unittest.TestCase):
     def test_front_observation_reports_measured_loss_for_one_client(self) -> None:
         front = {"clients": {"203.0.113.20": {"states": {"ESTAB": 1}, "bytes_sent": 5_000_000, "retransmit_ratio_pct": 4.5, "quality": "degraded"}}}
         self.assertEqual(server_agent.front_observation(front), "client_specific")
+
+    def test_front_live_diagnostics_fail_when_downstream_path_fails(self) -> None:
+        with (
+            patch.object(server_agent, "parse_env", return_value={"RU_LISTEN_PORT": "443"}),
+            patch.object(server_agent, "journal_filtered_lines", return_value=[]),
+            patch.object(server_agent, "tcp_front_snapshot", return_value={"listening": True, "clients": {}, "flows": {}}),
+            patch.object(server_agent, "service_state", return_value="active"),
+            patch.object(server_agent, "udp_443_policy", return_value="routed"),
+            patch.object(
+                server_agent,
+                "run_probes",
+                return_value={"profile": "light", "ok": False, "requirements": {"ru_direct": True, "via_wg": False, "router": False}},
+            ),
+        ):
+            payload = server_agent.public_front_snapshot(30, live_probes=True)
+
+        self.assertEqual(payload["verdicts"]["public_front"], "verified")
+        self.assertEqual(payload["verdicts"]["server_path"], "failed")
+        self.assertEqual(payload["verdict"], "failed")
 
     def test_client_quality_detects_rto_backed_rtt_inflation(self) -> None:
         metrics = {
@@ -241,7 +356,7 @@ class ServerAgentTests(unittest.TestCase):
         completed = subprocess.CompletedProcess(["nft"], 0, "", "")
         with (
             patch.object(server_agent, "parse_env", return_value={"RU_LISTEN_PORT": "443"}),
-            patch.object(server_agent, "journal_lines", return_value=["from 203.0.113.20:50123 accepted tcp:example.org:443"]),
+            patch.object(server_agent, "journal_filtered_lines", return_value=["from 203.0.113.20:50123 accepted tcp:example.org:443"]),
             patch.object(server_agent, "tcp_front_snapshot", return_value=front),
             patch.object(server_agent, "service_state", return_value="active"),
             patch.object(server_agent, "run", return_value=completed),
@@ -274,11 +389,16 @@ class ServerAgentTests(unittest.TestCase):
         self.assertIn("vpn-stack-agent", result.stdout)
 
     def test_client_snapshot_prefers_accepted_xray_event_over_socket_state(self) -> None:
-        front = {"listening": True, "clients": {"203.0.113.20": {"connections": 1}}, "top_sources": {"203.0.113.20": 1}}
+        front = {
+            "listening": True,
+            "clients": {"203.0.113.20": {"connections": 1}},
+            "flows": {"203.0.113.20:50123": {"source": "203.0.113.20", "source_port": 50123, "quality": "observed"}},
+            "top_sources": {"203.0.113.20": 1},
+        }
         completed = subprocess.CompletedProcess(["nft"], 0, "", "")
         with (
             patch.object(server_agent, "parse_env", return_value={"RU_LISTEN_PORT": "443"}),
-            patch.object(server_agent, "journal_lines", side_effect=[["from 203.0.113.20:50123 accepted tcp:example.org:443"], []]),
+            patch.object(server_agent, "journal_filtered_lines", return_value=["from 203.0.113.20:50123 accepted tcp:example.org:443"]),
             patch.object(server_agent, "tcp_front_snapshot", return_value=front),
             patch.object(server_agent, "service_state", return_value="active"),
             patch.object(server_agent, "run", return_value=completed),
@@ -289,6 +409,8 @@ class ServerAgentTests(unittest.TestCase):
         self.assertEqual(payload["events"]["accepted_tcp"], 1)
         self.assertEqual(payload["events"]["accepted_udp"], 0)
         self.assertEqual(payload["verdict"], "reached_xray")
+        self.assertEqual(payload["flow_events"], {"203.0.113.20:50123": {"example.org:443": 1}})
+        self.assertEqual(payload["front"]["flows"]["203.0.113.20:50123"]["accepted_destinations"], {"example.org:443": 1})
 
     def test_ru_acceptance_requires_router_paths_not_direct_foreign_access(self) -> None:
         def probe(url: str, *, interface: str = "", proxy: str = "", **_kwargs: object) -> dict[str, object]:
@@ -313,6 +435,52 @@ class ServerAgentTests(unittest.TestCase):
         self.assertTrue(result["requirements"]["foreign_domains_via_wg"])
         self.assertTrue(result["requirements"]["ipv6_literal_via_router"])
         self.assertTrue(result["ok"])
+
+    def test_external_ipv6_failure_degrades_acceptance_without_rejecting_release(self) -> None:
+        def probe(url: str, **_kwargs: object) -> dict[str, object]:
+            return {"target": url, "ok": "2606:4700:4700::1111" not in url}
+
+        with (
+            patch.object(server_agent, "probe_url", side_effect=probe),
+            patch.object(server_agent, "probe_identity", return_value={"ok": True}),
+            patch.object(server_agent, "probe_private_reject", return_value={"ok": True}),
+        ):
+            result = server_agent.run_probes({"WG_INTERFACE": "wg0"}, "ru-gateway", "acceptance")
+
+        self.assertFalse(result["requirements"]["ipv6_literal_via_router"])
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["release_gate_ok"])
+        self.assertNotIn("ipv6_literal_via_router", result["release_gate_requirements"])
+        self.assertTrue(server_agent.release_gate_ok(result))
+
+    def test_release_gate_still_rejects_core_foreign_path_failure(self) -> None:
+        probes = {
+            "profile": "acceptance",
+            "ok": False,
+            "release_gate_ok": False,
+            "requirements": {"foreign_domains_via_router": False, "ipv6_literal_via_router": False},
+        }
+        self.assertFalse(server_agent.release_gate_ok(probes))
+
+    def test_route_probe_uses_headers_instead_of_downloading_unbounded_body(self) -> None:
+        completed = subprocess.CompletedProcess(["curl"], 0, "200|0.010|0.020|203.0.113.10", "")
+        with patch.object(server_agent, "run", return_value=completed) as run_mock:
+            result = server_agent.probe_url("https://github.com/")
+
+        self.assertTrue(result["ok"])
+        self.assertIn("--head", run_mock.call_args.args[0])
+
+    def test_proxy_probe_does_not_force_ip_family_on_ipv4_loopback_proxy(self) -> None:
+        completed = subprocess.CompletedProcess(["curl"], 0, "200|0.001|0.100|127.0.0.1", "")
+        with patch.object(server_agent, "run", return_value=completed) as run_mock:
+            result = server_agent.probe_url(
+                "https://[2606:4700:4700::1111]/cdn-cgi/trace",
+                proxy="socks5h://127.0.0.1:2080",
+                ip_version=6,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertNotIn("-6", run_mock.call_args.args[0])
 
     def test_acceptance_retries_one_failed_cycle_without_declaring_hard_failure(self) -> None:
         failed = {"profile": "acceptance", "ok": False, "requirements": {"foreign_domains_via_wg": False}}

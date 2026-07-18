@@ -120,7 +120,7 @@ class DiagnoseTests(unittest.TestCase):
             ):
                 self.assertEqual(diagnose.diagnose_front_workflow("demo", non_interactive=True), 0)
             self.assertTrue(list(out_dir.glob("diagnostics/*/front-ru-gateway.json")))
-        self.assertIn("vpn-stack-agent.py front --since 120", ssh_mock.call_args.args[1])
+        self.assertIn("vpn-stack-agent.py front --since 120 --live-probes", ssh_mock.call_args.args[1])
     def test_iperf_smoke_requires_both_roles(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, patch.object(diagnose, "warn") as warn_mock:
             diagnose._run_iperf_smoke(Path(tmp), [RemoteTarget(role=ROLE_RU)])

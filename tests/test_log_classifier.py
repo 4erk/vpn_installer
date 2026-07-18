@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import unittest
 
-from vpn_installer.log_classifier import classify_line, source_from_line, summarize_lines
+from vpn_installer.log_classifier import classify_line, source_endpoint_from_line, source_from_line, summarize_lines
 
 
 class LogClassifierTests(unittest.TestCase):
     def test_source_normalizes_ipv4_mapped_ipv6(self) -> None:
         line = "INFO [1] inbound/vless[proxy]: process connection from [::ffff:203.0.113.20]:50123"
         self.assertEqual(source_from_line(line), "203.0.113.20")
+        self.assertEqual(source_endpoint_from_line(line), ("203.0.113.20", 50123))
+
+    def test_source_strips_xray_network_prefix(self) -> None:
+        line = "from tcp:178.66.131.189:49152 accepted tcp:example.org:443"
+        self.assertEqual(source_endpoint_from_line(line), ("178.66.131.189", 49152))
 
     def test_classifies_real_singbox_timeout_formats_into_exclusive_buckets(self) -> None:
         samples = {

@@ -82,7 +82,7 @@ class DiagnosticsSnapshot:
             historical_log_buckets={str(key): int(value) for key, value in historical.get("counts", {}).items()},
             top_destinations={str(key): json.dumps(value, ensure_ascii=False, sort_keys=True) for key, value in recent.get("top_destinations", {}).items()},
             fresh_window_minutes=int(recent.get("window_minutes", 30)),
-            historical_window_hours=24,
+            historical_window_hours=24 if "1440" in windows else 0,
             verdict=str(verdicts.get("overall", "inconclusive")),
             reasons=[str(value) for value in verdicts.get("reasons", [])],
             release=payload.get("release", {}),

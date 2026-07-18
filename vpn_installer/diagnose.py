@@ -57,7 +57,7 @@ def diagnose_front_workflow(deployment: str | None, *, source_ip: str | None = N
     )
     report = ssh_capture(
         targets[0],
-        f"/usr/bin/python3 /usr/local/lib/vpn-stack/vpn-stack-agent.py front --since {minutes}",
+        f"/usr/bin/python3 /usr/local/lib/vpn-stack/vpn-stack-agent.py front --since {minutes} --live-probes",
         as_root=True,
     )
     payload = _decode_agent_snapshot(report, "front")
@@ -84,6 +84,13 @@ def diagnose_front_workflow(deployment: str | None, *, source_ip: str | None = N
     )
     print(f"front retransmission scope: {front.get('socket_retransmissions_scope', 'unknown')}")
     print(f"front observation: {payload.get('observation', 'unknown')}; degraded_sources={len(front.get('degraded_sources', []))}")
+    requirements = payload.get("probes", {}).get("requirements", {})
+    failed_requirements = ",".join(name for name, passed in requirements.items() if passed is not True) or "-"
+    print(
+        "path: "
+        f"{payload.get('verdicts', {}).get('server_path', 'inconclusive')}; "
+        f"failed_requirements={failed_requirements}"
+    )
     print(f"verdict: {payload.get('verdict', 'inconclusive')}")
     print(f"udp/443 policy: {payload.get('transport', {}).get('udp_443_policy', '-')}")
     print(f"report: {report_path}")
@@ -138,6 +145,10 @@ def diagnose_server_client_workflow(deployment: str | None, *, source_ip: str, m
             f"retransmit_ratio_pct={client.get('retransmit_ratio_pct', 0)}, pmtu={client.get('pmtu', '-')}, "
             f"reord_seen={client.get('reord_seen', 0)}, unacked={client.get('unacked', 0)}"
         )
+    flows = payload.get("front", {}).get("flows", {})
+    if flows:
+        degraded_flows = sum(flow.get("quality") == "degraded" for flow in flows.values())
+        print(f"active flows: total={len(flows)}, degraded={degraded_flows}")
     print(f"verdict: {payload.get('verdict', 'inconclusive')}")
     print(f"udp/443 policy: {payload.get('transport', {}).get('udp_443_policy', '-')}")
     print(f"report: {report_path}")

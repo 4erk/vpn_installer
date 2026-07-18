@@ -591,7 +591,7 @@ def status_workflow(deployment: str | None, role: str, *, non_interactive: bool 
     failures = 0
     for target in targets:
         try:
-            snapshot = DiagnosticsSnapshot.from_agent(remote_agent_snapshot(target))
+            snapshot = DiagnosticsSnapshot.from_agent(remote_agent_snapshot(target, compact=True))
         except Exception as exc:  # noqa: BLE001
             warn(f"{target.label}: structured snapshot unavailable: {exc}")
             failures += 1

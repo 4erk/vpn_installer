@@ -6,6 +6,25 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.11.8] - 2026-07-18
+
+### Fixed
+
+- Foreign-трафик закреплён за `to-foreign` как fail-closed инвариант: health/recovery не переключает его на `direct-ru`, даже если RU uplink исправен, а единственный foreign-egress недоступен.
+- Устранён подтверждённый WireGuard receive overflow. На foreign при штатных `net.core.rmem_default/max=212992` накопилось `22341 UdpRcvbufErrors`; managed network profile теперь даёт UDP socket 4 MiB по умолчанию при 16 MiB ceiling. Необоснованные backlog, MTU, timeout и send-buffer настройки не добавлялись.
+- Health snapshot сохраняет дельты UDP receive errors, softnet drops и interface missed packets между двухминутными циклами. Новые drops дают `degraded` без restart; hard route failure по-прежнему требует двух циклов и восстанавливает только отказавший managed service.
+- `diagnose front` запускает свежие RU/WG/router probes и выводит раздельные `public_front` и `server_path`. Активный Xray больше не даёт ложный общий `verified`, когда downstream foreign-path уже упал.
+- TCP front telemetry разделена по `source IP:port`, а затем агрегируется по IP. Устройства за одним NAT больше не смешиваются в один поток; source-specific отчёт связывает Xray destinations с активными socket metrics.
+- Парсер Xray корректно удаляет префиксы `tcp:`/`udp:` из source и сохраняет source port. `status` использует честный компактный 5-минутный snapshot и не перечитывает 24 часа журнала; глубокие окна остаются в `diagnose path`.
+- Независимые direct/WG/router probes выполняются ограниченно параллельно, поэтому отказ одного сегмента не умножает timeout диагностики на число путей.
+- Исправлен неполный rollback установки: manifest, health/legacy state, admin auth и состояния всех затрагиваемых сервисов теперь входят в revision snapshot. Release сначала создаётся в отдельном staging-каталоге и публикуется как immutable content-addressed tree; повторный reinstall больше не удаляет каталог активного release до успешной приёмки.
+- Release gate отделён от внешних capabilities. Временный отказ единственного raw IPv6 endpoint больше не откатывает идентичный конфиг при исправных WG, доменах, IPv4, identities и policy; snapshot остаётся `degraded`, а полный `verify live` продолжает считать IPv6 failure ошибкой. Failed acceptance хранится одним bounded-файлом вместо накопления временных `.acceptance.*.json`.
+- Route acceptance больше не скачивает полные страницы внешних сайтов. Probe проверяет DNS/TCP/TLS/HTTP через `HEAD`; успешный GitHub HTTP 200 не считается route failure только потому, что произвольное тело страницы не успело целиком загрузиться за шестисекундное диагностическое окно. Полноценный GET и throughput остаются в public VLESS verifier.
+- Локальный `verify live` использует тот же release-gate contract, что и target-side activation: core failure остаётся `failed`, отдельная внешняя capability становится `degraded` и не маскирует результат более полного public VLESS probe.
+- Итог verifier использует иерархию доказательств: успешный end-to-end VLESS IPv6 probe снимает противоречащую ему деградацию внутреннего raw probe. Он не снимает drift, core route failure, front retransmission или другие независимые причины.
+- Proxy route probe больше не передаёт `curl -4/-6` при соединении с IPv4 loopback SOCKS. Family constraint относился к proxy connection и давал ложный мгновенный IPv6 failure; IP literal уже задаёт family назначения, а для домена её выбирает серверная routing policy.
+- Revision snapshots ограничены десятью последними транзакциями. Baseline и immutable releases не затрагиваются; многократные reinstall больше не создают неограниченный слой backup-каталогов.
+
 ## [0.11.7] - 2026-07-18
 
 ### Fixed
