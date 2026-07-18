@@ -171,6 +171,8 @@ class VerifyTests(unittest.TestCase):
         foreign = RemoteTarget(role=ROLE_FOREIGN, public_ip="198.51.100.20", ssh_host="198.51.100.20")
         result = {"ru_egress_ip": "203.0.113.10", "foreign_egress_ip": "198.51.100.20", "github_status": "200", "google_status": "204", "udp_dns": {"ok": True, "private_reject": {"ok": True}}, "ipv6_literal_status": "200", "throughput": {"bytes_per_second": 7_000_000, "duration_seconds": 60, "failures": 0}}
         self.assertEqual(_validate_public_vless_result(result, uri, foreign, throughput_seconds=60)["verdict"], "verified")
+        source_limited = {**result, "throughput": {"bytes_per_second": 1_000_000, "capacity_bytes_per_second": 7_000_000, "duration_seconds": 60, "failures": 0}}
+        self.assertEqual(_validate_public_vless_result(source_limited, uri, foreign, throughput_seconds=60)["verdict"], "verified")
         self.assertEqual(_validate_public_vless_result({**result, "throughput": {"bytes_per_second": 5_000_000, "duration_seconds": 60, "failures": 0}}, uri, foreign, throughput_seconds=60)["verdict"], "failed")
         self.assertEqual(_validate_public_vless_result({**result, "throughput": {"bytes_per_second": 7_000_000, "duration_seconds": 60, "failures": 1}}, uri, foreign, throughput_seconds=60)["verdict"], "failed")
         self.assertEqual(_vless_runner_timeout(0), 117)

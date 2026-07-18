@@ -234,7 +234,7 @@ SSH-туннель остаётся запасным способом админ
 
 `status` читает services, manifest, WireGuard, public front и журналы без нагрузочных скачиваний. `verify live` дополнительно запускает свежие DNS/domain/literal probes и эфемерный sing-box client из `vless-uri.txt`; он проходит публичный Reality front и подтверждает HTTP, UDP DNS и TCP IPv6 literal. Только он может подтвердить dataplane после переустановки.
 
-Для release throughput acceptance запусти десятиминутное измерение через тот же VLESS path. Runner держит фиксированное окно, суммирует переданные байты и повторяет завершённый range; он работает в отдельной remote process group, а SSH только читает короткие status snapshots. Нагрузка запускается только этим явным флагом, не ограничивается самим тестом и должна показать не менее 50 Mbit/s. На время проверки она использует доступную полосу production path:
+Для release throughput acceptance запусти десятиминутное измерение через тот же VLESS path. Runner чередует независимые download origins, считает скорость каждого отдельно и показывает общий поток; capacity gate не принимает rate limit одного CDN за предел VPN. Он работает в отдельной remote process group, а SSH только читает короткие status snapshots. Нагрузка запускается только этим явным флагом, не ограничивается самим тестом и должна подтвердить не менее 50 Mbit/s хотя бы до одного origin. На время проверки она использует доступную полосу production path:
 
 ```powershell
 .\vpn.cmd verify live --deployment my-vpn --non-interactive --throughput-seconds 600

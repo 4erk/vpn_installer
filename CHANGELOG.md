@@ -6,6 +6,18 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.11.9] - 2026-07-18
+
+### Fixed
+
+- Исправлен клиентозависимый порядок RU-маршрутов. Настоящий IPv4 literal из `ru-geoip` теперь идёт через `direct-ru` до global literal catchall; hostname завершается доменным правилом раньше и не может случайно стать literal после route-level DNS. Это устраняет лишний foreign round-trip для RU CDN/IP, который один клиент передавал доменом, а другой готовым адресом.
+- Удалены дублирующие `resolve -> route` и мёртвый класс `resolved_ru_ip`. DNS выполняется только resolver выбранного outbound; web-admin использует тот же terminal-route контракт и сохранён.
+- Global DNS отклоняет private-ответы до соединения. Lab проверяет это доступным внутренним HTTP, а также отдельно доказывает raw RU direct, raw global foreign и отсутствие аварийной утечки foreign-трафика через RU при остановке egress.
+- Public VLESS throughput verifier использует Cloudflare и Tele2, ограничивает отдельную попытку десятью секундами и выводит per-origin метрики. Capacity gate использует лучший подтверждённый origin, поэтому rate limit одного download-сервера больше не выдаётся за ограничение VPN path.
+- Явная WireGuard-диагностика измеряет TCP P1/P4 и UDP 25/100 Mbit/s в обе стороны вместо одного P4 и недостаточного UDP 10 Mbit/s.
+
+Основной `out/1/client/vless-uri.txt` не менялся. Foreign traffic остаётся fail-closed и никогда не переводится в `direct-ru` при отказе foreign-egress.
+
 ## [0.11.8] - 2026-07-18
 
 ### Fixed

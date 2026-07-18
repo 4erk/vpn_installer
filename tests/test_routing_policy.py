@@ -19,7 +19,7 @@ class RoutingPolicyTests(unittest.TestCase):
         self.assertEqual(policy.classes["ipv4_literal_foreign"].outbound, "to-foreign")
         self.assertEqual(policy.classes["ipv6_literal_foreign"].outbound, "to-foreign")
         self.assertEqual(policy.classes["domain_foreign"].outbound, "to-foreign")
-        self.assertEqual(policy.classes["resolved_ru_ip"].outbound, "direct-ru")
+        self.assertNotIn("resolved_ru_ip", policy.classes)
         self.assertNotIn("client_dns_dot", policy.classes)
 
     def test_policy_has_two_real_egress_outbounds_without_artificial_timeouts(self) -> None:
@@ -28,22 +28,28 @@ class RoutingPolicyTests(unittest.TestCase):
         self.assertEqual(set(outbounds), {"direct-ru", "to-foreign"})
         self.assertFalse(any("connect_timeout" in outbound for outbound in outbounds.values()))
 
-    def test_literal_routes_are_deterministic_and_precede_domain_resolution(self) -> None:
+    def test_domain_policy_finishes_before_literal_policy(self) -> None:
         rules = build_ru_routing_policy(self.make_env()).route_rules
+        domain_foreign_index = next(i for i, rule in enumerate(rules) if rule.get("domain_regex") == ["^[^:]*[A-Za-z][^:]*$"])
+        raw_ru_geoip_index = next(i for i, rule in enumerate(rules) if rule.get("rule_set") == ["ru-geoip"])
         ipv6_index = next(i for i, rule in enumerate(rules) if rule.get("ip_version") == 6)
         ipv4_index = next(i for i, rule in enumerate(rules) if rule.get("ip_cidr") == ["0.0.0.0/0"])
-        resolve_index = next(i for i, rule in enumerate(rules) if rule.get("server") == "dns-global")
+        self.assertEqual(rules[raw_ru_geoip_index]["outbound"], "direct-ru")
+        self.assertEqual(rules[domain_foreign_index]["outbound"], "to-foreign")
         self.assertEqual(rules[ipv6_index], {"ip_version": 6, "action": "route", "outbound": "to-foreign"})
         self.assertEqual(rules[ipv4_index], {"ip_cidr": ["0.0.0.0/0"], "action": "route", "outbound": "to-foreign"})
+        self.assertLess(domain_foreign_index, raw_ru_geoip_index)
+        self.assertLess(raw_ru_geoip_index, ipv6_index)
         self.assertLess(ipv6_index, ipv4_index)
-        self.assertLess(ipv4_index, resolve_index)
 
-    def test_resolved_ru_geoip_rule_only_runs_after_global_resolution(self) -> None:
+    def test_route_level_dns_resolution_is_not_duplicated(self) -> None:
         rules = build_ru_routing_policy(self.make_env()).route_rules
-        resolve_index = next(i for i, rule in enumerate(rules) if rule.get("server") == "dns-global")
-        geoip_indexes = [i for i, rule in enumerate(rules) if rule.get("rule_set") == ["ru-geoip"]]
-        self.assertEqual(len(geoip_indexes), 1)
-        self.assertLess(resolve_index, geoip_indexes[0])
+        self.assertFalse(any(rule.get("action") == "resolve" for rule in rules))
+        self.assertEqual(sum(rule.get("rule_set") == ["ru-geoip"] for rule in rules), 1)
+
+    def test_global_dns_rejects_private_answers(self) -> None:
+        rules = build_ru_routing_policy(self.make_env()).dns_rules
+        self.assertIn({"ip_is_private": True, "action": "reject", "server": "dns-global"}, rules)
 
     def test_ipv6_only_probe_cannot_leak_from_legacy_direct_domains(self) -> None:
         env = self.make_env()

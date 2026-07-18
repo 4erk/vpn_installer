@@ -74,6 +74,9 @@ def build_lab_ru_config(env: dict[str, str]) -> str:
         if outbound.get("tag") == "to-foreign":
             outbound["bind_interface"] = env["WG_INTERFACE"]
             outbound.pop("routing_mark", None)
+    for rule_set in payload["route"]["rule_set"]:
+        if rule_set.get("tag") == "ru-geoip":
+            rule_set.update({"format": "source", "path": "/opt/geoip-ru.json"})
     return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
 
 
@@ -112,6 +115,7 @@ def build_lab_dnsmasq() -> str:
         address=/ya.ru/{LAB_IPS["ru_web"]}
         address=/example.com/{LAB_IPS["global_web"]}
         address=/blocked-ru.example/{LAB_IPS["ru_web"]}
+        address=/private.invalid/10.0.0.20
         """
     )
 
@@ -153,6 +157,7 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
             dns_conf = lab_dir / "dnsmasq.conf"
             ru_web = lab_dir / "ru-web.py"
             global_web = lab_dir / "global-web.py"
+            geoip_source = lab_dir / "geoip-ru.json"
             ru_assets.mkdir(parents=True, exist_ok=True)
             shutil.copy2(out_dir / "assets" / "geosite-ru.srs", ru_assets / "geosite-ru.srs")
             shutil.copy2(out_dir / "assets" / "geoip-ru.srs", ru_assets / "geoip-ru.srs")
@@ -165,6 +170,7 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
             write_text(dns_conf, build_lab_dnsmasq())
             write_text(ru_web, build_lab_web_server("ru-web"))
             write_text(global_web, build_lab_web_server("global-web"))
+            write_text(geoip_source, json.dumps({"version": 3, "rules": [{"ip_cidr": [LAB_RU_SUBNET]}]}, indent=2) + "\n")
 
             for container, local, remote in [
                 (ru_container, ru_wg, "/opt/wg0.conf"),
@@ -176,6 +182,7 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
                 (dns_container, dns_conf, "/opt/dnsmasq.conf"),
                 (ru_web_container, ru_web, "/opt/web.py"),
                 (global_web_container, global_web, "/opt/web.py"),
+                (ru_container, geoip_source, "/opt/geoip-ru.json"),
             ]:
                 runner.docker_copy(container, local, remote)
 
@@ -190,6 +197,7 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
             runner.docker_exec(ru_container, "sysctl -w net.ipv4.conf.all.src_valid_mark=1 >/dev/null")
             runner.docker_exec(foreign_container, "wg-quick up /opt/wg0.conf")
             runner.docker_exec(ru_container, "wg-quick up /opt/wg0.conf")
+            runner.docker_exec(foreign_container, "ip address add 10.0.0.20/32 dev lo && nohup python3 -m http.server 80 --bind 10.0.0.20 >/opt/private-web.log 2>&1 &")
             runner.docker_exec(foreign_container, "nft -f /opt/nftables.conf && nft add element inet vpnstack ru_ipv4 { 203.0.113.0/24 }")
             runner.docker_exec(ru_container, "nft -f /opt/nftables.conf")
             runner.docker_exec(ru_container, f"nft insert rule inet vpnstack input tcp dport {env['RU_ROUTER_LISTEN_PORT']} counter accept")
@@ -201,9 +209,21 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
             if "server=ru-web" not in ru_resp or f"source={LAB_IPS['ru_lan']}" not in ru_resp:
                 raise AuditFailure(f"RU dataplane не подтверждён:\n{ru_resp}")
 
+            raw_ru_resp = runner.lab_curl(client_container, f"http://{LAB_IPS['ru_web']}/").stdout
+            if "server=ru-web" not in raw_ru_resp or f"source={LAB_IPS['ru_lan']}" not in raw_ru_resp:
+                raise AuditFailure(f"Raw RU GeoIP ушёл не через direct-ru:\n{raw_ru_resp}")
+
             global_resp = runner.lab_curl(client_container, "http://example.com/").stdout
             if "server=global-web" not in global_resp or f"source={LAB_IPS['foreign_wan']}" not in global_resp:
                 raise AuditFailure(f"Global dataplane через foreign не подтверждён:\n{global_resp}")
+
+            raw_global_resp = runner.lab_curl(client_container, f"http://{LAB_IPS['global_web']}/").stdout
+            if "server=global-web" not in raw_global_resp or f"source={LAB_IPS['foreign_wan']}" not in raw_global_resp:
+                raise AuditFailure(f"Raw global IP ушёл не через foreign:\n{raw_global_resp}")
+
+            private_dns = runner.lab_curl(client_container, "http://private.invalid/", expect_codes={5, 7, 22, 28, 52, 56, 97})
+            if private_dns.returncode == 0:
+                raise AuditFailure("Global DNS private answer открыл внутренний адрес foreign")
 
             blocked = runner.lab_curl(client_container, "http://blocked-ru.example/", expect_codes={7, 22, 28, 52, 56, 97})
             if blocked.returncode == 0:
@@ -218,4 +238,8 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
             ru_after = runner.lab_curl(client_container, "http://ya.ru/").stdout
             if "server=ru-web" not in ru_after or f"source={LAB_IPS['ru_lan']}" not in ru_after:
                 raise AuditFailure("После падения foreign RU трафик перестал ходить напрямую")
+
+            raw_ru_after = runner.lab_curl(client_container, f"http://{LAB_IPS['ru_web']}/").stdout
+            if "server=ru-web" not in raw_ru_after or f"source={LAB_IPS['ru_lan']}" not in raw_ru_after:
+                raise AuditFailure("После падения foreign raw RU GeoIP не остался на direct-ru")
     return {"lab_env": str(env_path)}

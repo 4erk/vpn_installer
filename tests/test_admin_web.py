@@ -589,6 +589,7 @@ class AdminWebTests(unittest.TestCase):
         override_index = next(i for i, rule in enumerate(route_rules) if rule.get("outbound") == "to-foreign" and rule.get("domain") == ["gosuslugi.ru"])
         geosite_index = next(i for i, rule in enumerate(route_rules) if rule.get("rule_set") == ["ru-geosite"] and rule.get("outbound") == "direct-ru")
         self.assertLess(override_index, geosite_index)
+        self.assertFalse(any(rule.get("action") == "resolve" for rule in route_rules))
         dns_rule = next(rule for rule in config["dns"]["rules"] if rule.get("domain") == ["gosuslugi.ru"])
         self.assertEqual(dns_rule["server"], "dns-global")
 

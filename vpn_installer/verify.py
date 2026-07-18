@@ -135,7 +135,7 @@ def _validate_public_vless_result(result: dict[str, object], uri, foreign_target
         if not isinstance(measurement, dict):
             return {"verdict": "failed", "reason": "public VLESS throughput measurement is missing", "result": result}
         try:
-            speed_bps = float(measurement.get("bytes_per_second", 0) or 0)
+            speed_bps = float(measurement.get("capacity_bytes_per_second", measurement.get("bytes_per_second", 0)) or 0)
             duration = float(measurement.get("duration_seconds", 0) or 0)
             failures = int(measurement.get("failures", 0) or 0)
         except (TypeError, ValueError):
@@ -143,7 +143,7 @@ def _validate_public_vless_result(result: dict[str, object], uri, foreign_target
         if failures:
             return {"verdict": "failed", "reason": f"public VLESS throughput had {failures} transfer failures", "result": result}
         if speed_bps < VLESS_CAPACITY_FLOOR_BYTES_PER_SECOND:
-            return {"verdict": "failed", "reason": f"public VLESS throughput below 50 Mbit/s: {speed_bps * 8 / 1_000_000:.2f} Mbit/s", "result": result}
+            return {"verdict": "failed", "reason": f"public VLESS capacity below 50 Mbit/s: {speed_bps * 8 / 1_000_000:.2f} Mbit/s", "result": result}
         if duration < throughput_seconds:
             return {"verdict": "failed", "reason": f"public VLESS throughput window too short: {duration:.1f}s of {throughput_seconds}s", "result": result}
     return {"verdict": "verified", "result": result}

@@ -199,17 +199,19 @@ class RenderTests(unittest.TestCase):
         payload = json.loads(render.render_ru_singbox(env))
         route_rules = payload["route"]["rules"]
         outbounds = {outbound["tag"]: outbound for outbound in payload["outbounds"]}
-        global_resolve_index = next(index for index, rule in enumerate(route_rules) if rule.get("action") == "resolve" and rule.get("server") == "dns-global")
+        domain_foreign_index = next(index for index, rule in enumerate(route_rules) if rule.get("domain_regex") == ["^[^:]*[A-Za-z][^:]*$"])
         ipv6_index = next(index for index, rule in enumerate(route_rules) if rule.get("ip_version") == 6)
         ipv4_literal_index = next(index for index, rule in enumerate(route_rules) if rule.get("ip_cidr") == ["0.0.0.0/0"])
-        resolved_ru_geoip_index = next(index for index, rule in enumerate(route_rules) if rule.get("rule_set") == ["ru-geoip"] and rule.get("outbound") == "direct-ru")
+        raw_ru_geoip_index = next(index for index, rule in enumerate(route_rules) if rule.get("rule_set") == ["ru-geoip"])
         self.assertEqual(set(outbounds), {"direct-ru", "to-foreign"})
         self.assertEqual(route_rules[ipv6_index], {"ip_version": 6, "action": "route", "outbound": "to-foreign"})
         self.assertEqual(route_rules[ipv4_literal_index], {"ip_cidr": ["0.0.0.0/0"], "action": "route", "outbound": "to-foreign"})
         self.assertEqual(payload["route"]["final"], "to-foreign")
+        self.assertEqual(route_rules[domain_foreign_index]["outbound"], "to-foreign")
+        self.assertLess(domain_foreign_index, raw_ru_geoip_index)
+        self.assertLess(raw_ru_geoip_index, ipv6_index)
         self.assertLess(ipv6_index, ipv4_literal_index)
-        self.assertLess(ipv4_literal_index, global_resolve_index)
-        self.assertLess(global_resolve_index, resolved_ru_geoip_index)
+        self.assertFalse(any(rule.get("action") == "resolve" for rule in route_rules))
         self.assertNotIn("connect_timeout", outbounds["to-foreign"])
         self.assertEqual(payload["dns"]["cache_capacity"], 4096)
         self.assertNotIn("independent_cache", payload["dns"])
@@ -243,25 +245,15 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(route_rules[own_ip_index]["outbound"], "direct-ru")
         self.assertLess(own_ip_index, ipv4_literal_index)
 
-    def test_ru_server_resolves_forced_direct_domains_before_direct_route(self) -> None:
+    def test_ru_server_resolves_direct_domains_at_the_selected_outbound(self) -> None:
         env = self.make_env()
         payload = json.loads(render.render_ru_singbox(env))
         route_rules = payload["route"]["rules"]
-        direct_domain_resolve_index = next(
-            index
-            for index, rule in enumerate(route_rules)
-            if rule.get("action") == "resolve" and rule.get("server") == "dns-ru-direct" and "domain" in rule
-        )
-        direct_domain_route_index = next(index for index, rule in enumerate(route_rules) if rule.get("outbound") == "direct-ru" and "domain" in rule)
-        ru_geosite_resolve_index = next(
-            index
-            for index, rule in enumerate(route_rules)
-            if rule.get("action") == "resolve" and rule.get("server") == "dns-ru-direct" and rule.get("rule_set") == ["ru-geosite"]
-        )
-        ru_geosite_route_index = next(index for index, rule in enumerate(route_rules) if rule.get("outbound") == "direct-ru" and rule.get("rule_set") == ["ru-geosite"])
-
-        self.assertLess(direct_domain_resolve_index, direct_domain_route_index)
-        self.assertLess(ru_geosite_resolve_index, ru_geosite_route_index)
+        direct_outbound = next(item for item in payload["outbounds"] if item["tag"] == "direct-ru")
+        self.assertTrue(any(rule.get("outbound") == "direct-ru" and "domain" in rule for rule in route_rules))
+        self.assertTrue(any(rule.get("outbound") == "direct-ru" and rule.get("rule_set") == ["ru-geosite"] for rule in route_rules))
+        self.assertFalse(any(rule.get("action") == "resolve" for rule in route_rules))
+        self.assertEqual(direct_outbound["domain_resolver"], {"server": "dns-ru-direct", "strategy": "ipv4_only"})
 
     def test_ru_server_config_forces_selected_domains_and_suffixes_direct(self) -> None:
         env = self.make_env()

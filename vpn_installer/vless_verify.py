@@ -16,8 +16,12 @@ RUNNER_CURL_WATCHDOG_KILL_SECONDS = 5
 RUNNER_SHUTDOWN_SECONDS = 5
 RUNNER_REPORT_SECONDS = 1
 RUNNER_TRANSPORT_DRAIN_SECONDS = 10
-THROUGHPUT_SOURCE_URL = "https://download.thinkbroadband.com/1GB.zip"
+THROUGHPUT_SOURCE_URLS = (
+    "https://speed.cloudflare.com/__down?bytes=50000000",
+    "http://speedtest.tele2.net/100MB.zip",
+)
 THROUGHPUT_RANGE_END = 1_073_741_823
+THROUGHPUT_ATTEMPT_SECONDS = 10
 
 
 @dataclass(frozen=True)
@@ -178,7 +182,7 @@ def render_socks5_udp_dns_probe(*, listen_port: int) -> str:
     )
 
 
-def render_vless_runner(*, listen_port: int, throughput_url: str = THROUGHPUT_SOURCE_URL) -> str:
+def render_vless_runner(*, listen_port: int, throughput_urls: tuple[str, ...] = THROUGHPUT_SOURCE_URLS) -> str:
     """Render the external, full-path VLESS acceptance runner.
 
     The throughput phase measures aggregate transferred bytes over a fixed wall
@@ -188,6 +192,9 @@ def render_vless_runner(*, listen_port: int, throughput_url: str = THROUGHPUT_SO
     for a measurement; a rate-limited transfer cannot verify capacity.
     """
 
+    if not throughput_urls:
+        raise ValueError("at least one throughput source is required")
+
     template = r'''
 #!/usr/bin/env bash
 set -uo pipefail
@@ -196,7 +203,14 @@ config_path=${1:?missing sing-box config path}
 udp_probe_path=${2:?missing UDP probe path}
 throughput_seconds=${3:-0}
 proxy="socks5h://127.0.0.1:__LISTEN_PORT__"
-throughput_url=__THROUGHPUT_URL__
+throughput_urls=(__THROUGHPUT_URLS__)
+throughput_sources_json=__THROUGHPUT_SOURCES_JSON__
+throughput_source_bytes=()
+throughput_source_ns=()
+for _ in "${throughput_urls[@]}"; do
+    throughput_source_bytes+=(0)
+    throughput_source_ns+=(0)
+done
 runner_started_ns=$(date +%s%N)
 pid=""
 
@@ -276,6 +290,8 @@ fi
 throughput_bytes=0
 throughput_attempts=0
 throughput_failures=0
+throughput_source_failures=0
+throughput_runs=0
 throughput_start_ns=0
 throughput_end_ns=0
 if (( throughput_seconds > 0 )); then
@@ -287,42 +303,58 @@ if (( throughput_seconds > 0 )); then
         remaining_ns=$((throughput_deadline_ns - now_ns))
         (( remaining_ns > 0 )) || break
         remaining_seconds=$(((remaining_ns + 999999999) / 1000000000))
-        event "throughput-attempt-$throughput_attempts-remaining-$remaining_seconds"
+        attempt_index=$throughput_runs
+        throughput_runs=$((throughput_runs + 1))
+        source_index=$((attempt_index % ${#throughput_urls[@]}))
+        throughput_url=${throughput_urls[$source_index]}
+        attempt_seconds=$remaining_seconds
+        if (( attempt_seconds > __THROUGHPUT_ATTEMPT_SECONDS__ )); then
+            attempt_seconds=__THROUGHPUT_ATTEMPT_SECONDS__
+        fi
+        event "throughput-attempt-$attempt_index-source-$source_index-remaining-$remaining_seconds"
+        attempt_start_ns=$now_ns
         throughput_count_file=$(mktemp)
-        timeout --foreground --signal=TERM --kill-after=__CURL_WATCHDOG_KILL_SECONDS__s "${remaining_seconds}s" curl -4fsS --proxy "$proxy" --connect-timeout 5 --range 0-__THROUGHPUT_RANGE_END__ -o - "$throughput_url" 2>>runner-curl.log | wc -c >"$throughput_count_file"
+        timeout --foreground --signal=TERM --kill-after=__CURL_WATCHDOG_KILL_SECONDS__s "${attempt_seconds}s" curl -4fsS --proxy "$proxy" --connect-timeout 5 --range 0-__THROUGHPUT_RANGE_END__ -o - "$throughput_url" 2>>runner-curl.log | wc -c >"$throughput_count_file"
         pipeline_status=("${PIPESTATUS[@]}")
         curl_status=${pipeline_status[0]}
         counter_status=${pipeline_status[1]}
         curl_output=$(tr -d '[:space:]' <"$throughput_count_file")
         rm -f "$throughput_count_file"
-        if (( counter_status != 0 )) || [[ ! "$curl_output" =~ ^[0-9]+$ ]]; then
-            throughput_failures=$((throughput_failures + 1))
-            event throughput-invalid-metrics
-            break
-        fi
-        throughput_bytes=$((throughput_bytes + curl_output))
-        throughput_attempts=$((throughput_attempts + 1))
         now_ns=$(date +%s%N)
+        if (( counter_status != 0 )) || [[ ! "$curl_output" =~ ^[0-9]+$ ]]; then
+            throughput_source_failures=$((throughput_source_failures + 1))
+            event throughput-invalid-metrics
+            continue
+        fi
+        if (( curl_output > 0 )); then
+            throughput_bytes=$((throughput_bytes + curl_output))
+            throughput_attempts=$((throughput_attempts + 1))
+            throughput_source_bytes[$source_index]=$((throughput_source_bytes[$source_index] + curl_output))
+            throughput_source_ns[$source_index]=$((throughput_source_ns[$source_index] + now_ns - attempt_start_ns))
+        fi
         if (( curl_status == 0 )); then
             if (( curl_output == 0 )); then
-                throughput_failures=$((throughput_failures + 1))
+                throughput_source_failures=$((throughput_source_failures + 1))
                 event throughput-empty-response
-                break
             fi
             continue
         fi
-        if (( (curl_status == 28 || curl_status == 124 || curl_status == 137) && now_ns >= throughput_deadline_ns && curl_output > 0 )); then
-            break
+        if (( (curl_status == 28 || curl_status == 124 || curl_status == 137) && curl_output > 0 )); then
+            continue
         fi
-        throughput_failures=$((throughput_failures + 1))
+        throughput_source_failures=$((throughput_source_failures + 1))
         event "throughput-curl-exit-$curl_status"
-        break
     done
     throughput_end_ns=$(date +%s%N)
+    if (( throughput_attempts == 0 || throughput_bytes == 0 )); then
+        throughput_failures=1
+    fi
     event throughput-complete
 fi
+throughput_source_bytes_csv=$(IFS=,; printf '%s' "${throughput_source_bytes[*]}")
+throughput_source_ns_csv=$(IFS=,; printf '%s' "${throughput_source_ns[*]}")
 
-python3 - "$ru_ip" "$foreign_ip" "$github" "$google" "$throughput_bytes" "$throughput_start_ns" "$throughput_end_ns" "$throughput_attempts" "$throughput_failures" "$udp_dns" "$ipv6_literal" <<'PY'
+python3 - "$ru_ip" "$foreign_ip" "$github" "$google" "$throughput_bytes" "$throughput_start_ns" "$throughput_end_ns" "$throughput_attempts" "$throughput_failures" "$throughput_source_failures" "$throughput_sources_json" "$throughput_source_bytes_csv" "$throughput_source_ns_csv" "$udp_dns" "$ipv6_literal" <<'PY'
 import json
 import sys
 
@@ -330,12 +362,28 @@ bytes_downloaded = int(sys.argv[5])
 started_ns = int(sys.argv[6])
 ended_ns = int(sys.argv[7])
 duration_seconds = max(0.0, (ended_ns - started_ns) / 1_000_000_000) if started_ns else 0.0
+sources = json.loads(sys.argv[11])
+source_bytes = [int(value) for value in sys.argv[12].split(",")]
+source_ns = [int(value) for value in sys.argv[13].split(",")]
+source_metrics = []
+for url, source_byte_count, elapsed_ns in zip(sources, source_bytes, source_ns):
+    source_duration = max(0.0, elapsed_ns / 1_000_000_000)
+    source_metrics.append({
+        "url": url,
+        "bytes_downloaded": source_byte_count,
+        "duration_seconds": source_duration,
+        "bytes_per_second": source_byte_count / source_duration if source_duration else 0.0,
+    })
 throughput = {
     "bytes_per_second": bytes_downloaded / duration_seconds if duration_seconds else 0.0,
+    "capacity_bytes_per_second": max((item["bytes_per_second"] for item in source_metrics), default=0.0),
     "duration_seconds": duration_seconds,
     "bytes_downloaded": bytes_downloaded,
     "attempts": int(sys.argv[8]),
     "failures": int(sys.argv[9]),
+    "source_failures": int(sys.argv[10]),
+    "sources": sources,
+    "source_metrics": source_metrics,
 }
 print(json.dumps({
     "ru_egress_ip": sys.argv[1],
@@ -343,17 +391,21 @@ print(json.dumps({
     "github_status": sys.argv[3],
     "google_status": sys.argv[4],
     "throughput": throughput,
-    "udp_dns": json.loads(sys.argv[10]),
-    "ipv6_literal_status": sys.argv[11],
+    "udp_dns": json.loads(sys.argv[14]),
+    "ipv6_literal_status": sys.argv[15],
 }))
 PY
 '''
     return textwrap.dedent(template).lstrip().replace("__LISTEN_PORT__", str(listen_port)).replace(
-        "__THROUGHPUT_URL__", shlex.quote(throughput_url)
+        "__THROUGHPUT_URLS__", " ".join(shlex.quote(url) for url in throughput_urls)
+    ).replace(
+        "__THROUGHPUT_SOURCES_JSON__", shlex.quote(json.dumps(list(throughput_urls), separators=(",", ":")))
     ).replace("__HTTP_TIMEOUT_SECONDS__", str(RUNNER_HTTP_TIMEOUT_SECONDS)).replace(
         "__STARTUP_SECONDS__", str(RUNNER_STARTUP_SECONDS)
     ).replace("__THROUGHPUT_RANGE_END__", str(THROUGHPUT_RANGE_END)).replace(
         "__SHUTDOWN_POLLS__", str(RUNNER_SHUTDOWN_SECONDS * 10)
     ).replace(
         "__CURL_WATCHDOG_KILL_SECONDS__", str(RUNNER_CURL_WATCHDOG_KILL_SECONDS)
+    ).replace(
+        "__THROUGHPUT_ATTEMPT_SECONDS__", str(THROUGHPUT_ATTEMPT_SECONDS)
     )

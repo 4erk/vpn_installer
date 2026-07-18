@@ -48,10 +48,10 @@ Policy явно различает следующие классы:
 | `ru_direct_domain`, `ru_direct_ip` | `direct-ru` |
 | `private_or_fake`, `blocked` | `reject` |
 | `dns_global` | DoH с detour через `to-foreign` |
-| `domain_foreign` | `to-foreign` после global DNS |
+| `domain_foreign` | `to-foreign`, DNS выполняет outbound resolver |
 | `ipv4_literal_foreign`, `ipv6_literal_foreign` | `to-foreign` без искусственного connect timeout |
 
-Domain routing использует глобальный DNS и затем направляет DNS-resolved RU geoip обратно в `direct-ru`. Raw literals не подменяются доменными правилами. DNS cache sing-box имеет ёмкость 4096, а DNS failures классифицируются отдельно от route timeout.
+Маршрутизация домена завершается до IP-literal правил: явные и `ru-geosite` домены идут в `direct-ru`, остальные домены - в `to-foreign`. Каждый outbound разрешает имя своим закреплённым resolver; дублирующих route-level `resolve` нет. Для настоящего IPv4 literal сначала проверяются block/private и `ru-geoip`, затем global catchall. Global DNS отклоняет private-ответы. DNS cache sing-box имеет ёмкость 4096, а DNS failures классифицируются отдельно от route timeout.
 
 Foreign-классы всегда остаются на `to-foreign`. Health и recovery не имеют права переводить их в `direct-ru`: при отказе единственного foreign-egress состояние становится `failed` и трафик остаётся fail-closed. Автоматический route failover допустим только между независимыми foreign-egress.
 
@@ -100,7 +100,7 @@ Server-side route acceptance использует HTTP `HEAD`: его задач
 
 Для RU acceptance прямой egress подтверждается отдельной identity-проверкой. Foreign-домены обязаны пройти через `wg0` и local router, IPv4 literal через оба пути, а IPv6 literal через router и проверенный IPv6 egress foreign. Прямой запрос RU к заблокированному foreign-домену и raw `curl --interface wg0 -6` не являются пользовательским dataplane и записываются как наблюдения, но не вызывают ложный rollback.
 
-`verify live --throughput-seconds 600` дополнительно держит public VLESS path десять минут на range-capable download и требует не менее 50 Mbit/s. Runner считает реальные байты в фиксированном окне, повторяет завершённый range и не ограничивает сам измеряемую скорость; он запускается в отдельной remote process group, а SSH control-plane читает только короткие status snapshots и при deadline завершает всю runner group. Нагрузка запускается только явным флагом, использует доступную production-полосу и не входит в health timer.
+`verify live --throughput-seconds 600` дополнительно держит public VLESS path десять минут на нескольких независимых download origins и требует подтверждённую capacity не менее 50 Mbit/s хотя бы до одного из них. Runner считает реальные байты и время отдельно по каждому origin, показывает также общий throughput и не принимает rate limit одного CDN за предел всего VPN. Он запускается в отдельной remote process group, а SSH control-plane читает только короткие status snapshots и при deadline завершает всю runner group. Нагрузка запускается только явным флагом, использует доступную production-полосу и не входит в health timer.
 
 Проверяющий runner сейчас запускается на foreign role, поэтому он проверяет полный публичный VLESS path и server capacity, но не измеряет маршрут конкретного пользователя до RU. Одновременный `client_specific/degraded` не маскируется успешным runner: это два разных component verdict.
 

@@ -174,10 +174,14 @@ def _run_iperf_smoke(output_dir: Path, targets: list[RemoteTarget]) -> None:
     ru = target_map[ROLE_RU]
     foreign = target_map[ROLE_FOREIGN]
     tests = [
-        ("tcp-ru-to-foreign", "-t 8 -P 4"),
-        ("tcp-foreign-to-ru", "-t 8 -P 4 -R"),
-        ("udp-ru-to-foreign-10m", "-u -b 10M -l 1200 -t 8"),
-        ("udp-foreign-to-ru-10m", "-u -b 10M -l 1200 -t 8 -R"),
+        ("tcp-ru-to-foreign-p1", "-t 8 -P 1"),
+        ("tcp-foreign-to-ru-p1", "-t 8 -P 1 -R"),
+        ("tcp-ru-to-foreign-p4", "-t 8 -P 4"),
+        ("tcp-foreign-to-ru-p4", "-t 8 -P 4 -R"),
+        ("udp-ru-to-foreign-25m", "-u -b 25M -l 1200 -t 8"),
+        ("udp-foreign-to-ru-25m", "-u -b 25M -l 1200 -t 8 -R"),
+        ("udp-ru-to-foreign-100m", "-u -b 100M -l 1200 -t 8"),
+        ("udp-foreign-to-ru-100m", "-u -b 100M -l 1200 -t 8 -R"),
     ]
     try:
         _cleanup_iperf_rules(foreign)

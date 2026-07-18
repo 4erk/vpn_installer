@@ -146,11 +146,9 @@ def apply_admin_rules_to_config(base_config: dict[str, Any], rules: list[dict[st
         domains, suffixes = rule_domains(rule)
         if domains:
             dns_inserts.append({"domain": domains, "action": "route", "server": dns_server, "strategy": "ipv4_only"})
-            route_inserts.append({"domain": domains, "action": "resolve", "server": dns_server, "strategy": "ipv4_only"})
             route_inserts.append({"domain": domains, "action": "route", "outbound": outbound})
         if suffixes:
             dns_inserts.append({"domain_suffix": suffixes, "action": "route", "server": dns_server, "strategy": "ipv4_only"})
-            route_inserts.append({"domain_suffix": suffixes, "action": "resolve", "server": dns_server, "strategy": "ipv4_only"})
             route_inserts.append({"domain_suffix": suffixes, "action": "route", "outbound": outbound})
     if dns_inserts:
         index = dns_insert_index(dns_rules)

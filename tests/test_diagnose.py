@@ -133,11 +133,14 @@ class DiagnoseTests(unittest.TestCase):
             diagnose._run_iperf_smoke(Path(tmp), [ru, foreign])
             outputs = sorted(Path(tmp).glob("iperf-*.txt"))
 
-        self.assertEqual(len(outputs), 4)
+        self.assertEqual(len(outputs), 8)
         commands = "\n".join(call.args[1] for call in ssh_mock.call_args_list)
         self.assertIn("vpnstack-diag-iperf", commands)
         self.assertIn("systemd-run --unit=vpnstack-iperf3", commands)
         self.assertIn("iperf3 -c 10.74.0.2", commands)
+        self.assertIn("-P 1", commands)
+        self.assertIn("-P 4", commands)
+        self.assertIn("-b 100M", commands)
         self.assertIn("nft delete rule inet vpnstack input handle", commands)
 
 
