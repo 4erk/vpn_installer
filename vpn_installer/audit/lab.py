@@ -116,6 +116,7 @@ def build_lab_dnsmasq() -> str:
         address=/example.com/{LAB_IPS["global_web"]}
         address=/blocked-ru.example/{LAB_IPS["ru_web"]}
         address=/private.invalid/10.0.0.20
+        address=/gosuslugi.ru/10.0.0.20
         """
     )
 
@@ -195,6 +196,7 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
             runner.docker_exec(global_web_container, "nohup python3 /opt/web.py >/opt/web.log 2>&1 &")
             runner.docker_exec(foreign_container, "sysctl -w net.ipv4.ip_forward=1 net.ipv6.conf.all.forwarding=1 >/dev/null")
             runner.docker_exec(ru_container, "sysctl -w net.ipv4.conf.all.src_valid_mark=1 >/dev/null")
+            runner.docker_exec(ru_container, "ip address add 10.0.0.20/32 dev lo && nohup python3 -m http.server 80 --bind 10.0.0.20 >/opt/private-direct-web.log 2>&1 &")
             runner.docker_exec(foreign_container, "wg-quick up /opt/wg0.conf")
             runner.docker_exec(ru_container, "wg-quick up /opt/wg0.conf")
             runner.docker_exec(foreign_container, "ip address add 10.0.0.20/32 dev lo && nohup python3 -m http.server 80 --bind 10.0.0.20 >/opt/private-web.log 2>&1 &")
@@ -224,6 +226,10 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
             private_dns = runner.lab_curl(client_container, "http://private.invalid/", expect_codes={5, 7, 22, 28, 52, 56, 97})
             if private_dns.returncode == 0:
                 raise AuditFailure("Global DNS private answer открыл внутренний адрес foreign")
+
+            private_direct_dns = runner.lab_curl(client_container, "http://gosuslugi.ru/", expect_codes={5, 7, 22, 28, 52, 56, 97})
+            if private_direct_dns.returncode == 0:
+                raise AuditFailure("RU direct DNS private answer открыл внутренний адрес RU")
 
             blocked = runner.lab_curl(client_container, "http://blocked-ru.example/", expect_codes={7, 22, 28, 52, 56, 97})
             if blocked.returncode == 0:

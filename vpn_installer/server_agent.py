@@ -1091,6 +1091,7 @@ def snapshot(*, live_probes: bool = False, profile: str = "light", full_logs: bo
     tcp_adaptation = tcp_adaptation_snapshot(public_iface)
     expected_network_profile = managed_network_profile()
     profile_mismatches = network_profile_mismatches(tcp_adaptation, expected_network_profile)
+    health_state = read_json(HEALTH_STATE_PATH, {})
     required = ["wireguard", "nftables"] + (["sing-box", "xray"] if role == "ru-gateway" else [])
     reasons = [f"{name}={services[name]}" for name in required if services.get(name) != "active"]
     if manifest_data["drift"] != "none":
@@ -1136,6 +1137,9 @@ def snapshot(*, live_probes: bool = False, profile: str = "light", full_logs: bo
             "profile_mismatches": profile_mismatches,
             "protocol_counters": protocol_counters_snapshot(),
             "softnet_counters": softnet_counters_snapshot(),
+            "recent_health_deltas": health_state.get("network_deltas", {}),
+            "health_state": health_state.get("state", "unknown"),
+            "health_updated_at": health_state.get("updated_at", ""),
         },
         "front": front,
         "transport": transport,

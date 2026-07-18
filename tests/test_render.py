@@ -199,7 +199,13 @@ class RenderTests(unittest.TestCase):
         payload = json.loads(render.render_ru_singbox(env))
         route_rules = payload["route"]["rules"]
         outbounds = {outbound["tag"]: outbound for outbound in payload["outbounds"]}
-        domain_foreign_index = next(index for index, rule in enumerate(route_rules) if rule.get("domain_regex") == ["^[^:]*[A-Za-z][^:]*$"])
+        domain_foreign_index = next(
+            index
+            for index, rule in enumerate(route_rules)
+            if rule.get("domain_regex") == ["^[^:]*[A-Za-z][^:]*$"]
+            and rule.get("action") == "route"
+            and rule.get("outbound") == "to-foreign"
+        )
         ipv6_index = next(index for index, rule in enumerate(route_rules) if rule.get("ip_version") == 6)
         ipv4_literal_index = next(index for index, rule in enumerate(route_rules) if rule.get("ip_cidr") == ["0.0.0.0/0"])
         raw_ru_geoip_index = next(index for index, rule in enumerate(route_rules) if rule.get("rule_set") == ["ru-geoip"])
@@ -211,7 +217,7 @@ class RenderTests(unittest.TestCase):
         self.assertLess(domain_foreign_index, raw_ru_geoip_index)
         self.assertLess(raw_ru_geoip_index, ipv6_index)
         self.assertLess(ipv6_index, ipv4_literal_index)
-        self.assertFalse(any(rule.get("action") == "resolve" for rule in route_rules))
+        self.assertTrue(any(rule.get("action") == "resolve" and rule.get("server") == "dns-global" for rule in route_rules))
         self.assertNotIn("connect_timeout", outbounds["to-foreign"])
         self.assertEqual(payload["dns"]["cache_capacity"], 4096)
         self.assertNotIn("independent_cache", payload["dns"])
@@ -252,7 +258,7 @@ class RenderTests(unittest.TestCase):
         direct_outbound = next(item for item in payload["outbounds"] if item["tag"] == "direct-ru")
         self.assertTrue(any(rule.get("outbound") == "direct-ru" and "domain" in rule for rule in route_rules))
         self.assertTrue(any(rule.get("outbound") == "direct-ru" and rule.get("rule_set") == ["ru-geosite"] for rule in route_rules))
-        self.assertFalse(any(rule.get("action") == "resolve" for rule in route_rules))
+        self.assertTrue(any(rule.get("action") == "resolve" and rule.get("server") == "dns-ru-direct" for rule in route_rules))
         self.assertEqual(direct_outbound["domain_resolver"], {"server": "dns-ru-direct", "strategy": "ipv4_only"})
 
     def test_ru_server_config_forces_selected_domains_and_suffixes_direct(self) -> None:

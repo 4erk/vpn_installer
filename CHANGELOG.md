@@ -6,6 +6,16 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.11.10] - 2026-07-18
+
+### Fixed
+
+- Для каждого доменного traffic class компилируется отдельная последовательность `resolve -> block/private guard -> terminal route`. Direct terminal завершается до foreign resolve, поэтому выбранный resolver вызывается ровно один раз; connection manager получает готовые адреса. Lab поднимает доступные private endpoints на обеих сторонах и доказывает отсутствие соединения до них через global и RU-direct доменные правила.
+- `context canceled` при закрытии запроса или restart больше не считается отказом DNS: событие относится к клиентскому cancellation bucket, тогда как реальные deadline/timeout остаются `dns_timeout`.
+- `status` явно отделяет накопительные kernel counters от положительных дельт последнего health-цикла. `diagnose client` показывает aggregate TCP quality и основание source-specific verdict вместо противоречивой пары `degraded`/`active flows degraded=0`.
+
+Основной `vless-uri.txt`, web-admin и fail-closed foreign invariant не изменены. Web-admin компилирует operator rules в те же resolve/guard/terminal фазы и не разрешает переопределить private CIDR guard.
+
 ## [0.11.9] - 2026-07-18
 
 ### Fixed

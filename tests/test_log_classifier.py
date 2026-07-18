@@ -48,6 +48,14 @@ class LogClassifierTests(unittest.TestCase):
         self.assertEqual(classified.bucket, "dns_timeout")
         self.assertEqual(classified.destination, "www.msftconnecttest.com:A")
 
+    def test_dns_context_cancelled_is_client_noise_not_dns_failure(self) -> None:
+        classified = classify_line(
+            "+0000 2026-07-18 20:22:04 ERROR [364916214 8.1s] dns: lookup failed for www.google.com: context canceled"
+        )
+        self.assertIsNotNone(classified)
+        self.assertEqual(classified.bucket, "client_reset_eof")
+        self.assertEqual(classified.destination, "www.google.com")
+
     def test_router_lookup_nxdomain_is_dns_and_deduplicated_by_request_id(self) -> None:
         lines = [
             "+0000 2026-07-15 01:53:31 ERROR [1400782119 31ms] dns: lookup failed for assets0.xboxlive.com: NXDOMAIN",

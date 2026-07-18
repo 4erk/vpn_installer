@@ -38,7 +38,12 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
     protocol = snapshot.network.get("protocol_counters", {})
     protocol_errors = {key: value for key, value in protocol.items() if value and ("Error" in key or "Drop" in key or "Discard" in key)}
     if protocol_errors:
-        lines.append("protocol counters: " + ", ".join(f"{key}={value}" for key, value in sorted(protocol_errors.items())))
+        lines.append("protocol counters (lifetime): " + ", ".join(f"{key}={value}" for key, value in sorted(protocol_errors.items())))
+    recent_deltas = snapshot.network.get("recent_health_deltas", {})
+    recent_protocol = recent_deltas.get("protocol", {}) if isinstance(recent_deltas, dict) else {}
+    recent_errors = {key: value for key, value in recent_protocol.items() if value and ("Error" in key or "Drop" in key or "Discard" in key)}
+    if recent_errors:
+        lines.append("protocol deltas (last health cycle): " + ", ".join(f"{key}=+{value}" for key, value in sorted(recent_errors.items())))
     if snapshot.reasons:
         lines.append("reasons: " + "; ".join(snapshot.reasons))
     return lines

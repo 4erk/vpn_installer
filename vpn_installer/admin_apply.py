@@ -67,6 +67,8 @@ def normalize_rule(raw_rule: dict[str, Any]) -> dict[str, Any]:
     include_subdomains = bool(raw_rule.get("include_subdomains", False))
     if rule_type == "cidr" or "/" in value:
         network = ipaddress.ip_network(value, strict=False)
+        if not network.is_global:
+            raise ValueError("CIDR web-правила разрешены только для публичных сетей")
         return {
             "id": str(raw_rule.get("id", "")),
             "type": "cidr",
@@ -136,20 +138,34 @@ def apply_admin_rules_to_config(base_config: dict[str, Any], rules: list[dict[st
     dns_rules = config.setdefault("dns", {}).setdefault("rules", [])
     route_rules = config.setdefault("route", {}).setdefault("rules", [])
     dns_inserts: list[dict[str, Any]] = []
+    guard_rules: list[dict[str, Any]] = []
+    for route_rule in route_rules:
+        if route_rule.get("action") != "reject" or not ("ip_cidr" in route_rule or route_rule.get("ip_is_private") is True):
+            continue
+        if route_rule not in guard_rules:
+            guard_rules.append(route_rule)
     route_inserts: list[dict[str, Any]] = []
     for rule in enabled:
         outbound = rule["outbound"]
         dns_server = OUTBOUND_TO_DNS[outbound]
         if rule["type"] == "cidr":
-            route_inserts.append({"ip_cidr": [rule["value"]], "action": "route", "outbound": outbound})
+            route_inserts.extend((*guard_rules, {"ip_cidr": [rule["value"]], "action": "route", "outbound": outbound}))
             continue
         domains, suffixes = rule_domains(rule)
         if domains:
             dns_inserts.append({"domain": domains, "action": "route", "server": dns_server, "strategy": "ipv4_only"})
-            route_inserts.append({"domain": domains, "action": "route", "outbound": outbound})
+            route_inserts.extend((
+                {"domain": domains, "action": "resolve", "server": dns_server, "strategy": "ipv4_only"},
+                *guard_rules,
+                {"domain": domains, "action": "route", "outbound": outbound},
+            ))
         if suffixes:
             dns_inserts.append({"domain_suffix": suffixes, "action": "route", "server": dns_server, "strategy": "ipv4_only"})
-            route_inserts.append({"domain_suffix": suffixes, "action": "route", "outbound": outbound})
+            route_inserts.extend((
+                {"domain_suffix": suffixes, "action": "resolve", "server": dns_server, "strategy": "ipv4_only"},
+                *guard_rules,
+                {"domain_suffix": suffixes, "action": "route", "outbound": outbound},
+            ))
     if dns_inserts:
         index = dns_insert_index(dns_rules)
         dns_rules[index:index] = dns_inserts

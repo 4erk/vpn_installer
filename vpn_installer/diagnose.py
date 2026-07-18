@@ -139,7 +139,8 @@ def diagnose_server_client_workflow(deployment: str | None, *, source_ip: str, m
     if client:
         print(
             "active sockets: "
-            f"connections={client.get('connections', 0)}, rtt_p95_ms={client.get('rtt_ms', {}).get('p95', '-')}, "
+            f"connections={client.get('connections', 0)}, quality={client.get('quality', 'unknown')}, "
+            f"rtt_p95_ms={client.get('rtt_ms', {}).get('p95', '-')}, "
             f"rto_max_ms={client.get('rto_ms', {}).get('max', '-')}, "
             f"retransmissions_lifetime={client.get('retransmissions', 0)}, retransmitted_bytes={client.get('bytes_retrans', 0)}, "
             f"retransmit_ratio_pct={client.get('retransmit_ratio_pct', 0)}, pmtu={client.get('pmtu', '-')}, "
@@ -149,7 +150,15 @@ def diagnose_server_client_workflow(deployment: str | None, *, source_ip: str, m
     if flows:
         degraded_flows = sum(flow.get("quality") == "degraded" for flow in flows.values())
         print(f"active flows: total={len(flows)}, degraded={degraded_flows}")
-    print(f"verdict: {payload.get('verdict', 'inconclusive')}")
+    verdict = payload.get("verdict", "inconclusive")
+    verdict_basis = {
+        "degraded": "Xray accepted the client; aggregate outer TCP quality is degraded",
+        "reached_xray": "Xray accepted the client; no active aggregate degradation was measured",
+        "rejected_by_front": "the public front rejected the connection",
+        "tcp_reached_no_xray_accept": "TCP reached port 443 without a matching Xray accept event",
+        "not_seen_on_server": "no matching TCP/Xray evidence was observed",
+    }.get(verdict, "")
+    print(f"verdict: {verdict}{f'; basis: {verdict_basis}' if verdict_basis else ''}")
     print(f"udp/443 policy: {payload.get('transport', {}).get('udp_443_policy', '-')}")
     print(f"report: {report_path}")
     return 1 if payload.get("verdict") in {"degraded", "rejected_by_front", "tcp_reached_no_xray_accept", "not_seen_on_server"} else 0

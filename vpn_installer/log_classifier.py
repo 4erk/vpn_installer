@@ -158,6 +158,8 @@ def classify_line(line: str) -> ClassifiedLogLine | None:
     if "using outbound/vless[" in line and any(token in line for token in ("dial tcp", "wsarecv", "connected host has failed to respond")):
         return ClassifiedLogLine("client_front_connect_failed", destination, source, event_id)
     dns_failure = any(token in line for token in ("dns: exchange failed", "exchange failed for ", "dns: lookup failed", "lookup failed for ", "router: lookup "))
+    if dns_failure and "context canceled" in line:
+        return ClassifiedLogLine("client_reset_eof", destination, source, event_id)
     if dns_failure and any(token in line for token in ("context deadline exceeded", "i/o timeout")):
         return ClassifiedLogLine("dns_timeout", destination, source, event_id)
     if dns_failure and "NXDOMAIN" in line.upper():

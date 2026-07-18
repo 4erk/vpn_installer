@@ -6,7 +6,7 @@ from typing import Any, Iterable
 
 from .dns_policy import CONNECTIVITY_CHECK_DIRECT_DOMAINS, CONNECTIVITY_CHECK_IPV6_ONLY_DOMAINS, merged_domains
 
-POLICY_VERSION = "0.11.9"
+POLICY_VERSION = "0.11.10"
 
 TRAFFIC_CLASSES = (
     "ru_direct_domain",
@@ -35,6 +35,8 @@ class RouteClass:
     log_category: str
     fallback: str
     dns_rules: tuple[dict[str, Any], ...] = ()
+    pre_route_rules: tuple[dict[str, Any], ...] = ()
+    guard_rules: tuple[dict[str, Any], ...] = ()
     route_rules: tuple[dict[str, Any], ...] = ()
 
     def metadata(self) -> dict[str, str]:
@@ -67,7 +69,19 @@ class RoutingPolicy:
 
     @property
     def route_rules(self) -> list[dict[str, Any]]:
-        return [*self.control_route_rules, *(rule for item in self.traffic for rule in item.route_rules)]
+        guards = [rule for item in self.traffic for rule in item.guard_rules]
+        pre_only = [rule for item in self.traffic if not item.route_rules for rule in item.pre_route_rules]
+        terminal_rules: list[dict[str, Any]] = []
+        compiled = [*self.control_route_rules, *pre_only]
+        for item in self.traffic:
+            if item.pre_route_rules and item.route_rules:
+                if len(item.pre_route_rules) != len(item.route_rules):
+                    raise ValueError(f"routing class {item.name} has mismatched resolve and terminal rules")
+                for pre_route, route in zip(item.pre_route_rules, item.route_rules):
+                    compiled.extend((pre_route, *guards, route))
+            elif item.route_rules:
+                terminal_rules.extend(item.route_rules)
+        return [*compiled, *guards, *terminal_rules]
 
     def singbox_parts(self) -> dict[str, Any]:
         return {
@@ -90,9 +104,22 @@ def _traffic_class(
     fallback: str,
     *,
     dns: Iterable[dict[str, Any]] = (),
+    pre_routes: Iterable[dict[str, Any]] = (),
+    guards: Iterable[dict[str, Any]] = (),
     routes: Iterable[dict[str, Any]] = (),
 ) -> RouteClass:
-    return RouteClass(name, outbound, resolver, timeout_policy, log_category, fallback, tuple(dns), tuple(routes))
+    return RouteClass(
+        name,
+        outbound,
+        resolver,
+        timeout_policy,
+        log_category,
+        fallback,
+        tuple(dns),
+        tuple(pre_routes),
+        tuple(guards),
+        tuple(routes),
+    )
 
 
 def build_ru_routing_policy(env: dict[str, str]) -> RoutingPolicy:
@@ -119,11 +146,12 @@ def build_ru_routing_policy(env: dict[str, str]) -> RoutingPolicy:
         _traffic_class(
             "connectivity_check_ipv6_only", "reject", "none", "none", "blocked_private_fake", "none",
             dns=({"query_type": ["AAAA"], "action": "reject"}, {"domain": list(CONNECTIVITY_CHECK_IPV6_ONLY_DOMAINS), "action": "reject"}),
-            routes=({"domain": list(CONNECTIVITY_CHECK_IPV6_ONLY_DOMAINS), "action": "reject"},),
+            pre_routes=({"domain": list(CONNECTIVITY_CHECK_IPV6_ONLY_DOMAINS), "action": "reject"},),
         ),
         _traffic_class(
             "connectivity_check", "direct-ru", "dns-ru-direct", "none", "direct_ru", "dns-global",
             dns=({"domain": direct_domains, "action": "route", "server": "dns-ru-direct", "strategy": "ipv4_only"},) if direct_domains else (),
+            pre_routes=({"domain": direct_domains, "action": "resolve", "server": "dns-ru-direct", "strategy": "ipv4_only"},) if direct_domains else (),
             routes=({"domain": direct_domains, "action": "route", "outbound": "direct-ru"},) if direct_domains else (),
         ),
         _traffic_class(
@@ -131,6 +159,10 @@ def build_ru_routing_policy(env: dict[str, str]) -> RoutingPolicy:
             dns=(
                 *(({"domain_suffix": direct_suffixes, "action": "route", "server": "dns-ru-direct", "strategy": "ipv4_only"},) if direct_suffixes else ()),
                 {"rule_set": ["ru-geosite"], "action": "route", "server": "dns-ru-direct", "strategy": "ipv4_only"},
+            ),
+            pre_routes=(
+                *(({"domain_suffix": direct_suffixes, "action": "resolve", "server": "dns-ru-direct", "strategy": "ipv4_only"},) if direct_suffixes else ()),
+                {"rule_set": ["ru-geosite"], "action": "resolve", "server": "dns-ru-direct", "strategy": "ipv4_only"},
             ),
             routes=(
                 *(({"domain_suffix": direct_suffixes, "action": "route", "outbound": "direct-ru"},) if direct_suffixes else ()),
@@ -143,15 +175,16 @@ def build_ru_routing_policy(env: dict[str, str]) -> RoutingPolicy:
         ),
         _traffic_class(
             "domain_foreign", "to-foreign", "dns-global", "system", "domain_to_foreign_timeout", "none",
+            pre_routes=({"domain_regex": ["^[^:]*[A-Za-z][^:]*$"], "action": "resolve", "server": "dns-global", "strategy": "ipv4_only"},),
             routes=({"domain_regex": ["^[^:]*[A-Za-z][^:]*$"], "action": "route", "outbound": "to-foreign"},),
         ),
         _traffic_class(
             "blocked", "reject", "none", "none", "blocked_private_fake", "none",
-            routes=({"ip_cidr": blocked_cidrs, "action": "reject"},) if blocked_cidrs else (),
+            guards=({"ip_cidr": blocked_cidrs, "action": "reject"},) if blocked_cidrs else (),
         ),
         _traffic_class(
             "private_or_fake", "reject", "none", "none", "blocked_private_fake", "none",
-            routes=({"ip_is_private": True, "action": "reject"},),
+            guards=({"ip_is_private": True, "action": "reject"},),
         ),
         _traffic_class(
             "ru_direct_ip", "direct-ru", "dns-ru-direct", "none", "direct_ru", "blocked",

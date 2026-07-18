@@ -588,8 +588,13 @@ class AdminWebTests(unittest.TestCase):
         route_rules = config["route"]["rules"]
         override_index = next(i for i, rule in enumerate(route_rules) if rule.get("outbound") == "to-foreign" and rule.get("domain") == ["gosuslugi.ru"])
         geosite_index = next(i for i, rule in enumerate(route_rules) if rule.get("rule_set") == ["ru-geosite"] and rule.get("outbound") == "direct-ru")
+        private_index = next(i for i, rule in enumerate(route_rules) if rule.get("ip_is_private") is True)
+        override_resolve_index = next(i for i, rule in enumerate(route_rules) if rule.get("action") == "resolve" and rule.get("domain") == ["gosuslugi.ru"])
+        base_resolve_index = next(i for i, rule in enumerate(route_rules) if rule.get("action") == "resolve" and rule.get("rule_set") == ["ru-geosite"])
         self.assertLess(override_index, geosite_index)
-        self.assertFalse(any(rule.get("action") == "resolve" for rule in route_rules))
+        self.assertLess(override_resolve_index, private_index)
+        self.assertLess(private_index, override_index)
+        self.assertLess(override_index, base_resolve_index)
         dns_rule = next(rule for rule in config["dns"]["rules"] if rule.get("domain") == ["gosuslugi.ru"])
         self.assertEqual(dns_rule["server"], "dns-global")
 
@@ -614,12 +619,16 @@ class AdminWebTests(unittest.TestCase):
         self.assertEqual(direct_rule["domain"], ["example.com"])
 
     def test_admin_apply_helpers_cover_cidr_and_indexes(self) -> None:
-        cidr_rule = admin_apply.normalize_rule({"value": "203.0.113.4/32", "outbound": "direct-ru"})
+        cidr_rule = admin_apply.normalize_rule({"value": "8.8.8.8/32", "outbound": "direct-ru"})
         self.assertEqual(cidr_rule["type"], "cidr")
-        self.assertEqual(cidr_rule["value"], "203.0.113.4/32")
+        self.assertEqual(cidr_rule["value"], "8.8.8.8/32")
         self.assertEqual(admin_apply.rule_domains({"value": "example.com", "include_subdomains": True}), (["example.com"], [".example.com"]))
         self.assertEqual(admin_apply.route_insert_index([]), 0)
         self.assertEqual(admin_apply.dns_insert_index([]), 0)
+
+    def test_admin_cidr_cannot_override_private_guard(self) -> None:
+        with self.assertRaisesRegex(ValueError, "публичных"):
+            admin_apply.normalize_rule({"value": "10.0.0.0/8", "outbound": "direct-ru"})
 
     def test_load_rules_deduplicates_rules(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

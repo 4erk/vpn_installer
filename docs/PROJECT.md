@@ -48,10 +48,10 @@ Policy явно различает следующие классы:
 | `ru_direct_domain`, `ru_direct_ip` | `direct-ru` |
 | `private_or_fake`, `blocked` | `reject` |
 | `dns_global` | DoH с detour через `to-foreign` |
-| `domain_foreign` | `to-foreign`, DNS выполняет outbound resolver |
+| `domain_foreign` | `to-foreign`, DNS выполняет resolver класса до guard |
 | `ipv4_literal_foreign`, `ipv6_literal_foreign` | `to-foreign` без искусственного connect timeout |
 
-Маршрутизация домена завершается до IP-literal правил: явные и `ru-geosite` домены идут в `direct-ru`, остальные домены - в `to-foreign`. Каждый outbound разрешает имя своим закреплённым resolver; дублирующих route-level `resolve` нет. Для настоящего IPv4 literal сначала проверяются block/private и `ru-geoip`, затем global catchall. Global DNS отклоняет private-ответы. DNS cache sing-box имеет ёмкость 4096, а DNS failures классифицируются отдельно от route timeout.
+Для каждого доменного класса компилируется отдельная последовательность `resolve -> block/private guard -> terminal route`. Direct terminal завершается до foreign resolve, поэтому имя разрешается ровно один раз resolver своего класса. Полученные адреса передаются dialer напрямую. Настоящий IP literal фазу DNS пропускает: после block/private сначала проверяется `ru-geoip`, затем global catchall. DNS cache sing-box имеет ёмкость 4096, а DNS failures классифицируются отдельно от route timeout.
 
 Foreign-классы всегда остаются на `to-foreign`. Health и recovery не имеют права переводить их в `direct-ru`: при отказе единственного foreign-egress состояние становится `failed` и трафик остаётся fail-closed. Автоматический route failover допустим только между независимыми foreign-egress.
 

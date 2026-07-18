@@ -36,7 +36,9 @@ class StatusOutputTests(unittest.TestCase):
                         "probe_interval_seconds": 600,
                         "udp_rmem_default": 4194304,
                         "udp_rmem_max": 16777216,
-                    }
+                    },
+                    "protocol_counters": {"UdpRcvbufErrors": 816},
+                    "recent_health_deltas": {"protocol": {"UdpRcvbufErrors": 3}},
                 },
                 reasons=["domain_to_foreign_timeout present"],
             )
@@ -54,6 +56,8 @@ class StatusOutputTests(unittest.TestCase):
         self.assertIn("domain_to_foreign_timeout present", rendered)
         self.assertIn("tcp adaptation: cc=bbr, qdisc=fq, mtu_probing=1, probe_interval_s=600", rendered)
         self.assertIn("udp_rmem=4194304/16777216", rendered)
+        self.assertIn("protocol counters (lifetime): UdpRcvbufErrors=816", rendered)
+        self.assertIn("protocol deltas (last health cycle): UdpRcvbufErrors=+3", rendered)
 
 
 if __name__ == "__main__":

@@ -30,7 +30,13 @@ class RoutingPolicyTests(unittest.TestCase):
 
     def test_domain_policy_finishes_before_literal_policy(self) -> None:
         rules = build_ru_routing_policy(self.make_env()).route_rules
-        domain_foreign_index = next(i for i, rule in enumerate(rules) if rule.get("domain_regex") == ["^[^:]*[A-Za-z][^:]*$"])
+        domain_foreign_index = next(
+            i
+            for i, rule in enumerate(rules)
+            if rule.get("domain_regex") == ["^[^:]*[A-Za-z][^:]*$"]
+            and rule.get("action") == "route"
+            and rule.get("outbound") == "to-foreign"
+        )
         raw_ru_geoip_index = next(i for i, rule in enumerate(rules) if rule.get("rule_set") == ["ru-geoip"])
         ipv6_index = next(i for i, rule in enumerate(rules) if rule.get("ip_version") == 6)
         ipv4_index = next(i for i, rule in enumerate(rules) if rule.get("ip_cidr") == ["0.0.0.0/0"])
@@ -42,14 +48,29 @@ class RoutingPolicyTests(unittest.TestCase):
         self.assertLess(raw_ru_geoip_index, ipv6_index)
         self.assertLess(ipv6_index, ipv4_index)
 
-    def test_route_level_dns_resolution_is_not_duplicated(self) -> None:
+    def test_domain_resolution_precedes_guards_and_terminal_routes(self) -> None:
         rules = build_ru_routing_policy(self.make_env()).route_rules
-        self.assertFalse(any(rule.get("action") == "resolve" for rule in rules))
+        direct_resolve_index = next(i for i, rule in enumerate(rules) if rule.get("action") == "resolve" and rule.get("rule_set") == ["ru-geosite"])
+        direct_route_index = next(i for i, rule in enumerate(rules) if rule.get("outbound") == "direct-ru" and rule.get("rule_set") == ["ru-geosite"])
+        foreign_resolve_index = next(i for i, rule in enumerate(rules) if rule.get("action") == "resolve" and rule.get("server") == "dns-global")
+        foreign_route_index = next(i for i, rule in enumerate(rules) if rule.get("outbound") == "to-foreign" and "domain_regex" in rule)
+        connectivity_resolve_index = next(i for i, rule in enumerate(rules) if rule.get("action") == "resolve" and "domain" in rule)
+        connectivity_route_index = next(i for i, rule in enumerate(rules) if rule.get("outbound") == "direct-ru" and "domain" in rule)
+        private_indexes = [i for i, rule in enumerate(rules) if rule.get("ip_is_private") is True]
+        self.assertTrue(any(direct_resolve_index < i < direct_route_index for i in private_indexes))
+        self.assertTrue(any(foreign_resolve_index < i < foreign_route_index for i in private_indexes))
+        self.assertLess(connectivity_resolve_index, connectivity_route_index)
+        self.assertLess(connectivity_route_index, direct_resolve_index)
+        self.assertLess(direct_route_index, foreign_resolve_index)
         self.assertEqual(sum(rule.get("rule_set") == ["ru-geoip"] for rule in rules), 1)
 
-    def test_global_dns_rejects_private_answers(self) -> None:
+    def test_client_dns_and_routed_domains_have_private_guards(self) -> None:
         rules = build_ru_routing_policy(self.make_env()).dns_rules
         self.assertIn({"ip_is_private": True, "action": "reject", "server": "dns-global"}, rules)
+        route_rules = build_ru_routing_policy(self.make_env()).route_rules
+        self.assertTrue(any(rule.get("server") == "dns-ru-direct" and rule.get("action") == "resolve" for rule in route_rules))
+        self.assertTrue(any(rule.get("server") == "dns-global" and rule.get("action") == "resolve" for rule in route_rules))
+        self.assertIn({"ip_is_private": True, "action": "reject"}, route_rules)
 
     def test_ipv6_only_probe_cannot_leak_from_legacy_direct_domains(self) -> None:
         env = self.make_env()
