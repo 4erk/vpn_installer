@@ -246,7 +246,7 @@ SSH-туннель остаётся запасным способом админ
 .\vpn.cmd diagnose path --deployment my-vpn
 ```
 
-Отчёт сохраняется в `out/diagnostics` как JSON. Для конкретного устройства используй `vpn diagnose client --source <public-ip>`: он группирует текущие TCP socket state, lifetime retransmit с явной областью измерения и Xray TCP/UDP events именно по этому source IP.
+Отчёт сохраняется в `out/diagnostics` как JSON. Для конкретного устройства используй `vpn diagnose client --source <public-ip>`: он группирует текущие TCP socket state, lifetime retransmit с явной областью измерения и Xray TCP/UDP events именно по этому source IP. IPv4-mapped IPv6 из kernel `ss` нормализуется к тому же IPv4 ключу.
 
 Для самопроверки на обычном пользовательском ПК:
 

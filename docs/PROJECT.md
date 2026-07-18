@@ -51,9 +51,9 @@ Snapshot schema 2 содержит:
 
 - service state, manifest drift и hashes всех managed artifacts;
 - WireGuard и interface/conntrack counters;
-- TCP front telemetry: socket states, RTT, retransmits, unacked и source grouping;
+- TCP front telemetry: socket states, RTT, retransmits, unacked и source grouping с canonical IPv4/IPv6 адресом, включая kernel-формат `::ffff:<IPv4>`;
 - fresh, 30-minute и 24-hour log windows;
-- mutually exclusive buckets: DNS, domain timeout, IPv4 literal timeout, IPv6 literal timeout, private/fake block, client reset/EOF, invalid Reality и disabled-invalid;
+- mutually exclusive buckets: DNS timeout, domain timeout, IPv4 literal timeout, IPv6 literal timeout, private/fake block, client reset/EOF, invalid Reality и disabled-invalid;
 - парные DNS/router сообщения sing-box одного request ID дедуплицируются в одном DNS bucket;
 - maintenance state и отдельные `server_path`, `public_front`, `client_observation` verdicts.
 
@@ -78,7 +78,7 @@ Journald ограничивается managed drop-in. APT periodic settings в�
 
 ## Live verification
 
-`vpn verify live --deployment <name>` обязателен после install/reinstall. Он собирает agent acceptance snapshots на обеих ролях и запускает эфемерный sing-box client, построенный напрямую из `vless-uri.txt`. Этот client соединяется с RU `:443`, проходит VLESS/Reality/Xray/sing-box/WireGuard path и проверяет egress identity, GitHub, Google, UDP DNS и TCP IPv6 literal.
+`vpn verify live --deployment <name>` обязателен после install/reinstall. Он собирает agent acceptance snapshots на обеих ролях и запускает эфемерный sing-box client, построенный напрямую из `vless-uri.txt`. Этот client соединяется с RU `:443`, проходит VLESS/Reality/Xray/sing-box/WireGuard path и проверяет egress identity, GitHub, Google, UDP DNS, TCP IPv6 literal и быстрый SOCKS reject private/fake destinations.
 
 Дополнительно проверяются DNS, direct/domain routes, IPv4 literal, IPv6 literal и reject private/fake. Итог только один из `verified`, `degraded`, `failed`, `inconclusive`; зелёный `status` не является acceptance доказательством.
 

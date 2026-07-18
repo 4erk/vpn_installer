@@ -1,18 +1,16 @@
 from __future__ import annotations
 
-import ipaddress
 import textwrap
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
 from .dns_policy import CONNECTIVITY_CHECK_DIRECT_DOMAINS, CONNECTIVITY_CHECK_IPV6_ONLY_DOMAINS, merged_domains
 
-POLICY_VERSION = "0.11.2"
+POLICY_VERSION = "0.11.3"
 
 TRAFFIC_CLASSES = (
     "ru_direct_domain",
     "ru_direct_ip",
-    "client_dns_dot",
     "private_or_fake",
     "connectivity_check",
     "connectivity_check_ipv6_only",
@@ -27,18 +25,6 @@ TRAFFIC_CLASSES = (
 
 def _env_list(env: dict[str, str], key: str) -> list[str]:
     return [item.strip() for item in textwrap.dedent(env.get(key, "")).replace("\n", ",").split(",") if item.strip()]
-
-
-def _ip_network_or_raw(raw_value: str) -> str:
-    try:
-        return str(ipaddress.ip_network(raw_value, strict=False))
-    except ValueError:
-        return raw_value
-
-
-def _client_dns_dot_networks(env: dict[str, str]) -> list[str]:
-    values = [_ip_network_or_raw(env[key]) for key in ("CLIENT_TUN_ADDRESS_V4", "CLIENT_FAKEIP_V4") if env.get(key, "").strip()]
-    return values + ["fd00::/8"]
 
 
 @dataclass(frozen=True)
@@ -165,10 +151,6 @@ def build_ru_routing_policy(env: dict[str, str]) -> RoutingPolicy:
         _traffic_class(
             "blocked", "reject", "none", "none", "blocked_private_fake", "none",
             routes=({"ip_cidr": blocked_cidrs, "action": "reject"},) if blocked_cidrs else (),
-        ),
-        _traffic_class(
-            "client_dns_dot", "to-foreign", "none", "system", "client_dns_dot", "reject",
-            routes=({"ip_cidr": _client_dns_dot_networks(env), "port": 853, "action": "route", "outbound": "to-foreign", "override_address": env["GLOBAL_DOH_SERVER"], "override_port": 853},),
         ),
         _traffic_class(
             "private_or_fake", "reject", "none", "none", "blocked_private_fake", "none",

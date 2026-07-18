@@ -20,7 +20,7 @@ class RoutingPolicyTests(unittest.TestCase):
         self.assertEqual(policy.classes["ipv6_literal_foreign"].outbound, "to-foreign")
         self.assertEqual(policy.classes["domain_foreign"].outbound, "to-foreign")
         self.assertEqual(policy.classes["resolved_ru_ip"].outbound, "direct-ru")
-        self.assertEqual(policy.classes["client_dns_dot"].outbound, "to-foreign")
+        self.assertNotIn("client_dns_dot", policy.classes)
 
     def test_policy_has_two_real_egress_outbounds_without_artificial_timeouts(self) -> None:
         parts = build_ru_routing_policy(self.make_env()).singbox_parts()
@@ -54,13 +54,12 @@ class RoutingPolicyTests(unittest.TestCase):
         self.assertIn("ipv6-internet.yandex.net", rejected["domain"])
         self.assertNotIn("ipv6-internet.yandex.net", routed_domains)
 
-    def test_private_addresses_reject_but_client_dot_is_redirected_to_foreign_dns(self) -> None:
+    def test_private_addresses_including_tun_dot_reject_without_dns_override(self) -> None:
         rules = build_ru_routing_policy(self.make_env()).route_rules
-        dot_index = next(i for i, rule in enumerate(rules) if rule.get("port") == 853)
         private_index = next(i for i, rule in enumerate(rules) if rule.get("ip_is_private") is True)
-        self.assertEqual(rules[dot_index]["outbound"], "to-foreign")
         self.assertEqual(rules[private_index], {"ip_is_private": True, "action": "reject"})
-        self.assertLess(dot_index, private_index)
+        self.assertFalse(any(rule.get("port") == 853 for rule in rules))
+        self.assertFalse(any("override_address" in rule for rule in rules))
 
     def test_legacy_knobs_are_reported_but_cannot_change_routes(self) -> None:
         baseline = build_ru_routing_policy(self.make_env())

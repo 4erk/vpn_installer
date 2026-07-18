@@ -26,6 +26,27 @@ class ServerAgentTests(unittest.TestCase):
         self.assertIsNotNone(classified)
         self.assertEqual(classified.bucket, "ipv6_literal_timeout")
 
+    def test_private_reject_requires_fast_rejection_for_each_target(self) -> None:
+        failed = subprocess.CompletedProcess(["curl"], 7, "", "blocked")
+        with (
+            patch.object(server_agent, "run", return_value=failed),
+            patch.object(server_agent.time, "monotonic", side_effect=[1.0, 1.01, 2.0, 2.01]),
+        ):
+            result = server_agent.probe_private_reject("socks5h://127.0.0.1:2080")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual([item["target"] for item in result["targets"]], ["http://10.0.0.1:80/", "http://172.19.0.2:853/"])
+
+    def test_private_reject_rejects_a_slow_failure(self) -> None:
+        failed = subprocess.CompletedProcess(["curl"], 28, "", "timeout")
+        with (
+            patch.object(server_agent, "run", return_value=failed),
+            patch.object(server_agent.time, "monotonic", side_effect=[1.0, 3.1, 4.0, 4.01]),
+        ):
+            result = server_agent.probe_private_reject("socks5h://127.0.0.1:2080")
+
+        self.assertFalse(result["ok"])
+
     def test_manifest_snapshot_detects_asset_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -125,6 +146,40 @@ class ServerAgentTests(unittest.TestCase):
         self.assertEqual(client["retransmissions"], 3)
         self.assertEqual(client["unacked"], 2)
         self.assertEqual(client["rtt_ms"]["p95"], 45.2)
+
+    def test_front_snapshot_normalizes_ipv4_mapped_socket_source(self) -> None:
+        def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            if "-Htan" in args:
+                return subprocess.CompletedProcess(args, 0, "ESTAB 0 0 [::ffff:94.232.248.35]:443 [::ffff:203.0.113.20]:50123\n", "")
+            if "-Htin" in args:
+                return subprocess.CompletedProcess(
+                    args,
+                    0,
+                    "ESTAB 0 0 [::ffff:94.232.248.35]:443 [::ffff:203.0.113.20]:50123\n\t cubic rtt:45.2/3.1 retrans:0/3 unacked:2\n",
+                    "",
+                )
+            return subprocess.CompletedProcess(args, 0, "LISTEN 0 4096 [::]:443 [::]:*\n", "")
+
+        with patch.object(server_agent, "run", side_effect=fake_run):
+            front = server_agent.tcp_front_snapshot(443)
+
+        self.assertEqual(front["top_sources"], {"203.0.113.20": 1})
+        self.assertEqual(front["clients"]["203.0.113.20"]["retransmissions"], 3)
+
+    def test_client_snapshot_matches_ipv4_mapped_xray_source(self) -> None:
+        front = {"listening": True, "clients": {"203.0.113.20": {"connections": 1}}, "top_sources": {"203.0.113.20": 1}}
+        completed = subprocess.CompletedProcess(["nft"], 0, "", "")
+        with (
+            patch.object(server_agent, "parse_env", return_value={"RU_LISTEN_PORT": "443"}),
+            patch.object(server_agent, "journal_lines", side_effect=[["from [::ffff:203.0.113.20]:50123 accepted tcp:example.org:443"], []]),
+            patch.object(server_agent, "tcp_front_snapshot", return_value=front),
+            patch.object(server_agent, "service_state", return_value="active"),
+            patch.object(server_agent, "run", return_value=completed),
+        ):
+            payload = server_agent.front_client_snapshot("203.0.113.20", 15)
+
+        self.assertEqual(payload["events"]["accepted"], 1)
+        self.assertEqual(payload["front"]["client"], {"connections": 1})
 
     def test_front_observation_keeps_one_noisy_client_separate_from_shared_degradation(self) -> None:
         isolated = {"clients": {"203.0.113.20": {"states": {"FIN-WAIT-1": 200}, "retransmissions": 5}}}

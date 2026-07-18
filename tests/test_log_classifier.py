@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import unittest
 
-from vpn_installer.log_classifier import classify_line, summarize_lines
+from vpn_installer.log_classifier import classify_line, source_from_line, summarize_lines
 
 
 class LogClassifierTests(unittest.TestCase):
+    def test_source_normalizes_ipv4_mapped_ipv6(self) -> None:
+        line = "INFO [1] inbound/vless[proxy]: process connection from [::ffff:203.0.113.20]:50123"
+        self.assertEqual(source_from_line(line), "203.0.113.20")
+
     def test_classifies_real_singbox_timeout_formats_into_exclusive_buckets(self) -> None:
         samples = {
             "domain_to_foreign_timeout": "open connection to github.com:443 using outbound/direct[to-foreign]: dial tcp: i/o timeout",
@@ -84,6 +88,15 @@ class LogClassifierTests(unittest.TestCase):
         self.assertEqual(summary["counts"]["direct_ru_timeout"], 1)
         self.assertEqual(summary["counts"]["ipv4_literal_timeout"], 0)
         self.assertEqual(summary["top_destinations"]["direct_ru_timeout"], {"lk.rosreestr.ru:8000": 1})
+
+    def test_dns_timeout_keeps_original_client_dns_destination_from_request_trace(self) -> None:
+        lines = [
+            "+0000 2026-07-18 22:56:00 INFO [877895708 0ms] inbound/mixed[router-in]: inbound connection to 8.8.8.8:53",
+            "+0000 2026-07-18 22:56:10 ERROR [877895708 10.0s] dns: exchange failed for rus-mqtt-cluster02.transsion-os.com. IN A: context deadline exceeded",
+        ]
+        summary = summarize_lines(lines)
+        self.assertEqual(summary["counts"]["dns_timeout"], 1)
+        self.assertEqual(summary["top_destinations"]["dns_timeout"], {"8.8.8.8:53": 1})
 
 
 if __name__ == "__main__":

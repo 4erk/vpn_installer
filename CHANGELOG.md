@@ -6,6 +6,24 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.11.6] - 2026-07-18
+
+### Fixed
+
+- External private/fake acceptance полностью читает SOCKS reply. Для `sing-box reject` допустимы явный SOCKS failure либо быстрый EOF после успешного SOCKS handshake и первого application byte; timeout или ответ от destination остаются failure. Это исключает ложный rollback на корректном full VLESS path.
+
+## [0.11.5] - 2026-07-18
+
+### Fixed
+
+- Удалён legacy-route `client_dns_dot`, который перенаправлял private/TUN `:853` на внешний DNS и порождал искусственные пятисекундные hangs. Private и fake IP, включая `172.19.0.2:853`, теперь сразу отклоняются единым policy rule. External `verify live` проходит этот reject через VLESS URI, а не доверяет только локальному router probe.
+
+## [0.11.4] - 2026-07-18
+
+### Fixed
+
+- `vpn diagnose client --source` и TCP front telemetry приводят IPv4, IPv6 и kernel-формат `::ffff:<IPv4>` к одному каноническому адресу. Активный socket больше не исчезает из source-specific отчёта при IPv4-mapped IPv6 представлении `ss`; Xray events и socket metrics коррелируются по одному ключу.
+
 ## [0.11.3] - 2026-07-17
 
 ### Fixed

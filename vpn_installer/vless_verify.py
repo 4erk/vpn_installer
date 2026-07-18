@@ -9,7 +9,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 RUNNER_HTTP_PROBE_COUNT = 5
 RUNNER_HTTP_TIMEOUT_SECONDS = 15
-RUNNER_UDP_TIMEOUT_SECONDS = 18
+RUNNER_ROUTE_PROBE_TIMEOUT_SECONDS = 24
 RUNNER_STARTUP_SECONDS = 1
 RUNNER_THROUGHPUT_CLOCK_SKEW_SECONDS = 1
 RUNNER_CURL_WATCHDOG_KILL_SECONDS = 5
@@ -83,7 +83,7 @@ def render_ephemeral_singbox_client(uri: VlessUri, *, listen_port: int) -> str:
 
 
 def render_socks5_udp_dns_probe(*, listen_port: int) -> str:
-    """Return a stdlib-only SOCKS5 UDP-associate probe for the ephemeral verifier."""
+    """Return a stdlib-only SOCKS5 DNS and private-route probe for the verifier."""
     return textwrap.dedent(
         f"""\
         import json
@@ -104,24 +104,44 @@ def render_socks5_udp_dns_probe(*, listen_port: int) -> str:
             question = b"".join(bytes([len(label)]) + label.encode("ascii") for label in labels)
             return b"\\x11\\x22\\x01\\x00\\x00\\x01\\x00\\x00\\x00\\x00\\x00\\x00" + question + b"\\x00\\x00\\x01\\x00\\x01"
 
+        def socks_reply(sock):
+            response = receive_exact(sock, 4)
+            if response[0] != 5 or response[2] != 0:
+                raise RuntimeError("invalid SOCKS reply")
+            address_type = response[3]
+            if address_type == 1:
+                address = socket.inet_ntoa(receive_exact(sock, 4))
+            elif address_type == 4:
+                address = socket.inet_ntop(socket.AF_INET6, receive_exact(sock, 16))
+            elif address_type == 3:
+                address = receive_exact(sock, receive_exact(sock, 1)[0]).decode("ascii")
+            else:
+                raise RuntimeError("unknown SOCKS reply address type")
+            return response[1], address, struct.unpack("!H", receive_exact(sock, 2))[0]
+
+        def private_connect_rejected(address, port):
+            control = socket.create_connection(("127.0.0.1", {listen_port}), timeout=2)
+            try:
+                control.sendall(b"\\x05\\x01\\x00")
+                if receive_exact(control, 2) != b"\\x05\\x00":
+                    raise RuntimeError("SOCKS authentication failed")
+                control.sendall(b"\\x05\\x01\\x00\\x01" + socket.inet_aton(address) + struct.pack("!H", port))
+                status, _bound_address, _bound_port = socks_reply(control)
+                if status != 0:
+                    return True
+                control.sendall(b"HEAD / HTTP/1.0\\r\\n\\r\\n")
+                return control.recv(1) == b""
+            finally:
+                control.close()
+
         control = socket.create_connection(("127.0.0.1", {listen_port}), timeout=8)
         control.sendall(b"\\x05\\x01\\x00")
         if receive_exact(control, 2) != b"\\x05\\x00":
             raise RuntimeError("SOCKS authentication failed")
         control.sendall(b"\\x05\\x03\\x00\\x01\\x00\\x00\\x00\\x00\\x00\\x00")
-        response = receive_exact(control, 4)
-        if response[:2] != b"\\x05\\x00":
-            raise RuntimeError(f"SOCKS UDP associate rejected: {{response!r}}")
-        address_type = response[3]
-        if address_type == 1:
-            relay_address = socket.inet_ntoa(receive_exact(control, 4))
-        elif address_type == 4:
-            relay_address = socket.inet_ntop(socket.AF_INET6, receive_exact(control, 16))
-        elif address_type == 3:
-            relay_address = receive_exact(control, receive_exact(control, 1)[0]).decode("ascii")
-        else:
-            raise RuntimeError("unknown SOCKS relay address type")
-        relay_port = struct.unpack("!H", receive_exact(control, 2))[0]
+        response_status, relay_address, relay_port = socks_reply(control)
+        if response_status != 0:
+            raise RuntimeError(f"SOCKS UDP associate rejected: {{response_status}}")
         if relay_address in {{"0.0.0.0", "::"}}:
             relay_address = "127.0.0.1"
 
@@ -142,7 +162,20 @@ def render_socks5_udp_dns_probe(*, listen_port: int) -> str:
             raise RuntimeError("invalid SOCKS reply address type")
         if reply[payload_offset:payload_offset + 2] != b"\\x11\\x22":
             raise RuntimeError("DNS transaction mismatch")
-        print(json.dumps({{"ok": True, "answer_bytes": len(reply) - payload_offset}}))
+        private_targets = []
+        for address, port in (("10.0.0.1", 80), ("172.19.0.2", 853)):
+            try:
+                rejected = private_connect_rejected(address, port)
+                error = ""
+            except Exception as exc:
+                rejected = False
+                error = str(exc)[:160]
+            private_targets.append({{"target": f"{{address}}:{{port}}", "ok": rejected, "error": error}})
+        print(json.dumps({{
+            "ok": True,
+            "answer_bytes": len(reply) - payload_offset,
+            "private_reject": {{"ok": all(item["ok"] for item in private_targets), "targets": private_targets}},
+        }}))
         """
     )
 
@@ -226,6 +259,16 @@ fi
 event udp-dns
 if ! udp_dns=$(python3 "$udp_probe_path" 2>>runner-curl.log); then
     fail udp-dns
+fi
+event private-reject
+if ! python3 - "$udp_dns" <<'PY'; then
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+raise SystemExit(0 if payload.get("private_reject", {}).get("ok") is True else 1)
+PY
+    fail private-reject
 fi
 event ipv6-literal
 if ! ipv6_literal=$(curl -ksS -o /dev/null -w '%{http_code}' --proxy "$proxy" --connect-timeout 5 --max-time __HTTP_TIMEOUT_SECONDS__ https://[2606:4700:4700::1111]/cdn-cgi/trace 2>>runner-curl.log); then

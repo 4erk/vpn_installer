@@ -92,20 +92,21 @@ class VerifyTests(unittest.TestCase):
     def test_public_vless_verifier_requires_both_egress_identities(self) -> None:
         uri = parse_vless_uri("vless://00000000-0000-0000-0000-000000000000@203.0.113.10:443?security=reality&sni=www.bing.com&pbk=public-key&sid=0123456789abcdef&fp=chrome&type=tcp&flow=xtls-rprx-vision")
         foreign = RemoteTarget(role=ROLE_FOREIGN, public_ip="198.51.100.20", ssh_host="198.51.100.20")
-        valid = {"ru_egress_ip": "203.0.113.10", "foreign_egress_ip": "198.51.100.20", "github_status": "200", "google_status": "204", "udp_dns": {"ok": True}, "ipv6_literal_status": "200"}
+        valid = {"ru_egress_ip": "203.0.113.10", "foreign_egress_ip": "198.51.100.20", "github_status": "200", "google_status": "204", "udp_dns": {"ok": True, "private_reject": {"ok": True}}, "ipv6_literal_status": "200"}
         self.assertEqual(_validate_public_vless_result(valid, uri, foreign)["verdict"], "verified")
         invalid = {**valid, "foreign_egress_ip": "203.0.113.99"}
         self.assertEqual(_validate_public_vless_result(invalid, uri, foreign)["verdict"], "failed")
+        self.assertEqual(_validate_public_vless_result({**valid, "udp_dns": {"ok": True, "private_reject": {"ok": False}}}, uri, foreign)["verdict"], "failed")
 
     def test_public_vless_throughput_requires_rate_and_duration(self) -> None:
         uri = parse_vless_uri("vless://00000000-0000-0000-0000-000000000000@203.0.113.10:443?security=reality&sni=www.bing.com&pbk=public-key&sid=0123456789abcdef&fp=chrome&type=tcp&flow=xtls-rprx-vision")
         foreign = RemoteTarget(role=ROLE_FOREIGN, public_ip="198.51.100.20", ssh_host="198.51.100.20")
-        result = {"ru_egress_ip": "203.0.113.10", "foreign_egress_ip": "198.51.100.20", "github_status": "200", "google_status": "204", "udp_dns": {"ok": True}, "ipv6_literal_status": "200", "throughput": {"bytes_per_second": 1_500_000, "duration_seconds": 60, "failures": 0}}
+        result = {"ru_egress_ip": "203.0.113.10", "foreign_egress_ip": "198.51.100.20", "github_status": "200", "google_status": "204", "udp_dns": {"ok": True, "private_reject": {"ok": True}}, "ipv6_literal_status": "200", "throughput": {"bytes_per_second": 1_500_000, "duration_seconds": 60, "failures": 0}}
         self.assertEqual(_validate_public_vless_result(result, uri, foreign, throughput_seconds=60)["verdict"], "verified")
         self.assertEqual(_validate_public_vless_result({**result, "throughput": {"bytes_per_second": 1_000_000, "duration_seconds": 60, "failures": 0}}, uri, foreign, throughput_seconds=60)["verdict"], "failed")
         self.assertEqual(_validate_public_vless_result({**result, "throughput": {"bytes_per_second": 1_500_000, "duration_seconds": 60, "failures": 1}}, uri, foreign, throughput_seconds=60)["verdict"], "failed")
-        self.assertEqual(_vless_runner_timeout(0), 111)
-        self.assertEqual(_vless_runner_timeout(600), 716)
+        self.assertEqual(_vless_runner_timeout(0), 117)
+        self.assertEqual(_vless_runner_timeout(600), 722)
 
     def test_public_vless_runner_uploads_lf_script_and_executes_it(self) -> None:
         uri_text = "vless://00000000-0000-0000-0000-000000000000@203.0.113.10:443?security=reality&sni=www.bing.com&pbk=public-key&sid=0123456789abcdef&fp=chrome&type=tcp&flow=xtls-rprx-vision"
@@ -115,7 +116,7 @@ class VerifyTests(unittest.TestCase):
             "foreign_egress_ip": "198.51.100.20",
             "github_status": "200",
             "google_status": "204",
-            "udp_dns": {"ok": True},
+            "udp_dns": {"ok": True, "private_reject": {"ok": True}},
             "ipv6_literal_status": "200",
             "throughput": {},
         }

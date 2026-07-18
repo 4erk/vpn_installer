@@ -226,19 +226,13 @@ class RenderTests(unittest.TestCase):
         payload = json.loads(render.render_ru_singbox(env))
         self.assertFalse(any(rule.get("network") == "udp" and rule.get("port") == 443 for rule in payload["route"]["rules"]))
 
-    def test_ru_server_redirects_client_tun_dot_to_foreign_dns(self) -> None:
+    def test_ru_server_rejects_client_tun_dot_without_dns_override(self) -> None:
         env = self.make_env()
         payload = json.loads(render.render_ru_singbox(env))
         route_rules = payload["route"]["rules"]
-        dot_index = next(index for index, rule in enumerate(route_rules) if rule.get("port") == 853 and rule.get("override_address") == "8.8.8.8")
-        private_index = next(index for index, rule in enumerate(route_rules) if rule.get("ip_is_private") is True)
-
-        self.assertLess(dot_index, private_index)
-        self.assertEqual(route_rules[dot_index]["outbound"], "to-foreign")
-        self.assertIn("172.19.0.0/30", route_rules[dot_index]["ip_cidr"])
-        self.assertIn("198.18.0.0/15", route_rules[dot_index]["ip_cidr"])
-        self.assertIn("fd00::/8", route_rules[dot_index]["ip_cidr"])
         self.assertIn({"ip_is_private": True, "action": "reject"}, route_rules)
+        self.assertFalse(any(rule.get("port") == 853 for rule in route_rules))
+        self.assertFalse(any("override_address" in rule for rule in route_rules))
 
     def test_ru_server_routes_own_public_ip_direct_before_foreign_catchall(self) -> None:
         env = self.make_env()

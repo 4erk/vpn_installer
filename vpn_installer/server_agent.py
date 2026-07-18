@@ -17,10 +17,10 @@ from pathlib import Path
 from typing import Any, Iterable
 
 try:
-    from .log_classifier import BUCKETS, source_from_line, summarize_lines
+    from .log_classifier import BUCKETS, normalize_source, source_from_line, summarize_lines
 except ImportError:  # Installed agent runs as a standalone script.
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from log_classifier import BUCKETS, source_from_line, summarize_lines
+    from log_classifier import BUCKETS, normalize_source, source_from_line, summarize_lines
 
 try:
     import fcntl
@@ -251,8 +251,8 @@ def default_interface() -> str:
 
 def socket_source(peer: str) -> str:
     if peer.startswith("["):
-        return peer[1 : peer.find("]")]
-    return peer.rsplit(":", 1)[0] if ":" in peer else peer
+        return normalize_source(peer[1 : peer.find("]")])
+    return normalize_source(peer.rsplit(":", 1)[0] if ":" in peer else peer)
 
 
 def tcp_front_snapshot(port: int) -> dict[str, Any]:
@@ -349,7 +349,7 @@ def front_observation(front: dict[str, Any]) -> str:
 
 
 def source_in_log_line(line: str, source: str) -> bool:
-    return f"from {source}:" in line or f"from [{source}]:" in line
+    return source_from_line(line) == normalize_source(source)
 
 
 def udp_443_policy() -> str:
@@ -382,6 +382,7 @@ def public_front_snapshot(minutes: int, source: str | None = None) -> dict[str, 
         raise ValueError("since must be in range 5..1440 minutes")
     if source:
         try:
+            source = normalize_source(source)
             ipaddress.ip_address(source)
         except ValueError as exc:
             raise ValueError("source must be an IP address") from exc
@@ -517,16 +518,26 @@ def probe_identity(*, interface: str = "", proxy: str = "", timeout: int = 8) ->
 
 
 def probe_private_reject(proxy: str) -> dict[str, Any]:
-    started = time.monotonic()
-    result = run(
-        ["curl", "-4", "-sS", "-o", "/dev/null", "--proxy", proxy, "--connect-timeout", "2", "--max-time", "4", "http://10.0.0.1:80/"],
-        timeout=6,
-    )
-    return {
-        "ok": result.returncode != 0,
-        "total_s": round(time.monotonic() - started, 3),
-        "error": result.stderr.strip()[:240],
-    }
+    """Verify that private and fake destinations fail at the local policy boundary."""
+
+    targets = ("http://10.0.0.1:80/", "http://172.19.0.2:853/")
+    results: list[dict[str, Any]] = []
+    for target in targets:
+        started = time.monotonic()
+        result = run(
+            ["curl", "-4", "-sS", "-o", "/dev/null", "--proxy", proxy, "--connect-timeout", "2", "--max-time", "4", target],
+            timeout=6,
+        )
+        total_s = round(time.monotonic() - started, 3)
+        results.append(
+            {
+                "target": target,
+                "ok": result.returncode != 0 and total_s < 2,
+                "total_s": total_s,
+                "error": result.stderr.strip()[:240],
+            }
+        )
+    return {"ok": all(item["ok"] for item in results), "targets": results}
 
 
 def failed_requirements(probes: dict[str, Any]) -> list[str]:

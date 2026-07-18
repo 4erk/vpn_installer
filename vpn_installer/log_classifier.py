@@ -26,7 +26,7 @@ BUCKETS = (
 _OPEN_CONNECTION_RE = re.compile(r"open connection to (?P<dst>\[[^\]]+\]:\d+|[^ ]+) using outbound/(?:direct|block)\[(?P<tag>[^\]]+)\]")
 _OUTBOUND_CONNECTION_RE = re.compile(r"outbound/(?:direct|block)\[(?P<tag>[^\]]+)\]: outbound connection to (?P<dst>\[[^\]]+\]:\d+|[^ ]+)")
 _ACCEPTED_RE = re.compile(r"accepted (?:tcp|udp):(?P<dst>\[[^\]]+\]:\d+|[^ ]+)")
-_SOURCE_RE = re.compile(r"(?:from|process connection from) (?P<src>\[[^\]]+\]|[^: ]+):\d+")
+_SOURCE_RE = re.compile(r"(?:from|process connection from) (?P<src>\[[^\]]+\]|[^ ]+):\d+")
 _DNS_LOOKUP_FAILED_RE = re.compile(r"dns: lookup failed for (?P<dst>[^: ]+):")
 _DNS_EXCHANGE_FAILED_RE = re.compile(r"dns: exchange failed for (?P<dst>[^ ]+)\. IN (?P<qtype>[A-Z0-9]+):")
 _ROUTER_LOOKUP_RE = re.compile(r"router: lookup (?P<dst>[^: ]+):")
@@ -45,9 +45,20 @@ class ClassifiedLogLine:
     event_id: str = ""
 
 
+def normalize_source(value: str) -> str:
+    candidate = value.strip().strip("[]")
+    try:
+        address = ipaddress.ip_address(candidate)
+    except ValueError:
+        return candidate
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        return str(address.ipv4_mapped)
+    return str(address)
+
+
 def source_from_line(line: str) -> str:
     match = _SOURCE_RE.search(line)
-    return match.group("src") if match else ""
+    return normalize_source(match.group("src")) if match else ""
 
 
 def event_id_from_line(line: str) -> str:

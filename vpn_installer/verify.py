@@ -20,7 +20,7 @@ from .vless_verify import (
     RUNNER_STARTUP_SECONDS,
     RUNNER_THROUGHPUT_CLOCK_SKEW_SECONDS,
     RUNNER_TRANSPORT_DRAIN_SECONDS,
-    RUNNER_UDP_TIMEOUT_SECONDS,
+    RUNNER_ROUTE_PROBE_TIMEOUT_SECONDS,
     parse_vless_uri,
     render_ephemeral_singbox_client,
     render_socks5_udp_dns_probe,
@@ -98,6 +98,9 @@ def _validate_public_vless_result(result: dict[str, object], uri, foreign_target
     udp_dns = result.get("udp_dns", {})
     if not isinstance(udp_dns, dict) or udp_dns.get("ok") is not True:
         return {"verdict": "failed", "reason": f"public VLESS UDP probe failed: {result}", "result": result}
+    private_reject = udp_dns.get("private_reject", {})
+    if not isinstance(private_reject, dict) or private_reject.get("ok") is not True:
+        return {"verdict": "failed", "reason": f"public VLESS private/fake reject probe failed: {result}", "result": result}
     if str(result.get("ipv6_literal_status", "")) != "200":
         return {"verdict": "failed", "reason": f"public VLESS IPv6 literal probe failed: {result}", "result": result}
     if throughput_seconds:
@@ -125,7 +128,7 @@ def _vless_runner_timeout(throughput_seconds: int) -> int:
     return (
         RUNNER_STARTUP_SECONDS
         + RUNNER_HTTP_PROBE_COUNT * RUNNER_HTTP_TIMEOUT_SECONDS
-        + RUNNER_UDP_TIMEOUT_SECONDS
+        + RUNNER_ROUTE_PROBE_TIMEOUT_SECONDS
         + throughput_seconds
         + RUNNER_THROUGHPUT_CLOCK_SKEW_SECONDS
         + (RUNNER_CURL_WATCHDOG_KILL_SECONDS if throughput_seconds else 0)
