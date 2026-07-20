@@ -585,6 +585,10 @@ class RenderTests(unittest.TestCase):
     def test_render_ru_nftables_admits_ssh_and_vless_without_log_driven_blocks(self) -> None:
         env = self.make_env()
         rules = render.render_ru_firewall_nftables(env)
+        self.assertIn("type filter hook prerouting priority raw", rules)
+        self.assertIn(f'tcp dport {env["RU_LISTEN_PORT"]} counter notrack comment "vpnstack-xray-in-notrack"', rules)
+        self.assertIn("type filter hook output priority raw", rules)
+        self.assertIn(f'tcp sport {env["RU_LISTEN_PORT"]} counter notrack comment "vpnstack-xray-out-notrack"', rules)
         self.assertIn("ct state invalid drop", rules)
         self.assertNotIn("abuse_ipv4", rules)
         self.assertIn(f"tcp dport {env['SSH_PORT']} counter accept", rules)
@@ -638,6 +642,14 @@ class RenderTests(unittest.TestCase):
         self.assertIn(f'iifname "eth0" oifname "{env["WG_INTERFACE"]}" tcp flags syn tcp option maxseg size set 1320 accept', rules)
         self.assertIn("table ip6 nat", rules)
         self.assertIn(f'ip6 saddr {env["WG_IPV6_PREFIX"]} oifname "eth0" masquerade', rules)
+        self.assertNotIn("notrack", rules)
+
+    def test_render_sysctl_reserves_conntrack_capacity_without_timeout_tuning(self) -> None:
+        for role in (render.ROLE_RU, render.ROLE_FOREIGN):
+            config = render.render_sysctl(role)
+            self.assertIn("net.netfilter.nf_conntrack_max=32768", config)
+            self.assertNotIn("nf_conntrack_tcp_timeout", config)
+        self.assertEqual(render.render_modules_load(), "nf_conntrack\n")
 
     def test_render_foreign_nftables_can_enable_ru_block_explicitly(self) -> None:
         env = self.make_env()
@@ -709,6 +721,29 @@ class RenderTests(unittest.TestCase):
             foreign_manifest = json.loads(render.rendered_files_for_role(env, render.ROLE_FOREIGN, assets=assets)["render-manifest.json"])
         self.assertEqual(set(ru_manifest["assets"]), {"geoip-ru.srs", "geosite-ru.srs"})
         self.assertEqual(set(foreign_manifest["assets"]), {"ru-ipv4.zone", "ru-ipv6.zone"})
+
+    def test_role_manifest_tracks_modules_load_at_installed_path(self) -> None:
+        env = self.make_env()
+        manifest = json.loads(render.rendered_files_for_role(env, render.ROLE_RU)["render-manifest.json"])
+        modules = manifest["artifacts"]["modules-vpn-stack.conf"]
+        self.assertEqual(modules["install_path"], "/etc/modules-load.d/90-vpn-stack.conf")
+        self.assertTrue(modules["required"])
+
+    def test_manifest_rejects_unmapped_rendered_artifact(self) -> None:
+        env = self.make_env()
+        with self.assertRaisesRegex(ValueError, "missing installed artifact path: unknown.conf"):
+            render.render_manifest(render.render_env_text(env), render.ROLE_RU, {"unknown.conf": "value\n"})
+
+    def test_manifest_recognizes_dynamic_wireguard_config_by_structure(self) -> None:
+        env = self.make_env()
+        manifest = json.loads(
+            render.render_manifest(
+                render.render_env_text(env),
+                render.ROLE_RU,
+                {"tunnel42.conf": "[Interface]\nPrivateKey = test\n"},
+            )
+        )
+        self.assertEqual(manifest["artifacts"]["tunnel42.conf"]["install_path"], "/etc/wireguard/tunnel42.conf")
 
     def test_role_manifest_is_deterministic(self) -> None:
         env = self.make_env()

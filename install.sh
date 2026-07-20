@@ -161,6 +161,7 @@ LEGACY_GUARD_TIMER_PATH="/etc/systemd/system/vpn-stack-guard.timer"
 ADMIN_WEB_SERVICE_PATH="/etc/systemd/system/vpn-stack-admin.service"
 SUBSCRIPTION_SERVICE_PATH="/etc/systemd/system/vpn-stack-subscription.service"
 SYSCTL_PATH="/etc/sysctl.d/90-vpn-stack.conf"
+MODULES_LOAD_PATH="/etc/modules-load.d/90-vpn-stack.conf"
 JOURNALD_DROPIN_PATH="/etc/systemd/journald.conf.d/90-vpn-stack.conf"
 APT_PERIODIC_DROPIN_PATH="/etc/apt/apt.conf.d/90-vpn-stack-unattended"
 SUBSCRIPTION_ROOT="/var/lib/vpn-stack/subscription"
@@ -377,6 +378,7 @@ managed_paths() {
     "${SUBSCRIPTION_SERVICE_PATH}" \
     "${SUBSCRIPTION_ROOT}" \
     "${SYSCTL_PATH}" \
+    "${MODULES_LOAD_PATH}" \
     "${JOURNALD_DROPIN_PATH}" \
     "${APT_PERIODIC_DROPIN_PATH}" \
     "${LEGACY_ADAPTIVE_ROUTING_RULES_PATH}" \
@@ -715,6 +717,7 @@ remove_managed_files() {
     "${ADMIN_WEB_SERVICE_PATH}" \
     "${SUBSCRIPTION_SERVICE_PATH}" \
     "${SYSCTL_PATH}" \
+    "${MODULES_LOAD_PATH}" \
     "${LEGACY_ADAPTIVE_ROUTING_RULES_PATH}" \
     "${LEGACY_DATAPLANE_CACHE_PATH}" \
     "${HEALTH_STATE_PATH}"
@@ -926,6 +929,7 @@ copy_role_artifacts() {
   copy_if_present "${source_dir}/nftables.conf" "${NFTABLES_PATH}" || { echo "Missing nftables.conf in ${source_dir}" >&2; exit 1; }
   copy_if_present "${source_dir}/sshd-vpn-stack.conf" "${SSHD_CONFIG_PATH}" || { echo "Missing sshd-vpn-stack.conf in ${source_dir}" >&2; exit 1; }
   copy_if_present "${source_dir}/sysctl-vpn-stack.conf" "${SYSCTL_PATH}" || { echo "Missing sysctl-vpn-stack.conf in ${source_dir}" >&2; exit 1; }
+  copy_if_present "${source_dir}/modules-vpn-stack.conf" "${MODULES_LOAD_PATH}" || { echo "Missing modules-vpn-stack.conf in ${source_dir}" >&2; exit 1; }
   copy_if_present "${source_dir}/apt-vpn-stack-unattended.conf" "${APT_PERIODIC_DROPIN_PATH}" || { echo "Missing apt-vpn-stack-unattended.conf in ${source_dir}" >&2; exit 1; }
   if [[ -f "${source_dir}/journald-vpn-stack.conf" ]]; then
     copy_if_present "${source_dir}/journald-vpn-stack.conf" "${JOURNALD_DROPIN_PATH}"
@@ -1364,6 +1368,7 @@ activate_staged_release "${ROLE_ARTIFACTS_DIR}"
 
 record_install_metadata
 
+modprobe nf_conntrack
 sysctl --system >/dev/null
 configure_journald_limits
 configure_unattended_security_updates

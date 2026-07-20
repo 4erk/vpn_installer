@@ -56,6 +56,14 @@ class LogClassifierTests(unittest.TestCase):
         self.assertEqual(classified.bucket, "client_reset_eof")
         self.assertEqual(classified.destination, "www.google.com")
 
+    def test_restart_cancellation_is_not_an_unclassified_route_error(self) -> None:
+        classified = classify_line(
+            "+0000 2026-07-20 09:41:42 ERROR [109264297 4.96s] connection: open connection to 149.154.167.51:443 using outbound/direct[to-foreign]: dial tcp 149.154.167.51:443: operation was canceled"
+        )
+        self.assertIsNotNone(classified)
+        self.assertEqual(classified.bucket, "client_reset_eof")
+        self.assertEqual(classified.destination, "149.154.167.51:443")
+
     def test_router_lookup_nxdomain_is_dns_and_deduplicated_by_request_id(self) -> None:
         lines = [
             "+0000 2026-07-15 01:53:31 ERROR [1400782119 31ms] dns: lookup failed for assets0.xboxlive.com: NXDOMAIN",

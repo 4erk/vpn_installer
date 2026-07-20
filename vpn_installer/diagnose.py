@@ -144,7 +144,8 @@ def diagnose_server_client_workflow(deployment: str | None, *, source_ip: str, m
             f"rto_max_ms={client.get('rto_ms', {}).get('max', '-')}, "
             f"retransmissions_lifetime={client.get('retransmissions', 0)}, retransmitted_bytes={client.get('bytes_retrans', 0)}, "
             f"retransmit_ratio_pct={client.get('retransmit_ratio_pct', 0)}, pmtu={client.get('pmtu', '-')}, "
-            f"reord_seen={client.get('reord_seen', 0)}, unacked={client.get('unacked', 0)}"
+            f"reordering={client.get('reordering', '-')}, reord_seen={client.get('reord_seen', 0)}, "
+            f"dsack_dups={client.get('dsack_dups', 0)}, rcv_ooopack={client.get('rcv_ooopack', 0)}, unacked={client.get('unacked', 0)}"
         )
     flows = payload.get("front", {}).get("flows", {})
     if flows:

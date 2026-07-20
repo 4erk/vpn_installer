@@ -29,6 +29,7 @@ def installed_artifact_paths(role: str) -> dict[str, str]:
         "nftables.conf": "/etc/nftables.conf",
         "sshd-vpn-stack.conf": "/etc/ssh/sshd_config.d/90-vpn-stack.conf",
         "sysctl-vpn-stack.conf": "/etc/sysctl.d/90-vpn-stack.conf",
+        "modules-vpn-stack.conf": "/etc/modules-load.d/90-vpn-stack.conf",
         "journald-vpn-stack.conf": "/etc/systemd/journald.conf.d/90-vpn-stack.conf",
         "apt-vpn-stack-unattended.conf": "/etc/apt/apt.conf.d/90-vpn-stack-unattended",
         "vpn-stack-agent.py": "/usr/local/lib/vpn-stack/vpn-stack-agent.py",
@@ -59,14 +60,17 @@ def sha256_path(path: Path) -> str:
 
 def render_manifest(env_text: str, role: str, rendered_files: dict[str, str], *, assets: dict[str, Path] | None = None) -> str:
     artifact_paths = installed_artifact_paths(role)
-    for name in rendered_files:
-        if name.endswith(".conf") and name not in artifact_paths and name != "nftables.conf":
+    for name, content in rendered_files.items():
+        if name not in artifact_paths and name.endswith(".conf") and content.lstrip().startswith("[Interface]"):
             artifact_paths[name] = f"/etc/wireguard/{name}"
+    missing_paths = sorted(set(rendered_files) - set(artifact_paths))
+    if missing_paths:
+        raise ValueError(f"missing installed artifact path: {', '.join(missing_paths)}")
     artifacts = {
         name: {
             "sha256": sha256_text(content),
-            "install_path": artifact_paths.get(name, ""),
-            "required": name in artifact_paths,
+            "install_path": artifact_paths[name],
+            "required": True,
         }
         for name, content in sorted(rendered_files.items())
     }

@@ -92,7 +92,7 @@ Journald ограничивается managed drop-in. APT periodic settings в�
 
 ## Live verification
 
-`vpn verify live --deployment <name>` обязателен после install/reinstall. Он собирает agent acceptance snapshots на обеих ролях и запускает эфемерный sing-box client, построенный напрямую из `vless-uri.txt`. Этот client соединяется с RU `:443`, проходит VLESS/Reality/Xray/sing-box/WireGuard path и проверяет egress identity, GitHub, Google, UDP DNS, TCP IPv6 literal и быстрый SOCKS reject private/fake destinations.
+`vpn verify live --deployment <name>` обязателен после install/reinstall. Он собирает agent acceptance snapshots на обеих ролях и запускает эфемерный sing-box client, построенный напрямую из `vless-uri.txt`. Этот client соединяется с RU `:443`, проходит VLESS/Reality/Xray/sing-box/WireGuard path и проверяет egress identity, GitHub, Google, UDP DNS, TCP IPv6 literal, быстрый SOCKS reject private/fake destinations и девять отдельных first-load GET через RU/foreign routes.
 
 Дополнительно проверяются DNS, direct/domain routes, IPv4 literal, IPv6 literal и reject private/fake. Итог только один из `verified`, `degraded`, `failed`, `inconclusive`; зелёный `status` не является acceptance доказательством.
 
@@ -100,7 +100,7 @@ Server-side route acceptance использует HTTP `HEAD`: его задач
 
 Для RU acceptance прямой egress подтверждается отдельной identity-проверкой. Foreign-домены обязаны пройти через `wg0` и local router, IPv4 literal через оба пути, а IPv6 literal через router и проверенный IPv6 egress foreign. Прямой запрос RU к заблокированному foreign-домену и raw `curl --interface wg0 -6` не являются пользовательским dataplane и записываются как наблюдения, но не вызывают ложный rollback.
 
-`verify live --throughput-seconds 600` дополнительно держит public VLESS path десять минут на нескольких независимых download origins и требует подтверждённую capacity не менее 50 Mbit/s хотя бы до одного из них. Runner считает реальные байты и время отдельно по каждому origin, показывает также общий throughput и не принимает rate limit одного CDN за предел всего VPN. Он запускается в отдельной remote process group, а SSH control-plane читает только короткие status snapshots и при deadline завершает всю runner group. Нагрузка запускается только явным флагом, использует доступную production-полосу и не входит в health timer.
+`verify live --throughput-seconds 600` дополнительно держит public VLESS path десять минут на нескольких независимых download origins и требует подтверждённую capacity не менее 50 Mbit/s хотя бы до одного из них. Runner считает реальные байты и время отдельно по каждому origin, показывает также общий throughput и не принимает rate limit одного CDN за предел всего VPN. Один global lock защищает SOCKS port от конкурирующих запусков; target-side deadline и обновляемая SSH controller lease завершают всю remote process group даже при аварийном исчезновении локального процесса. Нагрузка запускается только явным флагом, использует доступную production-полосу и не входит в health timer.
 
 Проверяющий runner сейчас запускается на foreign role, поэтому он проверяет полный публичный VLESS path и server capacity, но не измеряет маршрут конкретного пользователя до RU. Одновременный `client_specific/degraded` не маскируется успешным runner: это два разных component verdict.
 

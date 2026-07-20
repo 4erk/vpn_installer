@@ -232,9 +232,9 @@ SSH-туннель остаётся запасным способом админ
 .\vpn.cmd verify live --deployment my-vpn --non-interactive
 ```
 
-`status` читает services, manifest, WireGuard, public front и журналы без нагрузочных скачиваний. `verify live` дополнительно запускает свежие DNS/domain/literal probes и эфемерный sing-box client из `vless-uri.txt`; он проходит публичный Reality front и подтверждает HTTP, UDP DNS и TCP IPv6 literal. Только он может подтвердить dataplane после переустановки.
+`status` читает services, manifest, WireGuard, public front и журналы без нагрузочных скачиваний. `verify live` дополнительно запускает свежие DNS/domain/literal probes и эфемерный sing-box client из `vless-uri.txt`; он проходит публичный Reality front, выполняет девять независимых first-load запросов через RU и foreign routes и подтверждает HTTP, UDP DNS и TCP IPv6 literal. Каждая попытка имеет origin/status/latency в JSON-результате. Только эта команда может подтвердить dataplane после переустановки.
 
-Для release throughput acceptance запусти десятиминутное измерение через тот же VLESS path. Runner чередует независимые download origins, считает скорость каждого отдельно и показывает общий поток; capacity gate не принимает rate limit одного CDN за предел VPN. Он работает в отдельной remote process group, а SSH только читает короткие status snapshots. Нагрузка запускается только этим явным флагом, не ограничивается самим тестом и должна подтвердить не менее 50 Mbit/s хотя бы до одного origin. На время проверки она использует доступную полосу production path:
+Для release throughput acceptance запусти десятиминутное измерение через тот же VLESS path. Runner чередует независимые download origins, считает скорость каждого отдельно и показывает общий поток; capacity gate не принимает rate limit одного CDN за предел VPN. Глобальный lock исключает конкурирующие запуски, а controller lease и target-side deadline завершают всю process group при потере управляющей команды. Нагрузка запускается только этим явным флагом, не ограничивается самим тестом и должна подтвердить не менее 50 Mbit/s хотя бы до одного origin. На время проверки она использует доступную полосу production path:
 
 ```powershell
 .\vpn.cmd verify live --deployment my-vpn --non-interactive --throughput-seconds 600
@@ -246,7 +246,7 @@ SSH-туннель остаётся запасным способом админ
 .\vpn.cmd diagnose path --deployment my-vpn
 ```
 
-Отчёт сохраняется в `out/diagnostics` как JSON. Для конкретного устройства используй `vpn diagnose client --source <public-ip>`: он группирует TCP socket state, retransmitted bytes/ratio, PMTU, MSS, cwnd, delivery rate, reordering и Xray TCP/UDP events именно по этому source IP. IPv4-mapped IPv6 из kernel `ss` нормализуется к тому же IPv4 ключу. Один измеряемо lossy source выводится как `client_specific/degraded`, а не скрывается общим состоянием сервиса.
+Отчёт сохраняется в `out/diagnostics` как JSON. Для конкретного устройства используй `vpn diagnose client --source <public-ip>`: он группирует TCP socket state, retransmitted bytes/ratio, PMTU, MSS, cwnd, delivery rate, reordering и Xray TCP/UDP events именно по этому source IP. IPv4-mapped IPv6 из kernel `ss` нормализуется к тому же IPv4 ключу. Один измеряемо lossy source выводится как `client_specific/degraded`, а не скрывается общим состоянием сервиса; bounded evidence последней такой деградации сохраняется между health-циклами и виден в `status`.
 
 Для самопроверки на обычном пользовательском ПК:
 

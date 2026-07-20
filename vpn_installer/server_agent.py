@@ -42,6 +42,9 @@ PROBE_CONFIRMATION_DELAY_SECONDS = 2
 EXTERNAL_CAPABILITY_REQUIREMENTS = frozenset({"ipv6_literal", "ipv6_literal_via_router"})
 FRONT_LOSS_MIN_BYTES = 1_000_000
 FRONT_LOSS_DEGRADED_PERCENT = 2.0
+FRONT_SMALL_FLOW_MIN_BYTES = 8_192
+FRONT_SMALL_FLOW_MIN_RETRANSMISSIONS = 3
+FRONT_SMALL_FLOW_DEGRADED_PERCENT = 10.0
 FRONT_RTT_MIN_SAMPLES = 3
 FRONT_RTT_DEGRADED_MS = 250
 FRONT_RTT_INFLATION_FACTOR = 3
@@ -51,6 +54,7 @@ PROBLEM_LOG_GREP = (
     "connection rejected|mux connection closed|EOF|connection reset|using outbound/vless"
 )
 XRAY_FRONT_LOG_GREP = "accepted (tcp|udp):|REALITY: processed invalid connection"
+CONNTRACK_FULL_GREP = "nf_conntrack.*table full"
 ROOT = Path("/etc/vpn-stack")
 MANIFEST_PATH = ROOT / "render-manifest.json"
 ENV_PATH = ROOT / "deployment.env"
@@ -350,6 +354,7 @@ def managed_network_profile(path: Path = SYSCTL_PATH) -> dict[str, int]:
     field_names = {
         "net.core.rmem_default": "udp_rmem_default",
         "net.core.rmem_max": "udp_rmem_max",
+        "net.netfilter.nf_conntrack_max": "conntrack_max",
     }
     values: dict[str, int] = {}
     try:
@@ -378,7 +383,12 @@ def protocol_counters_snapshot() -> dict[str, int]:
         "IpOutNoRoutes",
         "Ip6InDiscards",
         "Ip6OutNoRoutes",
+        "TcpOutSegs",
         "TcpRetransSegs",
+        "TcpExtTCPDSACKRecv",
+        "TcpExtTCPSACKReorder",
+        "TcpExtTCPSpuriousRTOs",
+        "TcpExtTCPTimeouts",
         "TcpExtListenDrops",
         "TcpExtListenOverflows",
         "UdpInErrors",
@@ -438,6 +448,9 @@ def empty_tcp_metrics() -> dict[str, Any]:
         "bytes_retrans": 0,
         "data_segs_out": 0,
         "reord_seen": 0,
+        "dsack_dups": 0,
+        "rcv_ooopack": 0,
+        "reordering_levels": [],
         "pmtus": [],
         "msses": [],
         "cwnds": [],
@@ -455,6 +468,8 @@ def add_tcp_info(metrics: dict[str, Any], line: str) -> None:
         (r"\bbytes_retrans:(\d+)", "bytes_retrans"),
         (r"\bdata_segs_out:(\d+)", "data_segs_out"),
         (r"\breord_seen:(\d+)", "reord_seen"),
+        (r"\bdsack_dups:(\d+)", "dsack_dups"),
+        (r"\brcv_ooopack:(\d+)", "rcv_ooopack"),
         (r"\bunacked:(\d+)", "unacked"),
     )
     list_values = (
@@ -463,6 +478,7 @@ def add_tcp_info(metrics: dict[str, Any], line: str) -> None:
         (r"\bmss:(\d+)", "msses"),
         (r"\bcwnd:(\d+)", "cwnds"),
         (r"\bdelivery_rate (\d+)bps", "delivery_rates_bps"),
+        (r"\breordering:(\d+)", "reordering_levels"),
     )
     for pattern, key in float_values:
         match = re.search(pattern, line)
@@ -482,9 +498,9 @@ def add_tcp_info(metrics: dict[str, Any], line: str) -> None:
 def merge_tcp_metrics(target: dict[str, Any], source: dict[str, Any]) -> None:
     target["connections"] += source["connections"]
     target["states"].update(source["states"])
-    for key in ("retransmissions", "bytes_sent", "bytes_retrans", "data_segs_out", "reord_seen", "unacked"):
+    for key in ("retransmissions", "bytes_sent", "bytes_retrans", "data_segs_out", "reord_seen", "dsack_dups", "rcv_ooopack", "unacked"):
         target[key] += source[key]
-    for key in ("rtts", "rtos", "pmtus", "msses", "cwnds", "delivery_rates_bps", "idle_ms"):
+    for key in ("rtts", "rtos", "pmtus", "msses", "cwnds", "delivery_rates_bps", "reordering_levels", "idle_ms"):
         target[key].extend(source[key])
 
 
@@ -509,6 +525,9 @@ def render_tcp_metrics(values: dict[str, Any]) -> dict[str, Any]:
         "retransmit_ratio_pct": round(bytes_retrans * 100 / bytes_sent, 3) if bytes_sent else 0.0,
         "data_segs_out": values["data_segs_out"],
         "reord_seen": values["reord_seen"],
+        "dsack_dups": values["dsack_dups"],
+        "rcv_ooopack": values["rcv_ooopack"],
+        "reordering": max(values["reordering_levels"]) if values["reordering_levels"] else None,
         "pmtu": min(values["pmtus"]) if values["pmtus"] else None,
         "mss": min(values["msses"]) if values["msses"] else None,
         "cwnd": {"median": percentile(values["cwnds"], 50), "max": max(values["cwnds"]) if values["cwnds"] else None},
@@ -582,6 +601,12 @@ def tcp_front_snapshot(port: int) -> dict[str, Any]:
         for source, values in all_client_metrics.items()
         if int(values["states"].get("FIN-WAIT-1", 0)) >= 25
     )
+    degraded_sources = {source for source, metrics in all_client_metrics.items() if metrics["quality"] == "degraded"}
+    degraded_sources.update(
+        str(metrics["source"])
+        for metrics in all_flow_metrics.values()
+        if metrics["quality"] == "degraded"
+    )
     listener = run(["ss", "-Hln", f"sport = :{port}"], timeout=5)
     return {
         "port": port,
@@ -597,7 +622,7 @@ def tcp_front_snapshot(port: int) -> dict[str, Any]:
         "bytes_sent": bytes_sent,
         "bytes_retrans": bytes_retrans,
         "retransmit_ratio_pct": round(bytes_retrans * 100 / bytes_sent, 3) if bytes_sent else 0.0,
-        "degraded_sources": sorted(source for source, metrics in all_client_metrics.items() if metrics["quality"] == "degraded"),
+        "degraded_sources": sorted(degraded_sources),
         "unacked": unacked,
         "fin_wait_1_sources": fin_wait_sources,
     }
@@ -605,8 +630,15 @@ def tcp_front_snapshot(port: int) -> dict[str, Any]:
 
 def client_front_quality(metrics: dict[str, Any]) -> str:
     bytes_sent = int(metrics.get("bytes_sent", 0))
+    retransmissions = int(metrics.get("retransmissions", 0))
     retransmit_ratio_pct = float(metrics.get("retransmit_ratio_pct", 0.0))
     if bytes_sent >= FRONT_LOSS_MIN_BYTES and retransmit_ratio_pct >= FRONT_LOSS_DEGRADED_PERCENT:
+        return "degraded"
+    if (
+        bytes_sent >= FRONT_SMALL_FLOW_MIN_BYTES
+        and retransmissions >= FRONT_SMALL_FLOW_MIN_RETRANSMISSIONS
+        and retransmit_ratio_pct >= FRONT_SMALL_FLOW_DEGRADED_PERCENT
+    ):
         return "degraded"
     rtt = metrics.get("rtt_ms", {})
     rto = metrics.get("rto_ms", {})
@@ -644,6 +676,35 @@ def front_observation(front: dict[str, Any]) -> str:
     if noisy_sources:
         return "client_specific"
     return "observed"
+
+
+def front_degradation_evidence(front: dict[str, Any], observed_at: str) -> dict[str, Any]:
+    degraded_flows = dict(
+        sorted(
+            (
+                (key, metrics)
+                for key, metrics in front.get("flows", {}).items()
+                if metrics.get("quality") == "degraded"
+            ),
+            key=lambda item: -int(item[1].get("bytes_retrans", 0)),
+        )[:20]
+    )
+    degraded_sources = sorted(set(front.get("degraded_sources", [])) | set(front.get("fin_wait_1_sources", [])))
+    if not degraded_sources and not degraded_flows:
+        return {}
+    return {
+        "observed_at": observed_at,
+        "observation": front_observation(front),
+        "degraded_sources": degraded_sources,
+        "aggregate": {
+            "connections": front.get("connections", 0),
+            "bytes_sent": front.get("bytes_sent", 0),
+            "bytes_retrans": front.get("bytes_retrans", 0),
+            "retransmit_ratio_pct": front.get("retransmit_ratio_pct", 0.0),
+            "rtt_ms": front.get("rtt_ms", {}),
+        },
+        "flows": degraded_flows,
+    }
 
 
 def source_in_log_line(line: str, source: str) -> bool:
@@ -737,19 +798,29 @@ def public_front_snapshot(minutes: int, source: str | None = None, *, live_probe
     }
     source_events["accepted"] = source_events["accepted_tcp"] + source_events["accepted_udp"]
     client = front.get("clients", {}).get(source, {})
+    active_flow_keys = {
+        key
+        for key, metrics in front.get("flows", {}).items()
+        if metrics.get("source") == source
+    }
     flow_events: dict[str, Counter[str]] = {}
     for line in xray_lines:
         event_source, event_port = source_endpoint_from_line(line)
         destination = accepted_destination_from_line(line)
         if event_source != source or event_port is None or not destination:
             continue
-        flow_events.setdefault(endpoint_key(event_source, event_port), Counter())[destination] += 1
+        key = endpoint_key(event_source, event_port)
+        if key in active_flow_keys:
+            flow_events.setdefault(key, Counter())[destination] += 1
     source_flows = {
         key: {**metrics, "accepted_destinations": dict(flow_events.get(key, Counter()).most_common(10))}
         for key, metrics in front.get("flows", {}).items()
         if metrics.get("source") == source
     }
-    if source_events["accepted"] and client.get("quality") == "degraded":
+    source_degraded = client.get("quality") == "degraded" or any(
+        metrics.get("quality") == "degraded" for metrics in source_flows.values()
+    )
+    if source_events["accepted"] and source_degraded:
         source_verdict = "degraded"
     elif source_events["accepted"]:
         source_verdict = "reached_xray"
@@ -801,7 +872,43 @@ def percentile(values: list[float], percent: int) -> float | None:
     return ordered[index]
 
 
-def conntrack_snapshot() -> dict[str, int | float]:
+def kernel_conntrack_full_windows(*, full_logs: bool) -> dict[str, int]:
+    windows = (5, 30, 1440) if full_logs else (5,)
+    result = run(
+        [
+            "journalctl",
+            "-k",
+            "--since",
+            f"{max(windows)} minutes ago",
+            "--no-pager",
+            "-o",
+            "short-unix",
+            f"--grep={CONNTRACK_FULL_GREP}",
+        ],
+        timeout=20,
+    )
+    timestamps: list[float] = []
+    for raw_line in result.stdout.splitlines():
+        timestamp, separator, message = raw_line.partition(" ")
+        if not separator or "nf_conntrack" not in message or "table full" not in message:
+            continue
+        try:
+            timestamps.append(float(timestamp))
+        except ValueError:
+            continue
+    now = time.time()
+    return {str(minutes): sum(timestamp >= now - minutes * 60 for timestamp in timestamps) for minutes in windows}
+
+
+def xray_conntrack_bypass_snapshot(port: int) -> dict[str, bool]:
+    result = run(["nft", "list", "table", "inet", "vpnstack"], timeout=5)
+    lines = result.stdout.splitlines() if result.returncode == 0 else []
+    ingress = any(f"tcp dport {port}" in line and "notrack" in line and "vpnstack-xray-in-notrack" in line for line in lines)
+    egress = any(f"tcp sport {port}" in line and "notrack" in line and "vpnstack-xray-out-notrack" in line for line in lines)
+    return {"active": ingress and egress, "ingress": ingress, "egress": egress}
+
+
+def conntrack_snapshot(*, full_logs: bool = True) -> dict[str, Any]:
     def number(path: str) -> int:
         try:
             return int(Path(path).read_text().strip())
@@ -810,7 +917,12 @@ def conntrack_snapshot() -> dict[str, int | float]:
 
     count = number("/proc/sys/net/netfilter/nf_conntrack_count")
     maximum = number("/proc/sys/net/netfilter/nf_conntrack_max")
-    return {"count": count, "max": maximum, "percent": round(count * 100 / maximum, 2) if maximum else 0.0}
+    return {
+        "count": count,
+        "max": maximum,
+        "percent": round(count * 100 / maximum, 2) if maximum else 0.0,
+        "table_full_events": kernel_conntrack_full_windows(full_logs=full_logs),
+    }
 
 
 def probe_url(url: str, *, interface: str = "", proxy: str = "", timeout: int = 6, ip_version: int = 4, insecure: bool = False) -> dict[str, Any]:
@@ -1089,8 +1201,12 @@ def snapshot(*, live_probes: bool = False, profile: str = "light", full_logs: bo
     transport = {"udp_443_policy": udp_443_policy()} if role == "ru-gateway" else {}
     probes = run_confirmed_probes(env, role, profile) if live_probes else {"profile": "none", "ok": None}
     tcp_adaptation = tcp_adaptation_snapshot(public_iface)
+    conntrack = conntrack_snapshot(full_logs=full_logs)
+    if role == "ru-gateway":
+        conntrack["front_bypass"] = xray_conntrack_bypass_snapshot(port)
     expected_network_profile = managed_network_profile()
-    profile_mismatches = network_profile_mismatches(tcp_adaptation, expected_network_profile)
+    actual_network_profile = {**tcp_adaptation, "conntrack_max": conntrack.get("max", 0)}
+    profile_mismatches = network_profile_mismatches(actual_network_profile, expected_network_profile)
     health_state = read_json(HEALTH_STATE_PATH, {})
     required = ["wireguard", "nftables"] + (["sing-box", "xray"] if role == "ru-gateway" else [])
     reasons = [f"{name}={services[name]}" for name in required if services.get(name) != "active"]
@@ -1103,6 +1219,8 @@ def snapshot(*, live_probes: bool = False, profile: str = "light", full_logs: bo
         reasons.append(f"live_probes_failed:{failed}" if failed else "live_probes_failed")
     if role == "ru-gateway" and transport.get("udp_443_policy") != "routed":
         reasons.append(f"udp_443_policy={transport.get('udp_443_policy')}")
+    if role == "ru-gateway" and not conntrack.get("front_bypass", {}).get("active"):
+        reasons.append("xray_conntrack_bypass=inactive")
     capability_failures = [name for name in failed_requirements(probes) if name in EXTERNAL_CAPABILITY_REQUIREMENTS] if live_probes else []
     server_path = "failed" if reasons else "verified" if live_probes else "inconclusive"
     public_front = "not-applicable"
@@ -1111,6 +1229,9 @@ def snapshot(*, live_probes: bool = False, profile: str = "light", full_logs: bo
     client_observation = front_observation(front) if front else "not-applicable"
     external_capabilities = "degraded" if capability_failures else "verified" if live_probes else "inconclusive"
     degradations = ([f"external_capabilities_failed:{','.join(capability_failures)}"] if capability_failures else [])
+    recent_conntrack_full = int(conntrack.get("table_full_events", {}).get("5", 0))
+    if recent_conntrack_full:
+        degradations.append(f"conntrack_table_full_5m={recent_conntrack_full}")
     overall = "failed" if "failed" in {server_path, public_front} else "degraded" if degradations or client_observation in {"client_specific", "degraded"} else "verified" if server_path == "verified" else "inconclusive"
     return {
         "schema_version": SCHEMA_VERSION,
@@ -1131,7 +1252,7 @@ def snapshot(*, live_probes: bool = False, profile: str = "light", full_logs: bo
         "wireguard": wireguard_snapshot(wg_interface),
         "network": {
             "interfaces": interface_counters((public_iface, wg_interface)),
-            "conntrack": conntrack_snapshot(),
+            "conntrack": conntrack,
             "tcp_adaptation": tcp_adaptation,
             "managed_profile": expected_network_profile,
             "profile_mismatches": profile_mismatches,
@@ -1140,6 +1261,8 @@ def snapshot(*, live_probes: bool = False, profile: str = "light", full_logs: bo
             "recent_health_deltas": health_state.get("network_deltas", {}),
             "health_state": health_state.get("state", "unknown"),
             "health_updated_at": health_state.get("updated_at", ""),
+            "health_soft_reasons": health_state.get("soft_reasons", []),
+            "last_front_degradation": health_state.get("last_front_degradation", {}),
         },
         "front": front,
         "transport": transport,
@@ -1166,6 +1289,14 @@ def health() -> dict[str, Any]:
         }
         network_deltas = positive_counter_deltas(network_counters, previous.get("network_counters", {}))
         soft_reasons = network_soft_reasons(network_deltas)
+        conntrack_full = int(current.get("network", {}).get("conntrack", {}).get("table_full_events", {}).get("5", 0))
+        if conntrack_full:
+            soft_reasons.append(f"conntrack_table_full_5m={conntrack_full}")
+        client_observation = current.get("verdicts", {}).get("client_observation")
+        if client_observation in {"client_specific", "degraded"}:
+            soft_reasons.append(f"public_front={client_observation}")
+        front_evidence = front_degradation_evidence(current.get("front", {}), current.get("generated_at") or utc_now())
+        last_front_degradation = front_evidence or previous.get("last_front_degradation", {})
         state = "degraded" if soft_reasons else "healthy"
         action = "none"
         postcheck: dict[str, Any] | None = None
@@ -1198,6 +1329,7 @@ def health() -> dict[str, Any]:
             "network_counters": network_counters,
             "network_deltas": network_deltas,
             "soft_reasons": soft_reasons,
+            "last_front_degradation": last_front_degradation,
             "verdicts": (postcheck or current)["verdicts"],
         }
         if postcheck is not None:
@@ -1243,6 +1375,18 @@ def recover(current: dict[str, Any]) -> str:
         if services.get(key) not in {None, "active", "inactive" if key in {"sing-box", "xray"} and current.get("role") == "foreign-exit" else "active"}:
             result = run(["systemctl", "restart", unit], timeout=30)
             return f"restart:{unit}:{'ok' if result.returncode == 0 else 'failed'}"
+    artifacts_clean = current.get("artifacts", {}).get("drift") == "none"
+    network = current.get("network", {})
+    if artifacts_clean and network.get("profile_mismatches"):
+        result = run(["sysctl", "--load", str(SYSCTL_PATH)], timeout=30)
+        return f"reload:sysctl:{'ok' if result.returncode == 0 else 'failed'}"
+    bypass = network.get("conntrack", {}).get("front_bypass", {})
+    if artifacts_clean and current.get("role") == "ru-gateway" and not bypass.get("active"):
+        check = run(["nft", "--check", "--file", "/etc/nftables.conf"], timeout=15)
+        if check.returncode != 0:
+            return "reload:nftables:invalid-config"
+        result = run(["nft", "--file", "/etc/nftables.conf"], timeout=30)
+        return f"reload:nftables:{'ok' if result.returncode == 0 else 'failed'}"
     if current.get("role") == "ru-gateway":
         probes = current.get("probes", {})
         if probe_requirement(probes, "via_wg") and not probe_requirement(probes, "router"):

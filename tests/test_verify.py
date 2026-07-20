@@ -12,6 +12,9 @@ from vpn_installer.verify import _reconcile_public_capabilities, _validate_publi
 from vpn_installer.vless_verify import parse_vless_uri
 
 
+FIRST_LOAD_OK = {"attempts": 9, "successes": 9, "failures": 0, "average_total_seconds": 0.2, "max_total_seconds": 0.4}
+
+
 def acceptance_snapshot(role: str, **overrides: object) -> DiagnosticsSnapshot:
     services = {"wireguard": "active", "nftables": "active"}
     verdicts = {"server_path": "verified", "public_front": "not-applicable", "client_observation": "not-applicable"}
@@ -144,39 +147,51 @@ class VerifyTests(unittest.TestCase):
         ):
             self.assertEqual(verify_live_workflow("demo", non_interactive=True), 1)
 
-    def test_verify_live_workflow_requests_one_agent_acceptance_per_role(self) -> None:
+    def test_verify_live_workflow_requests_post_vless_agent_acceptance_per_role(self) -> None:
         targets = [RemoteTarget(role=ROLE_RU, ssh_host="ru.example"), RemoteTarget(role=ROLE_FOREIGN, ssh_host="foreign.example")]
+        sequence: list[str] = []
+
+        def public_vless(*_args, **_kwargs) -> dict[str, object]:
+            sequence.append("public-vless")
+            return {"verdict": "verified", "result": {}}
+
+        def collect(target: RemoteTarget) -> DiagnosticsSnapshot:
+            sequence.append(f"snapshot:{target.role}")
+            return acceptance_snapshot(target.role)
+
         with (
             patch("vpn_installer.verify.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), {}, {}, targets, {})) as prepare,
             patch("vpn_installer.verify.workflows.print_summary"),
-            patch("vpn_installer.verify._collect_agent_snapshot", side_effect=[acceptance_snapshot(ROLE_RU), acceptance_snapshot(ROLE_FOREIGN)]) as collect,
-            patch("vpn_installer.verify._verify_public_vless_uri", return_value={"verdict": "verified", "result": {}}),
+            patch("vpn_installer.verify._collect_agent_snapshot", side_effect=collect) as collect_mock,
+            patch("vpn_installer.verify._verify_public_vless_uri", side_effect=public_vless),
         ):
             self.assertEqual(verify_live_workflow("demo", non_interactive=True), 0)
-        self.assertEqual(collect.call_count, 2)
+        self.assertEqual(collect_mock.call_count, 2)
+        self.assertEqual(sequence, ["public-vless", f"snapshot:{ROLE_RU}", f"snapshot:{ROLE_FOREIGN}"])
         self.assertFalse(prepare.call_args.kwargs["run_live_probes"])
         self.assertFalse(prepare.call_args.kwargs["enforce_safe_route"])
 
     def test_public_vless_verifier_requires_both_egress_identities(self) -> None:
         uri = parse_vless_uri("vless://00000000-0000-0000-0000-000000000000@203.0.113.10:443?security=reality&sni=www.bing.com&pbk=public-key&sid=0123456789abcdef&fp=chrome&type=tcp&flow=xtls-rprx-vision")
         foreign = RemoteTarget(role=ROLE_FOREIGN, public_ip="198.51.100.20", ssh_host="198.51.100.20")
-        valid = {"ru_egress_ip": "203.0.113.10", "foreign_egress_ip": "198.51.100.20", "github_status": "200", "google_status": "204", "udp_dns": {"ok": True, "private_reject": {"ok": True}}, "ipv6_literal_status": "200"}
+        valid = {"ru_egress_ip": "203.0.113.10", "foreign_egress_ip": "198.51.100.20", "github_status": "200", "google_status": "204", "udp_dns": {"ok": True, "private_reject": {"ok": True}}, "ipv6_literal_status": "200", "first_load_reliability": FIRST_LOAD_OK}
         self.assertEqual(_validate_public_vless_result(valid, uri, foreign)["verdict"], "verified")
         invalid = {**valid, "foreign_egress_ip": "203.0.113.99"}
         self.assertEqual(_validate_public_vless_result(invalid, uri, foreign)["verdict"], "failed")
         self.assertEqual(_validate_public_vless_result({**valid, "udp_dns": {"ok": True, "private_reject": {"ok": False}}}, uri, foreign)["verdict"], "failed")
+        self.assertEqual(_validate_public_vless_result({**valid, "first_load_reliability": {**FIRST_LOAD_OK, "failures": 1}}, uri, foreign)["verdict"], "failed")
 
     def test_public_vless_throughput_requires_rate_and_duration(self) -> None:
         uri = parse_vless_uri("vless://00000000-0000-0000-0000-000000000000@203.0.113.10:443?security=reality&sni=www.bing.com&pbk=public-key&sid=0123456789abcdef&fp=chrome&type=tcp&flow=xtls-rprx-vision")
         foreign = RemoteTarget(role=ROLE_FOREIGN, public_ip="198.51.100.20", ssh_host="198.51.100.20")
-        result = {"ru_egress_ip": "203.0.113.10", "foreign_egress_ip": "198.51.100.20", "github_status": "200", "google_status": "204", "udp_dns": {"ok": True, "private_reject": {"ok": True}}, "ipv6_literal_status": "200", "throughput": {"bytes_per_second": 7_000_000, "duration_seconds": 60, "failures": 0}}
+        result = {"ru_egress_ip": "203.0.113.10", "foreign_egress_ip": "198.51.100.20", "github_status": "200", "google_status": "204", "udp_dns": {"ok": True, "private_reject": {"ok": True}}, "ipv6_literal_status": "200", "first_load_reliability": FIRST_LOAD_OK, "throughput": {"bytes_per_second": 7_000_000, "duration_seconds": 60, "failures": 0}}
         self.assertEqual(_validate_public_vless_result(result, uri, foreign, throughput_seconds=60)["verdict"], "verified")
         source_limited = {**result, "throughput": {"bytes_per_second": 1_000_000, "capacity_bytes_per_second": 7_000_000, "duration_seconds": 60, "failures": 0}}
         self.assertEqual(_validate_public_vless_result(source_limited, uri, foreign, throughput_seconds=60)["verdict"], "verified")
         self.assertEqual(_validate_public_vless_result({**result, "throughput": {"bytes_per_second": 5_000_000, "duration_seconds": 60, "failures": 0}}, uri, foreign, throughput_seconds=60)["verdict"], "failed")
         self.assertEqual(_validate_public_vless_result({**result, "throughput": {"bytes_per_second": 7_000_000, "duration_seconds": 60, "failures": 1}}, uri, foreign, throughput_seconds=60)["verdict"], "failed")
-        self.assertEqual(_vless_runner_timeout(0), 117)
-        self.assertEqual(_vless_runner_timeout(600), 722)
+        self.assertEqual(_vless_runner_timeout(0), 189)
+        self.assertEqual(_vless_runner_timeout(600), 794)
 
     def test_public_vless_runner_uploads_lf_script_and_executes_it(self) -> None:
         uri_text = "vless://00000000-0000-0000-0000-000000000000@203.0.113.10:443?security=reality&sni=www.bing.com&pbk=public-key&sid=0123456789abcdef&fp=chrome&type=tcp&flow=xtls-rprx-vision"
@@ -188,6 +203,7 @@ class VerifyTests(unittest.TestCase):
             "google_status": "204",
             "udp_dns": {"ok": True, "private_reject": {"ok": True}},
             "ipv6_literal_status": "200",
+            "first_load_reliability": FIRST_LOAD_OK,
             "throughput": {},
         }
         uploads: dict[str, bytes] = {}
@@ -209,14 +225,16 @@ class VerifyTests(unittest.TestCase):
         self.assertTrue(runner.startswith(b"#!/usr/bin/env bash\n"))
         self.assertNotIn(b"\r", runner)
         command = capture.call_args_list[1].args[1]
-        self.assertTrue(command.startswith("setsid bash /tmp/vpn-stack-vless-verify.test/runner.sh "))
+        self.assertIn("setsid timeout --foreground", command)
+        self.assertIn("controller.lease", command)
         self.assertIn("result.json", capture.call_args_list[2].args[1])
+        self.assertIn("touch /tmp/vpn-stack-vless-verify.test/controller.lease", capture.call_args_list[2].args[1])
 
     def test_detached_runner_reports_its_stderr_when_it_exits_without_result(self) -> None:
         target = RemoteTarget(role=ROLE_FOREIGN, ssh_host="foreign.example")
         with patch("vpn_installer.verify.ssh_capture", return_value="exited\nvpn-vless-runner phase=throughput-curl-exit-56\n"):
             with self.assertRaisesRegex(RuntimeError, "throughput-curl-exit-56"):
-                _wait_for_vless_runner(target, "4242", "/tmp/result.json", "/tmp/runner.stderr", throughput_seconds=30)
+                _wait_for_vless_runner(target, "4242", "/tmp/result.json", "/tmp/runner.stderr", "/tmp/controller.lease", throughput_seconds=30)
 
 
 if __name__ == "__main__":

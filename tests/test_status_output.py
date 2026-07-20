@@ -37,8 +37,32 @@ class StatusOutputTests(unittest.TestCase):
                         "udp_rmem_default": 4194304,
                         "udp_rmem_max": 16777216,
                     },
+                    "conntrack": {
+                        "count": 95,
+                        "max": 32768,
+                        "percent": 0.29,
+                        "front_bypass": {"active": True, "ingress": True, "egress": True},
+                        "table_full_events": {"5": 0, "30": 2, "1440": 23},
+                    },
+                    "health_state": "degraded",
+                    "health_updated_at": "2026-07-20T08:00:00+00:00",
+                    "health_soft_reasons": ["conntrack_table_full_5m=2"],
                     "protocol_counters": {"UdpRcvbufErrors": 816},
-                    "recent_health_deltas": {"protocol": {"UdpRcvbufErrors": 3}},
+                    "recent_health_deltas": {
+                        "protocol": {
+                            "UdpRcvbufErrors": 3,
+                            "TcpOutSegs": 10_000,
+                            "TcpRetransSegs": 125,
+                            "TcpExtTCPSACKReorder": 20,
+                            "TcpExtTCPDSACKRecv": 7,
+                            "TcpExtTCPTimeouts": 2,
+                        }
+                    },
+                    "last_front_degradation": {
+                        "observed_at": "2026-07-20T07:58:00+00:00",
+                        "degraded_sources": ["203.0.113.20"],
+                        "aggregate": {"bytes_sent": 12_251, "bytes_retrans": 2_829, "retransmit_ratio_pct": 23.092},
+                    },
                 },
                 reasons=["domain_to_foreign_timeout present"],
             )
@@ -56,8 +80,22 @@ class StatusOutputTests(unittest.TestCase):
         self.assertIn("domain_to_foreign_timeout present", rendered)
         self.assertIn("tcp adaptation: cc=bbr, qdisc=fq, mtu_probing=1, probe_interval_s=600", rendered)
         self.assertIn("udp_rmem=4194304/16777216", rendered)
+        self.assertIn("conntrack: 95/32768 (0.29%)", rendered)
+        self.assertIn("xray_front_bypass=active", rendered)
+        self.assertIn("table_full=5m:0,30m:2,24h:23", rendered)
+        self.assertIn("health: degraded", rendered)
+        self.assertIn("soft=conntrack_table_full_5m=2", rendered)
         self.assertIn("protocol counters (lifetime): UdpRcvbufErrors=816", rendered)
         self.assertIn("protocol deltas (last health cycle): UdpRcvbufErrors=+3", rendered)
+        self.assertIn("tcp deltas (last health cycle): out=10000, retrans=125 (1.250%)", rendered)
+        self.assertIn("tcp recovery deltas: TcpExtTCPSACKReorder=+20, TcpExtTCPDSACKRecv=+7, TcpExtTCPTimeouts=+2", rendered)
+        self.assertIn("last front degradation: at=2026-07-20T07:58:00+00:00, sources=203.0.113.20", rendered)
+
+    def test_does_not_invent_retransmit_ratio_without_out_segments(self) -> None:
+        lines = format_snapshot_summary(
+            DiagnosticsSnapshot(network={"recent_health_deltas": {"protocol": {"TcpRetransSegs": 229}}})
+        )
+        self.assertIn("tcp deltas (last health cycle): out=unavailable, retrans=229", lines)
 
 
 if __name__ == "__main__":

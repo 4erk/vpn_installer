@@ -21,27 +21,40 @@ class RuntimeDepsTests(unittest.TestCase):
             runtime_deps.ensure_pip_available()
         mocked.assert_called_once()
 
-    def test_ensure_pip_available_uses_ensurepip_before_get_pip(self) -> None:
-        responses = [completed(1), completed(0), completed(0)]
-        with patch("vpn_installer.runtime_deps.run_command", side_effect=responses) as mocked:
-            runtime_deps.ensure_pip_available()
-        self.assertEqual(mocked.call_count, 3)
-
     def test_ensure_pip_available_download_failure_raises(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            with patch("vpn_installer.runtime_deps.RUNTIME_DIR", Path(tmp)), patch("vpn_installer.runtime_deps.run_command", side_effect=[completed(1), completed(1)]), patch("vpn_installer.runtime_deps.urllib.request.urlretrieve", side_effect=OSError("nope")):
+            with patch("vpn_installer.runtime_deps.RUNTIME_DIR", Path(tmp)), patch("vpn_installer.runtime_deps.run_command", return_value=completed(1)) as run, patch("vpn_installer.runtime_deps.urllib.request.urlretrieve", side_effect=OSError("nope")):
                 with self.assertRaises(AppError) as ctx:
                     runtime_deps.ensure_pip_available()
         self.assertIn("get-pip.py", str(ctx.exception))
+        self.assertNotIn("ensurepip", run.call_args.args[0])
 
     def test_ensure_pip_available_get_pip_failure_raises(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             fake_file = Path(tmp) / "get-pip.py"
             fake_file.write_text("print('x')", encoding="utf-8")
-            with patch("vpn_installer.runtime_deps.RUNTIME_DIR", Path(tmp)), patch("vpn_installer.runtime_deps.run_command", side_effect=[completed(1), completed(1), completed(2, stderr="bad pip")]), patch("vpn_installer.runtime_deps.urllib.request.urlretrieve", return_value=(str(fake_file), None)):
+            with patch("vpn_installer.runtime_deps.RUNTIME_DIR", Path(tmp)), patch("vpn_installer.runtime_deps.run_command", side_effect=[completed(1), completed(2, stderr="bad pip")]), patch("vpn_installer.runtime_deps.urllib.request.urlretrieve", return_value=(str(fake_file), None)):
                 with self.assertRaises(AppError) as ctx:
                     runtime_deps.ensure_pip_available()
         self.assertIn("bad pip", str(ctx.exception))
+
+    def test_get_pip_bootstrap_is_scoped_to_runtime_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = Path(tmp)
+            get_pip = runtime / "downloads" / "get-pip.py"
+            responses = [completed(1), completed(0), completed(0)]
+            with (
+                patch.object(runtime_deps, "RUNTIME_DIR", runtime),
+                patch.object(runtime_deps, "RUNTIME_SITE_PACKAGES", runtime / "site"),
+                patch.object(runtime_deps, "run_command", side_effect=responses) as run,
+                patch.object(runtime_deps.urllib.request, "urlretrieve", side_effect=lambda _url, path: (Path(path).write_text("", encoding="utf-8"), None)),
+            ):
+                runtime_deps.ensure_pip_available()
+
+        bootstrap = run.call_args_list[1].args[0]
+        self.assertIn(str(get_pip), bootstrap)
+        self.assertEqual(bootstrap[-2:], ["--target", str(runtime / "site")])
+        self.assertIn("runpy.run_module('pip'", run.call_args_list[2].args[0][2])
 
     def test_ensure_python_package_returns_existing_module(self) -> None:
         module = types.SimpleNamespace(name="demo")
@@ -60,6 +73,8 @@ class RuntimeDepsTests(unittest.TestCase):
         ensure_pip.assert_called_once()
         self.assertEqual(importer.call_count, 2)
         self.assertEqual(run.call_count, 1)
+        self.assertIn("runpy.run_module('pip'", run.call_args.args[0][2])
+        self.assertEqual(run.call_args.args[0][-1], "paramiko>=3.5,<4")
 
     def test_ensure_python_package_install_failure_raises(self) -> None:
         importer = Mock(side_effect=ImportError())

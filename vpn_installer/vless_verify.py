@@ -9,13 +9,23 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 RUNNER_HTTP_PROBE_COUNT = 5
 RUNNER_HTTP_TIMEOUT_SECONDS = 15
+RUNNER_RELIABILITY_ATTEMPTS = 9
+RUNNER_RELIABILITY_FAILURE_LIMIT = 2
+RUNNER_RELIABILITY_TIMEOUT_SECONDS = 8
+RUNNER_RELIABILITY_MAX_TOTAL_SECONDS = 5.0
 RUNNER_ROUTE_PROBE_TIMEOUT_SECONDS = 24
 RUNNER_STARTUP_SECONDS = 1
 RUNNER_THROUGHPUT_CLOCK_SKEW_SECONDS = 1
 RUNNER_CURL_WATCHDOG_KILL_SECONDS = 5
+RUNNER_LEASE_TIMEOUT_SECONDS = 20
 RUNNER_SHUTDOWN_SECONDS = 5
 RUNNER_REPORT_SECONDS = 1
 RUNNER_TRANSPORT_DRAIN_SECONDS = 10
+RELIABILITY_PROBE_URLS = (
+    "https://www.gstatic.com/generate_204",
+    "https://www.cloudflare.com/cdn-cgi/trace",
+    "https://github.com/favicon.ico",
+)
 THROUGHPUT_SOURCE_URLS = (
     "https://speed.cloudflare.com/__down?bytes=50000000",
     "http://speedtest.tele2.net/100MB.zip",
@@ -182,7 +192,12 @@ def render_socks5_udp_dns_probe(*, listen_port: int) -> str:
     )
 
 
-def render_vless_runner(*, listen_port: int, throughput_urls: tuple[str, ...] = THROUGHPUT_SOURCE_URLS) -> str:
+def render_vless_runner(
+    *,
+    listen_port: int,
+    throughput_urls: tuple[str, ...] = THROUGHPUT_SOURCE_URLS,
+    reliability_urls: tuple[str, ...] = RELIABILITY_PROBE_URLS,
+) -> str:
     """Render the external, full-path VLESS acceptance runner.
 
     The throughput phase measures aggregate transferred bytes over a fixed wall
@@ -194,6 +209,8 @@ def render_vless_runner(*, listen_port: int, throughput_urls: tuple[str, ...] = 
 
     if not throughput_urls:
         raise ValueError("at least one throughput source is required")
+    if len(reliability_urls) != 3:
+        raise ValueError("exactly three reliability probe URLs are required")
 
     template = r'''
 #!/usr/bin/env bash
@@ -202,9 +219,14 @@ set -uo pipefail
 config_path=${1:?missing sing-box config path}
 udp_probe_path=${2:?missing UDP probe path}
 throughput_seconds=${3:-0}
+lease_path=${4:?missing controller lease path}
+lock_path=${5:?missing runner lock path}
+work_dir=$(dirname -- "$config_path")
+cd "$work_dir" || exit 1
 proxy="socks5h://127.0.0.1:__LISTEN_PORT__"
 throughput_urls=(__THROUGHPUT_URLS__)
 throughput_sources_json=__THROUGHPUT_SOURCES_JSON__
+reliability_urls=(__RELIABILITY_URLS__)
 throughput_source_bytes=()
 throughput_source_ns=()
 for _ in "${throughput_urls[@]}"; do
@@ -213,6 +235,13 @@ for _ in "${throughput_urls[@]}"; do
 done
 runner_started_ns=$(date +%s%N)
 pid=""
+watchdog_pid=""
+
+exec 9>"$lock_path"
+if ! flock -n 9; then
+    printf 'vpn-vless-runner phase=failed:runner-busy elapsed_s=0\n' >&2
+    exit 1
+fi
 
 event() {
     printf 'vpn-vless-runner phase=%s elapsed_s=%s\n' "$1" "$(( ($(date +%s%N) - runner_started_ns) / 1000000000 ))" >&2
@@ -226,6 +255,10 @@ fail() {
 }
 
 cleanup() {
+    if [[ -n "${watchdog_pid:-}" ]] && kill -0 "$watchdog_pid" 2>/dev/null; then
+        kill "$watchdog_pid" >/dev/null 2>&1 || true
+        wait "$watchdog_pid" >/dev/null 2>&1 || true
+    fi
     if [[ -z "${pid:-}" ]] || ! kill -0 "$pid" 2>/dev/null; then
         return
     fi
@@ -240,7 +273,26 @@ cleanup() {
     wait "$pid" >/dev/null 2>&1 || true
 }
 
+watch_controller() {
+    local now lease_mtime runner_pgid
+    runner_pgid=$(ps -o pgid= -p $$ | tr -d ' ')
+    while :; do
+        sleep 2
+        lease_mtime=$(stat -c %Y -- "$lease_path" 2>/dev/null || printf '0')
+        now=$(date +%s)
+        if (( lease_mtime == 0 || now - lease_mtime > __LEASE_TIMEOUT_SECONDS__ )); then
+            event controller-lease-expired
+            kill -TERM -- "-$runner_pgid" >/dev/null 2>&1 || true
+            return
+        fi
+    done
+}
+
+trap 'exit 143' TERM INT HUP
 trap cleanup EXIT
+touch "$lease_path"
+watch_controller &
+watchdog_pid=$!
 event sing-box-check
 if ! sing-box check -c "$config_path" >sing-box.log 2>&1; then
     fail sing-box-check
@@ -286,6 +338,28 @@ event ipv6-literal
 if ! ipv6_literal=$(curl -ksS -o /dev/null -w '%{http_code}' --proxy "$proxy" --connect-timeout 5 --max-time __HTTP_TIMEOUT_SECONDS__ https://[2606:4700:4700::1111]/cdn-cgi/trace 2>>runner-curl.log); then
     fail ipv6-literal
 fi
+
+event first-load-reliability
+reliability_attempts=0
+reliability_failures=0
+reliability_results_path=$(mktemp)
+while (( reliability_attempts < __RELIABILITY_ATTEMPTS__ )); do
+    reliability_url=${reliability_urls[$((reliability_attempts % ${#reliability_urls[@]}))]}
+    reliability_attempts=$((reliability_attempts + 1))
+    probe_output=$(curl -LsS -o /dev/null -w '%{http_code}|%{time_total}' --proxy "$proxy" --connect-timeout 3 --max-time __RELIABILITY_TIMEOUT_SECONDS__ "$reliability_url" 2>>runner-curl.log)
+    probe_status=$?
+    probe_code=${probe_output%%|*}
+    probe_seconds=${probe_output#*|}
+    if (( probe_status != 0 )) || [[ ! "$probe_code" =~ ^(200|204|301|302|403)$ ]] || [[ ! "$probe_seconds" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        printf '%s\t0\t%s\t%s\t%s\n' "$reliability_url" "$probe_status" "$probe_code" "$probe_seconds" >>"$reliability_results_path"
+        reliability_failures=$((reliability_failures + 1))
+        if (( reliability_failures >= __RELIABILITY_FAILURE_LIMIT__ )); then
+            break
+        fi
+        continue
+    fi
+    printf '%s\t1\t%s\t%s\t%s\n' "$reliability_url" "$probe_status" "$probe_code" "$probe_seconds" >>"$reliability_results_path"
+done
 
 throughput_bytes=0
 throughput_attempts=0
@@ -354,9 +428,10 @@ fi
 throughput_source_bytes_csv=$(IFS=,; printf '%s' "${throughput_source_bytes[*]}")
 throughput_source_ns_csv=$(IFS=,; printf '%s' "${throughput_source_ns[*]}")
 
-python3 - "$ru_ip" "$foreign_ip" "$github" "$google" "$throughput_bytes" "$throughput_start_ns" "$throughput_end_ns" "$throughput_attempts" "$throughput_failures" "$throughput_source_failures" "$throughput_sources_json" "$throughput_source_bytes_csv" "$throughput_source_ns_csv" "$udp_dns" "$ipv6_literal" <<'PY'
+python3 - "$ru_ip" "$foreign_ip" "$github" "$google" "$throughput_bytes" "$throughput_start_ns" "$throughput_end_ns" "$throughput_attempts" "$throughput_failures" "$throughput_source_failures" "$throughput_sources_json" "$throughput_source_bytes_csv" "$throughput_source_ns_csv" "$udp_dns" "$ipv6_literal" "$reliability_results_path" <<'PY'
 import json
 import sys
+from pathlib import Path
 
 bytes_downloaded = int(sys.argv[5])
 started_ns = int(sys.argv[6])
@@ -385,6 +460,26 @@ throughput = {
     "sources": sources,
     "source_metrics": source_metrics,
 }
+reliability_probes = []
+for line in Path(sys.argv[16]).read_text(encoding="utf-8").splitlines():
+    url, ok, curl_status, http_status, total_seconds = line.split("\t", 4)
+    reliability_probes.append({
+        "url": url,
+        "ok": ok == "1",
+        "curl_status": int(curl_status),
+        "http_status": http_status,
+        "total_seconds": float(total_seconds) if total_seconds else 0.0,
+    })
+reliability_successes = sum(probe["ok"] for probe in reliability_probes)
+successful_times = [probe["total_seconds"] for probe in reliability_probes if probe["ok"]]
+reliability = {
+    "attempts": len(reliability_probes),
+    "successes": reliability_successes,
+    "failures": len(reliability_probes) - reliability_successes,
+    "average_total_seconds": sum(successful_times) / len(successful_times) if successful_times else 0.0,
+    "max_total_seconds": max(successful_times, default=0.0),
+    "probes": reliability_probes,
+}
 print(json.dumps({
     "ru_egress_ip": sys.argv[1],
     "foreign_egress_ip": sys.argv[2],
@@ -393,11 +488,14 @@ print(json.dumps({
     "throughput": throughput,
     "udp_dns": json.loads(sys.argv[14]),
     "ipv6_literal_status": sys.argv[15],
+    "first_load_reliability": reliability,
 }))
 PY
 '''
     return textwrap.dedent(template).lstrip().replace("__LISTEN_PORT__", str(listen_port)).replace(
         "__THROUGHPUT_URLS__", " ".join(shlex.quote(url) for url in throughput_urls)
+    ).replace(
+        "__RELIABILITY_URLS__", " ".join(shlex.quote(url) for url in reliability_urls)
     ).replace(
         "__THROUGHPUT_SOURCES_JSON__", shlex.quote(json.dumps(list(throughput_urls), separators=(",", ":")))
     ).replace("__HTTP_TIMEOUT_SECONDS__", str(RUNNER_HTTP_TIMEOUT_SECONDS)).replace(
@@ -408,4 +506,12 @@ PY
         "__CURL_WATCHDOG_KILL_SECONDS__", str(RUNNER_CURL_WATCHDOG_KILL_SECONDS)
     ).replace(
         "__THROUGHPUT_ATTEMPT_SECONDS__", str(THROUGHPUT_ATTEMPT_SECONDS)
+    ).replace(
+        "__RELIABILITY_ATTEMPTS__", str(RUNNER_RELIABILITY_ATTEMPTS)
+    ).replace(
+        "__RELIABILITY_FAILURE_LIMIT__", str(RUNNER_RELIABILITY_FAILURE_LIMIT)
+    ).replace(
+        "__RELIABILITY_TIMEOUT_SECONDS__", str(RUNNER_RELIABILITY_TIMEOUT_SECONDS)
+    ).replace(
+        "__LEASE_TIMEOUT_SECONDS__", str(RUNNER_LEASE_TIMEOUT_SECONDS)
     )

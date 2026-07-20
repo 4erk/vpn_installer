@@ -56,6 +56,10 @@ class PackageTests(unittest.TestCase):
         self.assertNotIn('rm -rf "${release_dir}"', script)
         self.assertIn("configure_unattended_security_updates", script)
         self.assertIn('copy_if_present "${source_dir}/apt-vpn-stack-unattended.conf"', script)
+        self.assertIn('copy_if_present "${source_dir}/modules-vpn-stack.conf"', script)
+        self.assertIn("modprobe nf_conntrack", script)
+        remove_body = script.split("remove_managed_files() {", 1)[1].split("\n}", 1)[0]
+        self.assertIn('"${MODULES_LOAD_PATH}"', remove_body)
         self.assertIn('stage_preseed_assets "${ROLE_ARTIFACTS_DIR}/assets"', script)
         self.assertNotIn('cat >"${SYSCTL_PATH}"', script)
 
@@ -67,7 +71,7 @@ class PackageTests(unittest.TestCase):
 
     def test_package_exposes_version_via_getattr(self) -> None:
         package = importlib.import_module("vpn_installer")
-        self.assertEqual(package.__version__, "0.11.10")
+        self.assertEqual(package.__version__, "0.11.12")
         with self.assertRaises(AttributeError):
             package.__getattr__("nope")
 

@@ -35,6 +35,14 @@ _PROXY_READ_FAILED_RE = re.compile(r"using outbound/vless\[[^\]]+\]: read tcp [^
 _LOG_EVENT_ID_RE = re.compile(r"\b(?:TRACE|DEBUG|INFO|WARN|ERROR|FATAL)\s+\[(?P<event_id>\d+)\b")
 _INBOUND_DESTINATION_RE = re.compile(r"inbound/[^\[]+\[[^\]]+\]: inbound (?:packet )?connection to (?P<dst>\[[^\]]+\]:\d+|[^ ]+)")
 _DNS_LOOKUP_SUCCEED_RE = re.compile(r"dns: lookup succeed for (?P<dst>[^: ]+):")
+_CANCELLATION_TOKENS = (
+    "context canceled",
+    "context cancelled",
+    "operation canceled",
+    "operation cancelled",
+    "operation was canceled",
+    "operation was cancelled",
+)
 
 
 @dataclass(frozen=True)
@@ -151,15 +159,16 @@ def classify_line(line: str) -> ClassifiedLogLine | None:
     destination = _destination(line)
     source = source_from_line(line)
     event_id = event_id_from_line(line)
+    lower_line = line.lower()
     if "accepted tcp:disabled.invalid" in line:
         return ClassifiedLogLine("disabled_invalid", destination, source, event_id)
     if "REALITY: processed invalid connection" in line:
         return ClassifiedLogLine("invalid_reality", destination, source, event_id)
+    if any(token in lower_line for token in _CANCELLATION_TOKENS):
+        return ClassifiedLogLine("client_reset_eof", destination, source, event_id)
     if "using outbound/vless[" in line and any(token in line for token in ("dial tcp", "wsarecv", "connected host has failed to respond")):
         return ClassifiedLogLine("client_front_connect_failed", destination, source, event_id)
     dns_failure = any(token in line for token in ("dns: exchange failed", "exchange failed for ", "dns: lookup failed", "lookup failed for ", "router: lookup "))
-    if dns_failure and "context canceled" in line:
-        return ClassifiedLogLine("client_reset_eof", destination, source, event_id)
     if dns_failure and any(token in line for token in ("context deadline exceeded", "i/o timeout")):
         return ClassifiedLogLine("dns_timeout", destination, source, event_id)
     if dns_failure and "NXDOMAIN" in line.upper():

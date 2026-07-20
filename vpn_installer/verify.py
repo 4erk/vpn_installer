@@ -15,6 +15,9 @@ from .vless_verify import (
     RUNNER_HTTP_PROBE_COUNT,
     RUNNER_HTTP_TIMEOUT_SECONDS,
     RUNNER_CURL_WATCHDOG_KILL_SECONDS,
+    RUNNER_RELIABILITY_ATTEMPTS,
+    RUNNER_RELIABILITY_MAX_TOTAL_SECONDS,
+    RUNNER_RELIABILITY_TIMEOUT_SECONDS,
     RUNNER_REPORT_SECONDS,
     RUNNER_SHUTDOWN_SECONDS,
     RUNNER_STARTUP_SECONDS,
@@ -28,8 +31,9 @@ from .vless_verify import (
 )
 
 
-VLESS_RUNNER_POLL_INTERVAL_SECONDS = 15
+VLESS_RUNNER_POLL_INTERVAL_SECONDS = 5
 VLESS_CAPACITY_FLOOR_BYTES_PER_SECOND = 6_250_000
+VLESS_RUNNER_LOCK_PATH = "/run/lock/vpn-stack-vless-verify.lock"
 
 
 def _verify_snapshot(snapshot: DiagnosticsSnapshot) -> DiagnosticsSnapshot:
@@ -130,6 +134,24 @@ def _validate_public_vless_result(result: dict[str, object], uri, foreign_target
         return {"verdict": "failed", "reason": f"public VLESS private/fake reject probe failed: {result}", "result": result}
     if str(result.get("ipv6_literal_status", "")) != "200":
         return {"verdict": "failed", "reason": f"public VLESS IPv6 literal probe failed: {result}", "result": result}
+    reliability = result.get("first_load_reliability", {})
+    if not isinstance(reliability, dict):
+        return {"verdict": "failed", "reason": "public VLESS first-load reliability result is missing", "result": result}
+    try:
+        attempts = int(reliability.get("attempts", 0) or 0)
+        successes = int(reliability.get("successes", 0) or 0)
+        failures = int(reliability.get("failures", 0) or 0)
+        max_total = float(reliability.get("max_total_seconds", 0) or 0)
+    except (TypeError, ValueError):
+        return {"verdict": "failed", "reason": f"public VLESS first-load reliability result is malformed: {reliability}", "result": result}
+    if attempts != RUNNER_RELIABILITY_ATTEMPTS or successes != attempts or failures:
+        return {"verdict": "failed", "reason": f"public VLESS first-load reliability failed: {reliability}", "result": result}
+    if max_total <= 0 or max_total > RUNNER_RELIABILITY_MAX_TOTAL_SECONDS:
+        return {
+            "verdict": "failed",
+            "reason": f"public VLESS first-load latency exceeded {RUNNER_RELIABILITY_MAX_TOTAL_SECONDS:.1f}s: {reliability}",
+            "result": result,
+        }
     if throughput_seconds:
         measurement = result.get("throughput", {})
         if not isinstance(measurement, dict):
@@ -155,6 +177,7 @@ def _vless_runner_timeout(throughput_seconds: int) -> int:
     return (
         RUNNER_STARTUP_SECONDS
         + RUNNER_HTTP_PROBE_COUNT * RUNNER_HTTP_TIMEOUT_SECONDS
+        + RUNNER_RELIABILITY_ATTEMPTS * RUNNER_RELIABILITY_TIMEOUT_SECONDS
         + RUNNER_ROUTE_PROBE_TIMEOUT_SECONDS
         + throughput_seconds
         + RUNNER_THROUGHPUT_CLOCK_SKEW_SECONDS
@@ -165,9 +188,23 @@ def _vless_runner_timeout(throughput_seconds: int) -> int:
     )
 
 
-def _start_vless_runner(target, remote_runner: str, remote_config: str, remote_udp_probe: str, *, throughput_seconds: int, result_path: str, error_path: str) -> str:
+def _start_vless_runner(
+    target,
+    remote_runner: str,
+    remote_config: str,
+    remote_udp_probe: str,
+    *,
+    throughput_seconds: int,
+    result_path: str,
+    error_path: str,
+    lease_path: str,
+) -> str:
+    runtime_limit = _vless_runner_timeout(throughput_seconds)
     command = (
-        f"setsid bash {shlex.quote(remote_runner)} {shlex.quote(remote_config)} {shlex.quote(remote_udp_probe)} {throughput_seconds} "
+        f"touch {shlex.quote(lease_path)}; "
+        f"setsid timeout --foreground --signal=TERM --kill-after={RUNNER_CURL_WATCHDOG_KILL_SECONDS}s {runtime_limit}s "
+        f"bash {shlex.quote(remote_runner)} {shlex.quote(remote_config)} {shlex.quote(remote_udp_probe)} {throughput_seconds} "
+        f"{shlex.quote(lease_path)} {shlex.quote(VLESS_RUNNER_LOCK_PATH)} "
         f"> {shlex.quote(result_path)} 2> {shlex.quote(error_path)} < /dev/null & printf '%s\\n' \"$!\""
     )
     pid = ssh_capture(target, command, command_timeout=20).strip()
@@ -176,10 +213,10 @@ def _start_vless_runner(target, remote_runner: str, remote_config: str, remote_u
     return pid
 
 
-def _vless_runner_state_command(pid: str, result_path: str, error_path: str) -> str:
+def _vless_runner_state_command(pid: str, result_path: str, error_path: str, lease_path: str) -> str:
     return (
-        f"if test -s {shlex.quote(result_path)}; then printf '%s\\n' completed; cat {shlex.quote(result_path)}; "
-        f"elif kill -0 {shlex.quote(pid)} 2>/dev/null; then printf '%s\\n' running; "
+        f"if kill -0 {shlex.quote(pid)} 2>/dev/null; then touch {shlex.quote(lease_path)}; printf '%s\\n' running; "
+        f"elif test -s {shlex.quote(result_path)}; then printf '%s\\n' completed; cat {shlex.quote(result_path)}; "
         f"else printf '%s\\n' exited; tail -n 40 {shlex.quote(error_path)} 2>/dev/null || true; fi"
     )
 
@@ -197,10 +234,18 @@ def _stop_vless_runner(target, pid: str, error_path: str) -> str:
         return ""
 
 
-def _wait_for_vless_runner(target, pid: str, result_path: str, error_path: str, *, throughput_seconds: int) -> dict[str, object]:
+def _wait_for_vless_runner(
+    target,
+    pid: str,
+    result_path: str,
+    error_path: str,
+    lease_path: str,
+    *,
+    throughput_seconds: int,
+) -> dict[str, object]:
     deadline = time.monotonic() + _vless_runner_timeout(throughput_seconds)
     while True:
-        response = ssh_capture(target, _vless_runner_state_command(pid, result_path, error_path), command_timeout=20)
+        response = ssh_capture(target, _vless_runner_state_command(pid, result_path, error_path, lease_path), command_timeout=20)
         state, separator, payload = response.partition("\n")
         if state == "completed":
             if not separator:
@@ -228,7 +273,12 @@ def _verify_public_vless_uri(uri_path: Path, foreign_target, *, throughput_secon
     if throughput_seconds < 0 or 0 < throughput_seconds < 30:
         return {"verdict": "failed", "reason": "throughput-seconds must be 0 or at least 30"}
     try:
-        remote_dir = ssh_capture(foreign_target, "mktemp -d /tmp/vpn-stack-vless-verify.XXXXXX", command_timeout=15).strip()
+        remote_dir = ssh_capture(
+            foreign_target,
+            "find /tmp -maxdepth 1 -type d -name 'vpn-stack-vless-verify.*' -mmin +60 -exec rm -rf -- {} +; "
+            "mktemp -d /tmp/vpn-stack-vless-verify.XXXXXX",
+            command_timeout=15,
+        ).strip()
     except Exception as exc:  # noqa: BLE001
         return {"verdict": "failed", "reason": f"could not start external VLESS runner: {exc}"}
     if not remote_dir.startswith("/tmp/"):
@@ -247,6 +297,7 @@ def _verify_public_vless_uri(uri_path: Path, foreign_target, *, throughput_secon
         remote_runner = f"{remote_dir}/runner.sh"
         remote_result = f"{remote_dir}/result.json"
         remote_error = f"{remote_dir}/runner.stderr"
+        remote_lease = f"{remote_dir}/controller.lease"
         runner_pid = ""
         runner_completed = False
         try:
@@ -261,12 +312,14 @@ def _verify_public_vless_uri(uri_path: Path, foreign_target, *, throughput_secon
                 throughput_seconds=throughput_seconds,
                 result_path=remote_result,
                 error_path=remote_error,
+                lease_path=remote_lease,
             )
             result = _wait_for_vless_runner(
                 foreign_target,
                 runner_pid,
                 remote_result,
                 remote_error,
+                remote_lease,
                 throughput_seconds=throughput_seconds,
             )
             runner_completed = True
@@ -298,9 +351,13 @@ def verify_live_workflow(deployment: str | None, *, non_interactive: bool = Fals
         run_live_probes=False,
     )
     workflows.print_summary(deployment_name, env, targets)
-    snapshots: list[DiagnosticsSnapshot] = []
     worst = "verified"
     rank = {"verified": 0, "degraded": 1, "inconclusive": 2, "failed": 3}
+    foreign_target = next((target for target in targets if target.role == ROLE_FOREIGN), None)
+    public_vless: dict[str, object] = {"verdict": "inconclusive", "reason": "foreign verifier is unavailable"}
+    if foreign_target is not None:
+        public_vless = _verify_public_vless_uri(OUT_DIR / deployment_name / "client" / "vless-uri.txt", foreign_target, throughput_seconds=throughput_seconds)
+    snapshots: list[DiagnosticsSnapshot] = []
     for target in targets:
         try:
             snapshot = _collect_agent_snapshot(target)
@@ -309,10 +366,6 @@ def verify_live_workflow(deployment: str | None, *, non_interactive: bool = Fals
         except Exception as exc:  # noqa: BLE001
             snapshot = DiagnosticsSnapshot(deployment=deployment_name, role=target.role, verdict="failed", reasons=[f"agent snapshot failed: {exc}"])
         snapshots.append(snapshot)
-    foreign_target = next((target for target in targets if target.role == ROLE_FOREIGN), None)
-    public_vless: dict[str, object] = {"verdict": "inconclusive", "reason": "foreign verifier is unavailable"}
-    if foreign_target is not None:
-        public_vless = _verify_public_vless_uri(OUT_DIR / deployment_name / "client" / "vless-uri.txt", foreign_target, throughput_seconds=throughput_seconds)
     snapshots = [_reconcile_public_capabilities(snapshot, public_vless) for snapshot in snapshots]
     for verdict in [*(snapshot.verdict for snapshot in snapshots), str(public_vless["verdict"])]:
         if rank[verdict] > rank[worst]:

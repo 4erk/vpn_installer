@@ -6,6 +6,36 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.11.12] - 2026-07-20
+
+### Fixed
+
+- External `verify live` теперь имеет единственный глобальный lock, target-side deadline и короткую controller lease. Потеря управляющего процесса завершает всю process group, освобождает SOCKS port и не оставляет скрытую throughput-нагрузку на production.
+- Runner работает только в собственном временном каталоге и больше не смешивает `curl`/sing-box логи параллельных или прежних запусков. Результат читается только после завершения процесса, а устаревшие временные каталоги удаляются ограниченно.
+- Полный VLESS contract дополнен девятью последовательными first-load GET через RU-direct и foreign origins. Приёмка требует успеха каждой попытки не дольше пяти секунд и сохраняет origin, HTTP/curl status и latency каждой загрузки, поэтому обрывы первого запроса больше не скрываются одной успешной проверкой.
+- Public-front telemetry распознаёт подтверждённую высокую retransmit-долю на небольших TCP-потоках, не дожидаясь прежнего порога в 1 MB. Source-specific loss даёт только soft degradation и никогда не запускает restart либо смену маршрута.
+- Health сохраняет ограниченный снимок последней front-деградации с source, потоком, RTT, retransmitted bytes, reordering и DSACK; `status` отдельно выводит TCP segment/recovery deltas и это evidence после закрытия проблемного сокета.
+- Эквивалентные `context canceled/cancelled` и `operation was canceled/cancelled` при закрытии клиента или штатном restart относятся к одному cancellation bucket и больше не создают ложный `unclassified_error`.
+
+Основной `out/1/client/vless-uri.txt`, routing/DNS policy, WireGuard MTU, Xray transport и web-admin не изменены. Foreign traffic остаётся fail-closed; локальный VPN-клиент не меняется и не перезапускается.
+
+## [0.11.11] - 2026-07-20
+
+### Fixed
+
+- Устранено подтверждённое переполнение `nf_conntrack` на публичном RU-фронте. Локально завершаемые TCP-соединения Xray исключены из conntrack симметричными nftables raw-hook правилами; stateful WireGuard/NAT, SSH и web-admin остаются под штатным tracking.
+- Managed network profile резервирует `32768` записей conntrack без сокращения TCP timeout'ов и без ограничения валидных VLESS-клиентов. Runtime-значение входит в проверку профиля и транзакционный release gate.
+- Agent собирает kernel-события `nf_conntrack: table full` одним чтением журнала в раздельные окна `5m/30m/24h`, проверяет фактическую загрузку Xray bypass и переводит свежие drops в soft degradation без бессмысленного restart.
+- После двух подтверждённых hard-failure циклов agent может восстановить сброшенный managed sysctl или отсутствующий runtime nftables bypass из manifest-проверенных файлов; при любом drift автоматическое применение блокируется.
+- `status` показывает текущую загрузку conntrack, runtime bypass, свежие/исторические переполнения и причины последнего health-цикла.
+- Web-admin HTML, auth и redirect ответы теперь всегда передают точный `Content-Length`; это устраняет редкий TCP reset при чтении ответа в медленном/инструментированном исполнении.
+- Linux console bootstrap больше не вызывает `ensurepip` и не пытается менять PEP 668-managed system Python: `pip` и SSH-зависимости устанавливаются в проектный `.runtime/python-packages` и запускаются оттуда явным isolated runner.
+- `remove`/`purge` удаляет managed modules-load drop-in и восстанавливает прежний sysctl/module-loading baseline; загруженный общий kernel-модуль принудительно не выгружается.
+- Manifest больше не считает произвольный неизвестный `*.conf` конфигом WireGuard: все managed-артефакты имеют явный install path, а неполное описание останавливает сборку до установки.
+- `verify live` формирует итог из обязательных acceptance snapshots после публичного VLESS/throughput-run, поэтому длинный тест больше не завершается verdict по устаревшим TCP-сокетам, снятым до нагрузки.
+
+Основной `out/1/client/vless-uri.txt`, routing/DNS policy, WireGuard MTU и web-admin не изменены. Foreign traffic остаётся fail-closed и не переводится через RU direct.
+
 ## [0.11.10] - 2026-07-18
 
 ### Fixed

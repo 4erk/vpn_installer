@@ -650,10 +650,13 @@ class Handler(BaseHTTPRequestHandler):
             return False
         if check_basic_auth(self.headers.get("Authorization")):
             return True
+        data = "Authentication required\n".encode("utf-8")
         self.send_response(HTTPStatus.UNAUTHORIZED)
         self.send_header("WWW-Authenticate", 'Basic realm="VPN Admin", charset="UTF-8"')
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
         self.end_headers()
-        self.wfile.write("Authentication required\n".encode("utf-8"))
+        self.wfile.write(data)
         return False
 
     def require_csrf(self) -> bool:
@@ -668,6 +671,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Set-Cookie", f"csrf={CSRF_TOKEN}; SameSite=Strict")
+        self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
 
@@ -697,6 +701,7 @@ class Handler(BaseHTTPRequestHandler):
         if path in {"", "/"}:
             self.send_response(HTTPStatus.FOUND)
             self.send_header("Location", "/routes")
+            self.send_header("Content-Length", "0")
             self.end_headers()
         elif path == "/routes":
             self.send_html(page("VPN Admin: исключения", "routes", ROUTES_BODY))

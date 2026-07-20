@@ -21,7 +21,7 @@ from .client_artifacts import (
 from .common import INSTALL_SCRIPT_PATH, OUT_DIR, ROOT_DIR, ensure_file_parent, print_header, warn, write_text
 from .config import apply_ru_direct_overlays, download_asset, parse_env_text, render_env_text, require_env, split_asset_sources
 from .manifest import render_manifest
-from .models import DEFAULT_ASSET_TIMEOUT, REQUIRED_ENV_VARS, ROLE_FOREIGN, ROLE_RU, UDP_RMEM_DEFAULT, UDP_RMEM_MAX
+from .models import CONNTRACK_MAX, DEFAULT_ASSET_TIMEOUT, REQUIRED_ENV_VARS, ROLE_FOREIGN, ROLE_RU, UDP_RMEM_DEFAULT, UDP_RMEM_MAX
 from .routing_policy import build_ru_routing_policy
 from .specs import DeploymentSpec
 
@@ -378,16 +378,28 @@ def render_ru_firewall_nftables(env: dict[str, str]) -> str:
         )
     lines.extend(
         [
-        "",
-        "  chain input {",
-        "    type filter hook input priority 0;",
-        "    policy drop;",
-        "",
-        '    iifname "lo" accept',
-        "    ct state invalid drop",
-        "    ip6 nexthdr icmpv6 accept",
-        "    ip protocol icmp accept",
-        "    ct state established,related accept",
+            "",
+            "  chain prerouting_raw {",
+            "    type filter hook prerouting priority raw;",
+            "    policy accept;",
+            f'    tcp dport {env["RU_LISTEN_PORT"]} counter notrack comment "vpnstack-xray-in-notrack"',
+            "  }",
+            "",
+            "  chain output_raw {",
+            "    type filter hook output priority raw;",
+            "    policy accept;",
+            f'    tcp sport {env["RU_LISTEN_PORT"]} counter notrack comment "vpnstack-xray-out-notrack"',
+            "  }",
+            "",
+            "  chain input {",
+            "    type filter hook input priority 0;",
+            "    policy drop;",
+            "",
+            '    iifname "lo" accept',
+            "    ct state invalid drop",
+            "    ip6 nexthdr icmpv6 accept",
+            "    ip protocol icmp accept",
+            "    ct state established,related accept",
         ]
     )
     if admin_enabled and admin_active_client_required:
@@ -469,6 +481,7 @@ def render_sysctl(role: str) -> str:
         "net.core.default_qdisc=fq",
         f"net.core.rmem_max={UDP_RMEM_MAX}",
         f"net.core.rmem_default={UDP_RMEM_DEFAULT}",
+        f"net.netfilter.nf_conntrack_max={CONNTRACK_MAX}",
         "net.ipv4.tcp_syncookies=1",
         "net.ipv4.tcp_congestion_control=bbr",
         "net.ipv4.tcp_mtu_probing=1",
@@ -478,6 +491,10 @@ def render_sysctl(role: str) -> str:
     else:
         lines.extend(("net.ipv4.ip_forward=1", "net.ipv6.conf.all.forwarding=1"))
     return "\n".join((*lines, ""))
+
+
+def render_modules_load() -> str:
+    return "nf_conntrack\n"
 
 
 def journal_limits_enabled(env: dict[str, str]) -> bool:
@@ -576,6 +593,7 @@ def rendered_files_for_role(env: dict[str, str], role: str, *, assets: dict[str,
             "nftables.conf": render_ru_firewall_nftables(env),
             "sshd-vpn-stack.conf": render_sshd_hardening(env),
             "sysctl-vpn-stack.conf": render_sysctl(role),
+            "modules-vpn-stack.conf": render_modules_load(),
             "apt-vpn-stack-unattended.conf": render_apt_periodic_dropin(),
             "vpn-stack-agent.py": server_script_asset("server_agent.py"),
             "log_classifier.py": server_script_asset("log_classifier.py"),
@@ -597,6 +615,7 @@ def rendered_files_for_role(env: dict[str, str], role: str, *, assets: dict[str,
         "nftables.conf": render_foreign_nftables(env, wan_iface),
         "sshd-vpn-stack.conf": render_sshd_hardening(env),
         "sysctl-vpn-stack.conf": render_sysctl(role),
+        "modules-vpn-stack.conf": render_modules_load(),
         "apt-vpn-stack-unattended.conf": render_apt_periodic_dropin(),
         "vpn-stack-agent.py": server_script_asset("server_agent.py"),
         "log_classifier.py": server_script_asset("log_classifier.py"),
