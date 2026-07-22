@@ -40,6 +40,32 @@ class LogClassifierTests(unittest.TestCase):
         self.assertEqual(classified.bucket, "client_front_connect_failed")
         self.assertEqual(classified.destination, "94.232.248.35:443")
 
+    def test_hysteria2_foreign_timeout_uses_the_same_destination_buckets(self) -> None:
+        domain = classify_line("ERROR open connection to github.com:443 using outbound/hysteria2[to-foreign-hy2]: i/o timeout")
+        literal = classify_line("ERROR open connection to 91.108.56.103:443 using outbound/hysteria2[to-foreign-hy2]: i/o timeout")
+        self.assertEqual(domain.bucket, "domain_to_foreign_timeout")
+        self.assertEqual(literal.bucket, "ipv4_literal_timeout")
+
+    def test_transport_failure_is_not_misreported_as_dns_or_unclassified(self) -> None:
+        line = (
+            "ERROR [722003726 25ms] dns: lookup failed for gateway.discord.gg: "
+            "quic: transport closed: read udp 94.232.248.35:54968->132.243.21.108:18443: read: connection refused"
+        )
+        classified = classify_line(line)
+        self.assertIsNotNone(classified)
+        self.assertEqual(classified.bucket, "transport_unavailable")
+        self.assertEqual(classified.destination, "gateway.discord.gg")
+
+    def test_remote_endpoint_refusal_has_an_explicit_bucket(self) -> None:
+        line = (
+            "ERROR connection: open connection to 104.64.0.253:443 using outbound/direct[to-foreign]: "
+            "dial tcp 104.64.0.253:443: connect: connection refused"
+        )
+        classified = classify_line(line)
+        self.assertIsNotNone(classified)
+        self.assertEqual(classified.bucket, "upstream_refused")
+        self.assertEqual(classified.destination, "104.64.0.253:443")
+
     def test_dns_exchange_failed_keeps_domain_and_query_type(self) -> None:
         classified = classify_line(
             "+0300 2026-07-08 12:52:11 ERROR [4186343754 30.0s] dns: exchange failed for www.msftconnecttest.com. IN A: context deadline exceeded"
@@ -63,6 +89,21 @@ class LogClassifierTests(unittest.TestCase):
         self.assertIsNotNone(classified)
         self.assertEqual(classified.bucket, "client_reset_eof")
         self.assertEqual(classified.destination, "149.154.167.51:443")
+
+    def test_hysteria_clean_stream_cancellation_is_client_noise(self) -> None:
+        classified = classify_line(
+            "+0000 2026-07-22 17:15:18 ERROR [3486721526 1.17s] connection: report handshake success: stream 36 canceled by remote with error code 0"
+        )
+        self.assertIsNotNone(classified)
+        self.assertEqual(classified.bucket, "client_reset_eof")
+
+    def test_closed_upload_stream_is_client_close_noise(self) -> None:
+        classified = classify_line(
+            "+0000 2026-07-22 19:27:41 ERROR [208948600 29.87s] connection: "
+            "connection upload closed: write on closed stream 1720"
+        )
+        self.assertIsNotNone(classified)
+        self.assertEqual(classified.bucket, "client_reset_eof")
 
     def test_router_lookup_nxdomain_is_dns_and_deduplicated_by_request_id(self) -> None:
         lines = [

@@ -8,7 +8,7 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
         f"role: {snapshot.role or '-'}",
         f"drift: {snapshot.drift}",
         f"verdict: {snapshot.verdict}",
-        f"fresh window: {snapshot.fresh_window_minutes}m",
+        f"current log window: since={snapshot.fresh_since or '-'}, duration={snapshot.fresh_window_minutes}m",
     ]
     if snapshot.historical_window_hours:
         lines.append(f"historical window: {snapshot.historical_window_hours}h")
@@ -33,7 +33,8 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
             "tcp adaptation: "
             f"cc={tcp_adaptation.get('congestion_control', '-')}, qdisc={tcp_adaptation.get('qdisc', '-')}, "
             f"mtu_probing={tcp_adaptation.get('mtu_probing', '-')}, probe_interval_s={tcp_adaptation.get('probe_interval_seconds', '-')}, "
-            f"udp_rmem={tcp_adaptation.get('udp_rmem_default', '-')}/{tcp_adaptation.get('udp_rmem_max', '-')}"
+            f"udp_rmem={tcp_adaptation.get('udp_rmem_default', '-')}/{tcp_adaptation.get('udp_rmem_max', '-')}, "
+            f"udp_wmem_max={tcp_adaptation.get('udp_wmem_max', '-')}"
         )
     conntrack = snapshot.network.get("conntrack", {})
     if conntrack:
@@ -46,6 +47,39 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
         if events:
             details.append("table_full=" + ",".join(f"{labels.get(str(window), str(window))}:{count}" for window, count in events.items()))
         lines.append("conntrack: " + ", ".join(details))
+    resolver = snapshot.network.get("resolver", {})
+    if resolver:
+        lines.append(
+            "resolver: "
+            f"stub={'active' if resolver.get('managed_stub') else 'inactive'}, "
+            f"cache={'on' if resolver.get('cache_enabled') else 'off'}, "
+            f"stale={resolver.get('stale_retention') or '-'}, "
+            f"upstreams={','.join(str(value) for value in resolver.get('upstreams', [])) or '-'}"
+        )
+    interserver = snapshot.transport.get("interserver", {})
+    if interserver:
+        selection = interserver.get("selection", {})
+        candidates = selection.get("candidates", {})
+        delays = ",".join(
+            f"{tag}={details.get('delay_ms')}ms" if details.get("delay_ms") is not None else f"{tag}=not-probed"
+            for tag, details in candidates.items()
+            if isinstance(details, dict)
+        ) or "-"
+        details = [
+            f"mode={interserver.get('mode', '-')}",
+            f"selected={selection.get('selected') or '-'}",
+            f"candidates={delays}",
+        ]
+        if snapshot.role == "ru-gateway":
+            adaptive = interserver.get("adaptive_state", {})
+            details.append(f"adaptation={adaptive.get('state') or '-'}")
+            details.append(f"hy2_session={'active' if interserver.get('hysteria_session_active') else 'inactive'}")
+            if adaptive.get("reason"):
+                details.append(f"reason={adaptive['reason']}")
+        elif snapshot.role == "foreign-exit":
+            details.append(f"listener={'active' if interserver.get('listening') else 'inactive'}")
+            details.append(f"source={interserver.get('source_restricted_to') or '-'}")
+        lines.append("interserver transport: " + ", ".join(details))
     health_state = snapshot.network.get("health_state", "")
     if health_state:
         health = f"health: {health_state}"

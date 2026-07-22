@@ -309,6 +309,8 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("sleep 1", command)
         self.assertIn("journalctl -u \"$service\" -n 20 --no-pager", command)
         self.assertIn("check_service_active sing-box sing-box", command)
+        self.assertIn("check_service_active systemd-resolved.service systemd-resolved", command)
+        self.assertIn("/run/systemd/resolve/stub-resolv.conf", command)
         self.assertIn("check_service_active vpn-stack-xray.service vpn-stack-xray", command)
         self.assertIn("ADMIN_WEB_ENABLED", command)
         self.assertIn("check_service_active vpn-stack-admin.service vpn-stack-admin", command)
@@ -316,7 +318,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertNotIn("vpn-stack-subscription.service", command)
 
         foreign_command = workflows.postcheck_command(ROLE_FOREIGN, "wg-test")
-        self.assertNotIn("check_service_active sing-box sing-box", foreign_command)
+        self.assertIn("check_service_active sing-box sing-box", foreign_command)
         self.assertNotIn("vpn-stack-admin.service", foreign_command)
 
     def test_cleanup_remote_workdir_warns_on_error(self) -> None:

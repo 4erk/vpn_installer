@@ -27,11 +27,15 @@ RELIABILITY_PROBE_URLS = (
     "https://github.com/favicon.ico",
 )
 THROUGHPUT_SOURCE_URLS = (
-    "https://speed.cloudflare.com/__down?bytes=50000000",
-    "http://speedtest.tele2.net/100MB.zip",
+    "https://fsn1-speed.hetzner.com/100MB.bin",
+    "https://nbg1-speed.hetzner.com/100MB.bin",
 )
 THROUGHPUT_RANGE_END = 1_073_741_823
 THROUGHPUT_ATTEMPT_SECONDS = 10
+THROUGHPUT_MIN_CAPACITY_ATTEMPT_SECONDS = 3
+THROUGHPUT_CAPACITY_SECONDS = 30
+THROUGHPUT_STABILITY_LIMIT_BYTES_PER_SECOND = 2_000_000
+THROUGHPUT_STABILITY_FLOOR_BYTES_PER_SECOND = 1_250_000
 
 
 @dataclass(frozen=True)
@@ -200,11 +204,9 @@ def render_vless_runner(
 ) -> str:
     """Render the external, full-path VLESS acceptance runner.
 
-    The throughput phase measures aggregate transferred bytes over a fixed wall
-    clock window. A completed range is requested again until the deadline, so
-    fast paths do not turn a ten-minute check into a short burst. Throughput is
-    intentionally uncapped because this phase runs only when the operator asks
-    for a measurement; a rate-limited transfer cannot verify capacity.
+    A short uncapped phase proves available capacity. The remainder is capped
+    above the acceptance floor, so a long production stability check cannot
+    starve active client traffic while still detecting stalls and disconnects.
     """
 
     if not throughput_urls:
@@ -227,11 +229,13 @@ proxy="socks5h://127.0.0.1:__LISTEN_PORT__"
 throughput_urls=(__THROUGHPUT_URLS__)
 throughput_sources_json=__THROUGHPUT_SOURCES_JSON__
 reliability_urls=(__RELIABILITY_URLS__)
-throughput_source_bytes=()
-throughput_source_ns=()
+capacity_source_bytes=()
+capacity_source_ns=()
+throughput_source_failure_counts=()
 for _ in "${throughput_urls[@]}"; do
-    throughput_source_bytes+=(0)
-    throughput_source_ns+=(0)
+    capacity_source_bytes+=(0)
+    capacity_source_ns+=(0)
+    throughput_source_failure_counts+=(0)
 done
 runner_started_ns=$(date +%s%N)
 pid=""
@@ -368,10 +372,17 @@ throughput_source_failures=0
 throughput_runs=0
 throughput_start_ns=0
 throughput_end_ns=0
+stability_bytes=0
+stability_ns=0
 if (( throughput_seconds > 0 )); then
     event throughput-start
     throughput_start_ns=$(date +%s%N)
     throughput_deadline_ns=$((throughput_start_ns + throughput_seconds * 1000000000))
+    capacity_seconds=$throughput_seconds
+    if (( capacity_seconds > __THROUGHPUT_CAPACITY_SECONDS__ )); then
+        capacity_seconds=__THROUGHPUT_CAPACITY_SECONDS__
+    fi
+    capacity_deadline_ns=$((throughput_start_ns + capacity_seconds * 1000000000))
     while :; do
         now_ns=$(date +%s%N)
         remaining_ns=$((throughput_deadline_ns - now_ns))
@@ -382,13 +393,33 @@ if (( throughput_seconds > 0 )); then
         source_index=$((attempt_index % ${#throughput_urls[@]}))
         throughput_url=${throughput_urls[$source_index]}
         attempt_seconds=$remaining_seconds
-        if (( attempt_seconds > __THROUGHPUT_ATTEMPT_SECONDS__ )); then
+        phase=stability
+        phase_deadline_ns=$throughput_deadline_ns
+        curl_rate_args=()
+        if (( now_ns < capacity_deadline_ns )); then
+            phase=capacity
+            phase_deadline_ns=$capacity_deadline_ns
+        else
+            source_index=$((${#throughput_urls[@]} - 1))
+            throughput_url=${throughput_urls[$source_index]}
+            curl_rate_args=(--limit-rate __THROUGHPUT_STABILITY_LIMIT_BYTES_PER_SECOND__)
+        fi
+        phase_remaining_seconds=$(((phase_deadline_ns - now_ns + 999999999) / 1000000000))
+        if [[ "$phase" == "capacity" ]] && (( phase_remaining_seconds < __THROUGHPUT_MIN_CAPACITY_ATTEMPT_SECONDS__ )); then
+            event throughput-capacity-boundary
+            sleep "$phase_remaining_seconds"
+            continue
+        fi
+        if (( attempt_seconds > phase_remaining_seconds )); then
+            attempt_seconds=$phase_remaining_seconds
+        fi
+        if [[ "$phase" == "capacity" ]] && (( attempt_seconds > __THROUGHPUT_ATTEMPT_SECONDS__ )); then
             attempt_seconds=__THROUGHPUT_ATTEMPT_SECONDS__
         fi
-        event "throughput-attempt-$attempt_index-source-$source_index-remaining-$remaining_seconds"
+        event "throughput-$phase-attempt-$attempt_index-source-$source_index-remaining-$remaining_seconds"
         attempt_start_ns=$now_ns
         throughput_count_file=$(mktemp)
-        timeout --foreground --signal=TERM --kill-after=__CURL_WATCHDOG_KILL_SECONDS__s "${attempt_seconds}s" curl -4fsS --proxy "$proxy" --connect-timeout 5 --range 0-__THROUGHPUT_RANGE_END__ -o - "$throughput_url" 2>>runner-curl.log | wc -c >"$throughput_count_file"
+        timeout --foreground --signal=TERM --kill-after=__CURL_WATCHDOG_KILL_SECONDS__s "${attempt_seconds}s" curl -4fsS --proxy "$proxy" --connect-timeout 5 "${curl_rate_args[@]}" --range 0-__THROUGHPUT_RANGE_END__ -o - "$throughput_url" 2>>runner-curl.log | wc -c >"$throughput_count_file"
         pipeline_status=("${PIPESTATUS[@]}")
         curl_status=${pipeline_status[0]}
         counter_status=${pipeline_status[1]}
@@ -397,18 +428,25 @@ if (( throughput_seconds > 0 )); then
         now_ns=$(date +%s%N)
         if (( counter_status != 0 )) || [[ ! "$curl_output" =~ ^[0-9]+$ ]]; then
             throughput_source_failures=$((throughput_source_failures + 1))
+            throughput_source_failure_counts[$source_index]=$((throughput_source_failure_counts[$source_index] + 1))
             event throughput-invalid-metrics
             continue
         fi
         if (( curl_output > 0 )); then
             throughput_bytes=$((throughput_bytes + curl_output))
             throughput_attempts=$((throughput_attempts + 1))
-            throughput_source_bytes[$source_index]=$((throughput_source_bytes[$source_index] + curl_output))
-            throughput_source_ns[$source_index]=$((throughput_source_ns[$source_index] + now_ns - attempt_start_ns))
+            if [[ "$phase" == "capacity" ]]; then
+                capacity_source_bytes[$source_index]=$((capacity_source_bytes[$source_index] + curl_output))
+                capacity_source_ns[$source_index]=$((capacity_source_ns[$source_index] + now_ns - attempt_start_ns))
+            else
+                stability_bytes=$((stability_bytes + curl_output))
+                stability_ns=$((stability_ns + now_ns - attempt_start_ns))
+            fi
         fi
         if (( curl_status == 0 )); then
             if (( curl_output == 0 )); then
                 throughput_source_failures=$((throughput_source_failures + 1))
+                throughput_source_failure_counts[$source_index]=$((throughput_source_failure_counts[$source_index] + 1))
                 event throughput-empty-response
             fi
             continue
@@ -417,6 +455,7 @@ if (( throughput_seconds > 0 )); then
             continue
         fi
         throughput_source_failures=$((throughput_source_failures + 1))
+        throughput_source_failure_counts[$source_index]=$((throughput_source_failure_counts[$source_index] + 1))
         event "throughput-curl-exit-$curl_status"
     done
     throughput_end_ns=$(date +%s%N)
@@ -425,10 +464,11 @@ if (( throughput_seconds > 0 )); then
     fi
     event throughput-complete
 fi
-throughput_source_bytes_csv=$(IFS=,; printf '%s' "${throughput_source_bytes[*]}")
-throughput_source_ns_csv=$(IFS=,; printf '%s' "${throughput_source_ns[*]}")
+capacity_source_bytes_csv=$(IFS=,; printf '%s' "${capacity_source_bytes[*]}")
+capacity_source_ns_csv=$(IFS=,; printf '%s' "${capacity_source_ns[*]}")
+throughput_source_failure_counts_csv=$(IFS=,; printf '%s' "${throughput_source_failure_counts[*]}")
 
-python3 - "$ru_ip" "$foreign_ip" "$github" "$google" "$throughput_bytes" "$throughput_start_ns" "$throughput_end_ns" "$throughput_attempts" "$throughput_failures" "$throughput_source_failures" "$throughput_sources_json" "$throughput_source_bytes_csv" "$throughput_source_ns_csv" "$udp_dns" "$ipv6_literal" "$reliability_results_path" <<'PY'
+python3 - "$ru_ip" "$foreign_ip" "$github" "$google" "$throughput_bytes" "$throughput_start_ns" "$throughput_end_ns" "$throughput_attempts" "$throughput_failures" "$throughput_source_failures" "$throughput_sources_json" "$capacity_source_bytes_csv" "$capacity_source_ns_csv" "$throughput_source_failure_counts_csv" "$stability_bytes" "$stability_ns" "$udp_dns" "$ipv6_literal" "$reliability_results_path" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -440,18 +480,24 @@ duration_seconds = max(0.0, (ended_ns - started_ns) / 1_000_000_000) if started_
 sources = json.loads(sys.argv[11])
 source_bytes = [int(value) for value in sys.argv[12].split(",")]
 source_ns = [int(value) for value in sys.argv[13].split(",")]
+source_failures = [int(value) for value in sys.argv[14].split(",")]
 source_metrics = []
-for url, source_byte_count, elapsed_ns in zip(sources, source_bytes, source_ns):
+for url, source_byte_count, elapsed_ns, failure_count in zip(sources, source_bytes, source_ns, source_failures):
     source_duration = max(0.0, elapsed_ns / 1_000_000_000)
     source_metrics.append({
         "url": url,
         "bytes_downloaded": source_byte_count,
         "duration_seconds": source_duration,
         "bytes_per_second": source_byte_count / source_duration if source_duration else 0.0,
+        "failures": failure_count,
     })
 throughput = {
     "bytes_per_second": bytes_downloaded / duration_seconds if duration_seconds else 0.0,
     "capacity_bytes_per_second": max((item["bytes_per_second"] for item in source_metrics), default=0.0),
+    "capacity_duration_seconds": sum(item["duration_seconds"] for item in source_metrics),
+    "stability_bytes_per_second": int(sys.argv[15]) / (int(sys.argv[16]) / 1_000_000_000) if int(sys.argv[16]) else 0.0,
+    "stability_duration_seconds": int(sys.argv[16]) / 1_000_000_000,
+    "stability_limit_bytes_per_second": __THROUGHPUT_STABILITY_LIMIT_BYTES_PER_SECOND__,
     "duration_seconds": duration_seconds,
     "bytes_downloaded": bytes_downloaded,
     "attempts": int(sys.argv[8]),
@@ -461,7 +507,7 @@ throughput = {
     "source_metrics": source_metrics,
 }
 reliability_probes = []
-for line in Path(sys.argv[16]).read_text(encoding="utf-8").splitlines():
+for line in Path(sys.argv[19]).read_text(encoding="utf-8").splitlines():
     url, ok, curl_status, http_status, total_seconds = line.split("\t", 4)
     reliability_probes.append({
         "url": url,
@@ -486,8 +532,8 @@ print(json.dumps({
     "github_status": sys.argv[3],
     "google_status": sys.argv[4],
     "throughput": throughput,
-    "udp_dns": json.loads(sys.argv[14]),
-    "ipv6_literal_status": sys.argv[15],
+    "udp_dns": json.loads(sys.argv[17]),
+    "ipv6_literal_status": sys.argv[18],
     "first_load_reliability": reliability,
 }))
 PY
@@ -506,6 +552,12 @@ PY
         "__CURL_WATCHDOG_KILL_SECONDS__", str(RUNNER_CURL_WATCHDOG_KILL_SECONDS)
     ).replace(
         "__THROUGHPUT_ATTEMPT_SECONDS__", str(THROUGHPUT_ATTEMPT_SECONDS)
+    ).replace(
+        "__THROUGHPUT_MIN_CAPACITY_ATTEMPT_SECONDS__", str(THROUGHPUT_MIN_CAPACITY_ATTEMPT_SECONDS)
+    ).replace(
+        "__THROUGHPUT_CAPACITY_SECONDS__", str(THROUGHPUT_CAPACITY_SECONDS)
+    ).replace(
+        "__THROUGHPUT_STABILITY_LIMIT_BYTES_PER_SECOND__", str(THROUGHPUT_STABILITY_LIMIT_BYTES_PER_SECOND)
     ).replace(
         "__RELIABILITY_ATTEMPTS__", str(RUNNER_RELIABILITY_ATTEMPTS)
     ).replace(

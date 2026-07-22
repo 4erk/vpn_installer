@@ -6,6 +6,36 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.12.0] - 2026-07-22
+
+### Added
+
+- Межсерверный dataplane получил Hysteria2/QUIC transport между RU и foreign с pinned self-signed identity и auth, детерминированно производным от deployment secret. Fixed bandwidth не задаётся: sing-box использует собственный BBR congestion control, который в живом сравнении на том же lossy path дал около 81 Мбит/с против примерно 10 Мбит/с у TCP внутри WireGuard.
+- WireGuard сохранён как независимый transport fallback и control path. Один selector `to-foreign` по умолчанию использует Hysteria2; отдельный bounded supervisor каждые 5 секунд проверяет raw transport и переключает только новые соединения на WireGuard после подтверждённого отказа. Возврат на Hysteria2 требует двух успешных проверок, foreign traffic никогда не переводится в `direct-ru`, существующие соединения не прерываются.
+- Локальная Clash API-интроспекция на RU показывает фактически выбранный transport и последние delay обоих кандидатов. Snapshot отдельно сообщает transport redundancy и по-прежнему честно показывает отсутствие второго независимого foreign egress.
+- Quick audit получил реальный Docker contract `SOCKS -> selector -> Hysteria2/TLS/auth -> foreign HTTP`, включая проверку выбранного outbound через API; валидность JSON без handshake больше недостаточна.
+- Host DNS обеих ролей переведён на manifest-owned `systemd-resolved`: независимые Cloudflare/Quad9/Google upstreams, локальный positive cache и `StaleRetentionSec=1h`. Drop-in, `/etc/resolv.conf` symlink и исходное состояние сервиса входят в транзакционный rollback.
+
+### Fixed
+
+- Устранён подтверждённый узкий участок foreign-to-RU: 10-секундный iperf давал около 9.7 Мбит/с и 1630 retransmissions, тогда как CPU, conntrack и PMTU оставались исправны. Потери теперь переживаются QUIC loss recovery внутри межсерверного соединения, а не повторным HTTP-запросом клиента.
+- WireGuard fallback больше не использует `dns-global`, который сам шёл через `to-foreign` и создавал рекурсивную зависимость при отказе primary transport; bootstrap resolver теперь `dns-ru-direct`.
+- Xray Reality inbound включает TCP keepalive `90/15s`, чтобы kernel удалял давно умершие accepted sockets после потери NAT/клиента. Диагностика выводит keepalive timers и stale-сокеты `5m/1h`.
+- Managed UDP profile дополняет receive limits значением `net.core.wmem_max=16 MiB`; agent проверяет send-buffer drift и новые `UdpSndbufErrors` отдельно.
+- Foreign Hysteria2 listener разрешён nftables только с публичного RU IP. Сертификат, private key и pin валидируются как единая identity до рендера, а sing-box config внутри immutable release хранится с правами `0600`.
+- Foreign `sing-box` стал обязательным service/install/manifest invariant. Неисправный WG fallback даёт degradation при живом router path, но не запускает ложный rollback или restart.
+- Устранена ложная каскадная диагностика foreign acceptance: literal `1.1.1.1` больше не следует redirect к домену, egress identity проверяется через DNS-independent trace endpoint, а domain connect budget отделён от dataplane timeout. На live foreign старый статический resolver дал воспроизводимый 5-секундный stall и содержал пустые `nameserver` строки.
+- Agent сохраняет адаптивное состояние на диске и сообщает причину каждого перехода `healthy -> fallback -> recovering`. Ошибка primary немедленно выбирает исправный WireGuard, а краткое восстановление primary не вызывает route flapping.
+- Release acceptance сокращён до 60 секунд: 30-секундный uncapped capacity phase подтверждает не менее 50 Мбит/с, затем одно 30-секундное соединение с cap 16 Мбит/с подтверждает не менее 10 Мбит/с без повторных клиентских запросов и обрывов.
+- Компактный `status` больше не включает ошибки предыдущего процесса в current-release окно во время поочерёдной установки ролей. QUIC transport loss и отказ конечного upstream имеют отдельные buckets `transport_unavailable` и `upstream_refused`; неизвестная задержка fallback выводится как `not-probed`, а не `None ms`.
+- Live verifier использует только HTTPS throughput origins, считает ошибки отдельно по каждому источнику и всегда сохраняет полный public-VLESS result, runner events и post-run snapshots в `out/diagnostics`; неуспех больше не теряется после удаления remote temp directory.
+- Throughput acceptance больше не создаёт серию коротких запросов к speed origin: capacity использует bounded 10-секундные streams, а stability держит одно 30-секундное HTTPS-соединение. Это исключает ложный failure из-за origin rate-limit и проверяет именно отсутствие обрыва длительной загрузки.
+- Capacity phase не запускает новый stream в последние три секунды окна, поэтому короткий boundary timeout без полученного body больше не считается отказом dataplane.
+- Штатное закрытие Hysteria upload stream (`write on closed stream`) классифицируется как `client_reset_eof`, а не как необъяснённая серверная ошибка.
+- TCP front parser больше не принимает опциональное поле `ss timer:(keepalive,...)` за IP клиента; endpoint определяется по локальному порту и валидной удалённой IP-паре. Штатный Hysteria stream cancel с error code `0` относится к client-close bucket.
+
+Основной `out/1/client/vless-uri.txt`, публичный Xray/Reality `RU:443`, WireGuard MTU `1360`, routing classes и web-admin не изменены. Локальный VPN-клиент не меняется и не перезапускается.
+
 ## [0.11.12] - 2026-07-20
 
 ### Fixed

@@ -129,6 +129,9 @@ def test_install_rollback_state(runner: AuditRunner) -> dict[str, str]:
                 SINGBOX_CONFIG_PATH="${test_root}/sing-box/config.json"
                 SINGBOX_BASE_CONFIG_PATH="${VPNSTACK_ROOT}/sing-box.base.json"
                 WG_CONFIG_PATH="${test_root}/wireguard/wg-test.conf"
+                RESOLVED_DROPIN_PATH="${test_root}/resolved/90-vpn-stack.conf"
+                RESOLV_CONF_PATH="${test_root}/resolv.conf"
+                RESOLVED_STUB_PATH="${test_root}/run/stub-resolv.conf"
                 HEALTH_STATE_PATH="${test_root}/state/health-state.json"
                 LEGACY_ADAPTIVE_ROUTING_RULES_PATH="${test_root}/state/adaptive-routing-rules.json"
                 LEGACY_DATAPLANE_CACHE_PATH="${test_root}/state/dataplane-cache.env"
@@ -142,12 +145,14 @@ def test_install_rollback_state(runner: AuditRunner) -> dict[str, str]:
                 grep -Fxq "${VPNSTACK_ADMIN_AUTH_FILE}" <<<"${paths}"
                 grep -Fxq "${HEALTH_STATE_PATH}" <<<"${paths}"
 
-                mkdir -p "${VPNSTACK_RELEASES_DIR}/old" "${VPNSTACK_RELEASES_DIR}/new" "$(dirname "${SINGBOX_CONFIG_PATH}")" "$(dirname "${HEALTH_STATE_PATH}")" "${RULESET_DIR}"
+                mkdir -p "${VPNSTACK_RELEASES_DIR}/old" "${VPNSTACK_RELEASES_DIR}/new" "$(dirname "${SINGBOX_CONFIG_PATH}")" "$(dirname "${HEALTH_STATE_PATH}")" "${RULESET_DIR}" "$(dirname "${RESOLVED_STUB_PATH}")"
                 printf 'old manifest\n' >"${VPNSTACK_RENDER_MANIFEST_FILE}"
                 printf 'old config\n' >"${SINGBOX_CONFIG_PATH}"
                 printf 'old health\n' >"${HEALTH_STATE_PATH}"
                 printf 'old auth\n' >"${VPNSTACK_ADMIN_AUTH_FILE}"
                 printf 'old rules\n' >"${RULESET_DIR}/rules.srs"
+                printf 'old resolver\n' >"${RESOLVED_STUB_PATH}"
+                ln -s "${RESOLVED_STUB_PATH}" "${RESOLV_CONF_PATH}"
                 ln -s "${VPNSTACK_RELEASES_DIR}/old" "${VPNSTACK_CURRENT_RELEASE}"
 
                 create_revision_snapshot
@@ -156,6 +161,8 @@ def test_install_rollback_state(runner: AuditRunner) -> dict[str, str]:
                 rm -f "${HEALTH_STATE_PATH}"
                 printf 'new auth\n' >"${VPNSTACK_ADMIN_AUTH_FILE}"
                 printf 'new rules\n' >"${RULESET_DIR}/rules.srs"
+                rm -f "${RESOLV_CONF_PATH}"
+                printf 'new resolver\n' >"${RESOLV_CONF_PATH}"
                 ln -s "${VPNSTACK_RELEASES_DIR}/new" "${VPNSTACK_ROOT}/.current.tmp"
                 mv -Tf "${VPNSTACK_ROOT}/.current.tmp" "${VPNSTACK_CURRENT_RELEASE}"
                 INSTALL_MUTATION_STARTED=1
@@ -166,6 +173,8 @@ def test_install_rollback_state(runner: AuditRunner) -> dict[str, str]:
                 grep -Fxq 'old health' "${HEALTH_STATE_PATH}"
                 grep -Fxq 'old auth' "${VPNSTACK_ADMIN_AUTH_FILE}"
                 grep -Fxq 'old rules' "${RULESET_DIR}/rules.srs"
+                test -L "${RESOLV_CONF_PATH}"
+                grep -Fxq 'old resolver' "${RESOLV_CONF_PATH}"
                 test "$(readlink -f "${VPNSTACK_CURRENT_RELEASE}")" = "${VPNSTACK_RELEASES_DIR}/old"
 
                 rm -rf "${VPNSTACK_SNAPSHOT_DIR}"
@@ -267,7 +276,7 @@ def write_mock_ssh_scripts(base_dir: Path, *, allow_foreign: bool = False) -> tu
             "role": "ru-gateway",
             "release": {"release_id": "mock-release", "policy_version": "0.11.0", "installed_at": "2026-04-11T00:00:00Z"},
             "host": {"hostname": "ru-host", "login_user": "root", "is_root": True, "has_sudo": True, "os_id": "ubuntu", "os_version": "24.04", "default_interface": "eth0"},
-            "services": {"sing-box": "active", "xray": "active", "nftables": "active", "wireguard": "active", "health_timer": "active", "admin": "active"},
+            "services": {"sing-box": "active", "xray": "active", "nftables": "active", "wireguard": "active", "resolver": "active", "health_timer": "active", "admin": "active"},
             "artifacts": {"drift": "none", "files": {}},
             "wireguard": {"peers": []},
             "network": {"interfaces": {"eth0": {}}},
@@ -337,7 +346,7 @@ def write_mock_ssh_scripts(base_dir: Path, *, allow_foreign: bool = False) -> tu
             deployment_name=mock
             role=foreign-exit
             installed_at=2026-04-11T00:00:00Z
-            sing_box=inactive
+            sing_box=active
             nftables=active
             wireguard=active
             sync_timer=active

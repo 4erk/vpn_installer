@@ -62,10 +62,15 @@ class AuditModuleTests(unittest.TestCase):
             test_vpn_menu_exit=lambda *_args, **_kwargs: {},
             load_env_file=lambda *_args, **_kwargs: {"DEPLOY_NAME": "demo"},
         )
-        with no_op, patch("vpn_installer.audit.quick.shutil.which", return_value="found"):
+        with (
+            no_op,
+            patch("vpn_installer.audit.quick.shutil.which", return_value="found"),
+            patch("vpn_installer.audit.quick.docker_readiness", return_value=(True, "")),
+        ):
             audit_quick.run(runner)  # type: ignore[arg-type]
         self.assertNotIn("quick-unittest", runner.records)
         self.assertIn("quick-install-ux", runner.records)
+        self.assertIn("quick-interserver-hysteria-runtime", runner.records)
         self.assertIn("quick-unittest", runner.skips)
         self.assertIn("quick-linux-launcher-python", runner.skips)
 

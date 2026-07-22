@@ -5,7 +5,8 @@
 ```text
 клиент с vless-uri.txt -> RU Xray/Reality :443 -> RU sing-box :2080
                                                    -> direct-ru
-                                                   -> WireGuard -> foreign egress
+                                                   -> Hysteria2/QUIC -> foreign sing-box -> foreign egress
+                                                   -> WireGuard fallback -> foreign egress
 ```
 
 - `out/<deployment>/client/vless-uri.txt` является главным и неизменным клиентским контрактом.
@@ -17,7 +18,7 @@
 Роли:
 
 - `ru-gateway`: public Xray front, локальный sing-box, peer WireGuard.
-- `foreign-exit`: peer WireGuard, NAT и foreign egress.
+- `foreign-exit`: Hysteria2 endpoint, peer WireGuard, NAT и foreign egress.
 
 ## Источники истины
 
@@ -34,9 +35,11 @@
 - Public Reality TCP и оба серверных WAN используют BBR с `fq`; это pacing, а не route policy.
 - `net.ipv4.tcp_mtu_probing=1` является обязательным runtime-инвариантом. Linux включает PLPMTUD для конкретного TCP-потока после признаков ICMP black hole и с системным `tcp_probe_interval` периодически пробует восстановить больший PMTU. См. [Linux IP sysctl](https://www.kernel.org/doc/html/latest/networking/ip-sysctl.html) и [RFC 4821](https://datatracker.ietf.org/doc/html/rfc4821).
 - WireGuard MTU не меняется по журналам или одиночному endpoint. Он остаётся частью deployment spec и меняется только сравнительным acceptance-тестом.
-- Buffer/backlog sysctl не применяются без `softnet`, UDP buffer или interface delta evidence. После подтверждённых `UdpRcvbufErrors` WireGuard использует единый managed receive profile: `rmem_default=4 MiB`, `rmem_max=16 MiB`; send buffer и backlog не меняются без собственных drops. Это не публичные ручки для оперативного лечения. Семантика UDP receive limits описана в [Linux IP sysctl](https://www.kernel.org/doc/html/latest/networking/ip-sysctl.html).
+- Buffer/backlog sysctl не применяются без `softnet`, UDP buffer или interface delta evidence. После подтверждённых `UdpRcvbufErrors` transport использует единый managed profile: `rmem_default=4 MiB`, `rmem_max=16 MiB`, `wmem_max=16 MiB`; backlog не меняется без собственных drops. Это не публичные ручки для оперативного лечения. Hysteria рекомендует увеличить системные UDP receive/send ceilings для высокоскоростного QUIC: [performance guide](https://v2.hysteria.network/docs/advanced/Performance/).
 - CAKE/HTB не включаются по одному высокому RTT. CAKE управляет очередью только перед известным общим bottleneck и для egress требует обоснованного bandwidth; его `autorate-ingress` не оценивает участок сети ниже qdisc. При source-specific деградации глобальный shaper урежет исправных клиентов, не исправляя удалённую очередь. См. [tc-cake(8)](https://man7.org/linux/man-pages/man8/tc-cake.8.html).
-- URLTest активируется только при двух независимых foreign egress. Он выбирает выход для новых соединений и не прерывает существующие; при одном сервере snapshot честно сообщает `redundancy: unavailable`. См. [sing-box URLTest](https://sing-box.sagernet.org/configuration/outbound/urltest/).
+- Между теми же RU/foreign узлами работают два transport: основной Hysteria2/QUIC и резервный WireGuard. Hysteria2 не получает статических `up_mbps/down_mbps`, поэтому использует BBR congestion control ([sing-box Hysteria2](https://sing-box.sagernet.org/configuration/outbound/hysteria2/)). Один sing-box selector закреплён за Hysteria2; отдельный supervisor проверяет raw outbounds с жёстко ограниченным временем, немедленно переводит только новые соединения на исправный WireGuard при отказе primary и возвращается после двух успешных primary probes. QUIC восстанавливает потерянные пакеты внутри transport; уже созданный TCP stream намеренно не мигрирует между transport.
+- Host resolver не зависит от одного провайдерского DNS: renderer создаёт единый `systemd-resolved` drop-in с тремя независимыми upstreams, локальным cache и часовым stale retention. Это сокращает повторные сетевые DNS-запросы и позволяет использовать известные positive records при кратком отказе upstream; NXDOMAIN не подменяется stale-ответом ([resolved.conf](https://www.freedesktop.org/software/systemd/man/resolved.conf.html)).
+- Transport redundancy не является egress redundancy: оба пути заканчиваются на одном foreign VPS. Snapshot поэтому отдельно выводит `redundancy.transport` и `redundancy.egress`; второй независимый foreign сервер по-прежнему не выдумывается.
 - Один статический VLESS URI не может автоматически сменить публичный AS, TCP port или transport. Для отказоустойчивости client-to-RU path нужен второй независимый RU ingress либо новый клиентский transport contract. RAW/Reality/Vision не заменяется на XHTTP вслепую: полевые отчёты показывают и обход ISP policing, и отдельные compatibility/latency regressions ([net4people/bbs #546](https://github.com/net4people/bbs/issues/546), [Xray-core #5332](https://github.com/XTLS/Xray-core/issues/5332)).
 
 ## Routing policy
@@ -61,8 +64,8 @@ Foreign-классы всегда остаются на `to-foreign`. Health и 
 
 Snapshot schema 2 содержит:
 
-- service state, manifest drift и hashes всех managed artifacts;
-- WireGuard, interface/conntrack, protocol и softnet counters; health хранит дельты UDP receive overflow, softnet drops и missed packets;
+- service state, manifest drift и hashes всех managed artifacts, включая resolver drop-in и состояние `/etc/resolv.conf` stub;
+- WireGuard, выбранный межсерверный transport и delay кандидатов, interface/conntrack, protocol и softnet counters; health хранит дельты UDP receive/send overflow, softnet drops и missed packets;
 - TCP front telemetry: socket states, RTT, retransmitted bytes/ratio, PMTU, MSS, cwnd, delivery rate, reordering и unacked по каждому `source IP:port` с последующей агрегацией по canonical IPv4/IPv6 адресу, включая kernel-формат `::ffff:<IPv4>`;
 - fresh, 30-minute и 24-hour log windows;
 - mutually exclusive buckets: DNS timeout, domain timeout, IPv4 literal timeout, IPv6 literal timeout, private/fake block, client reset/EOF, invalid Reality и disabled-invalid;
@@ -82,7 +85,7 @@ Health выполняется раз в две минуты и имеет сос
 
 ## Установка и обслуживание
 
-Install/reinstall собирает release во временном каталоге внутри `/etc/vpn-stack/releases`, проверяет sing-box, Xray, nftables, WireGuard, systemd, manifest и assets, затем публикует immutable content-addressed tree и атомарно переключает `current`. Revision snapshot охватывает manifest, configs, rules/assets, runtime health state, admin auth, `current`/`previous` и состояния всех затрагиваемых сервисов. Неудачные service start, drift или core route acceptance возвращают весь этот набор; уже опубликованный release не перезаписывается повторной установкой. Внешние capability probes выводятся отдельно: временный отказ raw IPv6 при исправном core path даёт `degraded` и проваливает полный live verify, но не откатывает тот же конфиг, который не может изменить состояние внешнего endpoint.
+Install/reinstall собирает release во временном каталоге внутри `/etc/vpn-stack/releases`, проверяет sing-box, Xray, nftables, WireGuard, systemd, manifest и assets, затем публикует immutable content-addressed tree и атомарно переключает `current`. Revision snapshot охватывает manifest, configs, rules/assets, resolver drop-in и `/etc/resolv.conf`, runtime health state, admin auth, `current`/`previous` и состояния всех затрагиваемых сервисов. Неудачные service start, drift или core route acceptance возвращают весь этот набор; уже опубликованный release не перезаписывается повторной установкой. Внешние capability probes выводятся отдельно: временный отказ raw IPv6 при исправном core path даёт `degraded` и проваливает полный live verify, но не откатывает тот же конфиг, который не может изменить состояние внешнего endpoint.
 
 Хранятся последние 10 revision snapshots плюс отдельный baseline. Snapshot текущей транзакции никогда не удаляется её собственным rollback; pruning выполняется до создания нового snapshot.
 
@@ -92,7 +95,7 @@ Journald ограничивается managed drop-in. APT periodic settings в�
 
 ## Live verification
 
-`vpn verify live --deployment <name>` обязателен после install/reinstall. Он собирает agent acceptance snapshots на обеих ролях и запускает эфемерный sing-box client, построенный напрямую из `vless-uri.txt`. Этот client соединяется с RU `:443`, проходит VLESS/Reality/Xray/sing-box/WireGuard path и проверяет egress identity, GitHub, Google, UDP DNS, TCP IPv6 literal, быстрый SOCKS reject private/fake destinations и девять отдельных first-load GET через RU/foreign routes.
+`vpn verify live --deployment <name>` обязателен после install/reinstall. Он собирает agent acceptance snapshots на обеих ролях и запускает эфемерный sing-box client, построенный напрямую из `vless-uri.txt`. Этот client соединяется с RU `:443`, проходит VLESS/Reality/Xray/sing-box и выбранный Hysteria2/WireGuard transport, затем проверяет egress identity, GitHub, Google, UDP DNS, TCP IPv6 literal, быстрый SOCKS reject private/fake destinations и девять отдельных first-load GET через RU/foreign routes.
 
 Дополнительно проверяются DNS, direct/domain routes, IPv4 literal, IPv6 literal и reject private/fake. Итог только один из `verified`, `degraded`, `failed`, `inconclusive`; зелёный `status` не является acceptance доказательством.
 
@@ -100,7 +103,7 @@ Server-side route acceptance использует HTTP `HEAD`: его задач
 
 Для RU acceptance прямой egress подтверждается отдельной identity-проверкой. Foreign-домены обязаны пройти через `wg0` и local router, IPv4 literal через оба пути, а IPv6 literal через router и проверенный IPv6 egress foreign. Прямой запрос RU к заблокированному foreign-домену и raw `curl --interface wg0 -6` не являются пользовательским dataplane и записываются как наблюдения, но не вызывают ложный rollback.
 
-`verify live --throughput-seconds 600` дополнительно держит public VLESS path десять минут на нескольких независимых download origins и требует подтверждённую capacity не менее 50 Mbit/s хотя бы до одного из них. Runner считает реальные байты и время отдельно по каждому origin, показывает также общий throughput и не принимает rate limit одного CDN за предел всего VPN. Один global lock защищает SOCKS port от конкурирующих запусков; target-side deadline и обновляемая SSH controller lease завершают всю remote process group даже при аварийном исчезновении локального процесса. Нагрузка запускается только явным флагом, использует доступную production-полосу и не входит в health timer.
+`verify live --throughput-seconds 60` дополнительно проверяет public VLESS path на нескольких HTTPS download endpoints: 30-секундный uncapped burst должен подтвердить capacity не менее 50 Mbit/s, затем одно непрерывное bounded-соединение держит до 16 Mbit/s и требует не менее 10 Mbit/s без обрывов. Один global lock защищает SOCKS port от конкурирующих запусков; target-side deadline и обновляемая SSH controller lease завершают remote process group при аварийном исчезновении локального процесса. Проверка не входит в health timer и не должна длительно насыщать production path.
 
 Проверяющий runner сейчас запускается на foreign role, поэтому он проверяет полный публичный VLESS path и server capacity, но не измеряет маршрут конкретного пользователя до RU. Одновременный `client_specific/degraded` не маскируется успешным runner: это два разных component verdict.
 

@@ -11,6 +11,7 @@ import uuid
 from pathlib import Path
 
 from .common import DEPLOYMENTS_DIR, env_line, fail, parse_env_value, read_text, sanitize_name, write_text
+from .interserver_transport import generate_transport_identity, validate_transport_identity
 from .models import (
     ALLOW_EMPTY_OVERRIDE,
     DEFAULT_ASSET_TIMEOUT,
@@ -107,6 +108,9 @@ REMOTE_ENV_CRITICAL_KEYS = {
     "JOURNAL_SYSTEM_MAX_USE",
     "JOURNAL_MAX_RETENTION_SEC",
     "WG_MTU",
+    "INTERSERVER_HY2_CERTIFICATE_B64",
+    "INTERSERVER_HY2_PRIVATE_KEY_B64",
+    "INTERSERVER_HY2_PUBLIC_KEY_SHA256",
     "RU_FORCE_DIRECT_DOMAIN",
     "RU_FORCE_DIRECT_DOMAIN_SUFFIX",
     "RU_FORCE_DIRECT_IP_CIDR",
@@ -213,6 +217,7 @@ def generate_default_env(deploy_name: str) -> dict[str, str]:
     reality_private, reality_public = generate_x25519_pair()
     ru_wg_private, ru_wg_public = generate_x25519_pair()
     foreign_wg_private, foreign_wg_public = generate_x25519_pair()
+    transport_identity = generate_transport_identity()
     return {
         "DEPLOY_NAME": deploy_name,
         "RU_PUBLIC_IP": "",
@@ -256,6 +261,7 @@ def generate_default_env(deploy_name: str) -> dict[str, str]:
         "WG_FOREIGN_PRIVATE_KEY": base64_std(foreign_wg_private),
         "WG_FOREIGN_PUBLIC_KEY": base64_std(foreign_wg_public),
         "WG_PRESHARED_KEY": base64_std(os.urandom(32)),
+        **transport_identity,
         "GLOBAL_DOH_SERVER": "8.8.8.8",
         "GLOBAL_DOH_SERVER_NAME": "dns.google",
         "GLOBAL_DOH_PATH": "/dns-query",
@@ -341,8 +347,15 @@ def _merge_source_defaults(existing_value: str, default_value: str) -> str:
     return " ".join(merged)
 
 
-def merge_env_with_defaults(existing: dict[str, str], deploy_name: str) -> dict[str, str]:
+def merge_env_with_defaults(
+    existing: dict[str, str],
+    deploy_name: str,
+    *,
+    fallback_defaults: dict[str, str] | None = None,
+) -> dict[str, str]:
     defaults = generate_default_env(deploy_name)
+    if fallback_defaults:
+        defaults.update({key: value for key, value in fallback_defaults.items() if key in defaults})
     merged = defaults.copy()
     for key, value in existing.items():
         if key in DEPRECATED_ENV_KEYS:
@@ -399,6 +412,9 @@ def generate_example_env() -> dict[str, str]:
             "WG_FOREIGN_PRIVATE_KEY": "",
             "WG_FOREIGN_PUBLIC_KEY": "",
             "WG_PRESHARED_KEY": "",
+            "INTERSERVER_HY2_CERTIFICATE_B64": "",
+            "INTERSERVER_HY2_PRIVATE_KEY_B64": "",
+            "INTERSERVER_HY2_PUBLIC_KEY_SHA256": "",
         }
     )
     return env
@@ -503,6 +519,11 @@ def require_env(env: dict[str, str], required: list[str] | None = None) -> None:
     missing = [name for name in required_names if not env.get(name, "").strip()]
     if missing:
         fail(f"В deployment env не хватает обязательных значений: {', '.join(missing)}")
+    if all(env.get(name, "").strip() for name in ("INTERSERVER_HY2_CERTIFICATE_B64", "INTERSERVER_HY2_PRIVATE_KEY_B64", "INTERSERVER_HY2_PUBLIC_KEY_SHA256")):
+        try:
+            validate_transport_identity(env)
+        except ValueError as exc:
+            fail(f"Некорректная identity межсерверного транспорта: {exc}")
 
 
 def find_existing_deployments() -> list[str]:

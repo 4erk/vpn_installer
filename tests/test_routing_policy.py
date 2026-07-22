@@ -22,10 +22,18 @@ class RoutingPolicyTests(unittest.TestCase):
         self.assertNotIn("resolved_ru_ip", policy.classes)
         self.assertNotIn("client_dns_dot", policy.classes)
 
-    def test_policy_has_two_real_egress_outbounds_without_artificial_timeouts(self) -> None:
+    def test_policy_has_resilient_primary_and_wireguard_fallback_without_artificial_timeouts(self) -> None:
         parts = build_ru_routing_policy(self.make_env()).singbox_parts()
         outbounds = {outbound["tag"]: outbound for outbound in parts["outbounds"]}
-        self.assertEqual(set(outbounds), {"direct-ru", "to-foreign"})
+        self.assertEqual(set(outbounds), {"direct-ru", "to-foreign-hy2", "to-foreign-wg", "to-foreign"})
+        self.assertEqual(outbounds["to-foreign"]["outbounds"], ["to-foreign-hy2", "to-foreign-wg"])
+        self.assertEqual(outbounds["to-foreign"]["type"], "selector")
+        self.assertEqual(outbounds["to-foreign"]["default"], "to-foreign-hy2")
+        self.assertEqual(outbounds["to-foreign-hy2"]["type"], "hysteria2")
+        self.assertNotIn("up_mbps", outbounds["to-foreign-hy2"])
+        self.assertNotIn("down_mbps", outbounds["to-foreign-hy2"])
+        self.assertEqual(outbounds["to-foreign-wg"]["bind_interface"], "wg0")
+        self.assertEqual(outbounds["to-foreign-wg"]["domain_resolver"]["server"], "dns-ru-direct")
         self.assertFalse(any("connect_timeout" in outbound for outbound in outbounds.values()))
 
     def test_domain_policy_finishes_before_literal_policy(self) -> None:
@@ -89,8 +97,8 @@ class RoutingPolicyTests(unittest.TestCase):
         self.assertFalse(any("override_address" in rule for rule in rules))
 
     def test_legacy_knobs_are_reported_but_cannot_change_routes(self) -> None:
-        baseline = build_ru_routing_policy(self.make_env())
         env = self.make_env()
+        baseline = build_ru_routing_policy(env)
         env.update({"RU_LITERAL_POLICY": "reject", "RU_IPV6_LITERAL_POLICY": "reject", "TO_FOREIGN_CONNECT_TIMEOUT": "5s", "RU_BLOCK_QUIC": "1"})
         legacy = build_ru_routing_policy(env)
         self.assertEqual(legacy.route_rules, baseline.route_rules)

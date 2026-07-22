@@ -31,11 +31,14 @@ class PackageTests(unittest.TestCase):
         script = (Path(__file__).resolve().parents[1] / "install.sh").read_text(encoding="utf-8")
         self.assertIn('AGENT_SCRIPT_PATH="/usr/local/lib/vpn-stack/vpn-stack-agent.py"', script)
         self.assertIn('AGENT_LOG_CLASSIFIER_PATH="/usr/local/lib/vpn-stack/log_classifier.py"', script)
+        self.assertIn('AGENT_TRANSPORT_POLICY_PATH="/usr/local/lib/vpn-stack/interserver_transport.py"', script)
+        self.assertIn('TRANSPORT_SERVICE_PATH="/etc/systemd/system/vpn-stack-transport.service"', script)
         self.assertIn("stage_release()", script)
         self.assertIn("publish_staged_release()", script)
         self.assertIn("release_tree_digest()", script)
         self.assertIn("prune_revision_snapshots()", script)
         self.assertIn("normalize_staged_release_permissions", script)
+        self.assertIn('chmod 0600 "${source_dir}/sing-box.json"', script)
         self.assertIn('chmod 0600 "${source_dir}/${WG_INTERFACE}.conf"', script)
         self.assertIn("validate_staged_release()", script)
         self.assertIn('python3 "${source_dir}/vpn-stack-agent.py" --help', script)
@@ -53,9 +56,14 @@ class PackageTests(unittest.TestCase):
         self.assertIn("VPNSTACK_PREVIOUS_RELEASE", script)
         self.assertIn('"${VPNSTACK_RENDER_MANIFEST_FILE}"', script)
         self.assertIn('"${HEALTH_STATE_PATH}"', script)
+        self.assertIn('"${TRANSPORT_STATE_PATH}"', script)
         self.assertNotIn('rm -rf "${release_dir}"', script)
         self.assertIn("configure_unattended_security_updates", script)
         self.assertIn('copy_if_present "${source_dir}/apt-vpn-stack-unattended.conf"', script)
+        self.assertIn('copy_if_present "${source_dir}/resolved-vpn-stack.conf"', script)
+        self.assertIn("systemd-resolved", script)
+        self.assertIn('ln -sfn "../run/systemd/resolve/stub-resolv.conf"', script)
+        self.assertIn("extend_baseline_contract", script)
         self.assertIn('copy_if_present "${source_dir}/modules-vpn-stack.conf"', script)
         self.assertIn("modprobe nf_conntrack", script)
         remove_body = script.split("remove_managed_files() {", 1)[1].split("\n}", 1)[0]
@@ -71,7 +79,7 @@ class PackageTests(unittest.TestCase):
 
     def test_package_exposes_version_via_getattr(self) -> None:
         package = importlib.import_module("vpn_installer")
-        self.assertEqual(package.__version__, "0.11.12")
+        self.assertEqual(package.__version__, "0.12.0")
         with self.assertRaises(AttributeError):
             package.__getattr__("nope")
 

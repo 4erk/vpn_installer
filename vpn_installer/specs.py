@@ -47,5 +47,5 @@ class RoleSpec:
 
     @property
     def required_services(self) -> tuple[str, ...]:
-        base = ("wireguard", "nftables")
-        return ("sing-box", "xray", *base) if self.requires_xray else base
+        base = ("wireguard", "nftables", "resolver")
+        return ("sing-box", "xray", "transport", *base) if self.requires_xray else ("sing-box", *base)

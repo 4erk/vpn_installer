@@ -8,7 +8,7 @@ from pathlib import Path
 from . import workflows
 from .common import OUT_DIR, print_header
 from .diagnostics import DiagnosticsSnapshot
-from .models import ROLE_FOREIGN, ROLE_RU, UDP_RMEM_DEFAULT, UDP_RMEM_MAX
+from .models import ROLE_FOREIGN, ROLE_RU, UDP_RMEM_DEFAULT, UDP_RMEM_MAX, UDP_WMEM_MAX
 from .remote import remote_agent_snapshot, scp_upload, ssh_capture
 from .roles import requested_roles
 from .vless_verify import (
@@ -24,6 +24,8 @@ from .vless_verify import (
     RUNNER_THROUGHPUT_CLOCK_SKEW_SECONDS,
     RUNNER_TRANSPORT_DRAIN_SECONDS,
     RUNNER_ROUTE_PROBE_TIMEOUT_SECONDS,
+    THROUGHPUT_CAPACITY_SECONDS,
+    THROUGHPUT_STABILITY_FLOOR_BYTES_PER_SECOND,
     parse_vless_uri,
     render_ephemeral_singbox_client,
     render_socks5_udp_dns_probe,
@@ -39,14 +41,15 @@ VLESS_RUNNER_LOCK_PATH = "/run/lock/vpn-stack-vless-verify.lock"
 def _verify_snapshot(snapshot: DiagnosticsSnapshot) -> DiagnosticsSnapshot:
     hard_failures: list[str] = []
     degradations: list[str] = []
-    for service_name, state in snapshot.services.items():
-        required_services = {"wireguard", "nftables"}
-        if snapshot.role == ROLE_RU:
-            required_services.add("sing-box")
-        if service_name in required_services and state and state != "active":
-            hard_failures.append(f"{service_name}={state}")
+    required_services = {"wireguard", "nftables", "sing-box", "resolver"}
+    for service_name in sorted(required_services):
+        state = snapshot.services.get(service_name)
+        if state != "active":
+            hard_failures.append(f"{service_name}={state or 'missing'}")
     if snapshot.role == ROLE_RU and snapshot.services.get("xray") != "active":
         hard_failures.append(f"xray={snapshot.services.get('xray')}")
+    if snapshot.role == ROLE_RU and snapshot.services.get("transport") != "active":
+        hard_failures.append(f"transport={snapshot.services.get('transport') or 'missing'}")
     if snapshot.drift == "server-mutated":
         hard_failures.append("installed config hash differs from render manifest")
     elif snapshot.drift == "unknown":
@@ -59,10 +62,11 @@ def _verify_snapshot(snapshot: DiagnosticsSnapshot) -> DiagnosticsSnapshot:
     try:
         rmem_default = int(tcp_adaptation.get("udp_rmem_default", 0))
         rmem_max = int(tcp_adaptation.get("udp_rmem_max", 0))
+        wmem_max = int(tcp_adaptation.get("udp_wmem_max", 0))
     except (TypeError, ValueError):
-        rmem_default = rmem_max = 0
-    if tcp_adaptation and (rmem_default < UDP_RMEM_DEFAULT or rmem_max < UDP_RMEM_MAX):
-        degradations.append("UDP receive buffer profile is not active")
+        rmem_default = rmem_max = wmem_max = 0
+    if tcp_adaptation and (rmem_default < UDP_RMEM_DEFAULT or rmem_max < UDP_RMEM_MAX or wmem_max < UDP_WMEM_MAX):
+        degradations.append("UDP socket buffer profile is not active")
     required_verdicts = {"server_path", "public_front", "client_observation"}
     if not required_verdicts.issubset(snapshot.component_verdicts):
         hard_failures.append("agent verdict fields are incomplete")
@@ -160,13 +164,27 @@ def _validate_public_vless_result(result: dict[str, object], uri, foreign_target
             speed_bps = float(measurement.get("capacity_bytes_per_second", measurement.get("bytes_per_second", 0)) or 0)
             duration = float(measurement.get("duration_seconds", 0) or 0)
             failures = int(measurement.get("failures", 0) or 0)
+            source_failures = int(measurement.get("source_failures", 0) or 0)
+            stability_bps = float(measurement.get("stability_bytes_per_second", 0) or 0)
+            stability_duration = float(measurement.get("stability_duration_seconds", 0) or 0)
         except (TypeError, ValueError):
             return {"verdict": "failed", "reason": f"public VLESS throughput measurement is malformed: {measurement}", "result": result}
         if failures:
             return {"verdict": "failed", "reason": f"public VLESS throughput had {failures} transfer failures", "result": result}
+        if source_failures:
+            return {
+                "verdict": "failed",
+                "reason": f"public VLESS throughput had {source_failures} unexpected source failures: {measurement.get('source_metrics', [])}",
+                "result": result,
+            }
         if speed_bps < VLESS_CAPACITY_FLOOR_BYTES_PER_SECOND:
             return {"verdict": "failed", "reason": f"public VLESS capacity below 50 Mbit/s: {speed_bps * 8 / 1_000_000:.2f} Mbit/s", "result": result}
-        if duration < throughput_seconds:
+        expected_stability_seconds = max(0, throughput_seconds - THROUGHPUT_CAPACITY_SECONDS)
+        if expected_stability_seconds and stability_bps < THROUGHPUT_STABILITY_FLOOR_BYTES_PER_SECOND:
+            return {"verdict": "failed", "reason": f"public VLESS sustained rate below 10 Mbit/s: {stability_bps * 8 / 1_000_000:.2f} Mbit/s", "result": result}
+        if stability_duration + 0.5 < expected_stability_seconds:
+            return {"verdict": "failed", "reason": f"public VLESS stability window too short: {stability_duration:.1f}s of {expected_stability_seconds}s", "result": result}
+        if duration + 0.5 < throughput_seconds:
             return {"verdict": "failed", "reason": f"public VLESS throughput window too short: {duration:.1f}s of {throughput_seconds}s", "result": result}
     return {"verdict": "verified", "result": result}
 
@@ -322,6 +340,14 @@ def _verify_public_vless_uri(uri_path: Path, foreign_target, *, throughput_secon
                 remote_lease,
                 throughput_seconds=throughput_seconds,
             )
+            try:
+                result["runner_log"] = ssh_capture(
+                    foreign_target,
+                    f"tail -n 200 {shlex.quote(remote_error)} 2>/dev/null || true",
+                    command_timeout=15,
+                )
+            except Exception:  # noqa: BLE001
+                result["runner_log"] = "unavailable"
             runner_completed = True
         except (ValueError, OSError, RuntimeError) as exc:
             return {"verdict": "failed", "reason": f"public VLESS path failed: {exc}"}
@@ -367,6 +393,24 @@ def verify_live_workflow(deployment: str | None, *, non_interactive: bool = Fals
             snapshot = DiagnosticsSnapshot(deployment=deployment_name, role=target.role, verdict="failed", reasons=[f"agent snapshot failed: {exc}"])
         snapshots.append(snapshot)
     snapshots = [_reconcile_public_capabilities(snapshot, public_vless) for snapshot in snapshots]
+    report_dir = OUT_DIR / "diagnostics" / f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{deployment_name}"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    report_path = report_dir / "live-verify.json"
+    report_path.write_text(
+        json.dumps(
+            {
+                "deployment": deployment_name,
+                "throughput_seconds": throughput_seconds,
+                "public_vless": public_vless,
+                "snapshots": [snapshot.to_dict() for snapshot in snapshots],
+            },
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     for verdict in [*(snapshot.verdict for snapshot in snapshots), str(public_vless["verdict"])]:
         if rank[verdict] > rank[worst]:
             worst = verdict
@@ -376,5 +420,6 @@ def verify_live_workflow(deployment: str | None, *, non_interactive: bool = Fals
         reason_text = "; ".join(snapshot.reasons) if snapshot.reasons else "fresh probes and installed manifest are consistent"
         print(f"{snapshot.role or 'unknown'}: {snapshot.verdict} - {reason_text}")
     print(f"public-vless-uri: {public_vless['verdict']} - {public_vless.get('reason', public_vless.get('result', ''))}")
+    print(f"report: {report_path}")
     print(f"Deployment env: {Path(env_path)}")
     return 0 if worst == "verified" else 1

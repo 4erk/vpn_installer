@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 from ..common import OUT_DIR, ROOT_DIR, RUNTIME_SITE_PACKAGES
 from ..config import load_env_file
+from ..manifest import XRAY_VERSION
 from ..render import render_all_artifacts
 from ..runtime_deps import ensure_python_package
 from ..targets import build_target
@@ -107,6 +108,8 @@ def run(runner: AuditRunner) -> None:
                 str(ROOT_DIR / "vpn_installer" / "workflows.py"),
                 str(ROOT_DIR / "vpn_installer" / "render.py"),
                 str(ROOT_DIR / "vpn_installer" / "specs.py"),
+                str(ROOT_DIR / "vpn_installer" / "interserver_transport.py"),
+                str(ROOT_DIR / "vpn_installer" / "system_resolver.py"),
                 str(ROOT_DIR / "vpn_installer" / "routing_policy.py"),
                 str(ROOT_DIR / "vpn_installer" / "server_agent.py"),
                 str(ROOT_DIR / "vpn_installer" / "vless_verify.py"),
@@ -156,9 +159,11 @@ def run(runner: AuditRunner) -> None:
     if docker_available:
         runner.record("quick-singbox-check", lambda: test_singbox_check(runner, out_dir))
         runner.record("quick-singbox-runtime-ru", lambda: test_ru_singbox_runtime_smoke(runner, out_dir))
+        runner.record("quick-interserver-hysteria-runtime", lambda: test_interserver_hysteria_runtime(runner, out_dir))
     else:
         runner.skip("quick-singbox-check", f"{docker_skip_reason}, sing-box container check пропущен")
         runner.skip("quick-singbox-runtime-ru", f"{docker_skip_reason}, runtime smoke для RU sing-box пропущен")
+        runner.skip("quick-interserver-hysteria-runtime", f"{docker_skip_reason}, Hysteria2 runtime check пропущен")
 
     if dev_mode and docker_available:
         runner.record("quick-xray-reality-interop", lambda: test_xray_reality_interop(runner, out_dir))
@@ -450,6 +455,74 @@ def test_ru_singbox_runtime_smoke(runner: AuditRunner, out_dir: Path) -> dict[st
     return {"config": str(config_path), "router_config": str(router_plain_path), "result": "runtime-smoke-ok"}
 
 
+def test_interserver_hysteria_runtime(runner: AuditRunner, out_dir: Path) -> dict[str, str]:
+    network = f"audit-hysteria-{runner.run_id}"
+    server = f"audit-hysteria-server-{runner.run_id}"
+    client = f"audit-hysteria-client-{runner.run_id}"
+    server_ip = "172.31.249.10"
+    client_ip = "172.31.249.11"
+    work_dir = runner.work_dir / "interserver-hysteria-runtime"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    client_config_path = work_dir / "client.json"
+    server_config_path = out_dir / "preview" / "foreign" / "sing-box.json"
+
+    ru_config = json.loads((out_dir / "preview" / "ru" / "sing-box.json").read_text(encoding="utf-8"))
+    primary = next(
+        (item for item in ru_config.get("outbounds", []) if item.get("tag") == "to-foreign-hy2"),
+        None,
+    )
+    if not isinstance(primary, dict) or primary.get("type") != "hysteria2":
+        raise AuditFailure("RU config не содержит Hysteria2 primary outbound")
+    primary = dict(primary)
+    primary["server"] = server_ip
+    selector = {
+        "type": "selector",
+        "tag": "to-foreign",
+        "outbounds": ["to-foreign-hy2"],
+        "default": "to-foreign-hy2",
+        "interrupt_exist_connections": False,
+    }
+    client_config = {
+        "log": {"level": "info", "timestamp": True},
+        "inbounds": [{"type": "mixed", "tag": "probe-in", "listen": "0.0.0.0", "listen_port": 1080}],
+        "outbounds": [primary, selector],
+        "route": {"final": "to-foreign"},
+        "experimental": ru_config["experimental"],
+    }
+    write_bytes(client_config_path, json.dumps(client_config, ensure_ascii=False, indent=2).encode("utf-8") + b"\n")
+
+    with runner.docker_network(network, subnet="172.31.249.0/24"):
+        with runner.docker_container(server, AUDIT_IMAGE, network=network, ip=server_ip):
+            with runner.docker_container(client, AUDIT_IMAGE, network=network, ip=client_ip):
+                runner.docker_exec(server, "mkdir -p /work /srv/probe && printf 'hysteria transport ok\\n' >/srv/probe/index.html")
+                runner.docker_exec(client, "mkdir -p /work")
+                runner.docker_copy(server, server_config_path, "/work/server.json")
+                runner.docker_copy(client, client_config_path, "/work/client.json")
+                runner.docker_exec(server, "sing-box check -c /work/server.json")
+                runner.docker_exec(client, "sing-box check -c /work/client.json")
+                runner.docker_exec(server, "python3 -m http.server 18080 --bind 127.0.0.1 --directory /srv/probe >/tmp/web.log 2>&1 &")
+                runner.docker_exec(server, "sing-box run -c /work/server.json >/tmp/hysteria-server.log 2>&1 &")
+                runner.docker_exec(client, "sing-box run -c /work/client.json >/tmp/hysteria-client.log 2>&1 &")
+                runner.docker_exec(server, "for i in $(seq 1 40); do ss -Huln | grep -q ':18443 ' && exit 0; sleep 0.25; done; cat /tmp/hysteria-server.log; exit 1")
+                runner.docker_exec(client, "for i in $(seq 1 40); do ss -Hltn | grep -q ':1080 ' && ss -Hltn | grep -q ':19090 ' && exit 0; sleep 0.25; done; cat /tmp/hysteria-client.log; exit 1")
+                try:
+                    completed = runner.docker_exec(
+                        client,
+                        "curl --silent --show-error --fail --max-time 15 --socks5-hostname 127.0.0.1:1080 http://127.0.0.1:18080/",
+                    )
+                except Exception:
+                    runner.docker_exec(server, "cat /tmp/hysteria-server.log /tmp/web.log", expected_codes={0, 1})
+                    runner.docker_exec(client, "cat /tmp/hysteria-client.log", expected_codes={0, 1})
+                    raise
+                if completed.stdout.strip() != "hysteria transport ok":
+                    raise AuditFailure("Hysteria2 runtime не вернул payload с foreign endpoint")
+                runner.docker_exec(
+                    client,
+                    "curl --silent --show-error --fail http://127.0.0.1:19090/proxies/to-foreign | jq -e '.now == \"to-foreign-hy2\"'",
+                )
+    return {"server_config": str(server_config_path), "client_config": str(client_config_path), "result": "handshake-and-http-ok"}
+
+
 def test_xray_reality_interop(runner: AuditRunner, out_dir: Path) -> dict[str, str]:
     network = f"audit-xray-interop-{runner.run_id}"
     router = f"audit-singbox-router-{runner.run_id}"
@@ -538,7 +611,7 @@ def test_xray_reality_interop(runner: AuditRunner, out_dir: Path) -> dict[str, s
                         "xray-front",
                         "-v",
                         f"{xray_server_config_path}:/etc/xray/config.json:ro",
-                        "ghcr.io/xtls/xray-core:latest",
+                        f"ghcr.io/xtls/xray-core:{XRAY_VERSION}",
                         "run",
                         "-config",
                         "/etc/xray/config.json",
@@ -557,7 +630,7 @@ def test_xray_reality_interop(runner: AuditRunner, out_dir: Path) -> dict[str, s
                         network,
                         "-v",
                         f"{client_config_path}:/etc/xray/config.json:ro",
-                        "ghcr.io/xtls/xray-core:latest",
+                        f"ghcr.io/xtls/xray-core:{XRAY_VERSION}",
                         "run",
                         "-config",
                         "/etc/xray/config.json",

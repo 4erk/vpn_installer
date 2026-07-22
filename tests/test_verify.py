@@ -16,10 +16,10 @@ FIRST_LOAD_OK = {"attempts": 9, "successes": 9, "failures": 0, "average_total_se
 
 
 def acceptance_snapshot(role: str, **overrides: object) -> DiagnosticsSnapshot:
-    services = {"wireguard": "active", "nftables": "active"}
+    services = {"wireguard": "active", "nftables": "active", "sing-box": "active", "resolver": "active"}
     verdicts = {"server_path": "verified", "public_front": "not-applicable", "client_observation": "not-applicable"}
     if role == ROLE_RU:
-        services.update({"sing-box": "active", "xray": "active"})
+        services.update({"sing-box": "active", "xray": "active", "transport": "active"})
         verdicts.update({"public_front": "verified", "client_observation": "observed"})
     payload: dict[str, object] = {
         "role": role,
@@ -32,6 +32,7 @@ def acceptance_snapshot(role: str, **overrides: object) -> DiagnosticsSnapshot:
                 "mtu_probing": 1,
                 "udp_rmem_default": 4_194_304,
                 "udp_rmem_max": 16_777_216,
+                "udp_wmem_max": 16_777_216,
             }
         },
         "route_probes": {"profile": "acceptance", "ok": True},
@@ -81,7 +82,7 @@ class VerifyTests(unittest.TestCase):
             )
         )
         self.assertEqual(verified.verdict, "degraded")
-        self.assertIn("UDP receive buffer profile is not active", verified.reasons)
+        self.assertIn("UDP socket buffer profile is not active", verified.reasons)
 
     def test_verify_snapshot_requires_acceptance_probes(self) -> None:
         verified = _verify_snapshot(acceptance_snapshot(ROLE_FOREIGN, route_probes={"profile": "light", "ok": True}))
@@ -122,9 +123,20 @@ class VerifyTests(unittest.TestCase):
         self.assertEqual(reconciled.verdict, "degraded")
         self.assertEqual(reconciled.reasons, ["public TCP front shows retransmission or socket churn"])
 
-    def test_verify_snapshot_allows_inactive_foreign_singbox(self) -> None:
-        verified = _verify_snapshot(acceptance_snapshot(ROLE_FOREIGN, services={"sing-box": "inactive", "wireguard": "active", "nftables": "active"}))
-        self.assertEqual(verified.verdict, "verified")
+    def test_verify_snapshot_requires_foreign_transport_service(self) -> None:
+        verified = _verify_snapshot(
+            acceptance_snapshot(
+                ROLE_FOREIGN,
+                services={"sing-box": "inactive", "wireguard": "active", "nftables": "active", "resolver": "active"},
+            )
+        )
+        self.assertEqual(verified.verdict, "failed")
+        self.assertIn("sing-box=inactive", verified.reasons)
+
+    def test_verify_snapshot_requires_managed_resolver(self) -> None:
+        verified = _verify_snapshot(acceptance_snapshot(ROLE_FOREIGN, services={"sing-box": "active", "wireguard": "active", "nftables": "active"}))
+        self.assertEqual(verified.verdict, "failed")
+        self.assertIn("resolver=missing", verified.reasons)
 
     def test_verify_live_workflow_returns_nonzero_on_server_mutated_drift(self) -> None:
         targets = [RemoteTarget(role=ROLE_RU, ssh_host="ru.example"), RemoteTarget(role=ROLE_FOREIGN, ssh_host="foreign.example")]
@@ -184,12 +196,14 @@ class VerifyTests(unittest.TestCase):
     def test_public_vless_throughput_requires_rate_and_duration(self) -> None:
         uri = parse_vless_uri("vless://00000000-0000-0000-0000-000000000000@203.0.113.10:443?security=reality&sni=www.bing.com&pbk=public-key&sid=0123456789abcdef&fp=chrome&type=tcp&flow=xtls-rprx-vision")
         foreign = RemoteTarget(role=ROLE_FOREIGN, public_ip="198.51.100.20", ssh_host="198.51.100.20")
-        result = {"ru_egress_ip": "203.0.113.10", "foreign_egress_ip": "198.51.100.20", "github_status": "200", "google_status": "204", "udp_dns": {"ok": True, "private_reject": {"ok": True}}, "ipv6_literal_status": "200", "first_load_reliability": FIRST_LOAD_OK, "throughput": {"bytes_per_second": 7_000_000, "duration_seconds": 60, "failures": 0}}
+        result = {"ru_egress_ip": "203.0.113.10", "foreign_egress_ip": "198.51.100.20", "github_status": "200", "google_status": "204", "udp_dns": {"ok": True, "private_reject": {"ok": True}}, "ipv6_literal_status": "200", "first_load_reliability": FIRST_LOAD_OK, "throughput": {"bytes_per_second": 7_000_000, "capacity_bytes_per_second": 7_000_000, "stability_bytes_per_second": 1_400_000, "stability_duration_seconds": 30, "duration_seconds": 60, "failures": 0, "source_failures": 0}}
         self.assertEqual(_validate_public_vless_result(result, uri, foreign, throughput_seconds=60)["verdict"], "verified")
-        source_limited = {**result, "throughput": {"bytes_per_second": 1_000_000, "capacity_bytes_per_second": 7_000_000, "duration_seconds": 60, "failures": 0}}
+        source_limited = {**result, "throughput": {"bytes_per_second": 1_400_000, "capacity_bytes_per_second": 7_000_000, "stability_bytes_per_second": 1_400_000, "stability_duration_seconds": 30, "duration_seconds": 60, "failures": 0, "source_failures": 0}}
         self.assertEqual(_validate_public_vless_result(source_limited, uri, foreign, throughput_seconds=60)["verdict"], "verified")
         self.assertEqual(_validate_public_vless_result({**result, "throughput": {"bytes_per_second": 5_000_000, "duration_seconds": 60, "failures": 0}}, uri, foreign, throughput_seconds=60)["verdict"], "failed")
         self.assertEqual(_validate_public_vless_result({**result, "throughput": {"bytes_per_second": 7_000_000, "duration_seconds": 60, "failures": 1}}, uri, foreign, throughput_seconds=60)["verdict"], "failed")
+        self.assertEqual(_validate_public_vless_result({**result, "throughput": {**result["throughput"], "source_failures": 1}}, uri, foreign, throughput_seconds=60)["verdict"], "failed")
+        self.assertEqual(_validate_public_vless_result({**result, "throughput": {**result["throughput"], "stability_bytes_per_second": 1_000_000}}, uri, foreign, throughput_seconds=60)["verdict"], "failed")
         self.assertEqual(_vless_runner_timeout(0), 189)
         self.assertEqual(_vless_runner_timeout(600), 794)
 

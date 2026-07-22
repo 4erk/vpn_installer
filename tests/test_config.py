@@ -146,6 +146,17 @@ class ConfigTests(unittest.TestCase):
         self.assertNotIn("RUNTIME_QDISC", env)
         self.assertNotIn("DISABLE_NIC_OFFLOADS", env)
 
+    def test_merge_env_uses_one_local_identity_for_missing_remote_fields(self) -> None:
+        local = config.generate_default_env("sample")
+        remote = {key: value for key, value in local.items() if not key.startswith("INTERSERVER_HY2_")}
+        merged = config.merge_env_with_defaults(remote, "sample", fallback_defaults=local)
+        for key in (
+            "INTERSERVER_HY2_CERTIFICATE_B64",
+            "INTERSERVER_HY2_PRIVATE_KEY_B64",
+            "INTERSERVER_HY2_PUBLIC_KEY_SHA256",
+        ):
+            self.assertEqual(merged[key], local[key])
+
     def test_default_ru_listen_port_stays_public_443(self) -> None:
         env = config.generate_default_env("sample")
         self.assertEqual(env["RU_LISTEN_PORT"], "443")
@@ -350,29 +361,7 @@ class ConfigTests(unittest.TestCase):
                 names = config.find_existing_deployments()
         self.assertEqual(loaded_path, env_path)
         self.assertEqual(names, ["demo"])
-        config.require_env(
-            {
-                "DEPLOY_NAME": "demo",
-                "RU_PUBLIC_IP": "203.0.113.10",
-                "FOREIGN_PUBLIC_IP": "198.51.100.20",
-                "CLIENT_UUID": "x",
-                "RU_REALITY_SERVER_NAME": "a",
-                "RU_REALITY_HANDSHAKE_SERVER": "a",
-                "RU_REALITY_PRIVATE_KEY": "a",
-                "RU_REALITY_PUBLIC_KEY": "a",
-                "RU_REALITY_SHORT_ID": "a",
-                "WG_RU_ADDRESS": "a",
-                "WG_FOREIGN_ADDRESS": "a",
-                "WG_RU_ADDRESS_V6": "a",
-                "WG_FOREIGN_ADDRESS_V6": "a",
-                "WG_IPV6_PREFIX": "a",
-                "WG_RU_PRIVATE_KEY": "a",
-                "WG_RU_PUBLIC_KEY": "a",
-                "WG_FOREIGN_PRIVATE_KEY": "a",
-                "WG_FOREIGN_PUBLIC_KEY": "a",
-                "WG_PRESHARED_KEY": "a",
-            }
-        )
+        config.require_env(loaded_env)
         self.assertEqual(loaded_env["DEPLOY_NAME"], "demo")
 
     def test_ensure_deployment_env_creates_and_merges(self) -> None:

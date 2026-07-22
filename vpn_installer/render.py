@@ -20,10 +20,12 @@ from .client_artifacts import (
 )
 from .common import INSTALL_SCRIPT_PATH, OUT_DIR, ROOT_DIR, ensure_file_parent, print_header, warn, write_text
 from .config import apply_ru_direct_overlays, download_asset, parse_env_text, render_env_text, require_env, split_asset_sources
+from .interserver_transport import HY2_CLASH_API_LISTEN, HY2_PORT, decode_transport_pem, derive_transport_password
 from .manifest import render_manifest
-from .models import CONNTRACK_MAX, DEFAULT_ASSET_TIMEOUT, REQUIRED_ENV_VARS, ROLE_FOREIGN, ROLE_RU, UDP_RMEM_DEFAULT, UDP_RMEM_MAX
+from .models import CONNTRACK_MAX, DEFAULT_ASSET_TIMEOUT, REQUIRED_ENV_VARS, ROLE_FOREIGN, ROLE_RU, UDP_RMEM_DEFAULT, UDP_RMEM_MAX, UDP_WMEM_MAX
 from .routing_policy import build_ru_routing_policy
 from .specs import DeploymentSpec
+from .system_resolver import render_resolved_dropin
 
 
 def find_cached_asset(asset_name: str, target_path: Path) -> Path | None:
@@ -163,6 +165,7 @@ def render_ru_singbox(env: dict[str, str]) -> str:
             "rules": policy_parts["route_rules"],
             "final": policy_parts["final_outbound"],
         },
+        "experimental": {"clash_api": {"external_controller": HY2_CLASH_API_LISTEN}},
     }
     return render_json(payload)
 
@@ -190,7 +193,12 @@ def render_ru_xray(env: dict[str, str]) -> str:
                     "clients": [{"id": env["CLIENT_UUID"], "flow": env["CLIENT_FLOW"], "email": f"{env['DEPLOY_NAME']}-client"}],
                     "decryption": "none",
                 },
-                "streamSettings": {"network": "tcp", "security": "reality", "realitySettings": reality},
+                "streamSettings": {
+                    "network": "tcp",
+                    "security": "reality",
+                    "realitySettings": reality,
+                    "sockopt": {"tcpKeepAliveIdle": 90, "tcpKeepAliveInterval": 15},
+                },
                 "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"], "routeOnly": False},
             }
         ],
@@ -205,8 +213,28 @@ def render_ru_xray(env: dict[str, str]) -> str:
     return render_json(payload)
 
 
-def render_foreign_singbox() -> str:
-    return render_json({"log": {"level": "warn", "timestamp": True}, "outbounds": [{"type": "direct", "tag": "direct"}]})
+def render_foreign_singbox(env: dict[str, str]) -> str:
+    return render_json(
+        {
+            "log": {"level": "warn", "timestamp": True},
+            "inbounds": [
+                {
+                    "type": "hysteria2",
+                    "tag": "interserver-hy2-in",
+                    "listen": "0.0.0.0",
+                    "listen_port": HY2_PORT,
+                    "users": [{"password": derive_transport_password(env["WG_PRESHARED_KEY"])}],
+                    "tls": {
+                        "enabled": True,
+                        "certificate": decode_transport_pem(env["INTERSERVER_HY2_CERTIFICATE_B64"], "certificate"),
+                        "key": decode_transport_pem(env["INTERSERVER_HY2_PRIVATE_KEY_B64"], "private key"),
+                    },
+                }
+            ],
+            "outbounds": [{"type": "direct", "tag": "direct"}],
+            "route": {"final": "direct"},
+        }
+    )
 
 
 def render_ru_wg(env: dict[str, str]) -> str:
@@ -303,6 +331,7 @@ def render_foreign_nftables(env: dict[str, str], wan_iface: str) -> str:
     lines.append(f"    tcp dport {env['SSH_PORT']} counter accept")
     forward_rules = [
         f"    udp dport {env['WG_PORT']} accept",
+        f"    ip saddr {env['RU_PUBLIC_IP']} udp dport {HY2_PORT} counter accept",
         "  }",
         "",
         "  chain forward {",
@@ -481,6 +510,7 @@ def render_sysctl(role: str) -> str:
         "net.core.default_qdisc=fq",
         f"net.core.rmem_max={UDP_RMEM_MAX}",
         f"net.core.rmem_default={UDP_RMEM_DEFAULT}",
+        f"net.core.wmem_max={UDP_WMEM_MAX}",
         f"net.netfilter.nf_conntrack_max={CONNTRACK_MAX}",
         "net.ipv4.tcp_syncookies=1",
         "net.ipv4.tcp_congestion_control=bbr",
@@ -557,6 +587,34 @@ def render_health_timer() -> str:
         ]
     )
 
+
+def render_transport_service() -> str:
+    return "\n".join(
+        [
+            "[Unit]",
+            "Description=Maintain the preferred vpn-stack interserver transport",
+            "After=network-online.target sing-box.service",
+            "Requires=sing-box.service",
+            "PartOf=sing-box.service",
+            "",
+            "[Service]",
+            "Type=simple",
+            "ExecStart=/usr/bin/python3 /usr/local/lib/vpn-stack/vpn-stack-agent.py transport-watch",
+            "Restart=on-failure",
+            "RestartSec=2s",
+            "NoNewPrivileges=true",
+            "PrivateTmp=true",
+            "ProtectHome=true",
+            "ProtectSystem=strict",
+            "ReadWritePaths=/var/lib/vpn-stack /run",
+            "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX",
+            "",
+            "[Install]",
+            "WantedBy=multi-user.target",
+            "",
+        ]
+    )
+
 def deployment_out_dir(env: dict[str, str]) -> Path:
     return OUT_DIR / env["DEPLOY_NAME"]
 
@@ -595,12 +653,15 @@ def rendered_files_for_role(env: dict[str, str], role: str, *, assets: dict[str,
             "sysctl-vpn-stack.conf": render_sysctl(role),
             "modules-vpn-stack.conf": render_modules_load(),
             "apt-vpn-stack-unattended.conf": render_apt_periodic_dropin(),
+            "resolved-vpn-stack.conf": render_resolved_dropin(),
             "vpn-stack-agent.py": server_script_asset("server_agent.py"),
             "log_classifier.py": server_script_asset("log_classifier.py"),
+            "interserver_transport.py": server_script_asset("interserver_transport.py"),
             "admin_apply.py": server_script_asset("admin_apply.py"),
             "admin_web.py": server_script_asset("admin_web.py"),
             "vpn-stack-health.service": render_health_service(),
             "vpn-stack-health.timer": render_health_timer(),
+            "vpn-stack-transport.service": render_transport_service(),
             "vpn-stack-admin.service": render_admin_web_service(),
             "vpn-stack-xray.service": render_xray_service(),
         }
@@ -610,15 +671,17 @@ def rendered_files_for_role(env: dict[str, str], role: str, *, assets: dict[str,
         return files
     wan_iface = env.get("WAN_INTERFACE", "").strip() or "eth0"
     files = {
-        "sing-box.json": render_foreign_singbox(),
+        "sing-box.json": render_foreign_singbox(env),
         f"{env['WG_INTERFACE']}.conf": render_foreign_wg(env),
         "nftables.conf": render_foreign_nftables(env, wan_iface),
         "sshd-vpn-stack.conf": render_sshd_hardening(env),
         "sysctl-vpn-stack.conf": render_sysctl(role),
         "modules-vpn-stack.conf": render_modules_load(),
         "apt-vpn-stack-unattended.conf": render_apt_periodic_dropin(),
+        "resolved-vpn-stack.conf": render_resolved_dropin(),
         "vpn-stack-agent.py": server_script_asset("server_agent.py"),
         "log_classifier.py": server_script_asset("log_classifier.py"),
+        "interserver_transport.py": server_script_asset("interserver_transport.py"),
         "vpn-stack-health.service": render_health_service(),
         "vpn-stack-health.timer": render_health_timer(),
     }

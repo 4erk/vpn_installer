@@ -147,10 +147,12 @@ NFTABLES_PATH="/etc/nftables.conf"
 SSHD_CONFIG_PATH="/etc/ssh/sshd_config.d/90-vpn-stack.conf"
 AGENT_SCRIPT_PATH="/usr/local/lib/vpn-stack/vpn-stack-agent.py"
 AGENT_LOG_CLASSIFIER_PATH="/usr/local/lib/vpn-stack/log_classifier.py"
+AGENT_TRANSPORT_POLICY_PATH="/usr/local/lib/vpn-stack/interserver_transport.py"
 ADMIN_WEB_SCRIPT_PATH="/usr/local/lib/vpn-stack/admin_web.py"
 ADMIN_APPLY_SCRIPT_PATH="/usr/local/lib/vpn-stack/admin_apply.py"
 HEALTH_SERVICE_PATH="/etc/systemd/system/vpn-stack-health.service"
 HEALTH_TIMER_PATH="/etc/systemd/system/vpn-stack-health.timer"
+TRANSPORT_SERVICE_PATH="/etc/systemd/system/vpn-stack-transport.service"
 LEGACY_SYNC_SCRIPT_PATH="/usr/local/lib/vpn-stack/sync-state.sh"
 LEGACY_HEALTH_SCRIPT_PATH="/usr/local/lib/vpn-stack/health-check.sh"
 LEGACY_GUARD_SCRIPT_PATH="/usr/local/lib/vpn-stack/guard.sh"
@@ -164,10 +166,14 @@ SYSCTL_PATH="/etc/sysctl.d/90-vpn-stack.conf"
 MODULES_LOAD_PATH="/etc/modules-load.d/90-vpn-stack.conf"
 JOURNALD_DROPIN_PATH="/etc/systemd/journald.conf.d/90-vpn-stack.conf"
 APT_PERIODIC_DROPIN_PATH="/etc/apt/apt.conf.d/90-vpn-stack-unattended"
+RESOLVED_DROPIN_PATH="/etc/systemd/resolved.conf.d/90-vpn-stack.conf"
+RESOLV_CONF_PATH="/etc/resolv.conf"
+RESOLVED_STUB_PATH="/run/systemd/resolve/stub-resolv.conf"
 SUBSCRIPTION_ROOT="/var/lib/vpn-stack/subscription"
 LEGACY_ADAPTIVE_ROUTING_RULES_PATH="/var/lib/vpn-stack/adaptive-routing-rules.json"
 LEGACY_DATAPLANE_CACHE_PATH="/var/lib/vpn-stack/dataplane-cache.env"
 HEALTH_STATE_PATH="/var/lib/vpn-stack/health-state.json"
+TRANSPORT_STATE_PATH="/var/lib/vpn-stack/transport-state.json"
 VPNSTACK_ROLE_FILE="${VPNSTACK_ROOT}/role"
 VPNSTACK_DEPLOYMENT_FILE="${VPNSTACK_ROOT}/deployment.env"
 VPNSTACK_INSTALLED_AT_FILE="${VPNSTACK_ROOT}/installed_at"
@@ -332,6 +338,8 @@ HEALTH_TIMER_ENABLED=$(service_enabled_flag vpn-stack-health.timer)
 HEALTH_TIMER_ACTIVE=$(service_active_flag vpn-stack-health.timer)
 HEALTH_SERVICE_ENABLED=$(service_enabled_flag vpn-stack-health.service)
 HEALTH_SERVICE_ACTIVE=$(service_active_flag vpn-stack-health.service)
+TRANSPORT_SERVICE_ENABLED=$(service_enabled_flag vpn-stack-transport.service)
+TRANSPORT_SERVICE_ACTIVE=$(service_active_flag vpn-stack-transport.service)
 GUARD_TIMER_ENABLED=$(service_enabled_flag vpn-stack-guard.timer)
 GUARD_TIMER_ACTIVE=$(service_active_flag vpn-stack-guard.timer)
 SYNC_SERVICE_ENABLED=$(service_enabled_flag vpn-stack-sync.service)
@@ -352,6 +360,8 @@ APT_UPGRADE_TIMER_ENABLED=$(service_enabled_flag apt-daily-upgrade.timer)
 APT_UPGRADE_TIMER_ACTIVE=$(service_active_flag apt-daily-upgrade.timer)
 UNATTENDED_UPGRADES_ENABLED=$(service_enabled_flag unattended-upgrades.service)
 UNATTENDED_UPGRADES_ACTIVE=$(service_active_flag unattended-upgrades.service)
+SYSTEMD_RESOLVED_ENABLED=$(service_enabled_flag systemd-resolved.service)
+SYSTEMD_RESOLVED_ACTIVE=$(service_active_flag systemd-resolved.service)
 SSH_SERVICE_ENABLED=$(service_enabled_flag ssh.service)
 SSH_SERVICE_ACTIVE=$(service_active_flag ssh.service)
 SSH_SOCKET_ENABLED=$(service_enabled_flag ssh.socket)
@@ -370,10 +380,12 @@ managed_paths() {
     "${SSHD_CONFIG_PATH}" \
     "${AGENT_SCRIPT_PATH}" \
     "${AGENT_LOG_CLASSIFIER_PATH}" \
+    "${AGENT_TRANSPORT_POLICY_PATH}" \
     "${ADMIN_WEB_SCRIPT_PATH}" \
     "${ADMIN_APPLY_SCRIPT_PATH}" \
     "${HEALTH_SERVICE_PATH}" \
     "${HEALTH_TIMER_PATH}" \
+    "${TRANSPORT_SERVICE_PATH}" \
     "${ADMIN_WEB_SERVICE_PATH}" \
     "${SUBSCRIPTION_SERVICE_PATH}" \
     "${SUBSCRIPTION_ROOT}" \
@@ -381,9 +393,12 @@ managed_paths() {
     "${MODULES_LOAD_PATH}" \
     "${JOURNALD_DROPIN_PATH}" \
     "${APT_PERIODIC_DROPIN_PATH}" \
+    "${RESOLVED_DROPIN_PATH}" \
+    "${RESOLV_CONF_PATH}" \
     "${LEGACY_ADAPTIVE_ROUTING_RULES_PATH}" \
     "${LEGACY_DATAPLANE_CACHE_PATH}" \
     "${HEALTH_STATE_PATH}" \
+    "${TRANSPORT_STATE_PATH}" \
     "${VPNSTACK_DEPLOYMENT_FILE}" \
     "${VPNSTACK_ROLE_FILE}" \
     "${VPNSTACK_INSTALLED_AT_FILE}" \
@@ -420,11 +435,34 @@ backup_target_path() {
 backup_path_if_present() {
   local backup_root="$1"
   local original_path="$2"
-  if [[ -e "${original_path}" ]]; then
+  if [[ -e "${original_path}" || -L "${original_path}" ]]; then
     local backup_path
     backup_path="$(backup_target_path "${backup_root}" "${original_path}")"
     mkdir -p "$(dirname "${backup_path}")"
     cp -a "${original_path}" "${backup_path}"
+  fi
+}
+
+extend_baseline_contract() {
+  local path=""
+  local backup_path=""
+  for path in "${RESOLVED_DROPIN_PATH}" "${RESOLV_CONF_PATH}" "${AGENT_TRANSPORT_POLICY_PATH}" "${TRANSPORT_SERVICE_PATH}" "${TRANSPORT_STATE_PATH}"; do
+    backup_path="$(backup_target_path "${VPNSTACK_BASELINE_DIR}" "${path}")"
+    if [[ ! -e "${backup_path}" && ! -L "${backup_path}" ]]; then
+      backup_path_if_present "${VPNSTACK_BASELINE_DIR}" "${path}"
+    fi
+  done
+  if ! grep -q '^SYSTEMD_RESOLVED_ENABLED=' "${VPNSTACK_BASELINE_DIR}/service-state.env" 2>/dev/null; then
+    cat >>"${VPNSTACK_BASELINE_DIR}/service-state.env" <<EOF
+SYSTEMD_RESOLVED_ENABLED=$(service_enabled_flag systemd-resolved.service)
+SYSTEMD_RESOLVED_ACTIVE=$(service_active_flag systemd-resolved.service)
+EOF
+  fi
+  if ! grep -q '^TRANSPORT_SERVICE_ENABLED=' "${VPNSTACK_BASELINE_DIR}/service-state.env" 2>/dev/null; then
+    cat >>"${VPNSTACK_BASELINE_DIR}/service-state.env" <<EOF
+TRANSPORT_SERVICE_ENABLED=$(service_enabled_flag vpn-stack-transport.service)
+TRANSPORT_SERVICE_ACTIVE=$(service_active_flag vpn-stack-transport.service)
+EOF
   fi
 }
 
@@ -484,7 +522,7 @@ restore_path_from_backup() {
   backup_path="$(backup_target_path "${backup_root}" "${original_path}")"
 
   rm -rf "${original_path}"
-  if [[ -e "${backup_path}" ]]; then
+  if [[ -e "${backup_path}" || -L "${backup_path}" ]]; then
     mkdir -p "$(dirname "${original_path}")"
     cp -a "${backup_path}" "${original_path}"
   fi
@@ -523,6 +561,7 @@ restore_service_state() {
   apply_service_restore_flags vpn-stack-guard.timer "${GUARD_TIMER_ENABLED:-0}" "${GUARD_TIMER_ACTIVE:-0}"
   apply_service_restore_flags vpn-stack-sync.service "${SYNC_SERVICE_ENABLED:-0}" "${SYNC_SERVICE_ACTIVE:-0}"
   apply_service_restore_flags vpn-stack-health.service "${HEALTH_SERVICE_ENABLED:-0}" "${HEALTH_SERVICE_ACTIVE:-0}"
+  apply_service_restore_flags vpn-stack-transport.service "${TRANSPORT_SERVICE_ENABLED:-0}" "${TRANSPORT_SERVICE_ACTIVE:-0}"
   apply_service_restore_flags vpn-stack-guard.service "${GUARD_SERVICE_ENABLED:-0}" "${GUARD_SERVICE_ACTIVE:-0}"
   apply_service_restore_flags vpn-stack-subscription.service "${SUBSCRIPTION_ENABLED:-0}" "${SUBSCRIPTION_ACTIVE:-0}"
   apply_service_restore_flags sing-box "${SINGBOX_ENABLED:-0}" "${SINGBOX_ACTIVE:-0}"
@@ -534,6 +573,7 @@ restore_service_state() {
   apply_service_restore_flags apt-daily.timer "${APT_DAILY_TIMER_ENABLED:-0}" "${APT_DAILY_TIMER_ACTIVE:-0}"
   apply_service_restore_flags apt-daily-upgrade.timer "${APT_UPGRADE_TIMER_ENABLED:-0}" "${APT_UPGRADE_TIMER_ACTIVE:-0}"
   apply_service_restore_flags unattended-upgrades.service "${UNATTENDED_UPGRADES_ENABLED:-0}" "${UNATTENDED_UPGRADES_ACTIVE:-0}"
+  apply_service_restore_flags systemd-resolved.service "${SYSTEMD_RESOLVED_ENABLED:-0}" "${SYSTEMD_RESOLVED_ACTIVE:-0}"
   apply_service_restore_flags ssh.service "${SSH_SERVICE_ENABLED:-0}" "${SSH_SERVICE_ACTIVE:-0}"
   apply_service_restore_flags ssh.socket "${SSH_SOCKET_ENABLED:-0}" "${SSH_SOCKET_ACTIVE:-0}"
 }
@@ -579,6 +619,7 @@ install_exit_trap() {
 }
 
 stop_managed_services() {
+  systemctl stop vpn-stack-transport.service >/dev/null 2>&1 || true
   systemctl stop sing-box >/dev/null 2>&1 || true
   systemctl stop vpn-stack-xray.service >/dev/null 2>&1 || true
   systemctl stop "wg-quick@${WG_INTERFACE}" >/dev/null 2>&1 || true
@@ -688,10 +729,12 @@ disable_managed_services() {
   systemctl disable vpn-stack-xray.service >/dev/null 2>&1 || true
   systemctl disable "wg-quick@${WG_INTERFACE}" >/dev/null 2>&1 || true
   systemctl disable vpn-stack-health.timer >/dev/null 2>&1 || true
+  systemctl disable vpn-stack-transport.service >/dev/null 2>&1 || true
   systemctl disable vpn-stack-sync.timer vpn-stack-guard.timer >/dev/null 2>&1 || true
   systemctl disable vpn-stack-admin.service >/dev/null 2>&1 || true
   systemctl disable vpn-stack-subscription.service >/dev/null 2>&1 || true
   systemctl disable nftables >/dev/null 2>&1 || true
+  systemctl disable systemd-resolved.service >/dev/null 2>&1 || true
 }
 
 remove_managed_files() {
@@ -703,10 +746,14 @@ remove_managed_files() {
     "${WG_CONFIG_PATH}" \
     "${NFTABLES_PATH}" \
     "${SSHD_CONFIG_PATH}" \
+    "${AGENT_SCRIPT_PATH}" \
+    "${AGENT_LOG_CLASSIFIER_PATH}" \
+    "${AGENT_TRANSPORT_POLICY_PATH}" \
     "${ADMIN_WEB_SCRIPT_PATH}" \
     "${ADMIN_APPLY_SCRIPT_PATH}" \
     "${HEALTH_SERVICE_PATH}" \
     "${HEALTH_TIMER_PATH}" \
+    "${TRANSPORT_SERVICE_PATH}" \
     "${LEGACY_SYNC_SCRIPT_PATH}" \
     "${LEGACY_HEALTH_SCRIPT_PATH}" \
     "${LEGACY_GUARD_SCRIPT_PATH}" \
@@ -718,15 +765,18 @@ remove_managed_files() {
     "${SUBSCRIPTION_SERVICE_PATH}" \
     "${SYSCTL_PATH}" \
     "${MODULES_LOAD_PATH}" \
+    "${RESOLVED_DROPIN_PATH}" \
+    "${RESOLV_CONF_PATH}" \
     "${LEGACY_ADAPTIVE_ROUTING_RULES_PATH}" \
     "${LEGACY_DATAPLANE_CACHE_PATH}" \
-    "${HEALTH_STATE_PATH}"
+    "${HEALTH_STATE_PATH}" \
+    "${TRANSPORT_STATE_PATH}"
   rm -rf "${SUBSCRIPTION_ROOT}"
   rm -rf "${RULESET_DIR}"
 }
 
 reset_install_runtime_state() {
-  rm -f "${LEGACY_DATAPLANE_CACHE_PATH}" "${HEALTH_STATE_PATH}"
+  rm -f "${LEGACY_DATAPLANE_CACHE_PATH}" "${HEALTH_STATE_PATH}" "${TRANSPORT_STATE_PATH}"
   if [[ "${ROLE}" == "ru-gateway" ]]; then
     rm -f "${LEGACY_ADAPTIVE_ROUTING_RULES_PATH}"
   fi
@@ -877,6 +927,16 @@ configure_unattended_security_updates() {
   systemctl enable --now apt-daily.timer apt-daily-upgrade.timer >/dev/null 2>&1 || true
 }
 
+configure_system_resolver() {
+  systemctl enable systemd-resolved.service
+  systemctl restart systemd-resolved.service
+  if [[ ! -e "${RESOLVED_STUB_PATH}" ]]; then
+    echo "systemd-resolved did not create ${RESOLVED_STUB_PATH}" >&2
+    return 1
+  fi
+  ln -sfn "../run/systemd/resolve/stub-resolv.conf" "${RESOLV_CONF_PATH}"
+}
+
 find_rendered_role_dir() {
   local env_dir=""
   local candidate=""
@@ -914,6 +974,7 @@ copy_role_artifacts() {
   copy_if_present "${source_dir}/render-manifest.json" "${VPNSTACK_RENDER_MANIFEST_FILE}" || { echo "Missing render-manifest.json in ${source_dir}" >&2; exit 1; }
   copy_if_present "${source_dir}/vpn-stack-agent.py" "${AGENT_SCRIPT_PATH}" || { echo "Missing vpn-stack-agent.py in ${source_dir}" >&2; exit 1; }
   copy_if_present "${source_dir}/log_classifier.py" "${AGENT_LOG_CLASSIFIER_PATH}" || { echo "Missing log_classifier.py in ${source_dir}" >&2; exit 1; }
+  copy_if_present "${source_dir}/interserver_transport.py" "${AGENT_TRANSPORT_POLICY_PATH}" || { echo "Missing interserver_transport.py in ${source_dir}" >&2; exit 1; }
   if [[ "$ROLE" == "ru-gateway" ]]; then
     mkdir -p "$(dirname "${XRAY_CONFIG_PATH}")"
     copy_if_present "${source_dir}/xray.json" "${XRAY_CONFIG_PATH}" || { echo "Missing xray.json in ${source_dir}" >&2; exit 1; }
@@ -921,9 +982,11 @@ copy_role_artifacts() {
     copy_if_present "${source_dir}/admin_web.py" "${ADMIN_WEB_SCRIPT_PATH}" || { echo "Missing admin_web.py in ${source_dir}" >&2; exit 1; }
     copy_if_present "${source_dir}/admin_apply.py" "${ADMIN_APPLY_SCRIPT_PATH}" || { echo "Missing admin_apply.py in ${source_dir}" >&2; exit 1; }
     copy_if_present "${source_dir}/vpn-stack-admin.service" "${ADMIN_WEB_SERVICE_PATH}" || { echo "Missing vpn-stack-admin.service in ${source_dir}" >&2; exit 1; }
+    copy_if_present "${source_dir}/vpn-stack-transport.service" "${TRANSPORT_SERVICE_PATH}" || { echo "Missing vpn-stack-transport.service in ${source_dir}" >&2; exit 1; }
   else
     rm -f "${XRAY_CONFIG_PATH}" "${XRAY_SERVICE_PATH}"
     rm -f "${ADMIN_WEB_SCRIPT_PATH}" "${ADMIN_APPLY_SCRIPT_PATH}" "${ADMIN_WEB_SERVICE_PATH}"
+    rm -f "${TRANSPORT_SERVICE_PATH}" "${TRANSPORT_STATE_PATH}"
   fi
   copy_if_present "${source_dir}/${WG_INTERFACE}.conf" "${WG_CONFIG_PATH}" || { echo "Missing ${WG_INTERFACE}.conf in ${source_dir}" >&2; exit 1; }
   copy_if_present "${source_dir}/nftables.conf" "${NFTABLES_PATH}" || { echo "Missing nftables.conf in ${source_dir}" >&2; exit 1; }
@@ -931,6 +994,7 @@ copy_role_artifacts() {
   copy_if_present "${source_dir}/sysctl-vpn-stack.conf" "${SYSCTL_PATH}" || { echo "Missing sysctl-vpn-stack.conf in ${source_dir}" >&2; exit 1; }
   copy_if_present "${source_dir}/modules-vpn-stack.conf" "${MODULES_LOAD_PATH}" || { echo "Missing modules-vpn-stack.conf in ${source_dir}" >&2; exit 1; }
   copy_if_present "${source_dir}/apt-vpn-stack-unattended.conf" "${APT_PERIODIC_DROPIN_PATH}" || { echo "Missing apt-vpn-stack-unattended.conf in ${source_dir}" >&2; exit 1; }
+  copy_if_present "${source_dir}/resolved-vpn-stack.conf" "${RESOLVED_DROPIN_PATH}" || { echo "Missing resolved-vpn-stack.conf in ${source_dir}" >&2; exit 1; }
   if [[ -f "${source_dir}/journald-vpn-stack.conf" ]]; then
     copy_if_present "${source_dir}/journald-vpn-stack.conf" "${JOURNALD_DROPIN_PATH}"
   else
@@ -944,6 +1008,7 @@ copy_role_artifacts() {
   if [[ "$ROLE" == "ru-gateway" ]]; then
     chmod 0644 "${XRAY_SERVICE_PATH}"
     chmod 0644 "${ADMIN_WEB_SERVICE_PATH}"
+    chmod 0644 "${TRANSPORT_SERVICE_PATH}"
     chmod 0755 "${ADMIN_WEB_SCRIPT_PATH}" "${ADMIN_APPLY_SCRIPT_PATH}"
   fi
   rm -f "${LEGACY_SYNC_SCRIPT_PATH}" "${LEGACY_HEALTH_SCRIPT_PATH}" "${LEGACY_GUARD_SCRIPT_PATH}" "${LEGACY_SYNC_SERVICE_PATH}" "${LEGACY_SYNC_TIMER_PATH}" "${LEGACY_GUARD_SERVICE_PATH}" "${LEGACY_GUARD_TIMER_PATH}"
@@ -1015,6 +1080,9 @@ normalize_staged_release_permissions() {
   local source_dir="$1"
   find "${source_dir}" -type d -exec chmod 0755 {} +
   find "${source_dir}" -type f -exec chmod 0644 {} +
+  if [[ -f "${source_dir}/sing-box.json" ]]; then
+    chmod 0600 "${source_dir}/sing-box.json"
+  fi
   chmod 0600 "${source_dir}/${WG_INTERFACE}.conf"
   if [[ "${ROLE}" == "ru-gateway" ]]; then
     chmod 0600 "${source_dir}/xray.json"
@@ -1027,7 +1095,8 @@ validate_staged_release() {
   [[ -s "${source_dir}/render-manifest.json" ]] || { echo "missing render manifest" >&2; return 1; }
   [[ -s "${source_dir}/vpn-stack-agent.py" ]] || { echo "missing server agent" >&2; return 1; }
   [[ -s "${source_dir}/log_classifier.py" ]] || { echo "missing log classifier" >&2; return 1; }
-  python3 -m py_compile "${source_dir}/vpn-stack-agent.py" "${source_dir}/log_classifier.py"
+  [[ -s "${source_dir}/interserver_transport.py" ]] || { echo "missing interserver transport policy" >&2; return 1; }
+  python3 -m py_compile "${source_dir}/vpn-stack-agent.py" "${source_dir}/log_classifier.py" "${source_dir}/interserver_transport.py"
   PYTHONPATH="${source_dir}${PYTHONPATH:+:${PYTHONPATH}}" python3 "${source_dir}/vpn-stack-agent.py" --help >/dev/null
   python3 - "${source_dir}" <<'PY'
 import hashlib
@@ -1055,6 +1124,9 @@ PY
   fi
   wg-quick strip "${source_dir}/${WG_INTERFACE}.conf" >/dev/null
   systemd-analyze verify "${source_dir}/vpn-stack-health.service" "${source_dir}/vpn-stack-health.timer" >/dev/null
+  if [[ "${ROLE}" == "ru-gateway" ]]; then
+    systemd-analyze verify "${source_dir}/vpn-stack-transport.service" >/dev/null
+  fi
 }
 
 activate_staged_release() {
@@ -1225,6 +1297,7 @@ elif [[ ! -d "${VPNSTACK_BASELINE_DIR}" ]]; then
   echo "Baseline backup missing, capturing current host state before ${ACTION}." >&2
   create_baseline_backup
 else
+  extend_baseline_contract
   create_revision_snapshot
 fi
 
@@ -1245,6 +1318,7 @@ run_apt_get install -y \
   mtr-tiny \
   nftables \
   python3 \
+  systemd-resolved \
   unzip \
   unattended-upgrades \
   wireguard \
@@ -1372,6 +1446,7 @@ modprobe nf_conntrack
 sysctl --system >/dev/null
 configure_journald_limits
 configure_unattended_security_updates
+configure_system_resolver
 systemctl daemon-reload
 disable_legacy_proxy_services
 configure_ssh_daemon_mode
@@ -1387,7 +1462,12 @@ systemctl enable vpn-stack-health.timer
 systemctl restart vpn-stack-health.timer
 systemctl reset-failed vpn-stack-health.service >/dev/null 2>&1 || true
 
+systemctl enable sing-box
+systemctl restart sing-box
+
 if [[ "$ROLE" == "ru-gateway" ]]; then
+  systemctl enable vpn-stack-transport.service
+  systemctl restart vpn-stack-transport.service
   if [[ ! -f "${VPNSTACK_ROOT}/admin-auth.json" || "${ADMIN_WEB_USERNAME}" != "user" || "${ADMIN_WEB_PASSWORD}" != "password" ]]; then
     if [[ "${ADMIN_WEB_USERNAME}" != "user" || "${ADMIN_WEB_PASSWORD}" != "password" ]]; then
       python3 "${ADMIN_WEB_SCRIPT_PATH}" init-auth "${ADMIN_WEB_USERNAME}" "${ADMIN_WEB_PASSWORD}" --force
@@ -1396,8 +1476,6 @@ if [[ "$ROLE" == "ru-gateway" ]]; then
     fi
   fi
   python3 "${ADMIN_APPLY_SCRIPT_PATH}" --no-restart
-  systemctl enable sing-box
-  systemctl restart sing-box
   systemctl enable vpn-stack-xray.service
   systemctl restart vpn-stack-xray.service
   if [[ "${ADMIN_WEB_ENABLED,,}" != "0" && "${ADMIN_WEB_ENABLED,,}" != "false" && "${ADMIN_WEB_ENABLED,,}" != "no" && "${ADMIN_WEB_ENABLED,,}" != "off" ]]; then

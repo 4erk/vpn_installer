@@ -135,6 +135,10 @@ class RenderTests(unittest.TestCase):
         env = self.make_env()
         payload = json.loads(render.render_ru_xray(env))
         self.assertNotIn("multiplex", payload["inbounds"][0])
+        self.assertEqual(
+            payload["inbounds"][0]["streamSettings"]["sockopt"],
+            {"tcpKeepAliveIdle": 90, "tcpKeepAliveInterval": 15},
+        )
 
     def test_ru_server_config_uses_configured_log_level(self) -> None:
         env = self.make_env()
@@ -194,7 +198,14 @@ class RenderTests(unittest.TestCase):
         service = render.render_health_service()
         self.assertIn("ExecStart=/usr/bin/python3 /usr/local/lib/vpn-stack/vpn-stack-agent.py health", service)
         self.assertNotIn("sync-state.sh", service)
-    def test_ru_server_uses_one_foreign_egress_for_domains_and_literals(self) -> None:
+
+    def test_transport_service_runs_isolated_priority_supervisor(self) -> None:
+        service = render.render_transport_service()
+        self.assertIn("ExecStart=/usr/bin/python3 /usr/local/lib/vpn-stack/vpn-stack-agent.py transport-watch", service)
+        self.assertIn("PartOf=sing-box.service", service)
+        self.assertIn("ProtectSystem=strict", service)
+
+    def test_ru_server_uses_one_adaptive_foreign_policy_for_domains_and_literals(self) -> None:
         env = self.make_env()
         payload = json.loads(render.render_ru_singbox(env))
         route_rules = payload["route"]["rules"]
@@ -209,7 +220,16 @@ class RenderTests(unittest.TestCase):
         ipv6_index = next(index for index, rule in enumerate(route_rules) if rule.get("ip_version") == 6)
         ipv4_literal_index = next(index for index, rule in enumerate(route_rules) if rule.get("ip_cidr") == ["0.0.0.0/0"])
         raw_ru_geoip_index = next(index for index, rule in enumerate(route_rules) if rule.get("rule_set") == ["ru-geoip"])
-        self.assertEqual(set(outbounds), {"direct-ru", "to-foreign"})
+        self.assertEqual(set(outbounds), {"direct-ru", "to-foreign-hy2", "to-foreign-wg", "to-foreign"})
+        self.assertEqual(outbounds["to-foreign"]["outbounds"], ["to-foreign-hy2", "to-foreign-wg"])
+        self.assertEqual(outbounds["to-foreign"]["type"], "selector")
+        self.assertEqual(outbounds["to-foreign"]["default"], "to-foreign-hy2")
+        self.assertFalse(outbounds["to-foreign"]["interrupt_exist_connections"])
+        self.assertEqual(outbounds["to-foreign-hy2"]["server"], env["FOREIGN_PUBLIC_IP"])
+        self.assertNotIn("up_mbps", outbounds["to-foreign-hy2"])
+        self.assertNotIn("down_mbps", outbounds["to-foreign-hy2"])
+        self.assertEqual(outbounds["to-foreign-wg"]["domain_resolver"]["server"], "dns-ru-direct")
+        self.assertEqual(payload["experimental"]["clash_api"]["external_controller"], "127.0.0.1:19090")
         self.assertEqual(route_rules[ipv6_index], {"ip_version": 6, "action": "route", "outbound": "to-foreign"})
         self.assertEqual(route_rules[ipv4_literal_index], {"ip_cidr": ["0.0.0.0/0"], "action": "route", "outbound": "to-foreign"})
         self.assertEqual(payload["route"]["final"], "to-foreign")
@@ -499,6 +519,7 @@ class RenderTests(unittest.TestCase):
         self.assertIn("sysctl-vpn-stack.conf", files)
         self.assertIn("journald-vpn-stack.conf", files)
         self.assertIn("apt-vpn-stack-unattended.conf", files)
+        self.assertIn("resolved-vpn-stack.conf", files)
         self.assertIn("vpn-stack-agent.py", files)
         self.assertIn("log_classifier.py", files)
         self.assertNotIn("guard.sh", files)
@@ -506,6 +527,8 @@ class RenderTests(unittest.TestCase):
         self.assertNotIn("vpn-stack-sync.service", files)
         self.assertIn("vpn-stack-health.service", files)
         self.assertIn("vpn-stack-health.timer", files)
+        self.assertIn("vpn-stack-transport.service", files)
+        self.assertIn("interserver_transport.py", files)
         self.assertNotIn("vpn-stack-guard.service", files)
         self.assertNotIn("vpn-stack-guard.timer", files)
         self.assertIn("admin_apply.py", files)
@@ -513,6 +536,8 @@ class RenderTests(unittest.TestCase):
         self.assertIn("vpn-stack-admin.service", files)
         self.assertIn("vpn-stack-xray.service", files)
         foreign_files = render.rendered_files_for_role(env, render.ROLE_FOREIGN)
+        self.assertIn("interserver_transport.py", foreign_files)
+        self.assertNotIn("vpn-stack-transport.service", foreign_files)
         self.assertNotIn("admin_apply.py", foreign_files)
         self.assertNotIn("admin_web.py", foreign_files)
         self.assertNotIn("vpn-stack-admin.service", foreign_files)
@@ -525,9 +550,13 @@ class RenderTests(unittest.TestCase):
         self.assertIn("net.ipv4.tcp_mtu_probing=1", foreign_files["sysctl-vpn-stack.conf"])
         self.assertIn("net.core.rmem_default=4194304", ru_files["sysctl-vpn-stack.conf"])
         self.assertIn("net.core.rmem_max=16777216", foreign_files["sysctl-vpn-stack.conf"])
+        self.assertIn("net.core.wmem_max=16777216", foreign_files["sysctl-vpn-stack.conf"])
         self.assertIn("net.ipv4.conf.all.src_valid_mark=1", ru_files["sysctl-vpn-stack.conf"])
         self.assertIn("net.ipv4.ip_forward=1", foreign_files["sysctl-vpn-stack.conf"])
         self.assertIn('APT::Periodic::Unattended-Upgrade "1";', ru_files["apt-vpn-stack-unattended.conf"])
+        self.assertIn("DNS=1.1.1.1 9.9.9.9 8.8.8.8", ru_files["resolved-vpn-stack.conf"])
+        self.assertIn("Cache=yes", foreign_files["resolved-vpn-stack.conf"])
+        self.assertIn("StaleRetentionSec=1h", foreign_files["resolved-vpn-stack.conf"])
         self.assertIn(f"SystemMaxUse={env['JOURNAL_SYSTEM_MAX_USE']}", ru_files["journald-vpn-stack.conf"])
         env["JOURNAL_LIMIT_ENABLED"] = "0"
         self.assertNotIn("journald-vpn-stack.conf", render.rendered_files_for_role(env, render.ROLE_RU))
@@ -573,6 +602,17 @@ class RenderTests(unittest.TestCase):
             f"AllowedIPs = {render.wg_host_address(env['WG_RU_ADDRESS'])}/32, {render.wg_host_address(env['WG_RU_ADDRESS_V6'])}/128",
             config,
         )
+
+    def test_foreign_singbox_terminates_pinned_hysteria2_without_fixed_bandwidth(self) -> None:
+        env = self.make_env()
+        payload = json.loads(render.render_foreign_singbox(env))
+        inbound = payload["inbounds"][0]
+        self.assertEqual(inbound["type"], "hysteria2")
+        self.assertEqual(inbound["tag"], "interserver-hy2-in")
+        self.assertNotIn("up_mbps", inbound)
+        self.assertNotIn("down_mbps", inbound)
+        self.assertTrue(inbound["tls"]["certificate"][0].startswith("-----BEGIN CERTIFICATE-----"))
+        self.assertTrue(inbound["tls"]["key"][0].startswith("-----BEGIN PRIVATE KEY-----"))
 
     def test_render_sshd_hardening_uses_expected_limits(self) -> None:
         env = self.make_env()
@@ -638,6 +678,7 @@ class RenderTests(unittest.TestCase):
         self.assertNotIn("ssh_guard", rules)
         self.assertNotIn(f"tcp dport {env['SSH_PORT']} counter drop", rules)
         self.assertIn(f"udp dport {env['WG_PORT']} accept", rules)
+        self.assertIn(f"ip saddr {env['RU_PUBLIC_IP']} udp dport 18443 counter accept", rules)
         self.assertIn(f'iifname "{env["WG_INTERFACE"]}" oifname "eth0" tcp flags syn tcp option maxseg size set 1320 accept', rules)
         self.assertIn(f'iifname "eth0" oifname "{env["WG_INTERFACE"]}" tcp flags syn tcp option maxseg size set 1320 accept', rules)
         self.assertIn("table ip6 nat", rules)

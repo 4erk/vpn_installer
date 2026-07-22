@@ -27,6 +27,7 @@ class StatusOutputTests(unittest.TestCase):
                 log_buckets={"ipv4_literal_timeout": 2},
                 historical_log_buckets={"ipv4_literal_timeout": 9},
                 top_destinations={"ipv4_literal_timeout": "91.108.56.103:443=2"},
+                fresh_since="2026-07-20T08:00:00Z",
                 runtime_overrides={"admin_routing_rules_count": "2"},
                 network={
                     "tcp_adaptation": {
@@ -64,13 +65,28 @@ class StatusOutputTests(unittest.TestCase):
                         "aggregate": {"bytes_sent": 12_251, "bytes_retrans": 2_829, "retransmit_ratio_pct": 23.092},
                     },
                 },
+                transport={
+                    "interserver": {
+                        "mode": "priority-hysteria2-wireguard",
+                        "hysteria_session_active": True,
+                        "adaptive_state": {"state": "healthy", "reason": "primary transport is healthy"},
+                        "selection": {
+                            "selected": "to-foreign-hy2",
+                            "selection_pending": False,
+                            "candidates": {
+                                "to-foreign-hy2": {"delay_ms": 23},
+                                "to-foreign-wg": {"delay_ms": 74},
+                            },
+                        },
+                    }
+                },
                 reasons=["domain_to_foreign_timeout present"],
             )
         )
         rendered = "\n".join(lines)
         self.assertIn("role: ru-gateway", rendered)
         self.assertIn("drift: none", rendered)
-        self.assertIn("fresh window: 30m", rendered)
+        self.assertIn("current log window: since=2026-07-20T08:00:00Z, duration=30m", rendered)
         self.assertIn("historical window: 4h", rendered)
         self.assertIn("ipv4_literal_timeout=2", rendered)
         self.assertIn("historical log buckets: ipv4_literal_timeout=9", rendered)
@@ -90,6 +106,50 @@ class StatusOutputTests(unittest.TestCase):
         self.assertIn("tcp deltas (last health cycle): out=10000, retrans=125 (1.250%)", rendered)
         self.assertIn("tcp recovery deltas: TcpExtTCPSACKReorder=+20, TcpExtTCPDSACKRecv=+7, TcpExtTCPTimeouts=+2", rendered)
         self.assertIn("last front degradation: at=2026-07-20T07:58:00+00:00, sources=203.0.113.20", rendered)
+        self.assertIn(
+            "interserver transport: mode=priority-hysteria2-wireguard, selected=to-foreign-hy2, "
+            "candidates=to-foreign-hy2=23ms,to-foreign-wg=74ms, adaptation=healthy, hy2_session=active, "
+            "reason=primary transport is healthy",
+            rendered,
+        )
+
+    def test_formats_foreign_interserver_listener(self) -> None:
+        rendered = "\n".join(
+            format_snapshot_summary(
+                DiagnosticsSnapshot(
+                    role="foreign-exit",
+                    transport={
+                        "interserver": {
+                            "mode": "hysteria2-egress",
+                            "listening": True,
+                            "source_restricted_to": "94.232.248.35",
+                        }
+                    },
+                )
+            )
+        )
+        self.assertIn(
+            "interserver transport: mode=hysteria2-egress, selected=-, candidates=-, "
+            "listener=active, source=94.232.248.35",
+            rendered,
+        )
+
+    def test_formats_unmeasured_transport_without_none_milliseconds(self) -> None:
+        rendered = "\n".join(
+            format_snapshot_summary(
+                DiagnosticsSnapshot(
+                    role="ru-gateway",
+                    transport={
+                        "interserver": {
+                            "mode": "priority-hysteria2-wireguard",
+                            "selection": {"selected": "to-foreign-hy2", "candidates": {"to-foreign-wg": {"delay_ms": None}}},
+                        }
+                    },
+                )
+            )
+        )
+        self.assertIn("to-foreign-wg=not-probed", rendered)
+        self.assertNotIn("Nonems", rendered)
 
     def test_does_not_invent_retransmit_ratio_without_out_segments(self) -> None:
         lines = format_snapshot_summary(

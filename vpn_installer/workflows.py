@@ -76,7 +76,11 @@ def load_remote_authoritative_env(
         if not can_fetch_remote_env(target):
             continue
         remote_env_text = fetch_remote_deployment_env(target)
-        remote_envs[target.role] = merge_env_with_defaults(parse_env_text(remote_env_text), deployment_name)
+        remote_envs[target.role] = merge_env_with_defaults(
+            parse_env_text(remote_env_text),
+            deployment_name,
+            fallback_defaults=env,
+        )
     if len(remote_envs) > 1:
         role_items = list(remote_envs.items())
         baseline_role, baseline_env = role_items[0]
@@ -310,7 +314,6 @@ def postcheck_command(role: str, wg_interface: str) -> str:
     ru_service_checks = (
         '\n'.join(
             [
-                'check_service_active sing-box sing-box',
                 'check_service_active vpn-stack-xray.service vpn-stack-xray',
                 'admin_web_enabled="$(grep -E \'^ADMIN_WEB_ENABLED=\' /etc/vpn-stack/deployment.env 2>/dev/null | head -n1 | cut -d= -f2- | sed \'s/^"//; s/"$//\')"',
                 'admin_web_enabled="${admin_web_enabled:-1}"',
@@ -318,13 +321,7 @@ def postcheck_command(role: str, wg_interface: str) -> str:
             ]
         )
         if role == ROLE_RU
-        else textwrap.dedent(
-            """\
-            if systemctl list-unit-files sing-box.service >/dev/null 2>&1; then
-              systemctl is-active sing-box >/dev/null || true
-            fi
-            """
-        ).strip()
+        else ""
     )
     return textwrap.dedent(
         f"""\
@@ -352,8 +349,11 @@ def postcheck_command(role: str, wg_interface: str) -> str:
           exit 1
         }}
         check_service_active nftables nftables
+        check_service_active sing-box sing-box
+        check_service_active systemd-resolved.service systemd-resolved
         check_service_active vpn-stack-health.timer vpn-stack-health.timer
         check_service_active wg-quick@{wg_interface} wg-quick@{wg_interface}
+        test "$(readlink -f /etc/resolv.conf)" = /run/systemd/resolve/stub-resolv.conf
         test -x /usr/local/lib/vpn-stack/vpn-stack-agent.py
         {ru_service_checks}
         printf 'role='

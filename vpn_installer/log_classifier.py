@@ -12,6 +12,8 @@ BUCKETS = (
     "dns_timeout",
     "dns_nxdomain",
     "dns_failed",
+    "transport_unavailable",
+    "upstream_refused",
     "domain_to_foreign_timeout",
     "ipv4_literal_timeout",
     "ipv6_literal_timeout",
@@ -23,8 +25,8 @@ BUCKETS = (
     "unclassified_error",
 )
 
-_OPEN_CONNECTION_RE = re.compile(r"open connection to (?P<dst>\[[^\]]+\]:\d+|[^ ]+) using outbound/(?:direct|block)\[(?P<tag>[^\]]+)\]")
-_OUTBOUND_CONNECTION_RE = re.compile(r"outbound/(?:direct|block)\[(?P<tag>[^\]]+)\]: outbound connection to (?P<dst>\[[^\]]+\]:\d+|[^ ]+)")
+_OPEN_CONNECTION_RE = re.compile(r"open connection to (?P<dst>\[[^\]]+\]:\d+|[^ ]+) using outbound/[^\[]+\[(?P<tag>[^\]]+)\]")
+_OUTBOUND_CONNECTION_RE = re.compile(r"outbound/[^\[]+\[(?P<tag>[^\]]+)\]: outbound connection to (?P<dst>\[[^\]]+\]:\d+|[^ ]+)")
 _ACCEPTED_RE = re.compile(r"accepted (?:tcp|udp):(?P<dst>\[[^\]]+\]:\d+|[^ ]+)")
 _SOURCE_ENDPOINT_RE = re.compile(r"(?:from|process connection from) (?P<endpoint>\S+)")
 _DNS_LOOKUP_FAILED_RE = re.compile(r"dns: lookup failed for (?P<dst>[^: ]+):")
@@ -38,10 +40,13 @@ _DNS_LOOKUP_SUCCEED_RE = re.compile(r"dns: lookup succeed for (?P<dst>[^: ]+):")
 _CANCELLATION_TOKENS = (
     "context canceled",
     "context cancelled",
+    "canceled by remote with error code 0",
+    "cancelled by remote with error code 0",
     "operation canceled",
     "operation cancelled",
     "operation was canceled",
     "operation was cancelled",
+    "write on closed stream",
 )
 
 
@@ -168,6 +173,8 @@ def classify_line(line: str) -> ClassifiedLogLine | None:
         return ClassifiedLogLine("client_reset_eof", destination, source, event_id)
     if "using outbound/vless[" in line and any(token in line for token in ("dial tcp", "wsarecv", "connected host has failed to respond")):
         return ClassifiedLogLine("client_front_connect_failed", destination, source, event_id)
+    if "quic: transport closed" in lower_line:
+        return ClassifiedLogLine("transport_unavailable", destination, source, event_id)
     dns_failure = any(token in line for token in ("dns: exchange failed", "exchange failed for ", "dns: lookup failed", "lookup failed for ", "router: lookup "))
     if dns_failure and any(token in line for token in ("context deadline exceeded", "i/o timeout")):
         return ClassifiedLogLine("dns_timeout", destination, source, event_id)
@@ -186,8 +193,10 @@ def classify_line(line: str) -> ClassifiedLogLine | None:
             return ClassifiedLogLine("ipv6_literal_timeout", destination, source, event_id)
         if version == 4:
             return ClassifiedLogLine("ipv4_literal_timeout", destination, source, event_id)
-        if outbound == "to-foreign":
+        if outbound.startswith("to-foreign"):
             return ClassifiedLogLine("domain_to_foreign_timeout", destination, source, event_id)
+    if "connect: connection refused" in lower_line:
+        return ClassifiedLogLine("upstream_refused", destination, source, event_id)
     if any(token in line for token in ("mux connection closed", "EOF", "connection reset")):
         return ClassifiedLogLine("client_reset_eof", destination, source, event_id)
     if "ERROR" in line:

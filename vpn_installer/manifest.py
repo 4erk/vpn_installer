@@ -32,8 +32,10 @@ def installed_artifact_paths(role: str) -> dict[str, str]:
         "modules-vpn-stack.conf": "/etc/modules-load.d/90-vpn-stack.conf",
         "journald-vpn-stack.conf": "/etc/systemd/journald.conf.d/90-vpn-stack.conf",
         "apt-vpn-stack-unattended.conf": "/etc/apt/apt.conf.d/90-vpn-stack-unattended",
+        "resolved-vpn-stack.conf": "/etc/systemd/resolved.conf.d/90-vpn-stack.conf",
         "vpn-stack-agent.py": "/usr/local/lib/vpn-stack/vpn-stack-agent.py",
         "log_classifier.py": "/usr/local/lib/vpn-stack/log_classifier.py",
+        "interserver_transport.py": "/usr/local/lib/vpn-stack/interserver_transport.py",
         "vpn-stack-health.service": "/etc/systemd/system/vpn-stack-health.service",
         "vpn-stack-health.timer": "/etc/systemd/system/vpn-stack-health.timer",
     }
@@ -45,6 +47,7 @@ def installed_artifact_paths(role: str) -> dict[str, str]:
                 "admin_apply.py": "/usr/local/lib/vpn-stack/admin_apply.py",
                 "admin_web.py": "/usr/local/lib/vpn-stack/admin_web.py",
                 "vpn-stack-admin.service": "/etc/systemd/system/vpn-stack-admin.service",
+                "vpn-stack-transport.service": "/etc/systemd/system/vpn-stack-transport.service",
             }
         )
     return common

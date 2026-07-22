@@ -140,6 +140,10 @@ $env:VPN_SSH_BIND_ADDRESS="192.168.0.101"
 
 Сервер остаётся источником истины для split-маршрутизации: клиенту не нужно знать, что считать российским или зарубежным трафиком. Он просто даёт туннель до `российского сервера`, а сама логика маршрутов живёт на серверной стороне.
 
+Между серверами foreign-трафик идёт через адаптивную пару Hysteria2/QUIC и WireGuard. QUIC является устойчивым к потерям transport, WireGuard остаётся fallback; sing-box проверяет оба пути в фоне и применяет выбранный путь к новым соединениям. Оба transport заканчиваются на одном зарубежном VPS, поэтому это не подменяет второй независимый egress. Публичный клиентский контракт при этом остаётся тем же VLESS/Reality URI.
+
+Системные DNS-запросы серверов проходят через локальный cache `systemd-resolved` с независимыми Cloudflare, Quad9 и Google upstreams. При кратком отказе upstream известные positive records могут обслуживаться из stale cache до одного часа; этот resolver является частью manifest и откатывается вместе с release.
+
 В локальных JSON-профилях IP самих `российского` и `зарубежного` серверов автоматически исключаются из клиентского туннеля. Это нужно, чтобы можно было запускать `vpn status/reinstall/remove` с того же компьютера даже при уже активном VPN-подключении. Сырой `VLESS URI` сам по себе такие исключения не кодирует; если клиент в TUN/full VPN заворачивает IP сервера в свой же туннель, используй JSON-профиль или добавь bypass/direct rule в клиенте.
 
 Быстрая проверка этой проблемы:
@@ -234,10 +238,10 @@ SSH-туннель остаётся запасным способом админ
 
 `status` читает services, manifest, WireGuard, public front и журналы без нагрузочных скачиваний. `verify live` дополнительно запускает свежие DNS/domain/literal probes и эфемерный sing-box client из `vless-uri.txt`; он проходит публичный Reality front, выполняет девять независимых first-load запросов через RU и foreign routes и подтверждает HTTP, UDP DNS и TCP IPv6 literal. Каждая попытка имеет origin/status/latency в JSON-результате. Только эта команда может подтвердить dataplane после переустановки.
 
-Для release throughput acceptance запусти десятиминутное измерение через тот же VLESS path. Runner чередует независимые download origins, считает скорость каждого отдельно и показывает общий поток; capacity gate не принимает rate limit одного CDN за предел VPN. Глобальный lock исключает конкурирующие запуски, а controller lease и target-side deadline завершают всю process group при потере управляющей команды. Нагрузка запускается только этим явным флагом, не ограничивается самим тестом и должна подтвердить не менее 50 Mbit/s хотя бы до одного origin. На время проверки она использует доступную полосу production path:
+Для release throughput acceptance запусти короткое 60-секундное измерение через тот же VLESS path. Первые 30 секунд проверяют доступную capacity без rate limit, оставшееся окно держит одно HTTPS-соединение с cap 16 Mbit/s и требует не менее 10 Mbit/s без обрывов. Runner проверяет два HTTPS download endpoint, global lock исключает конкурирующие запуски, а controller lease и target-side deadline завершают process group при потере управляющей команды. Нагрузка запускается только явным флагом:
 
 ```powershell
-.\vpn.cmd verify live --deployment my-vpn --non-interactive --throughput-seconds 600
+.\vpn.cmd verify live --deployment my-vpn --non-interactive --throughput-seconds 60
 ```
 
 Если начались потери, высокий ping или просадка скорости, собери структурный snapshot:
@@ -260,6 +264,8 @@ SSH-туннель остаётся запасным способом админ
 - observed public IPv4 на `зарубежном сервере`
 - observed public IPv4 для `российского сервера` через `wg0`
 - возраст `WireGuard` handshake
+- выбранный межсерверный transport, bounded probe delay кандидатов и состояние failover/recovery
+- состояние server DNS stub/cache и список managed upstreams
 - отдельные verdict: `server_path`, `public_front`, `client_observation`
 - debt/maintenance: доступные security updates и reboot-required
 

@@ -70,10 +70,15 @@ def build_lab_ru_config(env: dict[str, str]) -> str:
     payload["dns"]["final"] = "dns-global"
     payload["inbounds"][0]["listen"] = "0.0.0.0"
     payload["inbounds"][0]["listen_port"] = int(env.get("RU_ROUTER_LISTEN_PORT", "2080"))
-    for outbound in payload.get("outbounds", []):
-        if outbound.get("tag") == "to-foreign":
-            outbound["bind_interface"] = env["WG_INTERFACE"]
-            outbound.pop("routing_mark", None)
+    payload["outbounds"] = [
+        {"type": "direct", "tag": "direct-ru", "domain_resolver": {"server": "dns-ru-direct", "strategy": "ipv4_only"}},
+        {
+            "type": "direct",
+            "tag": "to-foreign",
+            "bind_interface": env["WG_INTERFACE"],
+            "domain_resolver": {"server": "dns-global", "strategy": "ipv4_only"},
+        },
+    ]
     for rule_set in payload["route"]["rule_set"]:
         if rule_set.get("tag") == "ru-geoip":
             rule_set.update({"format": "source", "path": "/opt/geoip-ru.json"})

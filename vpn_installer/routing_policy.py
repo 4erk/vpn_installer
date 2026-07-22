@@ -5,8 +5,16 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable
 
 from .dns_policy import CONNECTIVITY_CHECK_DIRECT_DOMAINS, CONNECTIVITY_CHECK_IPV6_ONLY_DOMAINS, merged_domains
+from .interserver_transport import (
+    HY2_PORT,
+    HY2_SERVER_NAME,
+    TRANSPORT_FALLBACK_TAG,
+    TRANSPORT_PRIMARY_TAG,
+    TRANSPORT_SELECTOR_TAG,
+    derive_transport_password,
+)
 
-POLICY_VERSION = "0.11.11"
+POLICY_VERSION = "0.12.0"
 
 TRAFFIC_CLASSES = (
     "ru_direct_domain",
@@ -202,15 +210,37 @@ def build_ru_routing_policy(env: dict[str, str]) -> RoutingPolicy:
             routes=({"ip_cidr": ["0.0.0.0/0"], "action": "route", "outbound": "to-foreign"},),
         ),
     )
-    foreign_base = {
+    wireguard_fallback = {
         "type": "direct",
+        "tag": TRANSPORT_FALLBACK_TAG,
         "bind_interface": env["WG_INTERFACE"],
         "routing_mark": int(env["APP_ROUTE_MARK"]),
-        "domain_resolver": {"server": "dns-global", "strategy": "ipv4_only"},
+        "domain_resolver": {"server": "dns-ru-direct", "strategy": "ipv4_only"},
+    }
+    resilient_primary = {
+        "type": "hysteria2",
+        "tag": TRANSPORT_PRIMARY_TAG,
+        "server": env["FOREIGN_PUBLIC_IP"],
+        "server_port": HY2_PORT,
+        "password": derive_transport_password(env["WG_PRESHARED_KEY"]),
+        "tls": {
+            "enabled": True,
+            "server_name": HY2_SERVER_NAME,
+            "certificate_public_key_sha256": [env["INTERSERVER_HY2_PUBLIC_KEY_SHA256"]],
+        },
+    }
+    adaptive_foreign = {
+        "type": "selector",
+        "tag": TRANSPORT_SELECTOR_TAG,
+        "outbounds": [TRANSPORT_PRIMARY_TAG, TRANSPORT_FALLBACK_TAG],
+        "default": TRANSPORT_PRIMARY_TAG,
+        "interrupt_exist_connections": False,
     }
     outbounds = (
         {"type": "direct", "tag": "direct-ru", "domain_resolver": {"server": "dns-ru-direct", "strategy": "ipv4_only"}},
-        dict(foreign_base, tag="to-foreign"),
+        resilient_primary,
+        wireguard_fallback,
+        adaptive_foreign,
     )
     deprecated = tuple(
         key
