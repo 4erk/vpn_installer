@@ -197,6 +197,63 @@ class ServerAgentTests(unittest.TestCase):
         self.assertEqual(result["last_front_degradation"]["degraded_sources"], ["203.0.113.20"])
         recover.assert_not_called()
 
+    @staticmethod
+    def degraded_front_flow(*, source: str = "203.0.113.20", source_port: int = 50123) -> dict[str, object]:
+        return {
+            "port": 443,
+            "degraded_sources": [source],
+            "clients": {source: {"quality": "degraded"}},
+            "flows": {
+                f"{source}:{source_port}": {
+                    "source": source,
+                    "source_port": source_port,
+                    "states": {"ESTAB": 1},
+                    "rtt_ms": {"p95": 1_232.49},
+                    "rto_ms": {"max": 3_429},
+                    "retransmissions": 16,
+                    "bytes_sent": 96_410,
+                    "bytes_retrans": 5_237,
+                    "retransmit_ratio_pct": 5.465,
+                }
+            },
+        }
+
+    def test_front_flow_recovery_requires_two_fresh_observations_and_closes_exact_socket(self) -> None:
+        front = self.degraded_front_flow()
+        with patch.object(server_agent, "run", return_value=subprocess.CompletedProcess(["ss"], 0, "", "")) as run_mock:
+            first_state, first_action = server_agent.reconcile_front_flow_recovery(front, {}, listen_port=443, now_epoch=1_000)
+            second_state, second_action = server_agent.reconcile_front_flow_recovery(front, first_state, listen_port=443, now_epoch=1_120)
+
+        self.assertEqual(first_action, "none")
+        self.assertEqual(second_action, "close:front-flow:203.0.113.20:50123:ok")
+        self.assertEqual(second_state["suspect"], {})
+        run_mock.assert_called_once_with(
+            ["ss", "-K", "state", "established", "(", "sport", "=", ":443", "and", "dst", "203.0.113.20", "and", "dport", "=", ":50123", ")"],
+            timeout=5,
+        )
+
+    def test_front_flow_recovery_ignores_shared_or_mild_loss(self) -> None:
+        shared = self.degraded_front_flow()
+        shared["degraded_sources"] = ["203.0.113.20", "198.51.100.40"]
+        mild = self.degraded_front_flow()
+        mild["flows"]["203.0.113.20:50123"]["rto_ms"] = {"max": 1_000}
+        with patch.object(server_agent, "run") as run_mock:
+            self.assertEqual(server_agent.front_flow_recovery_candidate(shared), {})
+            self.assertEqual(server_agent.front_flow_recovery_candidate(mild), {})
+        run_mock.assert_not_called()
+
+    def test_front_flow_recovery_honors_cooldown(self) -> None:
+        front = self.degraded_front_flow(source_port=50124)
+        previous = {
+            "suspect": {"key": "203.0.113.20:50124", "confirmations": 1, "observed_epoch": 1_100},
+            "last_recovery": {"epoch": 1_000, "source": "203.0.113.20"},
+        }
+        with patch.object(server_agent, "run") as run_mock:
+            state, action = server_agent.reconcile_front_flow_recovery(front, previous, listen_port=443, now_epoch=1_120)
+        self.assertEqual(action, "none")
+        self.assertEqual(state["suspect"]["confirmations"], 2)
+        run_mock.assert_not_called()
+
     def test_front_degradation_evidence_is_bounded(self) -> None:
         flows = {
             f"203.0.113.20:{port}": {"quality": "degraded", "bytes_retrans": port}
