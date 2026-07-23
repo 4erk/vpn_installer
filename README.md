@@ -250,7 +250,7 @@ SSH-туннель остаётся запасным способом админ
 .\vpn.cmd diagnose path --deployment my-vpn
 ```
 
-Отчёт сохраняется в `out/diagnostics` как JSON. Для конкретного устройства используй `vpn diagnose client --source <public-ip>`: он группирует TCP socket state, retransmitted bytes/ratio, PMTU, MSS, cwnd, delivery rate, reordering и Xray TCP/UDP events именно по этому source IP. IPv4-mapped IPv6 из kernel `ss` нормализуется к тому же IPv4 ключу. Один измеряемо lossy source выводится как `client_specific/degraded`, а не скрывается общим состоянием сервиса; bounded evidence последней такой деградации сохраняется между health-циклами и виден в `status`.
+Отчёт сохраняется в `out/diagnostics` как JSON. Для конкретного устройства используй `vpn diagnose client --source <public-ip>`: он группирует TCP socket state, retransmitted bytes/ratio, PMTU, MSS, cwnd, delivery rate, reordering и Xray TCP/UDP events именно по этому source IP. IPv4-mapped IPv6 из kernel `ss` нормализуется к тому же IPv4 ключу. Накопленные счётчики открытого сокета выводятся как `loss_observed`, но сами по себе не ухудшают health: `client_specific/degraded` требует одновременных признаков текущего зависания одного активного flow — retransmit, раздутого RTT и RTO. Agent ничего не закрывает принудительно и оставляет восстановление TCP/QUIC transport.
 
 Для самопроверки на обычном пользовательском ПК:
 

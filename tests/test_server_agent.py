@@ -197,63 +197,6 @@ class ServerAgentTests(unittest.TestCase):
         self.assertEqual(result["last_front_degradation"]["degraded_sources"], ["203.0.113.20"])
         recover.assert_not_called()
 
-    @staticmethod
-    def degraded_front_flow(*, source: str = "203.0.113.20", source_port: int = 50123) -> dict[str, object]:
-        return {
-            "port": 443,
-            "degraded_sources": [source],
-            "clients": {source: {"quality": "degraded"}},
-            "flows": {
-                f"{source}:{source_port}": {
-                    "source": source,
-                    "source_port": source_port,
-                    "states": {"ESTAB": 1},
-                    "rtt_ms": {"p95": 1_232.49},
-                    "rto_ms": {"max": 3_429},
-                    "retransmissions": 16,
-                    "bytes_sent": 96_410,
-                    "bytes_retrans": 5_237,
-                    "retransmit_ratio_pct": 5.465,
-                }
-            },
-        }
-
-    def test_front_flow_recovery_requires_two_fresh_observations_and_closes_exact_socket(self) -> None:
-        front = self.degraded_front_flow()
-        with patch.object(server_agent, "run", return_value=subprocess.CompletedProcess(["ss"], 0, "", "")) as run_mock:
-            first_state, first_action = server_agent.reconcile_front_flow_recovery(front, {}, listen_port=443, now_epoch=1_000)
-            second_state, second_action = server_agent.reconcile_front_flow_recovery(front, first_state, listen_port=443, now_epoch=1_120)
-
-        self.assertEqual(first_action, "none")
-        self.assertEqual(second_action, "close:front-flow:203.0.113.20:50123:ok")
-        self.assertEqual(second_state["suspect"], {})
-        run_mock.assert_called_once_with(
-            ["ss", "-K", "state", "established", "(", "sport", "=", ":443", "and", "dst", "203.0.113.20", "and", "dport", "=", ":50123", ")"],
-            timeout=5,
-        )
-
-    def test_front_flow_recovery_ignores_shared_or_mild_loss(self) -> None:
-        shared = self.degraded_front_flow()
-        shared["degraded_sources"] = ["203.0.113.20", "198.51.100.40"]
-        mild = self.degraded_front_flow()
-        mild["flows"]["203.0.113.20:50123"]["rto_ms"] = {"max": 1_000}
-        with patch.object(server_agent, "run") as run_mock:
-            self.assertEqual(server_agent.front_flow_recovery_candidate(shared), {})
-            self.assertEqual(server_agent.front_flow_recovery_candidate(mild), {})
-        run_mock.assert_not_called()
-
-    def test_front_flow_recovery_honors_cooldown(self) -> None:
-        front = self.degraded_front_flow(source_port=50124)
-        previous = {
-            "suspect": {"key": "203.0.113.20:50124", "confirmations": 1, "observed_epoch": 1_100},
-            "last_recovery": {"epoch": 1_000, "source": "203.0.113.20"},
-        }
-        with patch.object(server_agent, "run") as run_mock:
-            state, action = server_agent.reconcile_front_flow_recovery(front, previous, listen_port=443, now_epoch=1_120)
-        self.assertEqual(action, "none")
-        self.assertEqual(state["suspect"]["confirmations"], 2)
-        run_mock.assert_not_called()
-
     def test_front_degradation_evidence_is_bounded(self) -> None:
         flows = {
             f"203.0.113.20:{port}": {"quality": "degraded", "bytes_retrans": port}
@@ -507,7 +450,7 @@ class ServerAgentTests(unittest.TestCase):
         self.assertEqual(client["retransmissions"], 3)
         self.assertEqual(client["bytes_retrans"], 80000)
         self.assertEqual(client["retransmit_ratio_pct"], 4.0)
-        self.assertEqual(client["quality"], "degraded")
+        self.assertEqual(client["quality"], "loss_observed")
         self.assertEqual(client["pmtu"], 1500)
         self.assertEqual(client["reord_seen"], 7)
         self.assertEqual(client["dsack_dups"], 4)
@@ -519,6 +462,7 @@ class ServerAgentTests(unittest.TestCase):
         flow = front["flows"]["203.0.113.20:50123"]
         self.assertEqual(flow["source_port"], 50123)
         self.assertEqual(flow["retransmit_ratio_pct"], 4.0)
+        self.assertEqual(front["degraded_sources"], [])
 
     def test_front_snapshot_normalizes_ipv4_mapped_socket_source(self) -> None:
         def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -637,9 +581,9 @@ class ServerAgentTests(unittest.TestCase):
         front = {"clients": {"203.0.113.20": {"states": {"ESTAB": 1}, "retransmissions": 200}}}
         self.assertEqual(server_agent.front_observation(front), "observed")
 
-    def test_front_observation_reports_measured_loss_for_one_client(self) -> None:
+    def test_front_observation_does_not_promote_client_lifetime_loss(self) -> None:
         front = {"clients": {"203.0.113.20": {"states": {"ESTAB": 1}, "bytes_sent": 5_000_000, "retransmit_ratio_pct": 4.5, "quality": "degraded"}}}
-        self.assertEqual(server_agent.front_observation(front), "client_specific")
+        self.assertEqual(server_agent.front_observation(front), "observed")
 
     def test_front_live_diagnostics_fail_when_downstream_path_fails(self) -> None:
         with (
@@ -669,7 +613,7 @@ class ServerAgentTests(unittest.TestCase):
         }
         self.assertEqual(server_agent.client_front_quality(metrics), "degraded")
 
-    def test_client_quality_detects_severe_loss_before_one_megabyte(self) -> None:
+    def test_client_quality_keeps_lifetime_loss_separate_from_current_stall(self) -> None:
         metrics = {
             "bytes_sent": 12_251,
             "bytes_retrans": 2_829,
@@ -677,6 +621,17 @@ class ServerAgentTests(unittest.TestCase):
             "retransmit_ratio_pct": 23.092,
             "rtt_ms": {"samples": 1, "min": 70.0, "p95": 70.0},
             "rto_ms": {"max": 391},
+        }
+        self.assertEqual(server_agent.client_front_quality(metrics), "loss_observed")
+
+    def test_client_quality_detects_one_stalled_flow_without_mixing_connections(self) -> None:
+        metrics = {
+            "bytes_sent": 96_410,
+            "bytes_retrans": 5_237,
+            "retransmissions": 16,
+            "retransmit_ratio_pct": 5.465,
+            "rtt_ms": {"samples": 1, "min": 1_232.49, "p95": 1_232.49},
+            "rto_ms": {"max": 3_429},
         }
         self.assertEqual(server_agent.client_front_quality(metrics), "degraded")
 
@@ -689,7 +644,7 @@ class ServerAgentTests(unittest.TestCase):
         }
         self.assertEqual(server_agent.client_front_quality(metrics), "observed")
 
-    def test_client_snapshot_reports_degraded_after_xray_accept(self) -> None:
+    def test_client_snapshot_does_not_report_aggregate_lifetime_loss_as_current_failure(self) -> None:
         front = {"listening": True, "clients": {"203.0.113.20": {"connections": 1, "quality": "degraded"}}, "top_sources": {"203.0.113.20": 1}}
         completed = subprocess.CompletedProcess(["nft"], 0, "", "")
         with (
@@ -700,7 +655,7 @@ class ServerAgentTests(unittest.TestCase):
             patch.object(server_agent, "run", return_value=completed),
         ):
             payload = server_agent.front_client_snapshot("203.0.113.20", 15)
-        self.assertEqual(payload["verdict"], "degraded")
+        self.assertEqual(payload["verdict"], "reached_xray")
 
     def test_client_snapshot_uses_degraded_active_flow_and_omits_stale_ports(self) -> None:
         front = {
@@ -787,7 +742,7 @@ class ServerAgentTests(unittest.TestCase):
         self.assertEqual(selection["selected"], "to-foreign-hy2")
         self.assertEqual(selection["candidates"]["to-foreign-wg"]["delay_ms"], 310)
 
-    def test_transport_reconciler_fails_over_without_interrupting_connections(self) -> None:
+    def test_transport_reconciler_confirms_failure_before_failover(self) -> None:
         config = {
             "experimental": {"clash_api": {"external_controller": "127.0.0.1:19090"}},
             "outbounds": [
@@ -811,15 +766,57 @@ class ServerAgentTests(unittest.TestCase):
                     side_effect=[
                         {"ok": False, "delay_ms": 0, "error": "timeout"},
                         {"ok": True, "delay_ms": 70, "error": ""},
+                        {"ok": False, "delay_ms": 0, "error": "timeout"},
+                        {"ok": True, "delay_ms": 70, "error": ""},
                     ],
                 ),
                 patch.object(server_agent, "select_transport") as select_transport,
             ):
-                result = server_agent.reconcile_interserver_transport()
+                first = server_agent.reconcile_interserver_transport()
+                second = server_agent.reconcile_interserver_transport()
 
-        self.assertEqual(result["state"], "degraded")
-        self.assertEqual(result["selected"], "to-foreign-wg")
+        self.assertEqual(first["state"], "suspect")
+        self.assertEqual(first["selected"], "to-foreign-hy2")
+        self.assertEqual(second["state"], "degraded")
+        self.assertEqual(second["selected"], "to-foreign-wg")
         select_transport.assert_called_once_with("127.0.0.1:19090", "to-foreign-wg")
+
+    def test_transport_reconciler_discards_one_transient_probe_failure(self) -> None:
+        config = {
+            "experimental": {"clash_api": {"external_controller": "127.0.0.1:19090"}},
+            "outbounds": [
+                {"type": "selector", "tag": "to-foreign", "outbounds": ["to-foreign-hy2", "to-foreign-wg"], "default": "to-foreign-hy2"},
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "sing-box.json"
+            state_path = root / "transport-state.json"
+            lock_path = root / "transport.lock"
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            with (
+                patch.object(server_agent, "SINGBOX_CONFIG_PATH", config_path),
+                patch.object(server_agent, "TRANSPORT_STATE_PATH", state_path),
+                patch.object(server_agent, "TRANSPORT_LOCK_PATH", lock_path),
+                patch.object(server_agent, "selector_selection_snapshot", return_value={"available": True, "selected": "to-foreign-hy2"}),
+                patch.object(
+                    server_agent,
+                    "transport_candidate_probe",
+                    side_effect=[
+                        {"ok": False, "delay_ms": 0, "error": "timeout"},
+                        {"ok": True, "delay_ms": 70, "error": ""},
+                        {"ok": True, "delay_ms": 50, "error": ""},
+                    ],
+                ),
+                patch.object(server_agent, "select_transport") as select_transport,
+            ):
+                first = server_agent.reconcile_interserver_transport()
+                second = server_agent.reconcile_interserver_transport()
+
+        self.assertEqual(first["state"], "suspect")
+        self.assertEqual(second["state"], "healthy")
+        self.assertEqual(second["primary_failures"], 0)
+        select_transport.assert_not_called()
 
     def test_transport_reconciler_returns_to_primary_after_two_successes(self) -> None:
         config = {

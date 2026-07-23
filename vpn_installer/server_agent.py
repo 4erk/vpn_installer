@@ -27,6 +27,7 @@ try:
         HY2_PORT,
         TRANSPORT_FALLBACK_TAG,
         TRANSPORT_HEALTHCHECK_URL,
+        TRANSPORT_PRIMARY_FAILURES,
         TRANSPORT_PRIMARY_RECOVERY_SUCCESSES,
         TRANSPORT_PRIMARY_TAG,
         TRANSPORT_PROBE_INTERVAL_SECONDS,
@@ -41,6 +42,7 @@ except ImportError:  # Installed agent runs as a standalone script.
         HY2_PORT,
         TRANSPORT_FALLBACK_TAG,
         TRANSPORT_HEALTHCHECK_URL,
+        TRANSPORT_PRIMARY_FAILURES,
         TRANSPORT_PRIMARY_RECOVERY_SUCCESSES,
         TRANSPORT_PRIMARY_TAG,
         TRANSPORT_PROBE_INTERVAL_SECONDS,
@@ -77,14 +79,6 @@ FRONT_RTT_MIN_SAMPLES = 3
 FRONT_RTT_DEGRADED_MS = 250
 FRONT_RTT_INFLATION_FACTOR = 3
 FRONT_RTO_DEGRADED_MS = 1_000
-FRONT_FLOW_RECOVERY_CONFIRMATIONS = 2
-FRONT_FLOW_RECOVERY_MAX_GAP_SECONDS = 300
-FRONT_FLOW_RECOVERY_COOLDOWN_SECONDS = 900
-FRONT_FLOW_RECOVERY_MIN_BYTES = 32_768
-FRONT_FLOW_RECOVERY_MIN_RETRANSMISSIONS = 8
-FRONT_FLOW_RECOVERY_MIN_RETRANSMIT_PERCENT = 4.0
-FRONT_FLOW_RECOVERY_MIN_RTT_MS = 500
-FRONT_FLOW_RECOVERY_MIN_RTO_MS = 2_000
 PROBLEM_LOG_GREP = (
     "ERROR|FATAL|processed invalid connection|accepted tcp:disabled[.]invalid|"
     "connection rejected|mux connection closed|EOF|connection reset|using outbound/vless"
@@ -668,12 +662,11 @@ def tcp_front_snapshot(port: int) -> dict[str, Any]:
         for source, values in all_client_metrics.items()
         if int(values["states"].get("FIN-WAIT-1", 0)) >= 25
     )
-    degraded_sources = {source for source, metrics in all_client_metrics.items() if metrics["quality"] == "degraded"}
-    degraded_sources.update(
+    degraded_sources = {
         str(metrics["source"])
         for metrics in all_flow_metrics.values()
         if metrics["quality"] == "degraded"
-    )
+    }
     listener = run(["ss", "-Hln", f"sport = :{port}"], timeout=5)
     return {
         "port": port,
@@ -702,14 +695,6 @@ def client_front_quality(metrics: dict[str, Any]) -> str:
     bytes_sent = int(metrics.get("bytes_sent", 0))
     retransmissions = int(metrics.get("retransmissions", 0))
     retransmit_ratio_pct = float(metrics.get("retransmit_ratio_pct", 0.0))
-    if bytes_sent >= FRONT_LOSS_MIN_BYTES and retransmit_ratio_pct >= FRONT_LOSS_DEGRADED_PERCENT:
-        return "degraded"
-    if (
-        bytes_sent >= FRONT_SMALL_FLOW_MIN_BYTES
-        and retransmissions >= FRONT_SMALL_FLOW_MIN_RETRANSMISSIONS
-        and retransmit_ratio_pct >= FRONT_SMALL_FLOW_DEGRADED_PERCENT
-    ):
-        return "degraded"
     rtt = metrics.get("rtt_ms", {})
     rto = metrics.get("rto_ms", {})
     samples = int(rtt.get("samples", 0) or 0)
@@ -724,6 +709,20 @@ def client_front_quality(metrics: dict[str, Any]) -> str:
         and max_rto >= FRONT_RTO_DEGRADED_MS
     ):
         return "degraded"
+    if (
+        retransmissions >= FRONT_SMALL_FLOW_MIN_RETRANSMISSIONS
+        and p95 >= FRONT_RTT_DEGRADED_MS
+        and max_rto >= FRONT_RTO_DEGRADED_MS
+    ):
+        return "degraded"
+    if bytes_sent >= FRONT_LOSS_MIN_BYTES and retransmit_ratio_pct >= FRONT_LOSS_DEGRADED_PERCENT:
+        return "loss_observed"
+    if (
+        bytes_sent >= FRONT_SMALL_FLOW_MIN_BYTES
+        and retransmissions >= FRONT_SMALL_FLOW_MIN_RETRANSMISSIONS
+        and retransmit_ratio_pct >= FRONT_SMALL_FLOW_DEGRADED_PERCENT
+    ):
+        return "loss_observed"
     return "observed"
 
 
@@ -737,9 +736,7 @@ def front_observation(front: dict[str, Any]) -> str:
             for source, metrics in clients.items()
             if int(metrics.get("states", {}).get("FIN-WAIT-1", 0)) >= 25
         ]
-    clients = front.get("clients", {})
     degraded_sources = set(front.get("degraded_sources", []))
-    degraded_sources.update(source for source, metrics in clients.items() if metrics.get("quality") == "degraded")
     noisy_sources = degraded_sources | set(fin_wait_sources)
     if int(front.get("stale_connections_5m", 0)) >= 25 and int(front.get("keepalive_timer_connections", 0)) < int(front.get("stale_connections_5m", 0)):
         return "degraded"
@@ -780,140 +777,6 @@ def front_degradation_evidence(front: dict[str, Any], observed_at: str) -> dict[
         },
         "flows": degraded_flows,
     }
-
-
-def front_flow_recovery_candidate(front: dict[str, Any]) -> dict[str, Any]:
-    """Return one conclusively degraded public-front flow, never a shared-path incident."""
-    if front_observation(front) != "client_specific":
-        return {}
-    degraded_sources = {normalize_source(str(source)) for source in front.get("degraded_sources", [])}
-    degraded_sources.update(
-        normalize_source(str(source))
-        for source, metrics in front.get("clients", {}).items()
-        if isinstance(metrics, dict) and metrics.get("quality") == "degraded"
-    )
-    degraded_sources.discard("")
-    if len(degraded_sources) != 1:
-        return {}
-    degraded_source = next(iter(degraded_sources))
-    candidates: list[dict[str, Any]] = []
-    flows = front.get("flows", {})
-    if not isinstance(flows, dict):
-        return {}
-    for key, metrics in flows.items():
-        if not isinstance(metrics, dict):
-            continue
-        source = normalize_source(str(metrics.get("source", "")))
-        source_port = metrics.get("source_port")
-        try:
-            ipaddress.ip_address(source)
-            source_port = int(source_port)
-        except (TypeError, ValueError):
-            continue
-        if source != degraded_source or not 1 <= source_port <= 65_535:
-            continue
-        states = metrics.get("states", {})
-        rtt_ms = float(metrics.get("rtt_ms", {}).get("p95") or 0)
-        rto_ms = float(metrics.get("rto_ms", {}).get("max") or 0)
-        retransmissions = int(metrics.get("retransmissions", 0) or 0)
-        bytes_sent = int(metrics.get("bytes_sent", 0) or 0)
-        retransmit_ratio = float(metrics.get("retransmit_ratio_pct", 0) or 0)
-        if (
-            not isinstance(states, dict)
-            or int(states.get("ESTAB", 0) or 0) != 1
-            or bytes_sent < FRONT_FLOW_RECOVERY_MIN_BYTES
-            or retransmissions < FRONT_FLOW_RECOVERY_MIN_RETRANSMISSIONS
-            or retransmit_ratio < FRONT_FLOW_RECOVERY_MIN_RETRANSMIT_PERCENT
-            or rtt_ms < FRONT_FLOW_RECOVERY_MIN_RTT_MS
-            or rto_ms < FRONT_FLOW_RECOVERY_MIN_RTO_MS
-        ):
-            continue
-        candidates.append(
-            {
-                "key": str(key),
-                "source": source,
-                "source_port": source_port,
-                "rtt_ms": rtt_ms,
-                "rto_ms": rto_ms,
-                "retransmissions": retransmissions,
-                "bytes_sent": bytes_sent,
-                "bytes_retrans": int(metrics.get("bytes_retrans", 0) or 0),
-                "retransmit_ratio_pct": retransmit_ratio,
-            }
-        )
-    if not candidates:
-        return {}
-    return max(
-        candidates,
-        key=lambda item: (
-            item["rto_ms"],
-            item["retransmit_ratio_pct"],
-            item["bytes_retrans"],
-            item["rtt_ms"],
-        ),
-    )
-
-
-def close_front_flow(source: str, source_port: int, listen_port: int) -> str:
-    try:
-        ipaddress.ip_address(source)
-        source_port = int(source_port)
-        listen_port = int(listen_port)
-    except (TypeError, ValueError):
-        return "close:front-flow:invalid-endpoint"
-    if not 1 <= source_port <= 65_535 or not 1 <= listen_port <= 65_535:
-        return "close:front-flow:invalid-endpoint"
-    result = run(
-        [
-            "ss", "-K", "state", "established", "(", "sport", "=", f":{listen_port}",
-            "and", "dst", source, "and", "dport", "=", f":{source_port}", ")",
-        ],
-        timeout=5,
-    )
-    endpoint = endpoint_key(source, source_port)
-    return f"close:front-flow:{endpoint}:{'ok' if result.returncode == 0 else 'failed'}"
-
-
-def reconcile_front_flow_recovery(
-    front: dict[str, Any],
-    previous: dict[str, Any],
-    *,
-    listen_port: int,
-    now_epoch: int,
-) -> tuple[dict[str, Any], str]:
-    last_recovery = previous.get("last_recovery", {})
-    state: dict[str, Any] = {
-        "suspect": {},
-        "last_recovery": last_recovery if isinstance(last_recovery, dict) else {},
-    }
-    candidate = front_flow_recovery_candidate(front)
-    if not candidate:
-        return state, "none"
-    prior = previous.get("suspect", {})
-    same_fresh_flow = (
-        isinstance(prior, dict)
-        and prior.get("key") == candidate["key"]
-        and 0 <= now_epoch - int(prior.get("observed_epoch", 0) or 0) <= FRONT_FLOW_RECOVERY_MAX_GAP_SECONDS
-    )
-    candidate["confirmations"] = int(prior.get("confirmations", 0) or 0) + 1 if same_fresh_flow else 1
-    candidate["observed_epoch"] = now_epoch
-    state["suspect"] = candidate
-    if candidate["confirmations"] < FRONT_FLOW_RECOVERY_CONFIRMATIONS:
-        return state, "none"
-    last_recovery_epoch = int(state["last_recovery"].get("epoch", 0) or 0)
-    if now_epoch - last_recovery_epoch < FRONT_FLOW_RECOVERY_COOLDOWN_SECONDS:
-        return state, "none"
-    action = close_front_flow(candidate["source"], candidate["source_port"], listen_port)
-    if action.endswith(":ok"):
-        state["last_recovery"] = {
-            "epoch": now_epoch,
-            "source": candidate["source"],
-            "source_port": candidate["source_port"],
-            "action": action,
-            "evidence": {key: candidate[key] for key in ("rtt_ms", "rto_ms", "retransmissions", "bytes_sent", "bytes_retrans", "retransmit_ratio_pct")},
-        }
-        state["suspect"] = {}
-    return state, action
 
 
 def source_in_log_line(line: str, source: str) -> bool:
@@ -1046,6 +909,7 @@ def reconcile_interserver_transport() -> dict[str, Any]:
             "updated_at": utc_now(),
             "state": "failed",
             "selected": "",
+            "primary_failures": 0,
             "primary_successes": 0,
             "probes": {},
             "reason": "",
@@ -1069,6 +933,7 @@ def reconcile_interserver_transport() -> dict[str, Any]:
         primary = transport_candidate_probe(controller, TRANSPORT_PRIMARY_TAG)
         probes = {TRANSPORT_PRIMARY_TAG: primary}
         target = selected
+        primary_failures = 0
         primary_successes = 0
         state = "healthy"
         reason = "primary transport is healthy"
@@ -1088,7 +953,11 @@ def reconcile_interserver_transport() -> dict[str, Any]:
         else:
             fallback = transport_candidate_probe(controller, TRANSPORT_FALLBACK_TAG)
             probes[TRANSPORT_FALLBACK_TAG] = fallback
-            if fallback["ok"]:
+            primary_failures = int(previous.get("primary_failures", 0) or 0) + 1
+            if selected == TRANSPORT_PRIMARY_TAG and primary_failures < TRANSPORT_PRIMARY_FAILURES:
+                state = "suspect"
+                reason = "primary failure is awaiting confirmation"
+            elif fallback["ok"]:
                 target = TRANSPORT_FALLBACK_TAG
                 state = "degraded"
                 reason = "primary transport failed; WireGuard fallback is active"
@@ -1107,6 +976,7 @@ def reconcile_interserver_transport() -> dict[str, Any]:
             {
                 "state": state,
                 "selected": selected,
+                "primary_failures": primary_failures,
                 "primary_successes": primary_successes,
                 "probes": probes,
                 "reason": reason,
@@ -1128,6 +998,7 @@ def watch_interserver_transport() -> None:
                 "updated_at": utc_now(),
                 "state": "failed",
                 "selected": "",
+                "primary_failures": 0,
                 "primary_successes": 0,
                 "probes": {},
                 "reason": str(exc)[:240],
@@ -1303,9 +1174,7 @@ def public_front_snapshot(minutes: int, source: str | None = None, *, live_probe
         for key, metrics in front.get("flows", {}).items()
         if metrics.get("source") == source
     }
-    source_degraded = client.get("quality") == "degraded" or any(
-        metrics.get("quality") == "degraded" for metrics in source_flows.values()
-    )
+    source_degraded = any(metrics.get("quality") == "degraded" for metrics in source_flows.values())
     if source_events["accepted"] and source_degraded:
         source_verdict = "degraded"
     elif source_events["accepted"]:
@@ -1824,7 +1693,6 @@ def snapshot(*, live_probes: bool = False, profile: str = "light", full_logs: bo
             "health_updated_at": health_state.get("updated_at", ""),
             "health_soft_reasons": health_state.get("soft_reasons", []),
             "last_front_degradation": health_state.get("last_front_degradation", {}),
-            "front_flow_recovery": health_state.get("front_flow_recovery", {}),
         },
         "front": front,
         "transport": transport,
@@ -1870,17 +1738,6 @@ def health() -> dict[str, Any]:
         action = "none"
         service_recovery = False
         postcheck: dict[str, Any] | None = None
-        front_flow_recovery = previous.get("front_flow_recovery", {})
-        if current.get("role") == "ru-gateway" and not hard_failure:
-            front = current.get("front", {})
-            front_flow_recovery, front_action = reconcile_front_flow_recovery(
-                front,
-                front_flow_recovery if isinstance(front_flow_recovery, dict) else {},
-                listen_port=int(front.get("port", 443) or 443),
-                now_epoch=now_epoch,
-            )
-            if front_action != "none":
-                action = front_action
         if hard_failure and failures == 1:
             state = "suspect"
         elif hard_failure:
@@ -1912,7 +1769,6 @@ def health() -> dict[str, Any]:
             "network_deltas": network_deltas,
             "soft_reasons": soft_reasons,
             "last_front_degradation": last_front_degradation,
-            "front_flow_recovery": front_flow_recovery,
             "verdicts": (postcheck or current)["verdicts"],
         }
         if postcheck is not None:
