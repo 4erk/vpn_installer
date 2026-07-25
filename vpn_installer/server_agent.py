@@ -372,7 +372,9 @@ def tcp_adaptation_snapshot(interface: str) -> dict[str, Any]:
     for field, name in (
         ("congestion_control", "net.ipv4.tcp_congestion_control"),
         ("mtu_probing", "net.ipv4.tcp_mtu_probing"),
+        ("mtu_probe_floor", "net.ipv4.tcp_mtu_probe_floor"),
         ("probe_interval_seconds", "net.ipv4.tcp_probe_interval"),
+        ("metrics_save_disabled", "net.ipv4.tcp_no_metrics_save"),
         ("udp_rmem_default", "net.core.rmem_default"),
         ("udp_rmem_max", "net.core.rmem_max"),
         ("udp_wmem_max", "net.core.wmem_max"),
@@ -392,6 +394,8 @@ def managed_network_profile(path: Path = SYSCTL_PATH) -> dict[str, int]:
         "net.core.rmem_max": "udp_rmem_max",
         "net.core.wmem_max": "udp_wmem_max",
         "net.netfilter.nf_conntrack_max": "conntrack_max",
+        "net.ipv4.tcp_mtu_probe_floor": "mtu_probe_floor",
+        "net.ipv4.tcp_no_metrics_save": "metrics_save_disabled",
     }
     values: dict[str, int] = {}
     try:

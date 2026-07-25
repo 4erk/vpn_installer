@@ -490,6 +490,8 @@ def bootstrap_from_snapshot(snapshot: dict[str, Any]) -> dict[str, str]:
         "tcp_congestion_control": str(tcp_adaptation.get("congestion_control", "")),
         "tcp_default_qdisc": str(tcp_adaptation.get("qdisc", "")),
         "tcp_mtu_probing": str(tcp_adaptation.get("mtu_probing", "")),
+        "tcp_mtu_probe_floor": str(tcp_adaptation.get("mtu_probe_floor", "")),
+        "tcp_metrics_save_disabled": str(tcp_adaptation.get("metrics_save_disabled", "")),
         "tcp_probe_interval_seconds": str(tcp_adaptation.get("probe_interval_seconds", "")),
         "udp_rmem_default": str(tcp_adaptation.get("udp_rmem_default", "")),
         "udp_rmem_max": str(tcp_adaptation.get("udp_rmem_max", "")),
@@ -527,7 +529,9 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
     print(
         "tcp adaptation: "
         f"cc={preflight.get('tcp_congestion_control', '-')}, qdisc={preflight.get('tcp_default_qdisc', '-')}, "
-        f"mtu_probing={preflight.get('tcp_mtu_probing', '-')}, probe_interval_s={preflight.get('tcp_probe_interval_seconds', '-')}, "
+        f"mtu_probing={preflight.get('tcp_mtu_probing', '-')}, mtu_floor={preflight.get('tcp_mtu_probe_floor', '-')}, "
+        f"metrics_save_disabled={preflight.get('tcp_metrics_save_disabled', '-')}, "
+        f"probe_interval_s={preflight.get('tcp_probe_interval_seconds', '-')}, "
         f"udp_rmem={preflight.get('udp_rmem_default', '-')}/{preflight.get('udp_rmem_max', '-')}"
     )
 

@@ -51,6 +51,9 @@ class PackageTests(unittest.TestCase):
         self.assertIn("sha256sum -c", script)
         self.assertIn("record_binary_digests()", script)
         self.assertIn("verify_active_release()", script)
+        self.assertIn("reset_public_front_tcp_metrics()", script)
+        self.assertIn("ip tcp_metrics flush all", script)
+        self.assertLess(script.index("reset_public_front_tcp_metrics\nverify_active_release"), script.index('chmod 0600 "${SINGBOX_CONFIG_PATH}"'))
         self.assertIn("snapshot --live-probes --profile acceptance", script)
         self.assertIn("VPNSTACK_FAILED_ACCEPTANCE_FILE", script)
         self.assertIn("VPNSTACK_PREVIOUS_RELEASE", script)
@@ -79,7 +82,7 @@ class PackageTests(unittest.TestCase):
 
     def test_package_exposes_version_via_getattr(self) -> None:
         package = importlib.import_module("vpn_installer")
-        self.assertEqual(package.__version__, "0.12.2")
+        self.assertEqual(package.__version__, "0.12.3")
         with self.assertRaises(AttributeError):
             package.__getattr__("nope")
 

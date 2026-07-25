@@ -8,7 +8,15 @@ from pathlib import Path
 from . import workflows
 from .common import OUT_DIR, print_header
 from .diagnostics import DiagnosticsSnapshot
-from .models import ROLE_FOREIGN, ROLE_RU, UDP_RMEM_DEFAULT, UDP_RMEM_MAX, UDP_WMEM_MAX
+from .models import (
+    ROLE_FOREIGN,
+    ROLE_RU,
+    TCP_MTU_PROBE_FLOOR,
+    TCP_NO_METRICS_SAVE,
+    UDP_RMEM_DEFAULT,
+    UDP_RMEM_MAX,
+    UDP_WMEM_MAX,
+)
 from .remote import remote_agent_snapshot, scp_upload, ssh_capture
 from .roles import requested_roles
 from .vless_verify import (
@@ -59,6 +67,10 @@ def _verify_snapshot(snapshot: DiagnosticsSnapshot) -> DiagnosticsSnapshot:
         hard_failures.append("network adaptation fields are missing")
     elif str(tcp_adaptation.get("mtu_probing", "")).strip() != "1":
         degradations.append("TCP PLPMTUD adaptation is disabled")
+    if tcp_adaptation and tcp_adaptation.get("mtu_probe_floor") != TCP_MTU_PROBE_FLOOR:
+        degradations.append("TCP PLPMTUD floor is not active")
+    if tcp_adaptation and tcp_adaptation.get("metrics_save_disabled") != TCP_NO_METRICS_SAVE:
+        degradations.append("TCP destination metrics isolation is not active")
     try:
         rmem_default = int(tcp_adaptation.get("udp_rmem_default", 0))
         rmem_max = int(tcp_adaptation.get("udp_rmem_max", 0))

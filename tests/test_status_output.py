@@ -34,8 +34,10 @@ class StatusOutputTests(unittest.TestCase):
                         "congestion_control": "bbr",
                         "qdisc": "fq",
                         "mtu_probing": 1,
+                        "mtu_probe_floor": 536,
+                        "metrics_save_disabled": 1,
                         "probe_interval_seconds": 600,
-                        "udp_rmem_default": 4194304,
+                        "udp_rmem_default": 8388608,
                         "udp_rmem_max": 16777216,
                     },
                     "conntrack": {
@@ -94,8 +96,8 @@ class StatusOutputTests(unittest.TestCase):
         self.assertIn("runtime overrides:", rendered)
         self.assertIn("admin_routing_rules_count=2", rendered)
         self.assertIn("domain_to_foreign_timeout present", rendered)
-        self.assertIn("tcp adaptation: cc=bbr, qdisc=fq, mtu_probing=1, probe_interval_s=600", rendered)
-        self.assertIn("udp_rmem=4194304/16777216", rendered)
+        self.assertIn("tcp adaptation: cc=bbr, qdisc=fq, mtu_probing=1, mtu_floor=536, metrics_cache=disabled, probe_interval_s=600", rendered)
+        self.assertIn("udp_rmem=8388608/16777216", rendered)
         self.assertIn("conntrack: 95/32768 (0.29%)", rendered)
         self.assertIn("xray_front_bypass=active", rendered)
         self.assertIn("table_full=5m:0,30m:2,24h:23", rendered)

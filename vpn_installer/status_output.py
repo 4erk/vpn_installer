@@ -32,7 +32,9 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
         lines.append(
             "tcp adaptation: "
             f"cc={tcp_adaptation.get('congestion_control', '-')}, qdisc={tcp_adaptation.get('qdisc', '-')}, "
-            f"mtu_probing={tcp_adaptation.get('mtu_probing', '-')}, probe_interval_s={tcp_adaptation.get('probe_interval_seconds', '-')}, "
+            f"mtu_probing={tcp_adaptation.get('mtu_probing', '-')}, mtu_floor={tcp_adaptation.get('mtu_probe_floor', '-')}, "
+            f"metrics_cache={'disabled' if tcp_adaptation.get('metrics_save_disabled') == 1 else 'enabled'}, "
+            f"probe_interval_s={tcp_adaptation.get('probe_interval_seconds', '-')}, "
             f"udp_rmem={tcp_adaptation.get('udp_rmem_default', '-')}/{tcp_adaptation.get('udp_rmem_max', '-')}, "
             f"udp_wmem_max={tcp_adaptation.get('udp_wmem_max', '-')}"
         )

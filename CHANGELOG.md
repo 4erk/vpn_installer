@@ -6,6 +6,17 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.12.3] - 2026-07-25
+
+### Fixed
+
+- Исправлено подтверждённое переполнение receive buffer RU Hysteria2: в трёх burst-окнах за сутки накопилось `12205` новых `UdpRcvbufErrors`. Единый managed profile увеличивает `rmem_default` с 4 до 8 MiB при прежнем ceiling 16 MiB; route policy, transport selector и MTU не меняются.
+- PLPMTUD больше не может уменьшить MSS публичного Xray TCP-flow до наблюдавшихся `48/256`: managed minimum закреплён на `536`.
+- Новые подключения больше не наследуют повреждённые RTT, cwnd и reordering из TCP destination cache после краткого сбоя клиентского маршрута. RU front отключает сохранение таких метрик, а штатная установка один раз очищает прежний cache перед acceptance.
+- Snapshot, status и live acceptance проверяют фактические UDP buffer, PLPMTUD floor и TCP metrics policy. Отсутствующий runtime-инвариант даёт явный `degraded`.
+
+Публичный `vless-uri.txt`, Reality, web-admin, routing policy, WireGuard MTU и локальный VPN-клиент не изменены.
+
 ## [0.12.2] - 2026-07-23
 
 ### Fixed

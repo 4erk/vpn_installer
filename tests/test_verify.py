@@ -30,7 +30,9 @@ def acceptance_snapshot(role: str, **overrides: object) -> DiagnosticsSnapshot:
                 "congestion_control": "bbr",
                 "qdisc": "fq",
                 "mtu_probing": 1,
-                "udp_rmem_default": 4_194_304,
+                "mtu_probe_floor": 536,
+                "metrics_save_disabled": 1,
+                "udp_rmem_default": 8_388_608,
                 "udp_rmem_max": 16_777_216,
                 "udp_wmem_max": 16_777_216,
             }
@@ -68,7 +70,15 @@ class VerifyTests(unittest.TestCase):
         verified = _verify_snapshot(
             acceptance_snapshot(
                 ROLE_RU,
-                network={"tcp_adaptation": {"mtu_probing": 0, "udp_rmem_default": 4_194_304, "udp_rmem_max": 16_777_216}},
+                network={
+                    "tcp_adaptation": {
+                        "mtu_probing": 0,
+                        "mtu_probe_floor": 536,
+                        "metrics_save_disabled": 1,
+                        "udp_rmem_default": 8_388_608,
+                        "udp_rmem_max": 16_777_216,
+                    }
+                },
             )
         )
         self.assertEqual(verified.verdict, "degraded")
@@ -78,7 +88,15 @@ class VerifyTests(unittest.TestCase):
         verified = _verify_snapshot(
             acceptance_snapshot(
                 ROLE_FOREIGN,
-                network={"tcp_adaptation": {"mtu_probing": 1, "udp_rmem_default": 212_992, "udp_rmem_max": 212_992}},
+                network={
+                    "tcp_adaptation": {
+                        "mtu_probing": 1,
+                        "mtu_probe_floor": 536,
+                        "metrics_save_disabled": 1,
+                        "udp_rmem_default": 212_992,
+                        "udp_rmem_max": 212_992,
+                    }
+                },
             )
         )
         self.assertEqual(verified.verdict, "degraded")

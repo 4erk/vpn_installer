@@ -22,7 +22,18 @@ from .common import INSTALL_SCRIPT_PATH, OUT_DIR, ROOT_DIR, ensure_file_parent, 
 from .config import apply_ru_direct_overlays, download_asset, parse_env_text, render_env_text, require_env, split_asset_sources
 from .interserver_transport import HY2_CLASH_API_LISTEN, HY2_PORT, decode_transport_pem, derive_transport_password
 from .manifest import render_manifest
-from .models import CONNTRACK_MAX, DEFAULT_ASSET_TIMEOUT, REQUIRED_ENV_VARS, ROLE_FOREIGN, ROLE_RU, UDP_RMEM_DEFAULT, UDP_RMEM_MAX, UDP_WMEM_MAX
+from .models import (
+    CONNTRACK_MAX,
+    DEFAULT_ASSET_TIMEOUT,
+    REQUIRED_ENV_VARS,
+    ROLE_FOREIGN,
+    ROLE_RU,
+    TCP_MTU_PROBE_FLOOR,
+    TCP_NO_METRICS_SAVE,
+    UDP_RMEM_DEFAULT,
+    UDP_RMEM_MAX,
+    UDP_WMEM_MAX,
+)
 from .routing_policy import build_ru_routing_policy
 from .specs import DeploymentSpec
 from .system_resolver import render_resolved_dropin
@@ -515,6 +526,8 @@ def render_sysctl(role: str) -> str:
         "net.ipv4.tcp_syncookies=1",
         "net.ipv4.tcp_congestion_control=bbr",
         "net.ipv4.tcp_mtu_probing=1",
+        f"net.ipv4.tcp_mtu_probe_floor={TCP_MTU_PROBE_FLOOR}",
+        f"net.ipv4.tcp_no_metrics_save={TCP_NO_METRICS_SAVE}",
     ]
     if role == ROLE_RU:
         lines.append("net.ipv4.conf.all.src_valid_mark=1")

@@ -343,8 +343,10 @@ class ServerAgentTests(unittest.TestCase):
             values = {
                 "net.ipv4.tcp_congestion_control": "bbr\n",
                 "net.ipv4.tcp_mtu_probing": "1\n",
+                "net.ipv4.tcp_mtu_probe_floor": "536\n",
                 "net.ipv4.tcp_probe_interval": "600\n",
-                "net.core.rmem_default": "4194304\n",
+                "net.ipv4.tcp_no_metrics_save": "1\n",
+                "net.core.rmem_default": "8388608\n",
                 "net.core.rmem_max": "16777216\n",
                 "net.core.wmem_max": "16777216\n",
             }
@@ -359,8 +361,10 @@ class ServerAgentTests(unittest.TestCase):
             {
                 "congestion_control": "bbr",
                 "mtu_probing": 1,
+                "mtu_probe_floor": 536,
                 "probe_interval_seconds": 600,
-                "udp_rmem_default": 4194304,
+                "metrics_save_disabled": 1,
+                "udp_rmem_default": 8388608,
                 "udp_rmem_max": 16777216,
                 "udp_wmem_max": 16777216,
                 "qdisc": "fq",
@@ -409,12 +413,34 @@ class ServerAgentTests(unittest.TestCase):
     def test_managed_network_profile_detects_runtime_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "sysctl.conf"
-            path.write_text("net.core.rmem_max=16777216\nnet.core.rmem_default=4194304\nnet.core.wmem_max=16777216\n", encoding="utf-8")
+            path.write_text(
+                "net.core.rmem_max=16777216\n"
+                "net.core.rmem_default=8388608\n"
+                "net.core.wmem_max=16777216\n"
+                "net.ipv4.tcp_mtu_probe_floor=536\n"
+                "net.ipv4.tcp_no_metrics_save=1\n",
+                encoding="utf-8",
+            )
             expected = server_agent.managed_network_profile(path)
-        self.assertEqual(expected, {"udp_rmem_default": 4_194_304, "udp_rmem_max": 16_777_216, "udp_wmem_max": 16_777_216})
+        self.assertEqual(
+            expected,
+            {
+                "udp_rmem_default": 8_388_608,
+                "udp_rmem_max": 16_777_216,
+                "udp_wmem_max": 16_777_216,
+                "mtu_probe_floor": 536,
+                "metrics_save_disabled": 1,
+            },
+        )
         self.assertEqual(
             server_agent.network_profile_mismatches(
-                {"udp_rmem_default": 212_992, "udp_rmem_max": 16_777_216, "udp_wmem_max": 16_777_216},
+                {
+                    "udp_rmem_default": 212_992,
+                    "udp_rmem_max": 16_777_216,
+                    "udp_wmem_max": 16_777_216,
+                    "mtu_probe_floor": 536,
+                    "metrics_save_disabled": 1,
+                },
                 expected,
             ),
             ["udp_rmem_default"],

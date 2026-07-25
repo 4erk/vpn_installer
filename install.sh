@@ -782,6 +782,12 @@ reset_install_runtime_state() {
   fi
 }
 
+reset_public_front_tcp_metrics() {
+  if [[ "${ROLE}" == "ru-gateway" ]]; then
+    ip tcp_metrics flush all >/dev/null
+  fi
+}
+
 record_install_metadata() {
   mkdir -p "${VPNSTACK_ROOT}"
   if [[ -z "${NORMALIZED_ENV_FILE:-}" || ! -s "${NORMALIZED_ENV_FILE}" ]]; then
@@ -1487,6 +1493,7 @@ if [[ "$ROLE" == "ru-gateway" ]]; then
   fi
 fi
 
+reset_public_front_tcp_metrics
 verify_active_release
 
 chmod 0600 "${SINGBOX_CONFIG_PATH}" "${WG_CONFIG_PATH}"
