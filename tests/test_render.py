@@ -137,7 +137,7 @@ class RenderTests(unittest.TestCase):
         self.assertNotIn("multiplex", payload["inbounds"][0])
         self.assertEqual(
             payload["inbounds"][0]["streamSettings"]["sockopt"],
-            {"tcpKeepAliveIdle": 90, "tcpKeepAliveInterval": 15},
+            {"tcpKeepAliveIdle": 90, "tcpKeepAliveInterval": 15, "tcpUserTimeout": 30_000},
         )
 
     def test_ru_server_config_uses_configured_log_level(self) -> None:

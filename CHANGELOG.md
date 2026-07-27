@@ -6,6 +6,14 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.12.4] - 2026-07-27
+
+### Fixed
+
+- Публичный Xray inbound теперь задаёт socket-local `TCP_USER_TIMEOUT=30s`. Здоровые и idle-соединения не затрагиваются, но TCP-flow с неподтверждёнными данными больше не остаётся в `ESTAB`/`FIN-WAIT-1` на системном WAN timeout после краткого обрыва клиентского маршрута.
+- `public_front` больше не считается `verified` только по active/listening Xray: подтверждённые RTT/RTO/retransmit и socket churn дают отдельный `degraded`, не запуская restart сервисов и не переводя foreign-трафик в RU-direct.
+- Snapshot и live acceptance проверяют установленную Xray liveness-policy вместе с manifest. Основной `vless-uri.txt`, Reality/Vision, маршрутизация, межсерверный transport, WireGuard и web-admin не изменены.
+
 ## [0.12.3] - 2026-07-25
 
 ### Fixed

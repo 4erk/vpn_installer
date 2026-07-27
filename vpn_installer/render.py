@@ -25,6 +25,7 @@ from .manifest import render_manifest
 from .models import (
     CONNTRACK_MAX,
     DEFAULT_ASSET_TIMEOUT,
+    PUBLIC_FRONT_TCP_USER_TIMEOUT_MS,
     REQUIRED_ENV_VARS,
     ROLE_FOREIGN,
     ROLE_RU,
@@ -208,7 +209,11 @@ def render_ru_xray(env: dict[str, str]) -> str:
                     "network": "tcp",
                     "security": "reality",
                     "realitySettings": reality,
-                    "sockopt": {"tcpKeepAliveIdle": 90, "tcpKeepAliveInterval": 15},
+                    "sockopt": {
+                        "tcpKeepAliveIdle": 90,
+                        "tcpKeepAliveInterval": 15,
+                        "tcpUserTimeout": PUBLIC_FRONT_TCP_USER_TIMEOUT_MS,
+                    },
                 },
                 "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"], "routeOnly": False},
             }

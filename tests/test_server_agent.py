@@ -611,6 +611,49 @@ class ServerAgentTests(unittest.TestCase):
         front = {"clients": {"203.0.113.20": {"states": {"ESTAB": 1}, "bytes_sent": 5_000_000, "retransmit_ratio_pct": 4.5, "quality": "degraded"}}}
         self.assertEqual(server_agent.front_observation(front), "observed")
 
+    def test_public_front_verdict_uses_socket_quality_not_only_listener_state(self) -> None:
+        degraded = {
+            "listening": True,
+            "degraded_sources": ["203.0.113.20"],
+            "fin_wait_1_sources": [],
+        }
+        self.assertEqual(server_agent.public_front_verdict("active", degraded), "degraded")
+        self.assertEqual(server_agent.public_front_verdict("inactive", degraded), "failed")
+
+    def test_xray_front_socket_policy_reads_inbound_liveness_values(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "xray.json"
+            config.write_text(
+                json.dumps(
+                    {
+                        "inbounds": [
+                            {
+                                "port": 443,
+                                "streamSettings": {
+                                    "sockopt": {
+                                        "tcpKeepAliveIdle": 90,
+                                        "tcpKeepAliveInterval": 15,
+                                        "tcpUserTimeout": 30_000,
+                                    }
+                                },
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch.object(server_agent, "XRAY_CONFIG_PATH", config):
+                policy = server_agent.xray_front_socket_policy(443)
+
+        self.assertEqual(
+            policy,
+            {
+                "tcp_keepalive_idle_seconds": 90,
+                "tcp_keepalive_interval_seconds": 15,
+                "tcp_user_timeout_ms": 30_000,
+            },
+        )
+
     def test_front_live_diagnostics_fail_when_downstream_path_fails(self) -> None:
         with (
             patch.object(server_agent, "parse_env", return_value={"RU_LISTEN_PORT": "443"}),

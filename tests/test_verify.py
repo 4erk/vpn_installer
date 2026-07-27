@@ -37,6 +37,7 @@ def acceptance_snapshot(role: str, **overrides: object) -> DiagnosticsSnapshot:
                 "udp_wmem_max": 16_777_216,
             }
         },
+        "front": {"tcp_user_timeout_ms": 30_000} if role == ROLE_RU else {},
         "route_probes": {"profile": "acceptance", "ok": True},
         "component_verdicts": verdicts,
     }
@@ -54,6 +55,11 @@ class VerifyTests(unittest.TestCase):
         verified = _verify_snapshot(acceptance_snapshot(ROLE_RU, component_verdicts={"server_path": "verified"}))
         self.assertEqual(verified.verdict, "failed")
         self.assertIn("agent verdict fields are incomplete", verified.reasons)
+
+    def test_verify_snapshot_requires_public_front_liveness_policy(self) -> None:
+        verified = _verify_snapshot(acceptance_snapshot(ROLE_RU, front={}))
+        self.assertEqual(verified.verdict, "failed")
+        self.assertIn("public TCP front liveness policy is missing", verified.reasons)
 
     def test_verify_snapshot_degrades_for_front_socket_churn(self) -> None:
         verdicts = {"server_path": "verified", "public_front": "verified", "client_observation": "degraded"}

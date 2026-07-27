@@ -27,6 +27,13 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
         overrides = ", ".join(f"{key}={value}" for key, value in sorted(snapshot.runtime_overrides.items()) if value)
         if overrides:
             lines.append(f"runtime overrides: {overrides}")
+    if snapshot.role == "ru-gateway" and snapshot.front:
+        lines.append(
+            "public front liveness: "
+            f"tcp_user_timeout_ms={snapshot.front.get('tcp_user_timeout_ms', '-')}, "
+            f"keepalive_idle_s={snapshot.front.get('tcp_keepalive_idle_seconds', '-')}, "
+            f"keepalive_interval_s={snapshot.front.get('tcp_keepalive_interval_seconds', '-')}"
+        )
     tcp_adaptation = snapshot.network.get("tcp_adaptation", {})
     if tcp_adaptation:
         lines.append(

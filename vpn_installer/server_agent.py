@@ -94,6 +94,7 @@ TRANSPORT_STATE_PATH = STATE_DIR / "transport-state.json"
 LOCK_PATH = Path("/run/vpn-stack-agent.lock")
 TRANSPORT_LOCK_PATH = Path("/run/vpn-stack-transport.lock")
 SINGBOX_CONFIG_PATH = Path("/etc/sing-box/config.json")
+XRAY_CONFIG_PATH = Path("/etc/xray/config.json")
 SYSCTL_PATH = Path("/etc/sysctl.d/90-vpn-stack.conf")
 RESOLV_CONF_PATH = Path("/etc/resolv.conf")
 RESOLVED_DROPIN_PATH = Path("/etc/systemd/resolved.conf.d/90-vpn-stack.conf")
@@ -692,6 +693,7 @@ def tcp_front_snapshot(port: int) -> dict[str, Any]:
         "stale_connections_5m": stale_5m,
         "stale_connections_1h": stale_1h,
         "fin_wait_1_sources": fin_wait_sources,
+        **xray_front_socket_policy(port),
     }
 
 
@@ -730,6 +732,34 @@ def client_front_quality(metrics: dict[str, Any]) -> str:
     return "observed"
 
 
+def xray_front_socket_policy(port: int) -> dict[str, int]:
+    config = read_json(XRAY_CONFIG_PATH, {})
+    for inbound in config.get("inbounds", []) if isinstance(config, dict) else []:
+        if not isinstance(inbound, dict):
+            continue
+        try:
+            inbound_port = int(inbound.get("port", 0))
+        except (TypeError, ValueError):
+            continue
+        if inbound_port != port:
+            continue
+        sockopt = inbound.get("streamSettings", {}).get("sockopt", {})
+        if not isinstance(sockopt, dict):
+            return {}
+        result: dict[str, int] = {}
+        for output_name, config_name in (
+            ("tcp_keepalive_idle_seconds", "tcpKeepAliveIdle"),
+            ("tcp_keepalive_interval_seconds", "tcpKeepAliveInterval"),
+            ("tcp_user_timeout_ms", "tcpUserTimeout"),
+        ):
+            try:
+                result[output_name] = int(sockopt.get(config_name, 0))
+            except (TypeError, ValueError):
+                result[output_name] = 0
+        return result
+    return {}
+
+
 def front_observation(front: dict[str, Any]) -> str:
     """Separate one lossy source from degradation shared by several clients."""
     fin_wait_sources = front.get("fin_wait_1_sources")
@@ -749,6 +779,12 @@ def front_observation(front: dict[str, Any]) -> str:
     if noisy_sources:
         return "client_specific"
     return "observed"
+
+
+def public_front_verdict(xray_state: str, front: dict[str, Any]) -> str:
+    if xray_state != "active" or not front.get("listening"):
+        return "failed"
+    return "degraded" if front_observation(front) in {"client_specific", "degraded"} else "verified"
 
 
 def front_degradation_evidence(front: dict[str, Any], observed_at: str) -> dict[str, Any]:
@@ -1123,7 +1159,7 @@ def public_front_snapshot(minutes: int, source: str | None = None, *, live_probe
     front = tcp_front_snapshot(port)
     services = {"xray": service_state("vpn-stack-xray.service"), "nftables": service_state("nftables.service")}
     observation = front_observation(front)
-    front_verdict = "failed" if services["xray"] != "active" or not front["listening"] else "degraded" if observation in {"client_specific", "degraded"} else "verified"
+    front_verdict = public_front_verdict(services["xray"], front)
     probes = run_probes(env, "ru-gateway", "light") if live_probes else {"profile": "none", "ok": None, "requirements": {}}
     path_verdict = "verified" if probes.get("ok") is True else "failed" if probes.get("ok") is False else "inconclusive"
     overall = "failed" if "failed" in {front_verdict, path_verdict} else "degraded" if front_verdict == "degraded" else front_verdict
@@ -1646,12 +1682,14 @@ def snapshot(*, live_probes: bool = False, profile: str = "light", full_logs: bo
     capability_failures = [name for name in failed_requirements(probes) if name in EXTERNAL_CAPABILITY_REQUIREMENTS] if live_probes else []
     transport_failures = [name for name in failed_requirements(probes) if name in OPTIONAL_TRANSPORT_REQUIREMENTS] if live_probes else []
     server_path = "failed" if reasons else "verified" if live_probes else "inconclusive"
+    client_observation = front_observation(front) if front else "not-applicable"
     public_front = "not-applicable"
     if role == "ru-gateway":
-        public_front = "verified" if services["xray"] == "active" and front.get("listening") else "failed"
-    client_observation = front_observation(front) if front else "not-applicable"
+        public_front = public_front_verdict(services["xray"], front)
     external_capabilities = "degraded" if capability_failures else "verified" if live_probes else "inconclusive"
     degradations = ([f"external_capabilities_failed:{','.join(capability_failures)}"] if capability_failures else [])
+    if public_front == "degraded":
+        degradations.append(f"public_front={client_observation}")
     if transport_failures:
         degradations.append(f"fallback_transport_failed:{','.join(transport_failures)}")
     selected_transport = str(interserver.get("selection", {}).get("selected", ""))

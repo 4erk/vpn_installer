@@ -32,6 +32,7 @@
 
 ## Network adaptation
 
+- Публичный Xray inbound использует socket-local `TCP_USER_TIMEOUT=30s`: он ограничивает только время неподтверждённых данных или закрытия broken TCP-flow и не является route/connect timeout. Значение является внутренним release-инвариантом, проверяется manifest/live acceptance и не экспортируется как env-ручка. См. [Xray Sockopt](https://xtls.github.io/en/config/transports/sockopt.html) и [Linux tcp(7)](https://man7.org/linux/man-pages/man7/tcp.7.html).
 - Public Reality TCP и оба серверных WAN используют BBR с `fq`; это pacing, а не route policy.
 - `net.ipv4.tcp_mtu_probing=1` является обязательным runtime-инвариантом. Нижний предел MSS закреплён на `536`, чтобы PLPMTUD не сохранял практически неработоспособные значения `48/256` после краткого path failure. На публичном туннельном фронте `tcp_no_metrics_save=1`: новый reconnect заново измеряет путь и не наследует повреждённые RTT/cwnd/reordering из destination cache. См. [Linux IP sysctl](https://www.kernel.org/doc/html/latest/networking/ip-sysctl.html), [ip tcp_metrics](https://man7.org/linux/man-pages/man8/ip-tcp_metrics.8.html) и [RFC 4821](https://datatracker.ietf.org/doc/html/rfc4821).
 - WireGuard MTU не меняется по журналам или одиночному endpoint. Он остаётся частью deployment spec и меняется только сравнительным acceptance-тестом.

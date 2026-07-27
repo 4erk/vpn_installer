@@ -9,6 +9,7 @@ from . import workflows
 from .common import OUT_DIR, print_header
 from .diagnostics import DiagnosticsSnapshot
 from .models import (
+    PUBLIC_FRONT_TCP_USER_TIMEOUT_MS,
     ROLE_FOREIGN,
     ROLE_RU,
     TCP_MTU_PROBE_FLOOR,
@@ -58,6 +59,8 @@ def _verify_snapshot(snapshot: DiagnosticsSnapshot) -> DiagnosticsSnapshot:
         hard_failures.append(f"xray={snapshot.services.get('xray')}")
     if snapshot.role == ROLE_RU and snapshot.services.get("transport") != "active":
         hard_failures.append(f"transport={snapshot.services.get('transport') or 'missing'}")
+    if snapshot.role == ROLE_RU and snapshot.front.get("tcp_user_timeout_ms") != PUBLIC_FRONT_TCP_USER_TIMEOUT_MS:
+        hard_failures.append("public TCP front liveness policy is missing")
     if snapshot.drift == "server-mutated":
         hard_failures.append("installed config hash differs from render manifest")
     elif snapshot.drift == "unknown":
