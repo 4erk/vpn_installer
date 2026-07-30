@@ -251,6 +251,11 @@ event() {
     printf 'vpn-vless-runner phase=%s elapsed_s=%s\n' "$1" "$(( ($(date +%s%N) - runner_started_ns) / 1000000000 ))" >&2
 }
 
+format_duration_ns() {
+    local duration_ns=$1
+    printf '%d.%09d' "$((duration_ns / 1000000000))" "$((duration_ns % 1000000000))"
+}
+
 fail() {
     event "failed:$1"
     tail -n 20 runner-curl.log >&2 2>/dev/null || true
@@ -392,7 +397,6 @@ if (( throughput_seconds > 0 )); then
         throughput_runs=$((throughput_runs + 1))
         source_index=$((attempt_index % ${#throughput_urls[@]}))
         throughput_url=${throughput_urls[$source_index]}
-        attempt_seconds=$remaining_seconds
         phase=stability
         phase_deadline_ns=$throughput_deadline_ns
         curl_rate_args=()
@@ -404,18 +408,20 @@ if (( throughput_seconds > 0 )); then
             throughput_url=${throughput_urls[$source_index]}
             curl_rate_args=(--limit-rate __THROUGHPUT_STABILITY_LIMIT_BYTES_PER_SECOND__)
         fi
-        phase_remaining_seconds=$(((phase_deadline_ns - now_ns + 999999999) / 1000000000))
-        if [[ "$phase" == "capacity" ]] && (( phase_remaining_seconds < __THROUGHPUT_MIN_CAPACITY_ATTEMPT_SECONDS__ )); then
+        phase_remaining_ns=$((phase_deadline_ns - now_ns))
+        if [[ "$phase" == "capacity" ]] && (( phase_remaining_ns < __THROUGHPUT_MIN_CAPACITY_ATTEMPT_SECONDS__ * 1000000000 )); then
             event throughput-capacity-boundary
-            sleep "$phase_remaining_seconds"
+            sleep "$(format_duration_ns "$phase_remaining_ns")"
             continue
         fi
-        if (( attempt_seconds > phase_remaining_seconds )); then
-            attempt_seconds=$phase_remaining_seconds
+        attempt_budget_ns=$remaining_ns
+        if (( attempt_budget_ns > phase_remaining_ns )); then
+            attempt_budget_ns=$phase_remaining_ns
         fi
-        if [[ "$phase" == "capacity" ]] && (( attempt_seconds > __THROUGHPUT_ATTEMPT_SECONDS__ )); then
-            attempt_seconds=__THROUGHPUT_ATTEMPT_SECONDS__
+        if [[ "$phase" == "capacity" ]] && (( attempt_budget_ns > __THROUGHPUT_ATTEMPT_SECONDS__ * 1000000000 )); then
+            attempt_budget_ns=$((__THROUGHPUT_ATTEMPT_SECONDS__ * 1000000000))
         fi
+        attempt_seconds=$(format_duration_ns "$attempt_budget_ns")
         event "throughput-$phase-attempt-$attempt_index-source-$source_index-remaining-$remaining_seconds"
         attempt_start_ns=$now_ns
         throughput_count_file=$(mktemp)
