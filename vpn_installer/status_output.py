@@ -69,11 +69,17 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
     if interserver:
         selection = interserver.get("selection", {})
         candidates = selection.get("candidates", {})
-        delays = ",".join(
-            f"{tag}={details.get('delay_ms')}ms" if details.get("delay_ms") is not None else f"{tag}=not-probed"
-            for tag, details in candidates.items()
-            if isinstance(details, dict)
-        ) or "-"
+        rendered_delays: list[str] = []
+        for tag, candidate in candidates.items():
+            if not isinstance(candidate, dict) or candidate.get("delay_ms") is None:
+                rendered_delays.append(f"{tag}=not-probed")
+            elif candidate.get("fresh") is False:
+                rendered_delays.append(
+                    f"{tag}=stale({candidate.get('delay_ms')}ms,age={candidate.get('age_seconds', '-')}s)"
+                )
+            else:
+                rendered_delays.append(f"{tag}={candidate.get('delay_ms')}ms")
+        delays = ",".join(rendered_delays) or "-"
         details = [
             f"mode={interserver.get('mode', '-')}",
             f"selected={selection.get('selected') or '-'}",
@@ -81,10 +87,24 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
         ]
         if snapshot.role == "ru-gateway":
             adaptive = interserver.get("adaptive_state", {})
-            details.append(f"adaptation={adaptive.get('state') or '-'}")
+            adaptive_label = adaptive.get("state") or "-"
+            if adaptive.get("fresh") is False:
+                adaptive_label = f"stale({adaptive_label},age={adaptive.get('age_seconds', '-')}s)"
+            details.append(f"adaptation={adaptive_label}")
             details.append(f"hy2_session={'active' if interserver.get('hysteria_session_active') else 'inactive'}")
             if adaptive.get("reason"):
                 details.append(f"reason={adaptive['reason']}")
+            shadow = interserver.get("shadow_state", {})
+            if shadow:
+                shadow_label = (
+                    f"{shadow.get('state', '-')}/{shadow.get('selected', '-')}->{shadow.get('recommended', '-')}"
+                )
+                if shadow.get("fresh") is False:
+                    shadow_label = f"stale({shadow_label},age={shadow.get('age_seconds', '-')}s)"
+                details.append(
+                    "shadow="
+                    + shadow_label
+                )
         elif snapshot.role == "foreign-exit":
             details.append(f"listener={'active' if interserver.get('listening') else 'inactive'}")
             details.append(f"source={interserver.get('source_restricted_to') or '-'}")
@@ -129,6 +149,17 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
             "last front degradation: "
             f"at={front_degradation.get('observed_at', '-')}, sources={sources}, "
             f"retrans={aggregate.get('bytes_retrans', 0)}/{aggregate.get('bytes_sent', 0)} "
+            f"({aggregate.get('retransmit_ratio_pct', 0)}%)"
+        )
+    front_interval = snapshot.network.get("recent_front_interval", {})
+    if front_interval:
+        aggregate = front_interval.get("aggregate", {})
+        sources = ",".join(str(source) for source in front_interval.get("degraded_sources", [])) or "-"
+        lines.append(
+            "front interval: "
+            f"at={front_interval.get('observed_at', '-')}, observation={front_interval.get('observation', '-')}, "
+            f"flows={front_interval.get('sampled_flows', 0)}, sources={sources}, "
+            f"retrans={aggregate.get('bytes_retrans', 0)}/{aggregate.get('activity_bytes', 0)} "
             f"({aggregate.get('retransmit_ratio_pct', 0)}%)"
         )
     if snapshot.reasons:

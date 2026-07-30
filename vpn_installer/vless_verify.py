@@ -150,34 +150,34 @@ def render_socks5_udp_dns_probe(*, listen_port: int) -> str:
             finally:
                 control.close()
 
-        control = socket.create_connection(("127.0.0.1", {listen_port}), timeout=8)
-        control.sendall(b"\\x05\\x01\\x00")
-        if receive_exact(control, 2) != b"\\x05\\x00":
-            raise RuntimeError("SOCKS authentication failed")
-        control.sendall(b"\\x05\\x03\\x00\\x01\\x00\\x00\\x00\\x00\\x00\\x00")
-        response_status, relay_address, relay_port = socks_reply(control)
-        if response_status != 0:
-            raise RuntimeError(f"SOCKS UDP associate rejected: {{response_status}}")
-        if relay_address in {{"0.0.0.0", "::"}}:
-            relay_address = "127.0.0.1"
+        with socket.create_connection(("127.0.0.1", {listen_port}), timeout=8) as control:
+            control.sendall(b"\\x05\\x01\\x00")
+            if receive_exact(control, 2) != b"\\x05\\x00":
+                raise RuntimeError("SOCKS authentication failed")
+            control.sendall(b"\\x05\\x03\\x00\\x01\\x00\\x00\\x00\\x00\\x00\\x00")
+            response_status, relay_address, relay_port = socks_reply(control)
+            if response_status != 0:
+                raise RuntimeError(f"SOCKS UDP associate rejected: {{response_status}}")
+            if relay_address in {{"0.0.0.0", "::"}}:
+                relay_address = "127.0.0.1"
 
-        request = b"\\x00\\x00\\x00\\x01" + socket.inet_aton("1.1.1.1") + struct.pack("!H", 53) + dns_query("example.com")
-        udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        udp.settimeout(10)
-        udp.sendto(request, (relay_address, relay_port))
-        reply, _peer = udp.recvfrom(4096)
-        if len(reply) < 14 or reply[:3] != b"\\x00\\x00\\x00":
-            raise RuntimeError("invalid SOCKS UDP reply")
-        if reply[3] == 1:
-            payload_offset = 10
-        elif reply[3] == 4:
-            payload_offset = 22
-        elif reply[3] == 3:
-            payload_offset = 5 + reply[4]
-        else:
-            raise RuntimeError("invalid SOCKS reply address type")
-        if reply[payload_offset:payload_offset + 2] != b"\\x11\\x22":
-            raise RuntimeError("DNS transaction mismatch")
+            request = b"\\x00\\x00\\x00\\x01" + socket.inet_aton("1.1.1.1") + struct.pack("!H", 53) + dns_query("example.com")
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
+                udp.settimeout(10)
+                udp.sendto(request, (relay_address, relay_port))
+                reply, _peer = udp.recvfrom(4096)
+            if len(reply) < 14 or reply[:3] != b"\\x00\\x00\\x00":
+                raise RuntimeError("invalid SOCKS UDP reply")
+            if reply[3] == 1:
+                payload_offset = 10
+            elif reply[3] == 4:
+                payload_offset = 22
+            elif reply[3] == 3:
+                payload_offset = 5 + reply[4]
+            else:
+                raise RuntimeError("invalid SOCKS reply address type")
+            if reply[payload_offset:payload_offset + 2] != b"\\x11\\x22":
+                raise RuntimeError("DNS transaction mismatch")
         private_targets = []
         for address, port in (("10.0.0.1", 80), ("172.19.0.2", 853)):
             try:

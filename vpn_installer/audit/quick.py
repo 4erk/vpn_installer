@@ -14,7 +14,7 @@ from unittest.mock import patch
 from ..common import OUT_DIR, ROOT_DIR, RUNTIME_SITE_PACKAGES
 from ..config import load_env_file
 from ..manifest import XRAY_VERSION
-from ..render import render_all_artifacts
+from ..render import find_cached_asset, render_all_artifacts
 from ..runtime_deps import ensure_python_package
 from ..targets import build_target
 from .runner import AUDIT_IMAGE, VPN_PS1, AuditFailure, AuditRunner, powershell_executable, python_cmd, write_bytes
@@ -152,16 +152,22 @@ def run(runner: AuditRunner) -> None:
         runner.skip("quick-vpn-sh-help", "не Linux-хост: Linux launcher help пропущен")
         runner.skip("quick-vpn-sh-audit-help", "не Linux-хост: Linux audit help пропущен")
     runner.record("quick-install-ux", test_install_ux_helpers)
-    runner.record("quick-render-all", lambda: test_render_all(env_path, env, out_dir))
+    runner.record(
+        "quick-render-all",
+        lambda: test_render_all(
+            env_path,
+            env,
+            out_dir,
+            refresh_assets=dev_mode,
+        ),
+    )
     runner.record("quick-validate-json", lambda: test_validate_json(out_dir))
     runner.record("quick-user-artifacts", lambda: test_user_artifacts(out_dir))
     runner.record("quick-validate-bundle", lambda: test_validate_bundle(out_dir))
     if docker_available:
-        runner.record("quick-singbox-check", lambda: test_singbox_check(runner, out_dir))
         runner.record("quick-singbox-runtime-ru", lambda: test_ru_singbox_runtime_smoke(runner, out_dir))
         runner.record("quick-interserver-hysteria-runtime", lambda: test_interserver_hysteria_runtime(runner, out_dir))
     else:
-        runner.skip("quick-singbox-check", f"{docker_skip_reason}, sing-box container check пропущен")
         runner.skip("quick-singbox-runtime-ru", f"{docker_skip_reason}, runtime smoke для RU sing-box пропущен")
         runner.skip("quick-interserver-hysteria-runtime", f"{docker_skip_reason}, Hysteria2 runtime check пропущен")
 
@@ -289,8 +295,39 @@ def test_vpn_menu_exit(runner: AuditRunner) -> dict[str, str]:
     return {"launcher": str(VPN_PS1)}
 
 
-def test_render_all(env_path: Path, env: dict[str, str], out_dir: Path) -> dict[str, str]:
-    render_all_artifacts(env_path, env)
+def seed_quick_asset_cache(env: dict[str, str], out_dir: Path) -> None:
+    names = ["geosite-ru.srs", "geoip-ru.srs"]
+    if env.get("FOREIGN_BLOCK_RU", "0") == "1":
+        names.extend(["ru-ipv4.zone", "ru-ipv6.zone"])
+    assets_dir = out_dir / "assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    missing: list[str] = []
+    for name in names:
+        target = assets_dir / name
+        if target.is_file() and target.stat().st_size > 0:
+            continue
+        cached = find_cached_asset(name, target)
+        if cached is None:
+            missing.append(name)
+            continue
+        shutil.copy2(cached, target)
+    if missing:
+        raise AuditFailure(
+            "quick audit requires local asset cache; refresh first: "
+            + ", ".join(missing)
+        )
+
+
+def test_render_all(
+    env_path: Path,
+    env: dict[str, str],
+    out_dir: Path,
+    *,
+    refresh_assets: bool = False,
+) -> dict[str, str]:
+    if not refresh_assets:
+        seed_quick_asset_cache(env, out_dir)
+    render_all_artifacts(env_path, env, fetch_assets_first=refresh_assets)
     return {"out_dir": str(out_dir)}
 
 
@@ -313,7 +350,9 @@ def test_validate_json(out_dir: Path) -> dict[str, str]:
 def test_user_artifacts(out_dir: Path) -> dict[str, str]:
     vless_uri_path = out_dir / "client" / "vless-uri.txt"
     hiddify_uri_alias_path = out_dir / "client" / "hiddify-uri.txt"
+    v2rayn_uri_alias_path = out_dir / "client" / "v2rayn-uri.txt"
     hiddify_json_path = out_dir / "client" / "hiddify-cross-platform.json"
+    linux_json_path = out_dir / "client" / "linux-sing-box.json"
     android_hiddify_json_path = out_dir / "client" / "hiddify-android.json"
     android_xray_json_path = out_dir / "client" / "android-v2rayng-xray.json"
     next_steps = out_dir / "NEXT-STEPS.txt"
@@ -321,8 +360,12 @@ def test_user_artifacts(out_dir: Path) -> dict[str, str]:
         raise AuditFailure(f"Не найден VLESS URI fallback файл: {vless_uri_path}")
     if not hiddify_uri_alias_path.is_file():
         raise AuditFailure(f"Не найден Hiddify URI alias файл: {hiddify_uri_alias_path}")
+    if not v2rayn_uri_alias_path.is_file():
+        raise AuditFailure(f"Не найден v2rayN URI alias файл: {v2rayn_uri_alias_path}")
     if not hiddify_json_path.is_file():
         raise AuditFailure(f"Не найден Hiddify JSON файл: {hiddify_json_path}")
+    if not linux_json_path.is_file():
+        raise AuditFailure(f"Не найден Linux sing-box JSON файл: {linux_json_path}")
     if not android_hiddify_json_path.is_file():
         raise AuditFailure(f"Не найден Android Hiddify JSON файл: {android_hiddify_json_path}")
     if not android_xray_json_path.is_file():
@@ -335,6 +378,17 @@ def test_user_artifacts(out_dir: Path) -> dict[str, str]:
     hiddify_uri_alias_payload = hiddify_uri_alias_path.read_text(encoding="utf-8")
     if hiddify_uri_alias_payload != vless_uri_payload:
         raise AuditFailure("Совместимый Hiddify URI alias расходится с VLESS URI fallback")
+    if v2rayn_uri_alias_path.read_text(encoding="utf-8") != vless_uri_payload:
+        raise AuditFailure("Совместимый v2rayN URI alias расходится с основным VLESS URI")
+    hiddify_payload = json.loads(hiddify_json_path.read_text(encoding="utf-8"))
+    linux_payload = json.loads(linux_json_path.read_text(encoding="utf-8"))
+    if hiddify_payload.get("inbounds", [{}])[0].get("auto_redirect") is not False:
+        raise AuditFailure("Hiddify profile должен отключать auto_redirect")
+    if linux_payload.get("inbounds", [{}])[0].get("auto_redirect") is not True:
+        raise AuditFailure("Linux sing-box profile должен включать auto_redirect")
+    linux_payload["inbounds"][0]["auto_redirect"] = False
+    if linux_payload != hiddify_payload:
+        raise AuditFailure("Hiddify и Linux sing-box profiles расходятся не только по auto_redirect")
     android_xray_payload = json.loads(android_xray_json_path.read_text(encoding="utf-8"))
     if "dns" in android_xray_payload:
         raise AuditFailure("Android/v2rayNG Xray JSON не должен включать клиентский DNS: домены должны доходить до серверного роутера")
@@ -352,6 +406,7 @@ def test_user_artifacts(out_dir: Path) -> dict[str, str]:
     return {
         "vless_uri": str(vless_uri_path),
         "hiddify_uri_alias": str(hiddify_uri_alias_path),
+        "v2rayn_uri_alias": str(v2rayn_uri_alias_path),
         "hiddify_json": str(hiddify_json_path),
         "android_hiddify_json": str(android_hiddify_json_path),
         "android_xray_json": str(android_xray_json_path),
@@ -387,27 +442,14 @@ def test_validate_bundle(out_dir: Path) -> dict[str, str]:
     return {"bundle_dir": str(bundle_dir)}
 
 
-def test_singbox_check(runner: AuditRunner, out_dir: Path) -> dict[str, str]:
-    container = f"audit-singbox-{runner.run_id}"
-    configs = [
-        out_dir / "preview" / "ru" / "sing-box.json",
-        out_dir / "preview" / "foreign" / "sing-box.json",
-        out_dir / "client" / "linux-sing-box.json",
-        out_dir / "client" / "hiddify-cross-platform.json",
-    ]
-    with runner.docker_container(container, AUDIT_IMAGE):
-        runner.docker_exec(container, "mkdir -p /work /var/lib/vpn-stack/rules")
-        for asset in ("geosite-ru.srs", "geoip-ru.srs"):
-            runner.docker_copy(container, out_dir / "assets" / asset, f"/var/lib/vpn-stack/rules/{asset}")
-        for path in configs:
-            runner.docker_copy(container, path, f"/work/{path.name}")
-            runner.docker_exec(container, f"sing-box check -c /work/{path.name}")
-    return {"checked_configs": ", ".join(path.name for path in configs)}
-
-
 def test_ru_singbox_runtime_smoke(runner: AuditRunner, out_dir: Path) -> dict[str, str]:
     container = f"audit-singbox-runtime-ru-{runner.run_id}"
     config_path = out_dir / "preview" / "ru" / "sing-box.json"
+    client_configs = [
+        out_dir / "client" / "linux-sing-box.json",
+    ]
+    if runner.mode != "quick":
+        client_configs.append(out_dir / "client" / "hiddify-cross-platform.json")
     work_dir = runner.work_dir / "ru-runtime-smoke"
     work_dir.mkdir(parents=True, exist_ok=True)
     router_plain_path = work_dir / "ru-sing-box-router.json"
@@ -416,6 +458,9 @@ def test_ru_singbox_runtime_smoke(runner: AuditRunner, out_dir: Path) -> dict[st
     inbound = router_config["inbounds"][0]
     if inbound.get("type") != "mixed" or inbound.get("tag") != "router-in" or inbound.get("listen") != "127.0.0.1":
         raise AuditFailure("RU sing-box должен быть локальным mixed-router, а публичный VLESS/Reality должен быть в Xray")
+    router_listen_port = int(inbound.get("listen_port", 0))
+    if not (1 <= router_listen_port <= 65535):
+        raise AuditFailure("RU sing-box router содержит некорректный listen_port")
     router_config["log"] = {"level": "info", "timestamp": True}
     for dns_server in router_config.get("dns", {}).get("servers", []):
         dns_server.pop("detour", None)
@@ -432,10 +477,47 @@ def test_ru_singbox_runtime_smoke(runner: AuditRunner, out_dir: Path) -> dict[st
         for asset in ("geosite-ru.srs", "geoip-ru.srs"):
             runner.docker_copy(container, out_dir / "assets" / asset, f"/var/lib/vpn-stack/rules/{asset}")
         runner.docker_copy(container, config_path, "/work/ru-sing-box.json")
+        for client_config in client_configs:
+            destination = f"/work/{client_config.name}"
+            runner.docker_copy(container, client_config, destination)
+        check_starts: list[str] = []
+        check_waits: list[str] = []
+        check_failures: list[str] = []
+        check_logs: list[str] = []
+        for index, client_config in enumerate(client_configs):
+            label = f"client_{index}"
+            log_path = f"/tmp/{label}-check.log"
+            check_starts.append(
+                f"sing-box check -c /work/{client_config.name} >{log_path} 2>&1 & {label}_pid=$!;"
+            )
+            check_waits.append(f'wait "${label}_pid"; {label}_rc=$?;')
+            check_failures.append(f"{label}_rc != 0")
+            check_logs.append(log_path)
+        failure_expression = " || ".join([*check_failures, "runtime_ready != 1"])
         runner.docker_exec(
             container,
-            "timeout 3s sing-box run -c /work/ru-sing-box.json >/tmp/ru-singbox.log 2>&1",
-            expected_codes={124},
+            " ".join(check_starts)
+            + " "
+            "sing-box run -c /work/ru-sing-box.json >/tmp/ru-singbox.log 2>&1 & "
+            "runtime_pid=$!; "
+            "runtime_ready=0; "
+            "for _ in $(seq 1 30); do "
+            f"if ss -Hltn | grep -q '127.0.0.1:{router_listen_port}'; then "
+            "sleep 0.2; "
+            "kill -0 \"$runtime_pid\" 2>/dev/null && runtime_ready=1; "
+            "break; "
+            "fi; "
+            "kill -0 \"$runtime_pid\" 2>/dev/null || break; "
+            "sleep 0.1; "
+            "done; "
+            "kill \"$runtime_pid\" 2>/dev/null || true; "
+            + " ".join(check_waits)
+            + " "
+            "wait \"$runtime_pid\" 2>/dev/null || true; "
+            f"if (( {failure_expression} )); then "
+            f"cat {' '.join(check_logs)} /tmp/ru-singbox.log; "
+            "exit 1; "
+            "fi",
         )
         runner.docker_copy(container, router_plain_path, "/work/ru-sing-box-router.json")
         runner.docker_exec(container, "sing-box check -c /work/ru-sing-box-router.json")
@@ -452,7 +534,12 @@ def test_ru_singbox_runtime_smoke(runner: AuditRunner, out_dir: Path) -> dict[st
             raise
         if "ru plain ok" not in completed.stdout:
             raise AuditFailure("RU sing-box router runtime smoke не вернул ожидаемый HTTP payload")
-    return {"config": str(config_path), "router_config": str(router_plain_path), "result": "runtime-smoke-ok"}
+    return {
+        "config": str(config_path),
+        "client_configs": ", ".join(path.name for path in client_configs),
+        "router_config": str(router_plain_path),
+        "result": "runtime-smoke-ok",
+    }
 
 
 def test_interserver_hysteria_runtime(runner: AuditRunner, out_dir: Path) -> dict[str, str]:

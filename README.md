@@ -124,15 +124,17 @@ $env:VPN_SSH_BIND_ADDRESS="192.168.0.101"
 - `hiddify-cross-platform.json` — fallback, если нужен локальный JSON-файл
 - `hiddify-android.json` — Android-safe fallback
 - `hiddify-uri.txt` — совместимый alias того же `VLESS URI` для старых сценариев
+- `v2rayn-uri.txt` — удобный alias того же `VLESS URI` для v2rayN
 
 ## Как подключить клиент
 
 1. Сначала импортируй простой `vless-uri.txt`
 2. Если нужен Hiddify, сначала пробуй `hiddify-uri.txt`, это тот же `VLESS URI`
-3. JSON-файлы используй как fallback для клиентов, которым нужен импорт файлом
-4. Если сайты висят, сначала смотри `vpn status --deployment <name> --role ru-gateway`, затем запускай свежую acceptance-проверку `vpn verify live --deployment <name>`
-5. `vpn status` выводит отдельные счётчики DNS, domain, IPv4-literal, IPv6-literal и private/fake ошибок за свежее и историческое окна
-6. Если включён TUN/full VPN и `client-check` показывает self-tunnel, используй route bypass helper ниже
+3. Для v2rayN скопируй URI из `v2rayn-uri.txt` и выбери импорт share link из буфера; отдельный custom-config слой не добавляется
+4. JSON-файлы используй как fallback для клиентов, которым нужен импорт файлом
+5. Если сайты висят, сначала смотри `vpn status --deployment <name> --role ru-gateway`, затем запускай свежую acceptance-проверку `vpn verify live --deployment <name>`
+6. `vpn status` выводит отдельные счётчики DNS, domain, IPv4-literal, IPv6-literal и private/fake ошибок за свежее и историческое окна
+7. Если включён TUN/full VPN и `client-check` показывает self-tunnel, используй route bypass helper ниже
 
 Сервер ожидает обычный VLESS/Reality tunnel. Публичный вход на российском сервере принимает Xray, восстанавливает домен из SNI, если клиент пришёл по IPv6 literal, и передаёт трафик во внутренний `sing-box` router. Если клиент отправляет private/fake IP вроде `fdfd::...` без домена, такие случаи явно группируются в `status/diagnose`.
 
@@ -140,7 +142,7 @@ $env:VPN_SSH_BIND_ADDRESS="192.168.0.101"
 
 Сервер остаётся источником истины для split-маршрутизации: клиенту не нужно знать, что считать российским или зарубежным трафиком. Он просто даёт туннель до `российского сервера`, а сама логика маршрутов живёт на серверной стороне.
 
-Между серверами foreign-трафик идёт через адаптивную пару Hysteria2/QUIC и WireGuard. QUIC является устойчивым к потерям transport, WireGuard остаётся fallback; sing-box проверяет оба пути в фоне и применяет выбранный путь к новым соединениям. Оба transport заканчиваются на одном зарубежном VPS, поэтому это не подменяет второй независимый egress. Публичный клиентский контракт при этом остаётся тем же VLESS/Reality URI.
+Между серверами foreign-трафик идёт через адаптивную пару Hysteria2/QUIC и WireGuard. Supervisor одновременно проверяет оба пути, фильтрует одиночные выбросы и после подтверждения применяет выбранный путь только к новым соединениям. Общесистемный UDP counter сам по себе маршрут не меняет. Оба transport заканчиваются на одном зарубежном VPS, поэтому это не подменяет второй независимый egress. Публичный клиентский контракт при этом остаётся тем же VLESS/Reality URI.
 
 Системные DNS-запросы серверов проходят через локальный cache `systemd-resolved` с независимыми Cloudflare, Quad9 и Google upstreams. При кратком отказе upstream известные positive records могут обслуживаться из stale cache до одного часа; этот resolver является частью manifest и откатывается вместе с release.
 

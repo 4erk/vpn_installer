@@ -458,11 +458,11 @@ class ServerAgentTests(unittest.TestCase):
         def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
             if "-Htan" in args:
                 return subprocess.CompletedProcess(args, 0, "ESTAB 0 0 94.232.248.35:443 203.0.113.20:50123\n", "")
-            if "-Htoin" in args:
+            if "-Htoein" in args:
                 return subprocess.CompletedProcess(
                     args,
                     0,
-                    "ESTAB 0 0 94.232.248.35:443 203.0.113.20:50123\n\t cubic rtt:45.2/3.1 mss:1428 pmtu:1500 cwnd:12 bytes_sent:2000000 bytes_retrans:80000 data_segs_out:1400 delivery_rate 12000000bps retrans:0/3 reord_seen:7 dsack_dups:4 reordering:300 rcv_ooopack:5 unacked:2 lastsnd:100 lastrcv:200\n",
+                    "ESTAB 0 0 94.232.248.35:443 203.0.113.20:50123 sk:2D43A0\n\t cubic rtt:45.2/3.1 mss:1428 pmtu:1500 cwnd:12 bytes_sent:2000000 bytes_retrans:80000 data_segs_out:1400 delivery_rate 12000000bps retrans:0/3 reord_seen:7 dsack_dups:4 reordering:300 rcv_ooopack:5 unacked:2 lastsnd:100 lastrcv:200\n",
                     "",
                 )
             return subprocess.CompletedProcess(args, 0, "LISTEN 0 4096 94.232.248.35:443 0.0.0.0:*\n", "")
@@ -487,14 +487,166 @@ class ServerAgentTests(unittest.TestCase):
         self.assertEqual(client["rtt_ms"]["samples"], 1)
         flow = front["flows"]["203.0.113.20:50123"]
         self.assertEqual(flow["source_port"], 50123)
+        self.assertEqual(flow["socket_id"], "2d43a0")
         self.assertEqual(flow["retransmit_ratio_pct"], 4.0)
         self.assertEqual(front["degraded_sources"], [])
+
+    def test_front_interval_uses_monotonic_counters_from_the_same_socket(self) -> None:
+        first = {
+            "flows": {
+                "203.0.113.20:50123": {
+                    "socket_id": "2d43a0",
+                    "source": "203.0.113.20",
+                    "source_port": 50123,
+                    "bytes_sent": 100_000,
+                    "bytes_retrans": 1_000,
+                    "retransmissions": 1,
+                    "data_segs_out": 80,
+                }
+            }
+        }
+        second = {
+            "flows": {
+                "203.0.113.20:50123": {
+                    "socket_id": "2d43a0",
+                    "source": "203.0.113.20",
+                    "source_port": 50123,
+                    "bytes_sent": 2_100_000,
+                    "bytes_retrans": 81_000,
+                    "retransmissions": 7,
+                    "data_segs_out": 1_480,
+                }
+            }
+        }
+
+        baseline, counters = server_agent.front_interval_snapshot(first, {}, "2026-07-30T20:00:00+00:00")
+        interval, _counters = server_agent.front_interval_snapshot(second, counters, "2026-07-30T20:02:00+00:00")
+
+        self.assertTrue(baseline["baseline"])
+        self.assertEqual(baseline["sampled_flows"], 0)
+        self.assertEqual(interval["degraded_sources"], ["203.0.113.20"])
+        self.assertEqual(interval["flows"]["203.0.113.20:50123"]["bytes_retrans"], 80_000)
+        self.assertEqual(interval["flows"]["203.0.113.20:50123"]["quality"], "degraded")
+
+    def test_front_interval_does_not_join_replaced_or_reset_sockets(self) -> None:
+        previous = {
+            "observed_at": "2026-07-30T20:00:00+00:00",
+            "flows": {
+                "old": {
+                    "endpoint": "203.0.113.20:50123",
+                    "source": "203.0.113.20",
+                    "source_port": 50123,
+                    "bytes_sent": 2_000_000,
+                    "bytes_retrans": 80_000,
+                    "retransmissions": 8,
+                    "data_segs_out": 1_400,
+                },
+                "reset": {
+                    "endpoint": "203.0.113.21:50124",
+                    "source": "203.0.113.21",
+                    "source_port": 50124,
+                    "bytes_sent": 2_000_000,
+                    "bytes_retrans": 80_000,
+                    "retransmissions": 8,
+                    "data_segs_out": 1_400,
+                },
+                "reused": {
+                    "endpoint": "203.0.113.22:50125",
+                    "source": "203.0.113.22",
+                    "source_port": 50125,
+                    "bytes_sent": 1_000,
+                    "bytes_retrans": 0,
+                    "retransmissions": 0,
+                    "data_segs_out": 10,
+                },
+            },
+        }
+        current = {
+            "flows": {
+                "203.0.113.20:50123": {
+                    "socket_id": "new",
+                    "source": "203.0.113.20",
+                    "source_port": 50123,
+                    "bytes_sent": 100_000,
+                    "bytes_retrans": 20_000,
+                    "retransmissions": 4,
+                    "data_segs_out": 70,
+                },
+                "203.0.113.21:50124": {
+                    "socket_id": "reset",
+                    "source": "203.0.113.21",
+                    "source_port": 50124,
+                    "bytes_sent": 100,
+                    "bytes_retrans": 0,
+                    "retransmissions": 0,
+                    "data_segs_out": 1,
+                },
+                "203.0.113.23:50126": {
+                    "socket_id": "reused",
+                    "source": "203.0.113.23",
+                    "source_port": 50126,
+                    "bytes_sent": 2_000_000,
+                    "bytes_retrans": 100_000,
+                    "retransmissions": 10,
+                    "data_segs_out": 1_400,
+                },
+            }
+        }
+
+        interval, _counters = server_agent.front_interval_snapshot(
+            current,
+            previous,
+            "2026-07-30T20:02:00+00:00",
+        )
+
+        self.assertEqual(interval["sampled_flows"], 0)
+        self.assertEqual(interval["degraded_sources"], [])
+
+    def test_front_interval_resets_a_stale_baseline(self) -> None:
+        current = {
+            "flows": {
+                "203.0.113.20:50123": {
+                    "socket_id": "2d43a0",
+                    "source": "203.0.113.20",
+                    "source_port": 50123,
+                    "bytes_sent": 2_000_000,
+                    "bytes_retrans": 100_000,
+                    "retransmissions": 10,
+                    "data_segs_out": 1_400,
+                }
+            }
+        }
+        previous = {
+            "observed_at": "2026-07-30T20:00:00+00:00",
+            "flows": {
+                "2d43a0": {
+                    "endpoint": "203.0.113.20:50123",
+                    "source": "203.0.113.20",
+                    "source_port": 50123,
+                    "bytes_sent": 1_000,
+                    "bytes_retrans": 0,
+                    "retransmissions": 0,
+                    "data_segs_out": 10,
+                }
+            },
+        }
+
+        interval, _counters = server_agent.front_interval_snapshot(
+            current,
+            previous,
+            "2026-07-30T20:10:00+00:00",
+        )
+
+        self.assertTrue(interval["baseline"])
+        self.assertEqual(interval["baseline_reason"], "stale")
+        self.assertEqual(interval["sampled_flows"], 0)
+        self.assertEqual(interval["degraded_sources"], [])
 
     def test_front_snapshot_normalizes_ipv4_mapped_socket_source(self) -> None:
         def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
             if "-Htan" in args:
                 return subprocess.CompletedProcess(args, 0, "ESTAB 0 0 [::ffff:94.232.248.35]:443 [::ffff:203.0.113.20]:50123\n", "")
-            if "-Htoin" in args:
+            if "-Htoein" in args:
                 return subprocess.CompletedProcess(
                     args,
                     0,
@@ -523,7 +675,7 @@ class ServerAgentTests(unittest.TestCase):
         def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
             if "-Htan" in args:
                 return subprocess.CompletedProcess(args, 0, sockets, "")
-            if "-Htoin" in args:
+            if "-Htoein" in args:
                 return subprocess.CompletedProcess(args, 0, details, "")
             return subprocess.CompletedProcess(args, 0, "LISTEN 0 4096 94.232.248.35:443 0.0.0.0:*\n", "")
 
@@ -539,7 +691,7 @@ class ServerAgentTests(unittest.TestCase):
         def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
             if "-Htan" in args:
                 return subprocess.CompletedProcess(args, 0, "ESTAB 0 0 94.232.248.35:443 203.0.113.20:50123\n", "")
-            if "-Htoin" in args:
+            if "-Htoein" in args:
                 return subprocess.CompletedProcess(
                     args,
                     0,
@@ -565,7 +717,7 @@ class ServerAgentTests(unittest.TestCase):
         def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
             if "-Htan" in args:
                 return subprocess.CompletedProcess(args, 0, "ESTAB 0 0 94.232.248.35:443 203.0.113.20:50123\n", "")
-            if "-Htoin" in args:
+            if "-Htoein" in args:
                 return subprocess.CompletedProcess(
                     args,
                     0,
@@ -619,6 +771,11 @@ class ServerAgentTests(unittest.TestCase):
         }
         self.assertEqual(server_agent.public_front_verdict("active", degraded), "degraded")
         self.assertEqual(server_agent.public_front_verdict("inactive", degraded), "failed")
+
+    def test_public_front_verdict_uses_fresh_interval_loss(self) -> None:
+        front = {"listening": True, "degraded_sources": [], "fin_wait_1_sources": []}
+        interval = {"degraded_sources": ["203.0.113.20"], "observation": "client_specific"}
+        self.assertEqual(server_agent.public_front_verdict("active", front, interval), "degraded")
 
     def test_xray_front_socket_policy_reads_inbound_liveness_values(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -810,6 +967,34 @@ class ServerAgentTests(unittest.TestCase):
         self.assertTrue(selection["available"])
         self.assertEqual(selection["selected"], "to-foreign-hy2")
         self.assertEqual(selection["candidates"]["to-foreign-wg"]["delay_ms"], 310)
+        self.assertFalse(selection["candidates"]["to-foreign-wg"]["fresh"])
+
+    def test_hysteria_socket_drop_count_is_scoped_to_the_active_peer(self) -> None:
+        sockets = subprocess.CompletedProcess(
+            ["ss"],
+            0,
+            'ESTAB 0 0 94.232.248.35%ens3:33574 132.243.21.108:18443 users:(("sing-box",pid=1,fd=12))\n'
+            "\t skmem:(r0,rb8388608,t0,tb212992,f4096,w0,o0,bl0,d7)\n"
+            'ESTAB 0 0 94.232.248.35%ens3:33575 203.0.113.10:18443 users:(("other",pid=2,fd=4))\n'
+            "\t skmem:(r0,rb8388608,t0,tb212992,f4096,w0,o0,bl0,d99)\n",
+            "",
+        )
+        with patch.object(server_agent, "run", return_value=sockets):
+            drops = server_agent.hysteria_socket_drop_count("132.243.21.108", 18443)
+        self.assertEqual(drops, 7)
+
+    def test_transport_state_snapshot_marks_old_state_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "transport-state.json"
+            state_path.write_text(
+                json.dumps({"updated_at": "2000-01-01T00:00:00+00:00", "state": "healthy"}),
+                encoding="utf-8",
+            )
+
+            state = server_agent.transport_state_snapshot(state_path)
+
+        self.assertFalse(state["fresh"])
+        self.assertGreater(state["age_seconds"], 30)
 
     def test_transport_reconciler_confirms_failure_before_failover(self) -> None:
         config = {
@@ -831,12 +1016,16 @@ class ServerAgentTests(unittest.TestCase):
                 patch.object(server_agent, "selector_selection_snapshot", return_value={"available": True, "selected": "to-foreign-hy2"}),
                 patch.object(
                     server_agent,
-                    "transport_candidate_probe",
+                    "probe_transport_candidates",
                     side_effect=[
-                        {"ok": False, "delay_ms": 0, "error": "timeout"},
-                        {"ok": True, "delay_ms": 70, "error": ""},
-                        {"ok": False, "delay_ms": 0, "error": "timeout"},
-                        {"ok": True, "delay_ms": 70, "error": ""},
+                        {
+                            "to-foreign-hy2": {"ok": False, "delay_ms": 0, "error": "timeout"},
+                            "to-foreign-wg": {"ok": True, "delay_ms": 70, "error": ""},
+                        },
+                        {
+                            "to-foreign-hy2": {"ok": False, "delay_ms": 0, "error": "timeout"},
+                            "to-foreign-wg": {"ok": True, "delay_ms": 70, "error": ""},
+                        },
                     ],
                 ),
                 patch.object(server_agent, "select_transport") as select_transport,
@@ -870,11 +1059,16 @@ class ServerAgentTests(unittest.TestCase):
                 patch.object(server_agent, "selector_selection_snapshot", return_value={"available": True, "selected": "to-foreign-hy2"}),
                 patch.object(
                     server_agent,
-                    "transport_candidate_probe",
+                    "probe_transport_candidates",
                     side_effect=[
-                        {"ok": False, "delay_ms": 0, "error": "timeout"},
-                        {"ok": True, "delay_ms": 70, "error": ""},
-                        {"ok": True, "delay_ms": 50, "error": ""},
+                        {
+                            "to-foreign-hy2": {"ok": False, "delay_ms": 0, "error": "timeout"},
+                            "to-foreign-wg": {"ok": True, "delay_ms": 70, "error": ""},
+                        },
+                        {
+                            "to-foreign-hy2": {"ok": True, "delay_ms": 50, "error": ""},
+                            "to-foreign-wg": {"ok": True, "delay_ms": 70, "error": ""},
+                        },
                     ],
                 ),
                 patch.object(server_agent, "select_transport") as select_transport,
@@ -884,17 +1078,21 @@ class ServerAgentTests(unittest.TestCase):
 
         self.assertEqual(first["state"], "suspect")
         self.assertEqual(second["state"], "healthy")
-        self.assertEqual(second["primary_failures"], 0)
+        self.assertEqual(second["pending_cycles"], 0)
+        self.assertTrue(second["probes"]["to-foreign-hy2"]["ok"])
         select_transport.assert_not_called()
 
-    def test_transport_reconciler_returns_to_primary_after_two_successes(self) -> None:
+    def test_transport_reconciler_returns_to_primary_after_three_successes(self) -> None:
         config = {
             "experimental": {"clash_api": {"external_controller": "127.0.0.1:19090"}},
             "outbounds": [
                 {"type": "selector", "tag": "to-foreign", "outbounds": ["to-foreign-hy2", "to-foreign-wg"], "default": "to-foreign-hy2"},
             ],
         }
-        healthy = {"ok": True, "delay_ms": 50, "error": ""}
+        healthy = {
+            "to-foreign-hy2": {"ok": True, "delay_ms": 50, "error": ""},
+            "to-foreign-wg": {"ok": True, "delay_ms": 70, "error": ""},
+        }
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             config_path = root / "sing-box.json"
@@ -906,16 +1104,72 @@ class ServerAgentTests(unittest.TestCase):
                 patch.object(server_agent, "TRANSPORT_STATE_PATH", state_path),
                 patch.object(server_agent, "TRANSPORT_LOCK_PATH", lock_path),
                 patch.object(server_agent, "selector_selection_snapshot", return_value={"available": True, "selected": "to-foreign-wg"}),
-                patch.object(server_agent, "transport_candidate_probe", return_value=healthy),
+                patch.object(server_agent, "probe_transport_candidates", return_value=healthy),
                 patch.object(server_agent, "select_transport") as select_transport,
             ):
                 first = server_agent.reconcile_interserver_transport()
                 second = server_agent.reconcile_interserver_transport()
+                third = server_agent.reconcile_interserver_transport()
 
         self.assertEqual(first["state"], "recovering")
-        self.assertEqual(second["state"], "healthy")
-        self.assertEqual(second["selected"], "to-foreign-hy2")
+        self.assertEqual(second["state"], "recovering")
+        self.assertEqual(third["state"], "healthy")
+        self.assertEqual(third["selected"], "to-foreign-hy2")
         select_transport.assert_called_once_with("127.0.0.1:19090", "to-foreign-hy2")
+
+    def test_transport_reconciler_shadow_never_updates_active_selector(self) -> None:
+        config = {
+            "experimental": {"clash_api": {"external_controller": "127.0.0.1:19090"}},
+            "outbounds": [
+                {"type": "hysteria2", "tag": "to-foreign-hy2", "server": "132.243.21.108", "server_port": 18443},
+                {"type": "direct", "tag": "to-foreign-wg"},
+                {"type": "selector", "tag": "to-foreign", "outbounds": ["to-foreign-hy2", "to-foreign-wg"], "default": "to-foreign-hy2"},
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "sing-box.json"
+            active_state_path = root / "transport-state.json"
+            shadow_state_path = root / "transport-shadow-state.json"
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            shadow_state_path.write_text(
+                json.dumps(
+                    {
+                        "selected": "to-foreign-hy2",
+                        "pending_target": "to-foreign-wg",
+                        "pending_cycles": 1,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with (
+                patch.object(server_agent, "SINGBOX_CONFIG_PATH", config_path),
+                patch.object(server_agent, "TRANSPORT_STATE_PATH", active_state_path),
+                patch.object(server_agent, "TRANSPORT_SHADOW_STATE_PATH", shadow_state_path),
+                patch.object(server_agent, "TRANSPORT_SHADOW_LOCK_PATH", root / "transport-shadow.lock"),
+                patch.object(server_agent, "selector_selection_snapshot", return_value={"available": True, "selected": "to-foreign-hy2"}),
+                patch.object(
+                    server_agent,
+                    "probe_transport_candidates",
+                    return_value={
+                        "to-foreign-hy2": {"ok": False, "delay_ms": 0, "error": "timeout"},
+                        "to-foreign-wg": {"ok": True, "delay_ms": 70, "error": ""},
+                    },
+                ),
+                patch.object(server_agent, "transport_passive_snapshot", return_value={}),
+                patch.object(server_agent, "select_transport") as select_transport,
+            ):
+                result = server_agent.reconcile_interserver_transport(shadow=True)
+
+            saved = json.loads(shadow_state_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(result["mode"], "shadow")
+        self.assertTrue(result["would_switch"])
+        self.assertEqual(result["selected"], "to-foreign-hy2")
+        self.assertEqual(result["recommended"], "to-foreign-wg")
+        self.assertEqual(saved["recommended"], "to-foreign-wg")
+        self.assertFalse(active_state_path.exists())
+        select_transport.assert_not_called()
 
     def test_interserver_transport_snapshot_reports_foreign_listener(self) -> None:
         config = {

@@ -3,7 +3,9 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import statistics
 from datetime import datetime, timezone
+from typing import Any
 
 HY2_PORT = 18443
 HY2_SERVER_NAME = "vpn-stack.internal"
@@ -15,7 +17,189 @@ TRANSPORT_HEALTHCHECK_URL = "https://1.1.1.1/cdn-cgi/trace"
 TRANSPORT_PROBE_TIMEOUT_MS = 2500
 TRANSPORT_PROBE_INTERVAL_SECONDS = 5
 TRANSPORT_PRIMARY_FAILURES = 2
-TRANSPORT_PRIMARY_RECOVERY_SUCCESSES = 2
+TRANSPORT_PRIMARY_RECOVERY_SUCCESSES = 3
+TRANSPORT_QUALITY_CONFIRMATIONS = 3
+TRANSPORT_DELAY_TOLERANCE_MS = 50
+TRANSPORT_HISTORY_LIMIT = 12
+TRANSPORT_STATE_SCHEMA_VERSION = 2
+
+
+def _successful_delays(history: list[dict[str, Any]]) -> list[int]:
+    return [
+        int(sample["delay_ms"])
+        for sample in history
+        if sample.get("ok") is True and int(sample.get("delay_ms", 0) or 0) > 0
+    ]
+
+
+def _candidate_score(history: list[dict[str, Any]]) -> dict[str, Any]:
+    delays = _successful_delays(history)
+    if not delays:
+        return {"available": False, "samples": 0, "delay_ms": None, "jitter_ms": None}
+    median = float(statistics.median(delays))
+    deviations = [abs(value - median) for value in delays]
+    return {
+        "available": True,
+        "samples": len(delays),
+        "delay_ms": round(median, 1),
+        "jitter_ms": round(float(statistics.median(deviations)), 1),
+    }
+
+
+def _append_probe_history(
+    previous: dict[str, Any],
+    probes: dict[str, dict[str, Any]],
+    observed_at: str,
+) -> dict[str, list[dict[str, Any]]]:
+    previous_history = previous.get("history", {}) if isinstance(previous, dict) else {}
+    history: dict[str, list[dict[str, Any]]] = {}
+    for tag in (TRANSPORT_PRIMARY_TAG, TRANSPORT_FALLBACK_TAG):
+        prior = previous_history.get(tag, []) if isinstance(previous_history, dict) else []
+        samples = [dict(sample) for sample in prior if isinstance(sample, dict)]
+        probe = probes.get(tag, {})
+        samples.append(
+            {
+                "observed_at": observed_at,
+                "ok": probe.get("ok") is True,
+                "delay_ms": int(probe.get("delay_ms", 0) or 0),
+                "error": str(probe.get("error", ""))[:160],
+            }
+        )
+        history[tag] = samples[-TRANSPORT_HISTORY_LIMIT:]
+    return history
+
+
+def evaluate_transport_policy(
+    *,
+    selected: str,
+    probes: dict[str, dict[str, Any]],
+    previous: dict[str, Any] | None = None,
+    passive_deltas: dict[str, int] | None = None,
+    observed_at: str | None = None,
+) -> dict[str, Any]:
+    """Return a deterministic recommendation without changing the selector."""
+
+    previous = previous or {}
+    passive_deltas = passive_deltas or {}
+    observed_at = observed_at or datetime.now(timezone.utc).isoformat()
+    if selected not in {TRANSPORT_PRIMARY_TAG, TRANSPORT_FALLBACK_TAG}:
+        return {
+            "schema_version": TRANSPORT_STATE_SCHEMA_VERSION,
+            "updated_at": observed_at,
+            "state": "failed",
+            "selected": selected,
+            "recommended": selected,
+            "would_switch": False,
+            "pending_target": "",
+            "pending_cycles": 0,
+            "hard_failure_evidence": False,
+            "probes": {},
+            "scores": {},
+            "history": {},
+            "passive_deltas": dict(passive_deltas),
+            "reason": "selected transport is invalid",
+        }
+
+    normalized_probes = {
+        tag: {
+            "ok": probes.get(tag, {}).get("ok") is True,
+            "delay_ms": int(probes.get(tag, {}).get("delay_ms", 0) or 0),
+            "error": str(probes.get(tag, {}).get("error", ""))[:240],
+        }
+        for tag in (TRANSPORT_PRIMARY_TAG, TRANSPORT_FALLBACK_TAG)
+    }
+    history = _append_probe_history(previous, normalized_probes, observed_at)
+    scores = {tag: _candidate_score(samples) for tag, samples in history.items()}
+    primary = normalized_probes[TRANSPORT_PRIMARY_TAG]
+    fallback = normalized_probes[TRANSPORT_FALLBACK_TAG]
+    selected_probe = normalized_probes[selected]
+    alternate = TRANSPORT_FALLBACK_TAG if selected == TRANSPORT_PRIMARY_TAG else TRANSPORT_PRIMARY_TAG
+    alternate_probe = normalized_probes[alternate]
+    hysteria_socket_drops = max(0, int(passive_deltas.get("hysteria_socket_drops", 0) or 0))
+
+    desired = selected
+    evidence = "selected transport is healthy"
+    required_confirmations = TRANSPORT_QUALITY_CONFIRMATIONS
+    hard_failure = False
+    if not primary["ok"] and not fallback["ok"]:
+        return {
+            "schema_version": TRANSPORT_STATE_SCHEMA_VERSION,
+            "updated_at": observed_at,
+            "state": "failed",
+            "selected": selected,
+            "recommended": selected,
+            "would_switch": False,
+            "pending_target": "",
+            "pending_cycles": 0,
+            "hard_failure_evidence": True,
+            "probes": normalized_probes,
+            "scores": scores,
+            "history": history,
+            "passive_deltas": dict(passive_deltas),
+            "reason": "both interserver transports failed",
+        }
+    if not selected_probe["ok"] and alternate_probe["ok"]:
+        desired = alternate
+        hard_failure = True
+        required_confirmations = TRANSPORT_PRIMARY_FAILURES
+        evidence = f"{selected} failed while {alternate} is reachable"
+    elif primary["ok"] and fallback["ok"]:
+        primary_delay = float(scores[TRANSPORT_PRIMARY_TAG]["delay_ms"] or primary["delay_ms"])
+        fallback_delay = float(scores[TRANSPORT_FALLBACK_TAG]["delay_ms"] or fallback["delay_ms"])
+        if selected == TRANSPORT_PRIMARY_TAG:
+            primary_slower = primary_delay > fallback_delay + TRANSPORT_DELAY_TOLERANCE_MS
+            passive_loss_confirmed = hysteria_socket_drops > 0 and primary_delay > fallback_delay
+            if primary_slower or passive_loss_confirmed:
+                desired = TRANSPORT_FALLBACK_TAG
+                if passive_loss_confirmed:
+                    evidence = (
+                        "primary socket loss and delay are worse than fallback "
+                        f"(drops={hysteria_socket_drops})"
+                    )
+                else:
+                    evidence = f"primary delay exceeds fallback by more than {TRANSPORT_DELAY_TOLERANCE_MS}ms"
+        elif primary_delay <= fallback_delay + TRANSPORT_DELAY_TOLERANCE_MS:
+            desired = TRANSPORT_PRIMARY_TAG
+            required_confirmations = TRANSPORT_PRIMARY_RECOVERY_SUCCESSES
+            evidence = "primary recovered within the preferred-path tolerance"
+
+    same_selection = previous.get("selected") == selected
+    previous_target = str(previous.get("pending_target", "")) if same_selection else ""
+    previous_cycles = int(previous.get("pending_cycles", 0) or 0) if same_selection else 0
+    pending_cycles = previous_cycles + 1 if previous_target == desired and desired != selected else 1
+    pending_target = desired if desired != selected else ""
+    if desired == selected:
+        pending_cycles = 0
+    confirmed = desired != selected and pending_cycles >= required_confirmations
+    recommended = desired if confirmed else selected
+
+    if confirmed:
+        state = "degraded" if recommended == TRANSPORT_FALLBACK_TAG else "recovering"
+    elif desired != selected:
+        state = "suspect" if selected == TRANSPORT_PRIMARY_TAG else "recovering"
+        evidence += f"; awaiting confirmation {pending_cycles}/{required_confirmations}"
+    elif selected == TRANSPORT_FALLBACK_TAG:
+        state = "degraded"
+        evidence = "fallback transport remains selected"
+    else:
+        state = "healthy"
+
+    return {
+        "schema_version": TRANSPORT_STATE_SCHEMA_VERSION,
+        "updated_at": observed_at,
+        "state": state,
+        "selected": selected,
+        "recommended": recommended,
+        "would_switch": recommended != selected,
+        "pending_target": pending_target,
+        "pending_cycles": pending_cycles,
+        "hard_failure_evidence": hard_failure,
+        "probes": normalized_probes,
+        "scores": scores,
+        "history": history,
+        "passive_deltas": dict(passive_deltas),
+        "reason": evidence,
+    }
 
 
 def generate_transport_identity() -> dict[str, str]:

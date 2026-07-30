@@ -23,6 +23,42 @@ class AuditQuickTests(unittest.TestCase):
         self.assertIn("unittest.defaultTestLoader.discover", driver)
         self.assertIn('pattern="test_*.py"', driver)
 
+    def test_quick_render_uses_local_assets_without_network_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cache = root / "cache"
+            out_dir = root / "out" / "demo"
+            cache.mkdir()
+            cached = {}
+            for name in ("geosite-ru.srs", "geoip-ru.srs"):
+                path = cache / name
+                path.write_bytes(name.encode("ascii"))
+                cached[name] = path
+
+            with (
+                patch(
+                    "vpn_installer.audit.quick.find_cached_asset",
+                    side_effect=lambda name, _target: cached.get(name),
+                ),
+                patch("vpn_installer.audit.quick.render_all_artifacts") as render_all,
+            ):
+                quick.test_render_all(
+                    root / "demo.env",
+                    {"FOREIGN_BLOCK_RU": "0"},
+                    out_dir,
+                    refresh_assets=False,
+                )
+
+            self.assertEqual(
+                (out_dir / "assets" / "geosite-ru.srs").read_bytes(),
+                b"geosite-ru.srs",
+            )
+            render_all.assert_called_once_with(
+                root / "demo.env",
+                {"FOREIGN_BLOCK_RU": "0"},
+                fetch_assets_first=False,
+            )
+
     def test_quick_run_skips_docker_and_bash_dependent_checks_when_missing(self) -> None:
         class FakeRunner:
             def __init__(self) -> None:
@@ -52,7 +88,6 @@ class AuditQuickTests(unittest.TestCase):
         self.assertIn("quick-unittest", fake_runner.skips)
         self.assertIn("quick-coverage", fake_runner.skips)
         self.assertIn("quick-bash-syntax", fake_runner.skips)
-        self.assertIn("quick-singbox-check", fake_runner.skips)
         self.assertIn("quick-linux-launcher-python", fake_runner.skips)
 
     def test_all_mode_keeps_dev_only_checks_enabled(self) -> None:

@@ -27,12 +27,11 @@ try:
         HY2_PORT,
         TRANSPORT_FALLBACK_TAG,
         TRANSPORT_HEALTHCHECK_URL,
-        TRANSPORT_PRIMARY_FAILURES,
-        TRANSPORT_PRIMARY_RECOVERY_SUCCESSES,
         TRANSPORT_PRIMARY_TAG,
         TRANSPORT_PROBE_INTERVAL_SECONDS,
         TRANSPORT_PROBE_TIMEOUT_MS,
         TRANSPORT_SELECTOR_TAG,
+        evaluate_transport_policy,
     )
 except ImportError:  # Installed agent runs as a standalone script.
     sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -42,12 +41,11 @@ except ImportError:  # Installed agent runs as a standalone script.
         HY2_PORT,
         TRANSPORT_FALLBACK_TAG,
         TRANSPORT_HEALTHCHECK_URL,
-        TRANSPORT_PRIMARY_FAILURES,
-        TRANSPORT_PRIMARY_RECOVERY_SUCCESSES,
         TRANSPORT_PRIMARY_TAG,
         TRANSPORT_PROBE_INTERVAL_SECONDS,
         TRANSPORT_PROBE_TIMEOUT_MS,
         TRANSPORT_SELECTOR_TAG,
+        evaluate_transport_policy,
     )
 
 try:
@@ -79,6 +77,7 @@ FRONT_RTT_MIN_SAMPLES = 3
 FRONT_RTT_DEGRADED_MS = 250
 FRONT_RTT_INFLATION_FACTOR = 3
 FRONT_RTO_DEGRADED_MS = 1_000
+FRONT_COUNTER_MAX_INTERVAL_SECONDS = 300
 PROBLEM_LOG_GREP = (
     "ERROR|FATAL|processed invalid connection|accepted tcp:disabled[.]invalid|"
     "connection rejected|mux connection closed|EOF|connection reset|using outbound/vless"
@@ -91,8 +90,10 @@ ENV_PATH = ROOT / "deployment.env"
 STATE_DIR = Path("/var/lib/vpn-stack")
 HEALTH_STATE_PATH = STATE_DIR / "health-state.json"
 TRANSPORT_STATE_PATH = STATE_DIR / "transport-state.json"
+TRANSPORT_SHADOW_STATE_PATH = STATE_DIR / "transport-shadow-state.json"
 LOCK_PATH = Path("/run/vpn-stack-agent.lock")
 TRANSPORT_LOCK_PATH = Path("/run/vpn-stack-transport.lock")
+TRANSPORT_SHADOW_LOCK_PATH = Path("/run/vpn-stack-transport-shadow.lock")
 SINGBOX_CONFIG_PATH = Path("/etc/sing-box/config.json")
 XRAY_CONFIG_PATH = Path("/etc/xray/config.json")
 SYSCTL_PATH = Path("/etc/sysctl.d/90-vpn-stack.conf")
@@ -102,6 +103,33 @@ RESOLVED_STUB_PATH = "/run/systemd/resolve/stub-resolv.conf"
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def parse_iso_datetime(value: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def iso_age_seconds(value: str, *, now: datetime | None = None) -> float | None:
+    parsed = parse_iso_datetime(value)
+    if parsed is None:
+        return None
+    age = ((now or datetime.now(timezone.utc)) - parsed.astimezone(timezone.utc)).total_seconds()
+    return max(0.0, age)
+
+
+def recent_observation(payload: Any, *, max_age_seconds: int) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    age = iso_age_seconds(str(payload.get("observed_at", "")))
+    return payload if age is not None and age <= max_age_seconds else {}
 
 
 def run(args: list[str], *, timeout: int = 15, check: bool = False, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
@@ -618,7 +646,7 @@ def tcp_front_snapshot(port: int) -> dict[str, Any]:
             clients[host] += 1
     per_flow: dict[str, dict[str, Any]] = {}
     current_flow: dict[str, Any] | None = None
-    for raw_line in run(["ss", "-Htoin", f"sport = :{port}"], timeout=8).stdout.splitlines():
+    for raw_line in run(["ss", "-Htoein", f"sport = :{port}"], timeout=8).stdout.splitlines():
         line = raw_line.strip()
         fields = line.split()
         if len(fields) >= 5 and fields[0] in {"ESTAB", "SYN-RECV", "FIN-WAIT-1", "FIN-WAIT-2", "CLOSE-WAIT", "LAST-ACK", "CLOSING", "TIME-WAIT"}:
@@ -627,7 +655,14 @@ def tcp_front_snapshot(port: int) -> dict[str, Any]:
                 current_flow = None
                 continue
             current_flow = empty_tcp_metrics()
-            current_flow.update({"source": source, "source_port": source_port})
+            socket_id_match = re.search(r"\bsk:([0-9a-fA-F]+)\b", line)
+            current_flow.update(
+                {
+                    "source": source,
+                    "source_port": source_port,
+                    "socket_id": socket_id_match.group(1).lower() if socket_id_match else "",
+                }
+            )
             current_flow["connections"] = 1
             current_flow["states"][fields[0]] = 1
             current_flow["keepalive_timers"] = int("timer:(keepalive" in line)
@@ -641,7 +676,12 @@ def tcp_front_snapshot(port: int) -> dict[str, Any]:
         merge_tcp_metrics(per_client.setdefault(values["source"], empty_tcp_metrics()), values)
     all_client_metrics = {source: render_tcp_metrics(values) for source, values in per_client.items()}
     all_flow_metrics = {
-        key: {"source": values["source"], "source_port": values["source_port"], **render_tcp_metrics(values)}
+        key: {
+            "source": values["source"],
+            "source_port": values["source_port"],
+            "socket_id": values.get("socket_id", ""),
+            **render_tcp_metrics(values),
+        }
         for key, values in per_flow.items()
     }
     client_metrics = {
@@ -732,6 +772,109 @@ def client_front_quality(metrics: dict[str, Any]) -> str:
     return "observed"
 
 
+FRONT_COUNTER_KEYS = ("bytes_sent", "bytes_retrans", "retransmissions", "data_segs_out")
+
+
+def front_counter_snapshot(front: dict[str, Any], observed_at: str) -> dict[str, Any]:
+    flows: dict[str, dict[str, Any]] = {}
+    for endpoint, metrics in front.get("flows", {}).items():
+        if not isinstance(metrics, dict):
+            continue
+        flow_id = str(metrics.get("socket_id") or endpoint)
+        flows[flow_id] = {
+            "endpoint": endpoint,
+            "source": str(metrics.get("source", "")),
+            "source_port": metrics.get("source_port"),
+            **{key: int(metrics.get(key, 0) or 0) for key in FRONT_COUNTER_KEYS},
+        }
+    return {"observed_at": observed_at, "flows": flows}
+
+
+def _monotonic_flow_deltas(current: dict[str, Any], previous: dict[str, Any]) -> dict[str, int] | None:
+    deltas: dict[str, int] = {}
+    for key in FRONT_COUNTER_KEYS:
+        value = int(current.get(key, 0) or 0)
+        old = int(previous.get(key, 0) or 0)
+        if value < old:
+            return None
+        deltas[key] = value - old
+    return deltas
+
+
+def front_interval_snapshot(
+    front: dict[str, Any],
+    previous_counters: dict[str, Any],
+    observed_at: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    counters = front_counter_snapshot(front, observed_at)
+    previous_flows = previous_counters.get("flows", {}) if isinstance(previous_counters, dict) else {}
+    previous_age = iso_age_seconds(
+        str(previous_counters.get("observed_at", "")),
+        now=parse_iso_datetime(observed_at),
+    )
+    baseline_reason = ""
+    if not previous_flows:
+        baseline_reason = "missing"
+    elif previous_age is None or previous_age > FRONT_COUNTER_MAX_INTERVAL_SECONDS:
+        previous_flows = {}
+        baseline_reason = "stale"
+    interval_flows: dict[str, dict[str, Any]] = {}
+    degraded_sources: set[str] = set()
+    aggregate = {key: 0 for key in FRONT_COUNTER_KEYS}
+    for flow_id, current in counters["flows"].items():
+        previous = previous_flows.get(flow_id) if isinstance(previous_flows, dict) else None
+        if not isinstance(previous, dict):
+            continue
+        if (
+            str(previous.get("endpoint", "")) != str(current.get("endpoint", ""))
+            or str(previous.get("source", "")) != str(current.get("source", ""))
+        ):
+            continue
+        deltas = _monotonic_flow_deltas(current, previous)
+        if deltas is None:
+            continue
+        for key, value in deltas.items():
+            aggregate[key] += value
+        bytes_sent = deltas["bytes_sent"]
+        activity_bytes = max(bytes_sent, deltas["bytes_retrans"])
+        ratio = round(deltas["bytes_retrans"] * 100 / activity_bytes, 3) if activity_bytes else 0.0
+        degraded = (
+            activity_bytes >= FRONT_LOSS_MIN_BYTES
+            and ratio >= FRONT_LOSS_DEGRADED_PERCENT
+        ) or (
+            activity_bytes >= FRONT_SMALL_FLOW_MIN_BYTES
+            and deltas["retransmissions"] >= FRONT_SMALL_FLOW_MIN_RETRANSMISSIONS
+            and ratio >= FRONT_SMALL_FLOW_DEGRADED_PERCENT
+        )
+        source = str(current.get("source", ""))
+        if degraded and source:
+            degraded_sources.add(source)
+        interval_flows[str(current.get("endpoint") or flow_id)] = {
+            "socket_id": flow_id,
+            "source": source,
+            "source_port": current.get("source_port"),
+            **deltas,
+            "activity_bytes": activity_bytes,
+            "retransmit_ratio_pct": ratio,
+            "quality": "degraded" if degraded else "observed",
+        }
+    aggregate_activity = max(aggregate["bytes_sent"], aggregate["bytes_retrans"])
+    aggregate_ratio = round(aggregate["bytes_retrans"] * 100 / aggregate_activity, 3) if aggregate_activity else 0.0
+    sources = sorted(degraded_sources)
+    observation = "degraded" if len(sources) >= 3 else "client_specific" if sources else "observed"
+    interval = {
+        "observed_at": observed_at,
+        "baseline": not bool(previous_flows),
+        "baseline_reason": baseline_reason,
+        "sampled_flows": len(interval_flows),
+        "observation": observation,
+        "degraded_sources": sources,
+        "aggregate": {**aggregate, "activity_bytes": aggregate_activity, "retransmit_ratio_pct": aggregate_ratio},
+        "flows": interval_flows,
+    }
+    return interval, counters
+
+
 def xray_front_socket_policy(port: int) -> dict[str, int]:
     config = read_json(XRAY_CONFIG_PATH, {})
     for inbound in config.get("inbounds", []) if isinstance(config, dict) else []:
@@ -760,7 +903,7 @@ def xray_front_socket_policy(port: int) -> dict[str, int]:
     return {}
 
 
-def front_observation(front: dict[str, Any]) -> str:
+def front_observation(front: dict[str, Any], interval: dict[str, Any] | None = None) -> str:
     """Separate one lossy source from degradation shared by several clients."""
     fin_wait_sources = front.get("fin_wait_1_sources")
     if not isinstance(fin_wait_sources, list):
@@ -770,7 +913,8 @@ def front_observation(front: dict[str, Any]) -> str:
             for source, metrics in clients.items()
             if int(metrics.get("states", {}).get("FIN-WAIT-1", 0)) >= 25
         ]
-    degraded_sources = set(front.get("degraded_sources", []))
+    interval_sources = set((interval or {}).get("degraded_sources", []))
+    degraded_sources = set(front.get("degraded_sources", [])) | interval_sources
     noisy_sources = degraded_sources | set(fin_wait_sources)
     if int(front.get("stale_connections_5m", 0)) >= 25 and int(front.get("keepalive_timer_connections", 0)) < int(front.get("stale_connections_5m", 0)):
         return "degraded"
@@ -781,13 +925,21 @@ def front_observation(front: dict[str, Any]) -> str:
     return "observed"
 
 
-def public_front_verdict(xray_state: str, front: dict[str, Any]) -> str:
+def public_front_verdict(
+    xray_state: str,
+    front: dict[str, Any],
+    interval: dict[str, Any] | None = None,
+) -> str:
     if xray_state != "active" or not front.get("listening"):
         return "failed"
-    return "degraded" if front_observation(front) in {"client_specific", "degraded"} else "verified"
+    return "degraded" if front_observation(front, interval) in {"client_specific", "degraded"} else "verified"
 
 
-def front_degradation_evidence(front: dict[str, Any], observed_at: str) -> dict[str, Any]:
+def front_degradation_evidence(
+    front: dict[str, Any],
+    observed_at: str,
+    interval: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     degraded_flows = dict(
         sorted(
             (
@@ -798,12 +950,22 @@ def front_degradation_evidence(front: dict[str, Any], observed_at: str) -> dict[
             key=lambda item: -int(item[1].get("bytes_retrans", 0)),
         )[:20]
     )
-    degraded_sources = sorted(set(front.get("degraded_sources", [])) | set(front.get("fin_wait_1_sources", [])))
-    if not degraded_sources and not degraded_flows:
+    interval = interval or {}
+    interval_flows = {
+        key: metrics
+        for key, metrics in interval.get("flows", {}).items()
+        if isinstance(metrics, dict) and metrics.get("quality") == "degraded"
+    }
+    degraded_sources = sorted(
+        set(front.get("degraded_sources", []))
+        | set(front.get("fin_wait_1_sources", []))
+        | set(interval.get("degraded_sources", []))
+    )
+    if not degraded_sources and not degraded_flows and not interval_flows:
         return {}
     return {
         "observed_at": observed_at,
-        "observation": front_observation(front),
+        "observation": front_observation(front, interval),
         "degraded_sources": degraded_sources,
         "aggregate": {
             "connections": front.get("connections", 0),
@@ -816,6 +978,10 @@ def front_degradation_evidence(front: dict[str, Any], observed_at: str) -> dict[
             "stale_connections_1h": front.get("stale_connections_1h", 0),
         },
         "flows": degraded_flows,
+        "interval": {
+            "aggregate": interval.get("aggregate", {}),
+            "flows": interval_flows,
+        },
     }
 
 
@@ -892,7 +1058,14 @@ def selector_selection_snapshot(config: dict[str, Any]) -> dict[str, Any]:
         candidate = proxies.get(tag, {}) if isinstance(proxies, dict) else {}
         history = candidate.get("history", []) if isinstance(candidate, dict) else []
         latest = history[-1] if isinstance(history, list) and history and isinstance(history[-1], dict) else {}
-        candidates[tag] = {"delay_ms": latest.get("delay"), "tested_at": latest.get("time", "")}
+        tested_at = str(latest.get("time", ""))
+        age_seconds = iso_age_seconds(tested_at)
+        candidates[tag] = {
+            "delay_ms": latest.get("delay"),
+            "tested_at": tested_at,
+            "age_seconds": round(age_seconds, 1) if age_seconds is not None else None,
+            "fresh": age_seconds is not None and age_seconds <= TRANSPORT_PROBE_INTERVAL_SECONDS * 6,
+        }
     selected = str(group.get("now", ""))
     return {
         "available": bool(selected and selected in candidates),
@@ -921,6 +1094,13 @@ def transport_candidate_probe(controller: str, tag: str) -> dict[str, Any]:
         }
 
 
+def probe_transport_candidates(controller: str) -> dict[str, dict[str, Any]]:
+    tags = (TRANSPORT_PRIMARY_TAG, TRANSPORT_FALLBACK_TAG)
+    with ThreadPoolExecutor(max_workers=len(tags)) as executor:
+        results = executor.map(lambda tag: transport_candidate_probe(controller, tag), tags)
+    return dict(zip(tags, results))
+
+
 def select_transport(controller: str, tag: str) -> None:
     clash_api_json(
         controller,
@@ -931,9 +1111,66 @@ def select_transport(controller: str, tag: str) -> None:
     )
 
 
-def reconcile_interserver_transport() -> dict[str, Any]:
-    TRANSPORT_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with TRANSPORT_LOCK_PATH.open("w", encoding="utf-8") as lock:
+def hysteria_socket_drop_count(server: str, port: int) -> int:
+    if not server or port <= 0:
+        return 0
+    total = 0
+    matched_socket = False
+    for raw_line in run(["ss", "-Hnuapim"], timeout=5).stdout.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if not raw_line[:1].isspace():
+            fields = line.split()
+            matched_socket = (
+                any(
+                    remote_port == port and normalize_source(host) == normalize_source(server)
+                    for host, remote_port in (split_endpoint(field) for field in fields)
+                )
+                and '"sing-box"' in line
+            )
+            continue
+        if not matched_socket or "skmem:" not in line:
+            continue
+        match = re.search(r"(?:^|,)d(\d+)(?:,|\))", line)
+        if match:
+            total += int(match.group(1))
+        matched_socket = False
+    return total
+
+
+def transport_passive_snapshot(primary: dict[str, Any]) -> dict[str, int]:
+    protocol = protocol_counters_snapshot()
+    try:
+        port = int(primary.get("server_port", 0) or 0)
+    except (TypeError, ValueError):
+        port = 0
+    return {
+        **{
+            key: int(protocol.get(key, 0) or 0)
+            for key in ("UdpRcvbufErrors", "Udp6RcvbufErrors", "UdpSndbufErrors", "Udp6SndbufErrors")
+        },
+        "HysteriaSocketDrops": hysteria_socket_drop_count(
+            str(primary.get("server", "")),
+            port,
+        ),
+    }
+
+
+def transport_passive_deltas(current: dict[str, int], previous: dict[str, Any]) -> dict[str, int]:
+    raw = positive_counter_deltas(current, previous)
+    return {
+        "udp_receive_drops": int(raw.get("UdpRcvbufErrors", 0)) + int(raw.get("Udp6RcvbufErrors", 0)),
+        "udp_send_drops": int(raw.get("UdpSndbufErrors", 0)) + int(raw.get("Udp6SndbufErrors", 0)),
+        "hysteria_socket_drops": int(raw.get("HysteriaSocketDrops", 0)),
+    }
+
+
+def reconcile_interserver_transport(*, shadow: bool = False) -> dict[str, Any]:
+    state_path = TRANSPORT_SHADOW_STATE_PATH if shadow else TRANSPORT_STATE_PATH
+    lock_path = TRANSPORT_SHADOW_LOCK_PATH if shadow else TRANSPORT_LOCK_PATH
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("w", encoding="utf-8") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         config = read_json(SINGBOX_CONFIG_PATH, {})
         outbounds = {
@@ -943,14 +1180,15 @@ def reconcile_interserver_transport() -> dict[str, Any]:
         } if isinstance(config, dict) else {}
         selector = outbounds.get(TRANSPORT_SELECTOR_TAG, {})
         controller = str(config.get("experimental", {}).get("clash_api", {}).get("external_controller", "")) if isinstance(config, dict) else ""
-        previous = read_json(TRANSPORT_STATE_PATH, {})
+        previous = read_json(state_path, {})
         payload: dict[str, Any] = {
-            "schema_version": 1,
+            "schema_version": 2,
             "updated_at": utc_now(),
             "state": "failed",
+            "mode": "shadow" if shadow else "apply",
             "selected": "",
-            "primary_failures": 0,
-            "primary_successes": 0,
+            "recommended": "",
+            "would_switch": False,
             "probes": {},
             "reason": "",
         }
@@ -961,95 +1199,99 @@ def reconcile_interserver_transport() -> dict[str, Any]:
             or not controller
         ):
             payload["reason"] = "priority transport selector is not configured"
-            write_json_atomic(TRANSPORT_STATE_PATH, payload)
+            write_json_atomic(state_path, payload)
             return payload
         selection = selector_selection_snapshot(config)
         selected = str(selection.get("selected", ""))
         if not selection.get("available"):
             payload["reason"] = str(selection.get("reason", "selector state is unavailable"))
-            write_json_atomic(TRANSPORT_STATE_PATH, payload)
+            write_json_atomic(state_path, payload)
             return payload
 
-        primary = transport_candidate_probe(controller, TRANSPORT_PRIMARY_TAG)
-        probes = {TRANSPORT_PRIMARY_TAG: primary}
-        target = selected
-        primary_failures = 0
-        primary_successes = 0
-        state = "healthy"
-        reason = "primary transport is healthy"
-        if primary["ok"]:
-            if selected == TRANSPORT_FALLBACK_TAG:
-                fallback = transport_candidate_probe(controller, TRANSPORT_FALLBACK_TAG)
-                probes[TRANSPORT_FALLBACK_TAG] = fallback
-                primary_successes = int(previous.get("primary_successes", 0) or 0) + 1
-                if not fallback["ok"] or primary_successes >= TRANSPORT_PRIMARY_RECOVERY_SUCCESSES:
-                    target = TRANSPORT_PRIMARY_TAG
-                    primary_successes = 0
-                else:
-                    state = "recovering"
-                    reason = "primary recovery is awaiting confirmation"
-            else:
-                target = TRANSPORT_PRIMARY_TAG
-        else:
-            fallback = transport_candidate_probe(controller, TRANSPORT_FALLBACK_TAG)
-            probes[TRANSPORT_FALLBACK_TAG] = fallback
-            primary_failures = int(previous.get("primary_failures", 0) or 0) + 1
-            if selected == TRANSPORT_PRIMARY_TAG and primary_failures < TRANSPORT_PRIMARY_FAILURES:
-                state = "suspect"
-                reason = "primary failure is awaiting confirmation"
-            elif fallback["ok"]:
-                target = TRANSPORT_FALLBACK_TAG
-                state = "degraded"
-                reason = "primary transport failed; WireGuard fallback is active"
-            else:
-                state = "failed"
-                reason = "both interserver transports failed"
-
-        if target != selected and state != "failed":
-            try:
-                select_transport(controller, target)
-                selected = target
-            except (OSError, ValueError, urllib.error.URLError) as exc:
-                state = "failed"
-                reason = f"selector update failed: {str(exc)[:180]}"
+        probes = probe_transport_candidates(controller)
+        primary = outbounds.get(TRANSPORT_PRIMARY_TAG, {})
+        passive_counters = transport_passive_snapshot(primary if isinstance(primary, dict) else {})
+        passive_deltas = transport_passive_deltas(passive_counters, previous.get("passive_counters", {}))
+        payload = evaluate_transport_policy(
+            selected=selected,
+            probes=probes,
+            previous=previous,
+            passive_deltas=passive_deltas,
+            observed_at=utc_now(),
+        )
         payload.update(
             {
-                "state": state,
-                "selected": selected,
-                "primary_failures": primary_failures,
-                "primary_successes": primary_successes,
-                "probes": probes,
-                "reason": reason,
+                "mode": "shadow" if shadow else "apply",
+                "passive_counters": passive_counters,
+                "changed": False,
             }
         )
-        write_json_atomic(TRANSPORT_STATE_PATH, payload)
+        target = str(payload.get("recommended", selected))
+        if not shadow and target != selected and payload.get("state") != "failed":
+            try:
+                select_transport(controller, target)
+                payload.update(
+                    {
+                        "selected": target,
+                        "recommended": target,
+                        "would_switch": False,
+                        "pending_target": "",
+                        "pending_cycles": 0,
+                        "changed": True,
+                        "state": "healthy" if target == TRANSPORT_PRIMARY_TAG else "degraded",
+                        "reason": f"{payload.get('reason', '')}; selector updated",
+                    }
+                )
+            except (OSError, ValueError, urllib.error.URLError) as exc:
+                payload["state"] = "failed"
+                payload["would_switch"] = False
+                payload["reason"] = f"selector update failed: {str(exc)[:180]}"
+        write_json_atomic(state_path, payload)
         return payload
 
 
-def watch_interserver_transport() -> None:
-    previous_signature: tuple[str, str] | None = None
+def watch_interserver_transport(*, shadow: bool = False) -> None:
+    state_path = TRANSPORT_SHADOW_STATE_PATH if shadow else TRANSPORT_STATE_PATH
+    previous_signature: tuple[str, str, str] | None = None
     while True:
         started = time.monotonic()
         try:
-            payload = reconcile_interserver_transport()
+            payload = reconcile_interserver_transport(shadow=shadow)
         except (OSError, RuntimeError, ValueError) as exc:
             payload = {
-                "schema_version": 1,
+                "schema_version": 2,
                 "updated_at": utc_now(),
                 "state": "failed",
+                "mode": "shadow" if shadow else "apply",
                 "selected": "",
-                "primary_failures": 0,
-                "primary_successes": 0,
+                "recommended": "",
+                "would_switch": False,
                 "probes": {},
                 "reason": str(exc)[:240],
             }
-            write_json_atomic(TRANSPORT_STATE_PATH, payload)
-        signature = (str(payload.get("state", "")), str(payload.get("selected", "")))
+            write_json_atomic(state_path, payload)
+        signature = (
+            str(payload.get("state", "")),
+            str(payload.get("selected", "")),
+            str(payload.get("recommended", "")),
+        )
         if signature != previous_signature:
             print(json.dumps(payload, ensure_ascii=False, sort_keys=True), flush=True)
             previous_signature = signature
         sleep_seconds = max(1.0, TRANSPORT_PROBE_INTERVAL_SECONDS - (time.monotonic() - started))
         time.sleep(sleep_seconds)
+
+
+def transport_state_snapshot(path: Path) -> dict[str, Any]:
+    state = read_json(path, {})
+    if not isinstance(state, dict) or not state:
+        return {}
+    age_seconds = iso_age_seconds(str(state.get("updated_at", "")))
+    return {
+        **state,
+        "age_seconds": round(age_seconds, 1) if age_seconds is not None else None,
+        "fresh": age_seconds is not None and age_seconds <= TRANSPORT_PROBE_INTERVAL_SECONDS * 6,
+    }
 
 
 def interserver_transport_snapshot(role: str, env: dict[str, str]) -> dict[str, Any]:
@@ -1101,7 +1343,8 @@ def interserver_transport_snapshot(role: str, env: dict[str, str]) -> dict[str, 
             "port": port,
             "hysteria_session_active": session_active,
             "selection": selection,
-            "adaptive_state": read_json(TRANSPORT_STATE_PATH, {}),
+            "adaptive_state": transport_state_snapshot(TRANSPORT_STATE_PATH),
+            "shadow_state": transport_state_snapshot(TRANSPORT_SHADOW_STATE_PATH),
         }
     if role == "foreign-exit":
         inbound = next(
@@ -1654,6 +1897,12 @@ def snapshot(*, live_probes: bool = False, profile: str = "light", full_logs: bo
     actual_network_profile = {**tcp_adaptation, "conntrack_max": conntrack.get("max", 0)}
     profile_mismatches = network_profile_mismatches(actual_network_profile, expected_network_profile)
     health_state = read_json(HEALTH_STATE_PATH, {})
+    recent_front_interval = recent_observation(
+        health_state.get("front_interval", {}),
+        max_age_seconds=300,
+    )
+    if front and recent_front_interval:
+        front["recent_interval"] = recent_front_interval
     required = ["wireguard", "nftables", "sing-box", "resolver"] + (["xray", "transport"] if role == "ru-gateway" else [])
     reasons = [f"{name}={services[name]}" for name in required if services.get(name) != "active"]
     if manifest_data["drift"] != "none":
@@ -1682,10 +1931,10 @@ def snapshot(*, live_probes: bool = False, profile: str = "light", full_logs: bo
     capability_failures = [name for name in failed_requirements(probes) if name in EXTERNAL_CAPABILITY_REQUIREMENTS] if live_probes else []
     transport_failures = [name for name in failed_requirements(probes) if name in OPTIONAL_TRANSPORT_REQUIREMENTS] if live_probes else []
     server_path = "failed" if reasons else "verified" if live_probes else "inconclusive"
-    client_observation = front_observation(front) if front else "not-applicable"
+    client_observation = front_observation(front, recent_front_interval) if front else "not-applicable"
     public_front = "not-applicable"
     if role == "ru-gateway":
-        public_front = public_front_verdict(services["xray"], front)
+        public_front = public_front_verdict(services["xray"], front, recent_front_interval)
     external_capabilities = "degraded" if capability_failures else "verified" if live_probes else "inconclusive"
     degradations = ([f"external_capabilities_failed:{','.join(capability_failures)}"] if capability_failures else [])
     if public_front == "degraded":
@@ -1735,6 +1984,7 @@ def snapshot(*, live_probes: bool = False, profile: str = "light", full_logs: bo
             "health_updated_at": health_state.get("updated_at", ""),
             "health_soft_reasons": health_state.get("soft_reasons", []),
             "last_front_degradation": health_state.get("last_front_degradation", {}),
+            "recent_front_interval": recent_front_interval,
         },
         "front": front,
         "transport": transport,
@@ -1758,6 +2008,22 @@ def health() -> dict[str, Any]:
         fcntl.flock(lock, fcntl.LOCK_EX)
         current = snapshot(live_probes=True, profile="light", full_logs=False, include_maintenance=False)
         previous = read_json(HEALTH_STATE_PATH, {})
+        observed_at = current.get("generated_at") or utc_now()
+        front_interval, front_counters = front_interval_snapshot(
+            current.get("front", {}),
+            previous.get("front_counters", {}),
+            observed_at,
+        )
+        interval_observation = str(front_interval.get("observation", "observed"))
+        if interval_observation in {"client_specific", "degraded"}:
+            verdicts = current["verdicts"]
+            verdicts["client_observation"] = interval_observation
+            verdicts["public_front"] = "degraded"
+            if verdicts.get("overall") != "failed":
+                verdicts["overall"] = "degraded"
+            interval_reason = f"public_front_interval={interval_observation}"
+            if interval_reason not in verdicts["reasons"]:
+                verdicts["reasons"].append(interval_reason)
         now_epoch = int(time.time())
         hard_failure = current["verdicts"]["server_path"] == "failed"
         failures = int(previous.get("consecutive_failures", 0)) + 1 if hard_failure else 0
@@ -1774,7 +2040,11 @@ def health() -> dict[str, Any]:
         client_observation = current.get("verdicts", {}).get("client_observation")
         if client_observation in {"client_specific", "degraded"}:
             soft_reasons.append(f"public_front={client_observation}")
-        front_evidence = front_degradation_evidence(current.get("front", {}), current.get("generated_at") or utc_now())
+        front_evidence = front_degradation_evidence(
+            current.get("front", {}),
+            observed_at,
+            front_interval,
+        )
         last_front_degradation = front_evidence or previous.get("last_front_degradation", {})
         state = "degraded" if soft_reasons else "healthy"
         action = "none"
@@ -1809,6 +2079,8 @@ def health() -> dict[str, Any]:
             "probes": (postcheck or current).get("probes", {}),
             "network_counters": network_counters,
             "network_deltas": network_deltas,
+            "front_counters": front_counters,
+            "front_interval": front_interval,
             "soft_reasons": soft_reasons,
             "last_front_degradation": last_front_degradation,
             "verdicts": (postcheck or current)["verdicts"],
@@ -1932,8 +2204,10 @@ def build_parser() -> argparse.ArgumentParser:
     front.add_argument("--since", type=int, default=30)
     front.add_argument("--live-probes", action="store_true")
     sub.add_parser("health")
-    sub.add_parser("transport")
-    sub.add_parser("transport-watch")
+    transport = sub.add_parser("transport")
+    transport.add_argument("--shadow", action="store_true")
+    transport_watch = sub.add_parser("transport-watch")
+    transport_watch.add_argument("--shadow", action="store_true")
     routes = sub.add_parser("routes")
     route_sub = routes.add_subparsers(dest="routes_action", required=True)
     route_sub.add_parser("list")
@@ -1968,9 +2242,9 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "health":
         payload = health()
     elif args.command == "transport":
-        payload = reconcile_interserver_transport()
+        payload = reconcile_interserver_transport(shadow=args.shadow)
     elif args.command == "transport-watch":
-        watch_interserver_transport()
+        watch_interserver_transport(shadow=args.shadow)
         return 0
     elif args.command == "routes":
         payload = routes_command(args)

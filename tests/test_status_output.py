@@ -153,6 +153,66 @@ class StatusOutputTests(unittest.TestCase):
         self.assertIn("to-foreign-wg=not-probed", rendered)
         self.assertNotIn("Nonems", rendered)
 
+    def test_formats_stale_transport_shadow_and_fresh_front_interval(self) -> None:
+        rendered = "\n".join(
+            format_snapshot_summary(
+                DiagnosticsSnapshot(
+                    role="ru-gateway",
+                    network={
+                        "recent_front_interval": {
+                            "observed_at": "2026-07-30T20:02:00+00:00",
+                            "observation": "client_specific",
+                            "sampled_flows": 2,
+                            "degraded_sources": ["203.0.113.20"],
+                            "aggregate": {
+                                "activity_bytes": 2_000_000,
+                                "bytes_retrans": 80_000,
+                                "retransmit_ratio_pct": 4.0,
+                            },
+                        }
+                    },
+                    transport={
+                        "interserver": {
+                            "mode": "priority-hysteria2-wireguard",
+                            "adaptive_state": {
+                                "state": "healthy",
+                                "fresh": False,
+                                "age_seconds": 120.0,
+                            },
+                            "selection": {
+                                "selected": "to-foreign-hy2",
+                                "candidates": {
+                                    "to-foreign-hy2": {
+                                        "delay_ms": 62,
+                                        "fresh": False,
+                                        "age_seconds": 120.0,
+                                    }
+                                },
+                            },
+                            "shadow_state": {
+                                "state": "healthy",
+                                "selected": "to-foreign-hy2",
+                                "recommended": "to-foreign-hy2",
+                                "fresh": False,
+                                "age_seconds": 120.0,
+                            },
+                        }
+                    },
+                )
+            )
+        )
+        self.assertIn("to-foreign-hy2=stale(62ms,age=120.0s)", rendered)
+        self.assertIn("adaptation=stale(healthy,age=120.0s)", rendered)
+        self.assertIn(
+            "shadow=stale(healthy/to-foreign-hy2->to-foreign-hy2,age=120.0s)",
+            rendered,
+        )
+        self.assertIn(
+            "front interval: at=2026-07-30T20:02:00+00:00, observation=client_specific, "
+            "flows=2, sources=203.0.113.20, retrans=80000/2000000 (4.0%)",
+            rendered,
+        )
+
     def test_does_not_invent_retransmit_ratio_without_out_segments(self) -> None:
         lines = format_snapshot_summary(
             DiagnosticsSnapshot(network={"recent_health_deltas": {"protocol": {"TcpRetransSegs": 229}}})

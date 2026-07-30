@@ -52,7 +52,6 @@ class AuditModuleTests(unittest.TestCase):
             test_validate_json=lambda *_args, **_kwargs: {},
             test_user_artifacts=lambda *_args, **_kwargs: {},
             test_validate_bundle=lambda *_args, **_kwargs: {},
-            test_singbox_check=lambda *_args, **_kwargs: {},
             test_cloud_init_schema=lambda *_args, **_kwargs: {},
             test_cloud_init_render_only=lambda *_args, **_kwargs: {},
             test_bundle_render_only=lambda *_args, **_kwargs: {},
@@ -93,10 +92,16 @@ class AuditModuleTests(unittest.TestCase):
                 preview / "ru" / "sing-box.json",
                 preview / "ru" / "xray.json",
                 preview / "foreign" / "sing-box.json",
-                client / "hiddify-cross-platform.json",
-                client / "linux-sing-box.json",
             ]:
                 path.write_text("{}\n", encoding="utf-8")
+            (client / "hiddify-cross-platform.json").write_text(
+                json.dumps({"inbounds": [{"auto_redirect": False}]}) + "\n",
+                encoding="utf-8",
+            )
+            (client / "linux-sing-box.json").write_text(
+                json.dumps({"inbounds": [{"auto_redirect": True}]}) + "\n",
+                encoding="utf-8",
+            )
             (client / "android-v2rayng-xray.json").write_text(
                 json.dumps(
                     {
@@ -111,9 +116,9 @@ class AuditModuleTests(unittest.TestCase):
                 encoding="utf-8",
             )
             (client / "vless-uri.txt").write_text("vless://demo\n", encoding="utf-8")
-            (client / "hiddify-cross-platform.json").write_text("{}\n", encoding="utf-8")
             (client / "hiddify-android.json").write_text("{}\n", encoding="utf-8")
             (client / "hiddify-uri.txt").write_text("vless://demo\n", encoding="utf-8")
+            (client / "v2rayn-uri.txt").write_text("vless://demo\n", encoding="utf-8")
             (out_dir / "NEXT-STEPS.txt").write_text("VLESS URI\nv2rayNG\nandroid-v2rayng-xray.json\nvpn status\n", encoding="utf-8")
             for name in ("ru-gateway.tar.gz", "foreign-exit.tar.gz"):
                 with tarfile.open(bundle / name, "w:gz") as archive:

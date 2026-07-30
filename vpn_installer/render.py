@@ -850,9 +850,18 @@ def package_bundle(env: dict[str, str]) -> Path:
     return bundle_dir
 
 
-def render_all_artifacts(env_path: Path, env: dict[str, str]) -> Path:
+def render_all_artifacts(
+    env_path: Path,
+    env: dict[str, str],
+    *,
+    fetch_assets_first: bool = True,
+) -> Path:
     effective_env = apply_ru_direct_overlays(env, env_path)
-    out_dir = render_config_artifacts(env_path, effective_env, fetch_assets_first=True)
+    out_dir = render_config_artifacts(
+        env_path,
+        effective_env,
+        fetch_assets_first=fetch_assets_first,
+    )
     render_client_profiles(effective_env)
     render_cloud_init_artifacts(effective_env)
     package_bundle(effective_env)

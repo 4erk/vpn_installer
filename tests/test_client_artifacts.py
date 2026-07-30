@@ -22,6 +22,7 @@ class ClientArtifactTests(unittest.TestCase):
 
         self.assertEqual(paths["client_dir"], Path(tmp) / "demo" / "client")
         self.assertEqual(paths["vless_uri"].name, "vless-uri.txt")
+        self.assertEqual(paths["v2rayn_uri"].name, "v2rayn-uri.txt")
         self.assertEqual(paths["android_xray_json"].name, "android-v2rayng-xray.json")
         self.assertEqual(paths["next_steps"], Path(tmp) / "demo" / "NEXT-STEPS.txt")
 
@@ -32,6 +33,14 @@ class ClientArtifactTests(unittest.TestCase):
 
             self.assertEqual(client_dir, Path(tmp) / "demo" / "client")
             self.assertTrue((client_dir / "vless-uri.txt").is_file())
+            self.assertEqual(
+                (client_dir / "v2rayn-uri.txt").read_text(encoding="utf-8"),
+                (client_dir / "vless-uri.txt").read_text(encoding="utf-8"),
+            )
+            self.assertEqual(
+                (client_dir / "hiddify-uri.txt").read_text(encoding="utf-8"),
+                (client_dir / "vless-uri.txt").read_text(encoding="utf-8"),
+            )
             self.assertTrue((client_dir / "android-v2rayng-xray.json").is_file())
             self.assertTrue((client_dir / "hiddify-cross-platform.json").is_file())
             self.assertEqual(
