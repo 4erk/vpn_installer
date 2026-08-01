@@ -103,6 +103,7 @@ RESOLVED_STUB_PATH = "/run/systemd/resolve/stub-resolv.conf"
 FSTAB_PATH = Path("/etc/fstab")
 PROC_MOUNTS_PATH = Path("/proc/self/mounts")
 EXT4_SYSFS_ROOT = Path("/sys/fs/ext4")
+SYS_DEV_BLOCK_ROOT = Path("/sys/dev/block")
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -1897,10 +1898,25 @@ def read_counter(path: Path) -> int | None:
         return None
 
 
+def block_device_name(source: str, sys_dev_block_root: Path = SYS_DEV_BLOCK_ROOT) -> str:
+    fallback = Path(os.path.realpath(source)).name
+    try:
+        device = os.stat(source).st_rdev
+        uevent = sys_dev_block_root / f"{os.major(device)}:{os.minor(device)}" / "uevent"
+        for line in uevent.read_text(encoding="utf-8").splitlines():
+            key, separator, value = line.partition("=")
+            if separator and key == "DEVNAME" and value:
+                return Path(value).name
+    except (AttributeError, OSError, ValueError):
+        pass
+    return fallback
+
+
 def root_filesystem_snapshot(
     mounts_path: Path = PROC_MOUNTS_PATH,
     fstab_path: Path = FSTAB_PATH,
     ext4_sysfs_root: Path = EXT4_SYSFS_ROOT,
+    sys_dev_block_root: Path = SYS_DEV_BLOCK_ROOT,
 ) -> dict[str, Any]:
     mount = root_mount(mounts_path)
     source = mount.get("source", "")
@@ -1922,7 +1938,7 @@ def root_filesystem_snapshot(
         result["reason"] = f"unsupported root filesystem: {filesystem or 'unknown'}"
         return result
     device = os.path.realpath(source)
-    sysfs = ext4_sysfs_root / Path(device).name
+    sysfs = ext4_sysfs_root / block_device_name(source, sys_dev_block_root)
     result["errors_count"] = read_counter(sysfs / "errors_count")
     result["first_error_time"] = read_counter(sysfs / "first_error_time")
     result["last_error_time"] = read_counter(sysfs / "last_error_time")

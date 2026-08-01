@@ -6,6 +6,15 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.12.8] - 2026-08-01
+
+### Fixed
+
+- `host_integrity` разрешает kernel alias корневого block device (`/dev/root`, mapper и обычные device paths) через его `major:minor` и `/sys/dev/block/.../uevent`. Ext4 counters на RU больше не ищутся по ошибочному имени `/sys/fs/ext4/root`.
+- Регрессия воспроизводит production layout `/dev/root -> DEVNAME=vda1`; обязательный activation gate остаётся fail-closed при действительно отсутствующем runtime counter.
+
+Dataplane-конфиги и клиентские артефакты не изменены относительно `0.12.7`.
+
 ## [0.12.7] - 2026-08-01
 
 ### Fixed

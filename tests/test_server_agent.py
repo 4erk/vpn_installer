@@ -111,6 +111,21 @@ class ServerAgentTests(unittest.TestCase):
         self.assertEqual(result["errors_count"], 0)
         self.assertEqual(result["state"], "clean")
 
+    def test_block_device_name_resolves_dev_root_alias_through_sysfs_device_number(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = Mock(st_rdev=123)
+            with (
+                patch.object(server_agent.os, "stat", return_value=metadata),
+                patch.object(server_agent.os, "major", return_value=253, create=True),
+                patch.object(server_agent.os, "minor", return_value=1, create=True),
+                patch.object(server_agent.Path, "read_text", autospec=True, return_value="MAJOR=253\nMINOR=1\nDEVNAME=vda1\n") as read_text,
+            ):
+                name = server_agent.block_device_name("/dev/root", Path(tmp))
+
+        self.assertEqual(name, "vda1")
+        self.assertEqual(read_text.call_args.args[0], Path(tmp) / "253:1" / "uevent")
+        self.assertEqual(read_text.call_args.kwargs, {"encoding": "utf-8"})
+
     def test_root_filesystem_snapshot_fails_on_ext4_metadata_errors(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
