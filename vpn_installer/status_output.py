@@ -27,6 +27,15 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
         overrides = ", ".join(f"{key}={value}" for key, value in sorted(snapshot.runtime_overrides.items()) if value)
         if overrides:
             lines.append(f"runtime overrides: {overrides}")
+    root_filesystem = snapshot.storage.get("root_filesystem", {})
+    if root_filesystem:
+        lines.append(
+            "root filesystem: "
+            f"source={root_filesystem.get('source') or '-'}, fs={root_filesystem.get('filesystem') or '-'}, "
+            f"state={root_filesystem.get('state') or 'unknown'}, errors={root_filesystem.get('errors_count', '-')}, "
+            f"boot_fsck={'enabled' if root_filesystem.get('boot_check_enabled') else 'disabled'}, "
+            f"verdict={root_filesystem.get('verdict', 'inconclusive')}"
+        )
     if snapshot.role == "ru-gateway" and snapshot.front:
         lines.append(
             "public front liveness: "
@@ -34,6 +43,9 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
             f"keepalive_idle_s={snapshot.front.get('tcp_keepalive_idle_seconds', '-')}, "
             f"keepalive_interval_s={snapshot.front.get('tcp_keepalive_interval_seconds', '-')}"
         )
+        loss_sources = snapshot.front.get("loss_observed_sources", [])
+        if loss_sources:
+            lines.append("public front lifetime loss sources: " + ",".join(str(source) for source in loss_sources))
     tcp_adaptation = snapshot.network.get("tcp_adaptation", {})
     if tcp_adaptation:
         lines.append(
@@ -123,6 +135,16 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
     if protocol_errors:
         lines.append("protocol counters (lifetime): " + ", ".join(f"{key}={value}" for key, value in sorted(protocol_errors.items())))
     recent_deltas = snapshot.network.get("recent_health_deltas", {})
+    recent_interfaces = recent_deltas.get("interfaces", {}) if isinstance(recent_deltas, dict) else {}
+    interface_drops = {
+        f"{interface}.{counter}": value
+        for interface, counters in recent_interfaces.items()
+        if isinstance(counters, dict)
+        for counter, value in counters.items()
+        if value and counter in {"rx_dropped", "tx_dropped", "rx_errors", "tx_errors", "rx_missed_errors"}
+    }
+    if interface_drops:
+        lines.append("interface deltas (last health cycle): " + ", ".join(f"{key}=+{value}" for key, value in sorted(interface_drops.items())))
     recent_protocol = recent_deltas.get("protocol", {}) if isinstance(recent_deltas, dict) else {}
     recent_errors = {key: value for key, value in recent_protocol.items() if value and ("Error" in key or "Drop" in key or "Discard" in key)}
     if recent_errors:

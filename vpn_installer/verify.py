@@ -82,12 +82,15 @@ def _verify_snapshot(snapshot: DiagnosticsSnapshot) -> DiagnosticsSnapshot:
         rmem_default = rmem_max = wmem_max = 0
     if tcp_adaptation and (rmem_default < UDP_RMEM_DEFAULT or rmem_max < UDP_RMEM_MAX or wmem_max < UDP_WMEM_MAX):
         degradations.append("UDP socket buffer profile is not active")
-    required_verdicts = {"server_path", "public_front", "client_observation"}
+    required_verdicts = {"server_path", "public_front", "client_observation", "host_integrity"}
     if not required_verdicts.issubset(snapshot.component_verdicts):
         hard_failures.append("agent verdict fields are incomplete")
+    if not snapshot.storage.get("root_filesystem"):
+        hard_failures.append("root filesystem integrity fields are missing")
     server_path = snapshot.component_verdicts.get("server_path", "inconclusive")
     public_front = snapshot.component_verdicts.get("public_front", "not-applicable")
     client_observation = snapshot.component_verdicts.get("client_observation", "not-applicable")
+    host_integrity = snapshot.component_verdicts.get("host_integrity", "inconclusive")
     if server_path == "failed":
         hard_failures.append("agent server_path failed")
     elif server_path != "verified":
@@ -98,6 +101,10 @@ def _verify_snapshot(snapshot: DiagnosticsSnapshot) -> DiagnosticsSnapshot:
         degradations.append(f"agent public_front={public_front}")
     if client_observation in {"client_specific", "degraded"}:
         degradations.append("public TCP front shows retransmission or socket churn")
+    if host_integrity == "failed":
+        hard_failures.append("agent host_integrity failed")
+    elif host_integrity != "verified":
+        degradations.append(f"agent host_integrity={host_integrity}")
     if snapshot.route_probes.get("profile") != "acceptance":
         hard_failures.append("acceptance probes did not run")
     elif "release_gate_ok" in snapshot.route_probes:

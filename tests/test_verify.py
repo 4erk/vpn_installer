@@ -17,7 +17,12 @@ FIRST_LOAD_OK = {"attempts": 9, "successes": 9, "failures": 0, "average_total_se
 
 def acceptance_snapshot(role: str, **overrides: object) -> DiagnosticsSnapshot:
     services = {"wireguard": "active", "nftables": "active", "sing-box": "active", "resolver": "active"}
-    verdicts = {"server_path": "verified", "public_front": "not-applicable", "client_observation": "not-applicable"}
+    verdicts = {
+        "server_path": "verified",
+        "public_front": "not-applicable",
+        "client_observation": "not-applicable",
+        "host_integrity": "verified",
+    }
     if role == ROLE_RU:
         services.update({"sing-box": "active", "xray": "active", "transport": "active"})
         verdicts.update({"public_front": "verified", "client_observation": "observed"})
@@ -38,6 +43,15 @@ def acceptance_snapshot(role: str, **overrides: object) -> DiagnosticsSnapshot:
             }
         },
         "front": {"tcp_user_timeout_ms": 30_000} if role == ROLE_RU else {},
+        "storage": {
+            "root_filesystem": {
+                "filesystem": "ext4",
+                "state": "clean",
+                "errors_count": 0,
+                "boot_check_enabled": True,
+                "verdict": "verified",
+            }
+        },
         "route_probes": {"profile": "acceptance", "ok": True},
         "component_verdicts": verdicts,
     }
@@ -61,14 +75,30 @@ class VerifyTests(unittest.TestCase):
         self.assertEqual(verified.verdict, "failed")
         self.assertIn("public TCP front liveness policy is missing", verified.reasons)
 
+    def test_verify_snapshot_requires_root_filesystem_integrity_fields(self) -> None:
+        verified = _verify_snapshot(acceptance_snapshot(ROLE_FOREIGN, storage={}))
+        self.assertEqual(verified.verdict, "failed")
+        self.assertIn("root filesystem integrity fields are missing", verified.reasons)
+
+    def test_verify_snapshot_fails_for_filesystem_corruption(self) -> None:
+        verdicts = {
+            "server_path": "verified",
+            "public_front": "not-applicable",
+            "client_observation": "not-applicable",
+            "host_integrity": "failed",
+        }
+        verified = _verify_snapshot(acceptance_snapshot(ROLE_FOREIGN, component_verdicts=verdicts))
+        self.assertEqual(verified.verdict, "failed")
+        self.assertIn("agent host_integrity failed", verified.reasons)
+
     def test_verify_snapshot_degrades_for_front_socket_churn(self) -> None:
-        verdicts = {"server_path": "verified", "public_front": "verified", "client_observation": "degraded"}
+        verdicts = {"server_path": "verified", "public_front": "verified", "client_observation": "degraded", "host_integrity": "verified"}
         verified = _verify_snapshot(acceptance_snapshot(ROLE_RU, component_verdicts=verdicts))
         self.assertEqual(verified.verdict, "degraded")
         self.assertIn("public TCP front shows retransmission or socket churn", verified.reasons)
 
     def test_verify_snapshot_degrades_for_one_measured_lossy_client(self) -> None:
-        verdicts = {"server_path": "verified", "public_front": "verified", "client_observation": "client_specific"}
+        verdicts = {"server_path": "verified", "public_front": "verified", "client_observation": "client_specific", "host_integrity": "verified"}
         verified = _verify_snapshot(acceptance_snapshot(ROLE_RU, component_verdicts=verdicts))
         self.assertEqual(verified.verdict, "degraded")
 
@@ -174,7 +204,7 @@ class VerifyTests(unittest.TestCase):
 
     def test_verify_live_workflow_returns_nonzero_when_agent_acceptance_fails(self) -> None:
         targets = [RemoteTarget(role=ROLE_RU, ssh_host="ru.example"), RemoteTarget(role=ROLE_FOREIGN, ssh_host="foreign.example")]
-        broken = acceptance_snapshot(ROLE_RU, route_probes={"profile": "acceptance", "ok": False}, component_verdicts={"server_path": "failed", "public_front": "verified", "client_observation": "observed"})
+        broken = acceptance_snapshot(ROLE_RU, route_probes={"profile": "acceptance", "ok": False}, component_verdicts={"server_path": "failed", "public_front": "verified", "client_observation": "observed", "host_integrity": "verified"})
         with (
             patch("vpn_installer.verify.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), {}, {}, targets, {})),
             patch("vpn_installer.verify.workflows.print_summary"),

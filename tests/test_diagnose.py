@@ -102,6 +102,29 @@ class DiagnoseTests(unittest.TestCase):
             self.assertTrue(list(out_dir.glob("diagnostics/*/client-front-ru-gateway.json")))
         self.assertIn("vpn-stack-agent.py client --source 203.0.113.44 --since 15", ssh_mock.call_args.args[1])
 
+    def test_diagnose_client_reports_lifetime_loss_without_claiming_current_failure(self) -> None:
+        ru = RemoteTarget(role=ROLE_RU, ssh_host="ru.example", ssh_user="root")
+        payload = {
+            "source": "203.0.113.44",
+            "window_minutes": 15,
+            "services": {"xray": "active", "nftables": "active"},
+            "events": {"accepted": 2, "invalid_reality": 0, "disabled_invalid": 0},
+            "front": {"client": {"quality": "loss_observed"}, "flows": {}},
+            "verdict": "loss_observed",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch.object(diagnose, "OUT_DIR", Path(tmp) / "out"),
+                patch.object(diagnose, "prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), {}, {}, [ru], {})),
+                patch.object(diagnose, "ssh_capture", return_value=json.dumps(payload)),
+                patch("sys.stdout", new_callable=__import__("io").StringIO) as stream,
+            ):
+                result = diagnose.diagnose_server_client_workflow("demo", source_ip="203.0.113.44", non_interactive=True)
+
+        self.assertEqual(result, 1)
+        self.assertIn("verdict: loss_observed", stream.getvalue())
+        self.assertIn("no fresh degraded interval is available", stream.getvalue())
+
     def test_diagnose_front_uses_structured_agent_snapshot(self) -> None:
         ru = RemoteTarget(role=ROLE_RU, ssh_host="ru.example", ssh_user="root")
         payload = {

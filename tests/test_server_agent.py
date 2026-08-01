@@ -86,6 +86,79 @@ class ServerAgentTests(unittest.TestCase):
             payload = server_agent.assets_snapshot()
         self.assertEqual(payload, {"drift": "none", "assets": {"geoip-ru.srs": {"state": "ok"}}})
 
+    def test_root_filesystem_snapshot_verifies_clean_ext4_and_boot_check(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mounts = root / "mounts"
+            fstab = root / "fstab"
+            sysfs = root / "sysfs" / "vda1"
+            sysfs.mkdir(parents=True)
+            mounts.write_text("/dev/vda1 / ext4 rw,relatime 0 0\n", encoding="utf-8")
+            fstab.write_text("LABEL=root / ext4 defaults 0 1\n", encoding="utf-8")
+            for name, value in (("errors_count", "0"), ("first_error_time", "0"), ("last_error_time", "0")):
+                (sysfs / name).write_text(value, encoding="utf-8")
+            tune = subprocess.CompletedProcess(
+                ["tune2fs"],
+                0,
+                "Filesystem state:         clean\nFS Error count:          0\nLast checked:             Sat Aug  1 19:56:37 2026\n",
+                "",
+            )
+            with patch.object(server_agent, "run", return_value=tune):
+                result = server_agent.root_filesystem_snapshot(mounts, fstab, root / "sysfs")
+
+        self.assertEqual(result["verdict"], "verified")
+        self.assertTrue(result["boot_check_enabled"])
+        self.assertEqual(result["errors_count"], 0)
+        self.assertEqual(result["state"], "clean")
+
+    def test_root_filesystem_snapshot_fails_on_ext4_metadata_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mounts = root / "mounts"
+            fstab = root / "fstab"
+            sysfs = root / "sysfs" / "vda1"
+            sysfs.mkdir(parents=True)
+            mounts.write_text("/dev/vda1 / ext4 rw,relatime 0 0\n", encoding="utf-8")
+            fstab.write_text("LABEL=root / ext4 defaults 0 1\n", encoding="utf-8")
+            (sysfs / "errors_count").write_text("3", encoding="utf-8")
+            tune = subprocess.CompletedProcess(["tune2fs"], 0, "Filesystem state:         clean with errors\n", "")
+            with patch.object(server_agent, "run", return_value=tune):
+                result = server_agent.root_filesystem_snapshot(mounts, fstab, root / "sysfs")
+
+        self.assertEqual(result["verdict"], "failed")
+        self.assertIn("offline fsck", result["reason"])
+
+    def test_root_filesystem_snapshot_degrades_when_boot_check_is_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mounts = root / "mounts"
+            fstab = root / "fstab"
+            sysfs = root / "sysfs" / "vda1"
+            sysfs.mkdir(parents=True)
+            mounts.write_text("/dev/vda1 / ext4 rw,relatime 0 0\n", encoding="utf-8")
+            fstab.write_text("LABEL=root / ext4 defaults 0 0\n", encoding="utf-8")
+            (sysfs / "errors_count").write_text("0", encoding="utf-8")
+            tune = subprocess.CompletedProcess(["tune2fs"], 0, "Filesystem state:         clean\n", "")
+            with patch.object(server_agent, "run", return_value=tune):
+                result = server_agent.root_filesystem_snapshot(mounts, fstab, root / "sysfs")
+
+        self.assertEqual(result["verdict"], "degraded")
+        self.assertFalse(result["boot_check_enabled"])
+
+    def test_root_filesystem_snapshot_is_inconclusive_without_runtime_error_counter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mounts = root / "mounts"
+            fstab = root / "fstab"
+            mounts.write_text("/dev/vda1 / ext4 rw,relatime 0 0\n", encoding="utf-8")
+            fstab.write_text("LABEL=root / ext4 defaults 0 1\n", encoding="utf-8")
+            tune = subprocess.CompletedProcess(["tune2fs"], 0, "Filesystem state:         clean\n", "")
+            with patch.object(server_agent, "run", return_value=tune):
+                result = server_agent.root_filesystem_snapshot(mounts, fstab, root / "missing-sysfs")
+
+        self.assertEqual(result["verdict"], "inconclusive")
+        self.assertIn("error counter is unavailable", result["reason"])
+
     def test_health_requires_two_failed_cycles_before_recovery(self) -> None:
         failed = {"verdicts": {"server_path": "failed"}, "services": {}, "role": "ru-gateway"}
         with tempfile.TemporaryDirectory() as tmp:
@@ -99,6 +172,35 @@ class ServerAgentTests(unittest.TestCase):
         recover.assert_called_once()
         self.assertFalse(snapshot_mock.call_args_list[0].kwargs["full_logs"])
         self.assertFalse(snapshot_mock.call_args_list[0].kwargs["include_maintenance"])
+
+    def test_health_never_restarts_services_for_filesystem_corruption(self) -> None:
+        failed = {
+            "generated_at": "2026-08-01T20:00:00+00:00",
+            "verdicts": {
+                "server_path": "verified",
+                "host_integrity": "failed",
+                "client_observation": "not-applicable",
+            },
+            "services": {},
+            "role": "foreign-exit",
+            "probes": {"requirements": {"foreign_direct": True}},
+            "network": {"interfaces": {}, "protocol_counters": {}, "softnet_counters": {}, "conntrack": {}},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch.object(server_agent, "HEALTH_STATE_PATH", Path(tmp) / "health.json"),
+                patch.object(server_agent, "LOCK_PATH", Path(tmp) / "lock"),
+                patch.object(server_agent, "snapshot", return_value=failed),
+                patch.object(server_agent, "recover") as recover,
+            ):
+                first = server_agent.health()
+                second = server_agent.health()
+
+        self.assertEqual(first["state"], "suspect")
+        self.assertEqual(second["state"], "failed")
+        self.assertEqual(second["hard_reasons"], ["host_integrity"])
+        self.assertEqual(second["last_action"], "none")
+        recover.assert_not_called()
 
     def test_health_reports_udp_buffer_drops_as_degraded_without_recovery(self) -> None:
         def healthy(udp_drops: int) -> dict[str, object]:
@@ -490,6 +592,7 @@ class ServerAgentTests(unittest.TestCase):
         self.assertEqual(flow["socket_id"], "2d43a0")
         self.assertEqual(flow["retransmit_ratio_pct"], 4.0)
         self.assertEqual(front["degraded_sources"], [])
+        self.assertEqual(front["loss_observed_sources"], ["203.0.113.20"])
 
     def test_front_interval_uses_monotonic_counters_from_the_same_socket(self) -> None:
         first = {
@@ -527,6 +630,46 @@ class ServerAgentTests(unittest.TestCase):
         self.assertEqual(interval["degraded_sources"], ["203.0.113.20"])
         self.assertEqual(interval["flows"]["203.0.113.20:50123"]["bytes_retrans"], 80_000)
         self.assertEqual(interval["flows"]["203.0.113.20:50123"]["quality"], "degraded")
+
+    def test_front_interval_aggregates_loss_across_one_clients_flows(self) -> None:
+        first = {
+            "flows": {
+                f"203.0.113.20:{port}": {
+                    "socket_id": f"socket-{port}",
+                    "source": "203.0.113.20",
+                    "source_port": port,
+                    "bytes_sent": 100_000,
+                    "bytes_retrans": 1_000,
+                    "retransmissions": 1,
+                    "data_segs_out": 80,
+                }
+                for port in (50123, 50124)
+            }
+        }
+        second = {
+            "flows": {
+                f"203.0.113.20:{port}": {
+                    "socket_id": f"socket-{port}",
+                    "source": "203.0.113.20",
+                    "source_port": port,
+                    "bytes_sent": 700_000,
+                    "bytes_retrans": 13_000,
+                    "retransmissions": 3,
+                    "data_segs_out": 500,
+                }
+                for port in (50123, 50124)
+            }
+        }
+
+        _baseline, counters = server_agent.front_interval_snapshot(first, {}, "2026-08-01T20:00:00+00:00")
+        interval, _counters = server_agent.front_interval_snapshot(second, counters, "2026-08-01T20:02:00+00:00")
+
+        self.assertEqual({flow["quality"] for flow in interval["flows"].values()}, {"observed"})
+        self.assertEqual(interval["sources"]["203.0.113.20"]["activity_bytes"], 1_200_000)
+        self.assertEqual(interval["sources"]["203.0.113.20"]["retransmit_ratio_pct"], 2.0)
+        self.assertEqual(interval["sources"]["203.0.113.20"]["quality"], "degraded")
+        self.assertEqual(interval["degraded_sources"], ["203.0.113.20"])
+        self.assertEqual(interval["observation"], "client_specific")
 
     def test_front_interval_does_not_join_replaced_or_reset_sockets(self) -> None:
         previous = {
@@ -870,8 +1013,8 @@ class ServerAgentTests(unittest.TestCase):
         }
         self.assertEqual(server_agent.client_front_quality(metrics), "observed")
 
-    def test_client_snapshot_does_not_report_aggregate_lifetime_loss_as_current_failure(self) -> None:
-        front = {"listening": True, "clients": {"203.0.113.20": {"connections": 1, "quality": "degraded"}}, "top_sources": {"203.0.113.20": 1}}
+    def test_client_snapshot_reports_lifetime_loss_separately_from_current_degradation(self) -> None:
+        front = {"listening": True, "clients": {"203.0.113.20": {"connections": 1, "quality": "loss_observed"}}, "top_sources": {"203.0.113.20": 1}}
         completed = subprocess.CompletedProcess(["nft"], 0, "", "")
         with (
             patch.object(server_agent, "parse_env", return_value={"RU_LISTEN_PORT": "443"}),
@@ -881,7 +1024,7 @@ class ServerAgentTests(unittest.TestCase):
             patch.object(server_agent, "run", return_value=completed),
         ):
             payload = server_agent.front_client_snapshot("203.0.113.20", 15)
-        self.assertEqual(payload["verdict"], "reached_xray")
+        self.assertEqual(payload["verdict"], "loss_observed")
 
     def test_client_snapshot_uses_degraded_active_flow_and_omits_stale_ports(self) -> None:
         front = {

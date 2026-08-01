@@ -14,12 +14,14 @@ class DiagnosticsTests(unittest.TestCase):
             drift="none",
             log_buckets={"ipv4_literal_timeout": 2},
             top_destinations={"ipv4_literal_timeout": "91.108.56.103:443=2"},
+            storage={"root_filesystem": {"filesystem": "ext4", "state": "clean", "verdict": "verified"}},
             verdict="verified",
         )
         restored = DiagnosticsSnapshot.from_json(snapshot.to_json())
         self.assertEqual(restored.deployment, "demo")
         self.assertEqual(restored.log_buckets["ipv4_literal_timeout"], 2)
         self.assertEqual(restored.drift, "none")
+        self.assertEqual(restored.storage["root_filesystem"]["verdict"], "verified")
 
     def test_snapshot_rejects_legacy_schema(self) -> None:
         with self.assertRaisesRegex(ValueError, "unsupported diagnostics snapshot schema"):

@@ -6,6 +6,19 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.12.7] - 2026-08-01
+
+### Fixed
+
+- Snapshot schema 2 и `status` получили отдельный `host_integrity`: agent читает ext4 state и error counters корневого раздела, а также обязательный `fs_passno` из `/etc/fstab`. Повреждение metadata теперь даёт hard failure и блокирует release acceptance вместо ложного green-verdict.
+- Health не пытается исправлять повреждение файловой системы перезапуском VPN-сервисов. После двух подтверждений состояние становится `failed` с причиной `host_integrity`; восстановление требует offline fsck.
+- Свежая потеря публичного Xray TCP-front теперь агрегируется по source IP между всеми продолжающимися kernel socket ID. Потеря, распределённая по нескольким небольшим потокам одного клиента, больше не скрывается из-за per-flow порога.
+- `diagnose client` различает свежую деградацию и накопленные counters открытых сокетов: первый случай даёт `degraded`, второй — явный `loss_observed`. `status` дополнительно показывает свежие interface drop/error deltas без автоматической смены маршрутов или sysctl.
+- Target-side activation требует `host_integrity=verified`; `e2fsprogs` закреплён как install dependency.
+- Внешние команды audit получили bounded timeout с сохранением partial stdout/stderr; зависший Docker CLI теперь даёт определённый failed-result и cleanup вместо бесконечного full-audit.
+
+На foreign сервере перед выпуском выполнен offline fsck подтверждённо повреждённого ext4 root, сброшены error counters и включена загрузочная проверка. Routing policy, основной `vless-uri.txt`, Xray/Reality, web-admin, WireGuard MTU и локальный VPN-клиент не изменены.
+
 ## [0.12.6] - 2026-07-31
 
 ### Fixed

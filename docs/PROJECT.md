@@ -66,12 +66,13 @@ Foreign-классы всегда остаются на `to-foreign`. Health и 
 Snapshot schema 2 содержит:
 
 - service state, manifest drift и hashes всех managed artifacts, включая resolver drop-in и состояние `/etc/resolv.conf` stub;
+- root filesystem source/type, ext4 state и runtime error counters, время последней проверки и `fs_passno` загрузочного `fsck`;
 - WireGuard, выбранный межсерверный transport и delay кандидатов, interface/conntrack, protocol и softnet counters; health хранит дельты UDP receive/send overflow, softnet drops и missed packets;
-- TCP front telemetry: socket states, RTT, retransmitted bytes/ratio, PMTU, MSS, cwnd, delivery rate, reordering и unacked по каждому `source IP:port` с последующей агрегацией по canonical IPv4/IPv6 адресу, включая kernel-формат `::ffff:<IPv4>`; свежий интервал считается по монотонным counters одного kernel socket ID, поэтому port reuse и counter reset не создают ложную потерю; lifetime loss остаётся наблюдением;
+- TCP front telemetry: socket states, RTT, retransmitted bytes/ratio, PMTU, MSS, cwnd, delivery rate, reordering и unacked по каждому `source IP:port` с последующей агрегацией по canonical IPv4/IPv6 адресу, включая kernel-формат `::ffff:<IPv4>`; свежий интервал считается по монотонным counters одного kernel socket ID и затем суммируется по source IP, поэтому port reuse/counter reset не создают ложную потерю, а распределённая по нескольким потокам потеря не скрывается; lifetime loss остаётся отдельным `loss_observed`;
 - fresh, 30-minute и 24-hour log windows;
 - mutually exclusive buckets: DNS timeout, domain timeout, IPv4 literal timeout, IPv6 literal timeout, private/fake block, client reset/EOF, invalid Reality и disabled-invalid;
 - парные DNS/router сообщения sing-box одного request ID дедуплицируются в одном DNS bucket;
-- maintenance state и отдельные `server_path`, `public_front`, `client_observation` verdicts.
+- maintenance state и отдельные `server_path`, `public_front`, `client_observation`, `host_integrity` verdicts.
 
 `vpn status` собирает компактный snapshot за последние 5 минут без live probes и исторического сканирования. `vpn diagnose path` сохраняет полный structured JSON с окнами 5m/30m/24h. `vpn diagnose front` одновременно проверяет публичный listener и свежие RU/WG/router paths. `vpn diagnose client --source <public-ip>` показывает потоки и Xray destinations проблемного источника, не смешивая устройства за одним NAT.
 
@@ -82,11 +83,12 @@ Health выполняется раз в две минуты и имеет сос
 - Soft degradation (новые UDP/softnet/interface drops, медленный источник или socket churn) не вызывает restart.
 - Hard failure требует двух свежих независимых failure cycles.
 - Recovery имеет 15-minute cooldown, перезапускает только inactive/failed required service и обязательно делает post-check.
+- `host_integrity=failed` является hard failure, но не запускает service recovery: ext4 metadata repair выполняется только offline fsck после резервной копии.
 - Throughput tests не входят в периодический health. Они запускаются только явно через live verification или диагностику.
 
 ## Установка и обслуживание
 
-Install/reinstall собирает release во временном каталоге внутри `/etc/vpn-stack/releases`, проверяет sing-box, Xray, nftables, WireGuard, systemd, manifest и assets, затем публикует immutable content-addressed tree и атомарно переключает `current`. Revision snapshot охватывает manifest, configs, rules/assets, resolver drop-in и `/etc/resolv.conf`, runtime health state, admin auth, `current`/`previous` и состояния всех затрагиваемых сервисов. Неудачные service start, drift или core route acceptance возвращают весь этот набор; уже опубликованный release не перезаписывается повторной установкой. Внешние capability probes выводятся отдельно: временный отказ raw IPv6 при исправном core path даёт `degraded` и проваливает полный live verify, но не откатывает тот же конфиг, который не может изменить состояние внешнего endpoint.
+Install/reinstall собирает release во временном каталоге внутри `/etc/vpn-stack/releases`, проверяет sing-box, Xray, nftables, WireGuard, systemd, manifest и assets, затем публикует immutable content-addressed tree и атомарно переключает `current`. Target-side acceptance дополнительно требует чистый ext4 root и включённую загрузочную проверку. Revision snapshot охватывает manifest, configs, rules/assets, resolver drop-in и `/etc/resolv.conf`, runtime health state, admin auth, `current`/`previous` и состояния всех затрагиваемых сервисов. Неудачные service start, drift или core route acceptance возвращают весь этот набор; уже опубликованный release не перезаписывается повторной установкой. Внешние capability probes выводятся отдельно: временный отказ raw IPv6 при исправном core path даёт `degraded` и проваливает полный live verify, но не откатывает тот же конфиг, который не может изменить состояние внешнего endpoint.
 
 Хранятся последние 10 revision snapshots плюс отдельный baseline. Snapshot текущей транзакции никогда не удаляется её собственным rollback; pruning выполняется до создания нового snapshot.
 

@@ -252,7 +252,7 @@ SSH-туннель остаётся запасным способом админ
 .\vpn.cmd diagnose path --deployment my-vpn
 ```
 
-Отчёт сохраняется в `out/diagnostics` как JSON. Для конкретного устройства используй `vpn diagnose client --source <public-ip>`: он группирует TCP socket state, retransmitted bytes/ratio, PMTU, MSS, cwnd, delivery rate, reordering и Xray TCP/UDP events именно по этому source IP. IPv4-mapped IPv6 из kernel `ss` нормализуется к тому же IPv4 ключу. Накопленные счётчики открытого сокета выводятся как `loss_observed`, но сами по себе не ухудшают health: `client_specific/degraded` требует одновременных признаков текущего зависания одного активного flow — retransmit, раздутого RTT и RTO. Agent ничего не закрывает принудительно и оставляет восстановление TCP/QUIC transport.
+Отчёт сохраняется в `out/diagnostics` как JSON. Для конкретного устройства используй `vpn diagnose client --source <public-ip>`: он группирует TCP socket state, retransmitted bytes/ratio, PMTU, MSS, cwnd, delivery rate, reordering и Xray TCP/UDP events именно по этому source IP. IPv4-mapped IPv6 из kernel `ss` нормализуется к тому же IPv4 ключу. Накопленные counters открытого сокета выводятся как `loss_observed`, но не выдаются за свежий сбой. Каждые две минуты agent считает монотонные дельты тех же kernel socket ID и агрегирует их по source IP: только измеренная потеря текущего интервала или подтверждённый RTT/RTO stall дают `client_specific/degraded`. Agent ничего не закрывает принудительно и оставляет восстановление TCP/QUIC transport.
 
 Для самопроверки на обычном пользовательском ПК:
 
@@ -268,7 +268,8 @@ SSH-туннель остаётся запасным способом админ
 - возраст `WireGuard` handshake
 - выбранный межсерверный transport, bounded probe delay кандидатов и состояние failover/recovery
 - состояние server DNS stub/cache и список managed upstreams
-- отдельные verdict: `server_path`, `public_front`, `client_observation`
+- root filesystem: ext4 state/error counters, загрузочный `fsck` и отдельный `host_integrity`
+- отдельные verdict: `server_path`, `public_front`, `client_observation`, `host_integrity`
 - debt/maintenance: доступные security updates и reboot-required
 
 Если локальный `deployments/<name>.env` разъехался с уже установленным сервером, lifecycle-команды сначала подтянут живой `/etc/vpn-stack/deployment.env`. Read-only `status`, `verify` и `diagnose` не меняют локальные клиентские артефакты.

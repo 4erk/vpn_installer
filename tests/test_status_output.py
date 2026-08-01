@@ -29,6 +29,17 @@ class StatusOutputTests(unittest.TestCase):
                 top_destinations={"ipv4_literal_timeout": "91.108.56.103:443=2"},
                 fresh_since="2026-07-20T08:00:00Z",
                 runtime_overrides={"admin_routing_rules_count": "2"},
+                storage={
+                    "root_filesystem": {
+                        "source": "/dev/vda1",
+                        "filesystem": "ext4",
+                        "state": "clean",
+                        "errors_count": 0,
+                        "boot_check_enabled": True,
+                        "verdict": "verified",
+                    }
+                },
+                front={"loss_observed_sources": ["203.0.113.20"]},
                 network={
                     "tcp_adaptation": {
                         "congestion_control": "bbr",
@@ -52,6 +63,7 @@ class StatusOutputTests(unittest.TestCase):
                     "health_soft_reasons": ["conntrack_table_full_5m=2"],
                     "protocol_counters": {"UdpRcvbufErrors": 816},
                     "recent_health_deltas": {
+                        "interfaces": {"eth0": {"rx_dropped": 64, "rx_errors": 0}},
                         "protocol": {
                             "UdpRcvbufErrors": 3,
                             "TcpOutSegs": 10_000,
@@ -95,6 +107,8 @@ class StatusOutputTests(unittest.TestCase):
         self.assertIn("91.108.56.103:443=2", rendered)
         self.assertIn("runtime overrides:", rendered)
         self.assertIn("admin_routing_rules_count=2", rendered)
+        self.assertIn("root filesystem: source=/dev/vda1, fs=ext4, state=clean, errors=0, boot_fsck=enabled, verdict=verified", rendered)
+        self.assertIn("public front lifetime loss sources: 203.0.113.20", rendered)
         self.assertIn("domain_to_foreign_timeout present", rendered)
         self.assertIn("tcp adaptation: cc=bbr, qdisc=fq, mtu_probing=1, mtu_floor=536, metrics_cache=disabled, probe_interval_s=600", rendered)
         self.assertIn("udp_rmem=8388608/16777216", rendered)
@@ -105,6 +119,7 @@ class StatusOutputTests(unittest.TestCase):
         self.assertIn("soft=conntrack_table_full_5m=2", rendered)
         self.assertIn("protocol counters (lifetime): UdpRcvbufErrors=816", rendered)
         self.assertIn("protocol deltas (last health cycle): UdpRcvbufErrors=+3", rendered)
+        self.assertIn("interface deltas (last health cycle): eth0.rx_dropped=+64", rendered)
         self.assertIn("tcp deltas (last health cycle): out=10000, retrans=125 (1.250%)", rendered)
         self.assertIn("tcp recovery deltas: TcpExtTCPSACKReorder=+20, TcpExtTCPDSACKRecv=+7, TcpExtTCPTimeouts=+2", rendered)
         self.assertIn("last front degradation: at=2026-07-20T07:58:00+00:00, sources=203.0.113.20", rendered)

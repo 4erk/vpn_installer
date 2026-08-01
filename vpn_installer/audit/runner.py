@@ -22,6 +22,9 @@ from ..config import generate_default_env, load_env_file, render_env_text
 AUDIT_ROOT = OUT_DIR / "audit"
 AUDIT_SINGBOX_REQUIRED_VERSION = "1.13.12"
 AUDIT_IMAGE = f"vpn-installer-audit-base:sing-box-{AUDIT_SINGBOX_REQUIRED_VERSION}"
+AUDIT_COMMAND_TIMEOUT_SECONDS = 120
+AUDIT_DOCKER_TIMEOUT_SECONDS = 45
+AUDIT_IMAGE_BUILD_TIMEOUT_SECONDS = 600
 VPN_PS1 = ROOT_DIR / "vpn.ps1"
 VPN_SH = ROOT_DIR / "vpn.sh"
 REPO_FILES_FOR_BOOTSTRAP = [
@@ -213,6 +216,7 @@ class AuditRunner:
         input_text: str | None = None,
         expect_code: int = 0,
         expected_codes: set[int] | None = None,
+        timeout_seconds: int = AUDIT_COMMAND_TIMEOUT_SECONDS,
     ) -> subprocess.CompletedProcess[str]:
         test_dir = ensure_dir(self.logs_dir / re.sub(r"[^A-Za-z0-9._-]+", "-", name))
         stdout_path = test_dir / "stdout.log"
@@ -227,15 +231,25 @@ class AuditRunner:
         if merged_env.get("PYTHONPATH"):
             pythonpath_parts.append(merged_env["PYTHONPATH"])
         merged_env["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)
-        completed = subprocess.run(
-            args,
-            cwd=str(cwd or ROOT_DIR),
-            env=merged_env,
-            input=input_text,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
+        try:
+            completed = subprocess.run(
+                args,
+                cwd=str(cwd or ROOT_DIR),
+                env=merged_env,
+                input=input_text,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=timeout_seconds,
+            )
+        except subprocess.TimeoutExpired as exc:
+            stdout = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else exc.stdout or ""
+            stderr = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else exc.stderr or ""
+            write_text(stdout_path, stdout)
+            write_text(stderr_path, stderr)
+            raise AuditFailure(
+                f"{name}: timeout after {timeout_seconds}s.\nstdout: {stdout_path}\nstderr: {stderr_path}"
+            ) from exc
         write_text(stdout_path, completed.stdout)
         write_text(stderr_path, completed.stderr)
         allowed_codes = expected_codes or {expect_code}
@@ -294,6 +308,7 @@ class AuditRunner:
         expect_code: int = 0,
         expected_codes: set[int] | None = None,
         cwd: Path | None = None,
+        timeout_seconds: int = AUDIT_DOCKER_TIMEOUT_SECONDS,
     ) -> subprocess.CompletedProcess[str]:
         require_command("docker")
         return self.run_command(
@@ -302,18 +317,20 @@ class AuditRunner:
             cwd=cwd,
             expect_code=expect_code,
             expected_codes=expected_codes,
+            timeout_seconds=timeout_seconds,
         )
 
     def ensure_audit_image(self) -> None:
         if self.base_image_ready:
             return
-        inspect = subprocess.run(["docker", "image", "inspect", AUDIT_IMAGE], capture_output=True, text=True, check=False)
+        inspect = subprocess.run(["docker", "image", "inspect", AUDIT_IMAGE], capture_output=True, text=True, check=False, timeout=AUDIT_DOCKER_TIMEOUT_SECONDS)
         if inspect.returncode == 0:
             version = subprocess.run(
                 ["docker", "run", "--rm", AUDIT_IMAGE, "bash", "-lc", "sing-box version | awk 'NR == 1 {print $3}'"],
                 capture_output=True,
                 text=True,
                 check=False,
+                timeout=AUDIT_DOCKER_TIMEOUT_SECONDS,
             )
             if version.returncode == 0 and version.stdout.strip() == AUDIT_SINGBOX_REQUIRED_VERSION:
                 self.base_image_ready = True
@@ -345,7 +362,11 @@ class AuditRunner:
             """
         )
         write_text(build_dir / "Dockerfile", dockerfile)
-        self.docker("build-audit-image", ["build", "-t", AUDIT_IMAGE, str(build_dir)])
+        self.docker(
+            "build-audit-image",
+            ["build", "-t", AUDIT_IMAGE, str(build_dir)],
+            timeout_seconds=AUDIT_IMAGE_BUILD_TIMEOUT_SECONDS,
+        )
         self.base_image_ready = True
 
     def create_env(self, name: str, overrides: dict[str, str] | None = None) -> tuple[Path, dict[str, str]]:
@@ -419,19 +440,21 @@ class AuditRunner:
             capture_output=True,
             text=True,
             check=False,
+            timeout=AUDIT_DOCKER_TIMEOUT_SECONDS,
         )
         for name in containers.stdout.splitlines():
             if name:
-                subprocess.run(["docker", "rm", "-f", name], capture_output=True, text=True, check=False)
+                subprocess.run(["docker", "rm", "-f", name], capture_output=True, text=True, check=False, timeout=AUDIT_DOCKER_TIMEOUT_SECONDS)
         networks = subprocess.run(
             ["docker", "network", "ls", "--filter", "label=vpn-installer.audit=1", "--format", "{{.Name}}"],
             capture_output=True,
             text=True,
             check=False,
+            timeout=AUDIT_DOCKER_TIMEOUT_SECONDS,
         )
         for name in networks.stdout.splitlines():
             if name:
-                subprocess.run(["docker", "network", "rm", name], capture_output=True, text=True, check=False)
+                subprocess.run(["docker", "network", "rm", name], capture_output=True, text=True, check=False, timeout=AUDIT_DOCKER_TIMEOUT_SECONDS)
 
     def docker_copy(self, container: str, source: Path, destination: str) -> None:
         self.docker("cp", ["cp", str(source), f"{container}:{destination}"])

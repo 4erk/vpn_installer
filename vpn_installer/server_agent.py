@@ -100,6 +100,9 @@ SYSCTL_PATH = Path("/etc/sysctl.d/90-vpn-stack.conf")
 RESOLV_CONF_PATH = Path("/etc/resolv.conf")
 RESOLVED_DROPIN_PATH = Path("/etc/systemd/resolved.conf.d/90-vpn-stack.conf")
 RESOLVED_STUB_PATH = "/run/systemd/resolve/stub-resolv.conf"
+FSTAB_PATH = Path("/etc/fstab")
+PROC_MOUNTS_PATH = Path("/proc/self/mounts")
+EXT4_SYSFS_ROOT = Path("/sys/fs/ext4")
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -712,6 +715,11 @@ def tcp_front_snapshot(port: int) -> dict[str, Any]:
         for metrics in all_flow_metrics.values()
         if metrics["quality"] == "degraded"
     }
+    loss_observed_sources = sorted(
+        source
+        for source, metrics in all_client_metrics.items()
+        if metrics["quality"] == "loss_observed"
+    )
     listener = run(["ss", "-Hln", f"sport = :{port}"], timeout=5)
     return {
         "port": port,
@@ -728,6 +736,7 @@ def tcp_front_snapshot(port: int) -> dict[str, Any]:
         "bytes_retrans": bytes_retrans,
         "retransmit_ratio_pct": round(bytes_retrans * 100 / bytes_sent, 3) if bytes_sent else 0.0,
         "degraded_sources": sorted(degraded_sources),
+        "loss_observed_sources": loss_observed_sources,
         "unacked": unacked,
         "keepalive_timer_connections": keepalive_timers,
         "stale_connections_5m": stale_5m,
@@ -801,6 +810,24 @@ def _monotonic_flow_deltas(current: dict[str, Any], previous: dict[str, Any]) ->
     return deltas
 
 
+def front_interval_metrics(counters: dict[str, int]) -> dict[str, Any]:
+    activity_bytes = max(counters["bytes_sent"], counters["bytes_retrans"])
+    ratio = round(counters["bytes_retrans"] * 100 / activity_bytes, 3) if activity_bytes else 0.0
+    degraded = (
+        activity_bytes >= FRONT_LOSS_MIN_BYTES
+        and ratio >= FRONT_LOSS_DEGRADED_PERCENT
+    ) or (
+        activity_bytes >= FRONT_SMALL_FLOW_MIN_BYTES
+        and counters["retransmissions"] >= FRONT_SMALL_FLOW_MIN_RETRANSMISSIONS
+        and ratio >= FRONT_SMALL_FLOW_DEGRADED_PERCENT
+    )
+    return {
+        "activity_bytes": activity_bytes,
+        "retransmit_ratio_pct": ratio,
+        "quality": "degraded" if degraded else "observed",
+    }
+
+
 def front_interval_snapshot(
     front: dict[str, Any],
     previous_counters: dict[str, Any],
@@ -821,6 +848,7 @@ def front_interval_snapshot(
     interval_flows: dict[str, dict[str, Any]] = {}
     degraded_sources: set[str] = set()
     aggregate = {key: 0 for key in FRONT_COUNTER_KEYS}
+    source_counters: dict[str, dict[str, int]] = {}
     for flow_id, current in counters["flows"].items():
         previous = previous_flows.get(flow_id) if isinstance(previous_flows, dict) else None
         if not isinstance(previous, dict):
@@ -835,31 +863,30 @@ def front_interval_snapshot(
             continue
         for key, value in deltas.items():
             aggregate[key] += value
-        bytes_sent = deltas["bytes_sent"]
-        activity_bytes = max(bytes_sent, deltas["bytes_retrans"])
-        ratio = round(deltas["bytes_retrans"] * 100 / activity_bytes, 3) if activity_bytes else 0.0
-        degraded = (
-            activity_bytes >= FRONT_LOSS_MIN_BYTES
-            and ratio >= FRONT_LOSS_DEGRADED_PERCENT
-        ) or (
-            activity_bytes >= FRONT_SMALL_FLOW_MIN_BYTES
-            and deltas["retransmissions"] >= FRONT_SMALL_FLOW_MIN_RETRANSMISSIONS
-            and ratio >= FRONT_SMALL_FLOW_DEGRADED_PERCENT
-        )
         source = str(current.get("source", ""))
-        if degraded and source:
+        if source:
+            combined = source_counters.setdefault(source, {key: 0 for key in FRONT_COUNTER_KEYS})
+            for key, value in deltas.items():
+                combined[key] += value
+        metrics = front_interval_metrics(deltas)
+        if metrics["quality"] == "degraded" and source:
             degraded_sources.add(source)
         interval_flows[str(current.get("endpoint") or flow_id)] = {
             "socket_id": flow_id,
             "source": source,
             "source_port": current.get("source_port"),
             **deltas,
-            "activity_bytes": activity_bytes,
-            "retransmit_ratio_pct": ratio,
-            "quality": "degraded" if degraded else "observed",
+            **metrics,
         }
-    aggregate_activity = max(aggregate["bytes_sent"], aggregate["bytes_retrans"])
-    aggregate_ratio = round(aggregate["bytes_retrans"] * 100 / aggregate_activity, 3) if aggregate_activity else 0.0
+    interval_sources = {
+        source: {**counters_by_source, **front_interval_metrics(counters_by_source)}
+        for source, counters_by_source in source_counters.items()
+    }
+    degraded_sources.update(
+        source
+        for source, metrics in interval_sources.items()
+        if metrics["quality"] == "degraded"
+    )
     sources = sorted(degraded_sources)
     observation = "degraded" if len(sources) >= 3 else "client_specific" if sources else "observed"
     interval = {
@@ -869,7 +896,8 @@ def front_interval_snapshot(
         "sampled_flows": len(interval_flows),
         "observation": observation,
         "degraded_sources": sources,
-        "aggregate": {**aggregate, "activity_bytes": aggregate_activity, "retransmit_ratio_pct": aggregate_ratio},
+        "aggregate": {**aggregate, **front_interval_metrics(aggregate)},
+        "sources": interval_sources,
         "flows": interval_flows,
     }
     return interval, counters
@@ -1457,9 +1485,27 @@ def public_front_snapshot(minutes: int, source: str | None = None, *, live_probe
         for key, metrics in front.get("flows", {}).items()
         if metrics.get("source") == source
     }
-    source_degraded = any(metrics.get("quality") == "degraded" for metrics in source_flows.values())
+    recent_interval = recent_observation(
+        read_json(HEALTH_STATE_PATH, {}).get("front_interval", {}),
+        max_age_seconds=300,
+    )
+    interval_sources = recent_interval.get("sources", {}) if recent_interval else {}
+    if not isinstance(interval_sources, dict):
+        interval_sources = {}
+    interval_degraded_sources = recent_interval.get("degraded_sources", []) if recent_interval else []
+    if not isinstance(interval_degraded_sources, list):
+        interval_degraded_sources = []
+    source_interval = interval_sources.get(source, {})
+    source_degraded = source in interval_degraded_sources or any(
+        metrics.get("quality") == "degraded" for metrics in source_flows.values()
+    )
+    source_loss_observed = client.get("quality") == "loss_observed" or any(
+        metrics.get("quality") == "loss_observed" for metrics in source_flows.values()
+    )
     if source_events["accepted"] and source_degraded:
         source_verdict = "degraded"
+    elif source_events["accepted"] and source_loss_observed:
+        source_verdict = "loss_observed"
     elif source_events["accepted"]:
         source_verdict = "reached_xray"
     elif source_events["invalid_reality"] or source_events["disabled_invalid"]:
@@ -1474,6 +1520,7 @@ def public_front_snapshot(minutes: int, source: str | None = None, *, live_probe
             "source_events": source_events,
             "source_client": client,
             "source_flows": source_flows,
+            "source_interval": source_interval,
             "source_flow_events": {key: dict(counter.most_common(10)) for key, counter in flow_events.items()},
             "source_verdict": source_verdict,
         }
@@ -1494,6 +1541,7 @@ def front_client_snapshot(source: str, minutes: int) -> dict[str, Any]:
             "listening": payload["front"].get("listening", False),
             "client": payload["source_client"],
             "flows": payload["source_flows"],
+            "recent_interval": payload["source_interval"],
         },
         "events": payload["source_events"],
         "flow_events": payload["source_flow_events"],
@@ -1803,6 +1851,110 @@ def maintenance_snapshot() -> dict[str, Any]:
     }
 
 
+def decode_mount_field(value: str) -> str:
+    return re.sub(r"\\([0-7]{3})", lambda match: chr(int(match.group(1), 8)), value)
+
+
+def root_fstab_passno(path: Path = FSTAB_PATH) -> int | None:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        fields = stripped.split()
+        if len(fields) < 6 or decode_mount_field(fields[1]) != "/":
+            continue
+        try:
+            return int(fields[5])
+        except ValueError:
+            return None
+    return None
+
+
+def root_mount(path: Path = PROC_MOUNTS_PATH) -> dict[str, str]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {}
+    for line in lines:
+        fields = line.split()
+        if len(fields) >= 4 and decode_mount_field(fields[1]) == "/":
+            return {
+                "source": decode_mount_field(fields[0]),
+                "filesystem": fields[2],
+                "options": fields[3],
+            }
+    return {}
+
+
+def read_counter(path: Path) -> int | None:
+    try:
+        return int(path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+
+
+def root_filesystem_snapshot(
+    mounts_path: Path = PROC_MOUNTS_PATH,
+    fstab_path: Path = FSTAB_PATH,
+    ext4_sysfs_root: Path = EXT4_SYSFS_ROOT,
+) -> dict[str, Any]:
+    mount = root_mount(mounts_path)
+    source = mount.get("source", "")
+    filesystem = mount.get("filesystem", "")
+    passno = root_fstab_passno(fstab_path)
+    result: dict[str, Any] = {
+        **mount,
+        "fstab_passno": passno,
+        "boot_check_enabled": passno is not None and passno > 0,
+        "state": "unknown",
+        "errors_count": None,
+        "first_error_time": None,
+        "last_error_time": None,
+        "last_checked": "",
+        "verdict": "inconclusive",
+        "reason": "root filesystem state is unavailable",
+    }
+    if filesystem != "ext4" or not source:
+        result["reason"] = f"unsupported root filesystem: {filesystem or 'unknown'}"
+        return result
+    device = os.path.realpath(source)
+    sysfs = ext4_sysfs_root / Path(device).name
+    result["errors_count"] = read_counter(sysfs / "errors_count")
+    result["first_error_time"] = read_counter(sysfs / "first_error_time")
+    result["last_error_time"] = read_counter(sysfs / "last_error_time")
+    tune = run(["tune2fs", "-l", device], timeout=8)
+    metadata: dict[str, str] = {}
+    if tune.returncode == 0:
+        for line in tune.stdout.splitlines():
+            key, separator, value = line.partition(":")
+            if separator:
+                metadata[key.strip()] = value.strip()
+    result["state"] = metadata.get("Filesystem state", "unknown")
+    result["last_checked"] = metadata.get("Last checked", "")
+    if result["errors_count"] is None:
+        try:
+            result["errors_count"] = int(metadata.get("FS Error count", ""))
+        except ValueError:
+            pass
+    state = str(result["state"]).lower()
+    error_count = result["errors_count"]
+    if (isinstance(error_count, int) and error_count > 0) or "error" in state:
+        result.update(verdict="failed", reason="ext4 metadata errors require offline fsck")
+    elif state != "clean":
+        result.update(verdict="inconclusive", reason=f"unexpected ext4 state: {result['state']}")
+    elif error_count is None:
+        result.update(verdict="inconclusive", reason="current ext4 error counter is unavailable")
+    elif not result["boot_check_enabled"]:
+        result.update(verdict="degraded", reason="root filesystem boot-time fsck is disabled in fstab")
+    else:
+        result.update(verdict="verified", reason="")
+    return result
+
+
 def os_release_fields() -> dict[str, str]:
     values: dict[str, str] = {}
     try:
@@ -1890,6 +2042,7 @@ def snapshot(*, live_probes: bool = False, profile: str = "light", full_logs: bo
         transport["udp_443_policy"] = udp_443_policy()
     tcp_adaptation = tcp_adaptation_snapshot(public_iface)
     resolver = resolver_snapshot()
+    root_filesystem = root_filesystem_snapshot()
     conntrack = conntrack_snapshot(full_logs=full_logs)
     if role == "ru-gateway":
         conntrack["front_bypass"] = xray_conntrack_bypass_snapshot(port)
@@ -1931,6 +2084,7 @@ def snapshot(*, live_probes: bool = False, profile: str = "light", full_logs: bo
     capability_failures = [name for name in failed_requirements(probes) if name in EXTERNAL_CAPABILITY_REQUIREMENTS] if live_probes else []
     transport_failures = [name for name in failed_requirements(probes) if name in OPTIONAL_TRANSPORT_REQUIREMENTS] if live_probes else []
     server_path = "failed" if reasons else "verified" if live_probes else "inconclusive"
+    host_integrity = str(root_filesystem.get("verdict", "inconclusive"))
     client_observation = front_observation(front, recent_front_interval) if front else "not-applicable"
     public_front = "not-applicable"
     if role == "ru-gateway":
@@ -1941,6 +2095,8 @@ def snapshot(*, live_probes: bool = False, profile: str = "light", full_logs: bo
         degradations.append(f"public_front={client_observation}")
     if transport_failures:
         degradations.append(f"fallback_transport_failed:{','.join(transport_failures)}")
+    if host_integrity in {"degraded", "inconclusive"}:
+        degradations.append(f"host_integrity={host_integrity}:{root_filesystem.get('reason') or 'unknown'}")
     selected_transport = str(interserver.get("selection", {}).get("selected", ""))
     router_path_ok = probe_path_ok(probes, "router", "foreign_domains_via_router")
     if role == "ru-gateway" and live_probes and router_path_ok and selected_transport == "to-foreign-wg":
@@ -1948,7 +2104,7 @@ def snapshot(*, live_probes: bool = False, profile: str = "light", full_logs: bo
     recent_conntrack_full = int(conntrack.get("table_full_events", {}).get("5", 0))
     if recent_conntrack_full:
         degradations.append(f"conntrack_table_full_5m={recent_conntrack_full}")
-    overall = "failed" if "failed" in {server_path, public_front} else "degraded" if degradations or client_observation in {"client_specific", "degraded"} else "verified" if server_path == "verified" else "inconclusive"
+    overall = "failed" if "failed" in {server_path, public_front, host_integrity} else "degraded" if degradations or client_observation in {"client_specific", "degraded"} else "verified" if server_path == "verified" else "inconclusive"
     healthy_exits = int(
         services.get("sing-box") == "active"
         and (not live_probes or release_gate_ok(probes))
@@ -1967,6 +2123,7 @@ def snapshot(*, live_probes: bool = False, profile: str = "light", full_logs: bo
             "installed_at": installed_at_value(),
         },
         "host": host_snapshot(public_iface),
+        "storage": {"root_filesystem": root_filesystem},
         "services": services,
         "artifacts": manifest_data,
         "wireguard": wireguard_snapshot(wg_interface),
@@ -1998,7 +2155,7 @@ def snapshot(*, live_probes: bool = False, profile: str = "light", full_logs: bo
                 "selected": selected_transport or ("to-foreign-hy2" if interserver.get("listening") else ""),
             },
         },
-        "verdicts": {"server_path": server_path, "public_front": public_front, "client_observation": client_observation, "external_capabilities": external_capabilities, "overall": overall, "reasons": reasons + degradations},
+        "verdicts": {"server_path": server_path, "public_front": public_front, "client_observation": client_observation, "host_integrity": host_integrity, "external_capabilities": external_capabilities, "overall": overall, "reasons": reasons + degradations + ([f"host_integrity=failed:{root_filesystem.get('reason') or 'unknown'}"] if host_integrity == "failed" else [])},
     }
 
 
@@ -2025,7 +2182,10 @@ def health() -> dict[str, Any]:
             if interval_reason not in verdicts["reasons"]:
                 verdicts["reasons"].append(interval_reason)
         now_epoch = int(time.time())
-        hard_failure = current["verdicts"]["server_path"] == "failed"
+        server_path_failure = current["verdicts"]["server_path"] == "failed"
+        host_integrity = current["verdicts"].get("host_integrity", "verified")
+        host_integrity_failure = host_integrity == "failed"
+        hard_failure = server_path_failure or host_integrity_failure
         failures = int(previous.get("consecutive_failures", 0)) + 1 if hard_failure else 0
         network_counters = {
             "interfaces": current.get("network", {}).get("interfaces", {}),
@@ -2040,6 +2200,8 @@ def health() -> dict[str, Any]:
         client_observation = current.get("verdicts", {}).get("client_observation")
         if client_observation in {"client_specific", "degraded"}:
             soft_reasons.append(f"public_front={client_observation}")
+        if host_integrity in {"degraded", "inconclusive"}:
+            soft_reasons.append(f"host_integrity={host_integrity}")
         front_evidence = front_degradation_evidence(
             current.get("front", {}),
             observed_at,
@@ -2055,7 +2217,7 @@ def health() -> dict[str, Any]:
         elif hard_failure:
             state = "failed"
             last_action = int(previous.get("last_action_epoch", 0))
-            if now_epoch - last_action >= 900:
+            if server_path_failure and now_epoch - last_action >= 900:
                 action = recover(current)
                 if action != "none":
                     service_recovery = True
@@ -2075,6 +2237,14 @@ def health() -> dict[str, Any]:
             "consecutive_failures": failures,
             "last_action": action,
             "last_action_epoch": now_epoch if service_recovery else int(previous.get("last_action_epoch", 0)),
+            "hard_reasons": [
+                reason
+                for reason, failed in (
+                    ("server_path", server_path_failure),
+                    ("host_integrity", host_integrity_failure),
+                )
+                if failed
+            ],
             "probe_failures": failed_requirements((postcheck or current).get("probes", {})),
             "probes": (postcheck or current).get("probes", {}),
             "network_counters": network_counters,

@@ -36,6 +36,7 @@ class DiagnosticsSnapshot:
     reasons: list[str] = field(default_factory=list)
     release: dict[str, Any] = field(default_factory=dict)
     artifacts: dict[str, Any] = field(default_factory=dict)
+    storage: dict[str, Any] = field(default_factory=dict)
     network: dict[str, Any] = field(default_factory=dict)
     front: dict[str, Any] = field(default_factory=dict)
     transport: dict[str, Any] = field(default_factory=dict)
@@ -89,6 +90,7 @@ class DiagnosticsSnapshot:
             reasons=[str(value) for value in verdicts.get("reasons", [])],
             release=payload.get("release", {}),
             artifacts=artifacts,
+            storage=payload.get("storage", {}),
             network=payload.get("network", {}),
             front=payload.get("front", {}),
             transport=payload.get("transport", {}),

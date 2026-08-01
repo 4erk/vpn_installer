@@ -1170,6 +1170,8 @@ if verdicts.get("server_path") != "verified":
     raise SystemExit(f"post-activation server path failed: {verdicts.get('reasons', [])}")
 if payload.get("role") == "ru-gateway" and verdicts.get("public_front") != "verified":
     raise SystemExit("post-activation public VLESS front is not verified")
+if verdicts.get("host_integrity") != "verified":
+    raise SystemExit(f"post-activation host integrity failed: {verdicts.get('host_integrity')}")
 if payload.get("artifacts", {}).get("drift") != "none":
     raise SystemExit("post-activation artifact drift detected")
 PY
@@ -1317,6 +1319,7 @@ run_apt_get install -y \
   apt-transport-https \
   ca-certificates \
   curl \
+  e2fsprogs \
   ethtool \
   gnupg \
   iperf3 \

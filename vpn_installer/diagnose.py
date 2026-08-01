@@ -83,7 +83,11 @@ def diagnose_front_workflow(deployment: str | None, *, source_ip: str | None = N
         f"retransmitted_bytes={front.get('bytes_retrans', 0)}, retransmit_ratio_pct={front.get('retransmit_ratio_pct', 0)}"
     )
     print(f"front retransmission scope: {front.get('socket_retransmissions_scope', 'unknown')}")
-    print(f"front observation: {payload.get('observation', 'unknown')}; degraded_sources={len(front.get('degraded_sources', []))}")
+    print(
+        f"front observation: {payload.get('observation', 'unknown')}; "
+        f"degraded_sources={len(front.get('degraded_sources', []))}; "
+        f"lifetime_loss_sources={len(front.get('loss_observed_sources', []))}"
+    )
     requirements = payload.get("probes", {}).get("requirements", {})
     failed_requirements = ",".join(name for name, passed in requirements.items() if passed is not True) or "-"
     print(
@@ -150,10 +154,20 @@ def diagnose_server_client_workflow(deployment: str | None, *, source_ip: str, m
     flows = payload.get("front", {}).get("flows", {})
     if flows:
         degraded_flows = sum(flow.get("quality") == "degraded" for flow in flows.values())
-        print(f"active flows: total={len(flows)}, degraded={degraded_flows}")
+        loss_observed_flows = sum(flow.get("quality") == "loss_observed" for flow in flows.values())
+        print(f"active flows: total={len(flows)}, degraded={degraded_flows}, lifetime_loss={loss_observed_flows}")
+    recent_interval = payload.get("front", {}).get("recent_interval", {})
+    if recent_interval:
+        print(
+            "fresh source interval: "
+            f"quality={recent_interval.get('quality', 'unknown')}, "
+            f"retrans={recent_interval.get('bytes_retrans', 0)}/{recent_interval.get('activity_bytes', 0)} "
+            f"({recent_interval.get('retransmit_ratio_pct', 0)}%)"
+        )
     verdict = payload.get("verdict", "inconclusive")
     verdict_basis = {
         "degraded": "Xray accepted the client; aggregate outer TCP quality is degraded",
+        "loss_observed": "Xray accepted the client; open-socket lifetime counters contain loss, but no fresh degraded interval is available",
         "reached_xray": "Xray accepted the client; no active aggregate degradation was measured",
         "rejected_by_front": "the public front rejected the connection",
         "tcp_reached_no_xray_accept": "TCP reached port 443 without a matching Xray accept event",
@@ -162,7 +176,7 @@ def diagnose_server_client_workflow(deployment: str | None, *, source_ip: str, m
     print(f"verdict: {verdict}{f'; basis: {verdict_basis}' if verdict_basis else ''}")
     print(f"udp/443 policy: {payload.get('transport', {}).get('udp_443_policy', '-')}")
     print(f"report: {report_path}")
-    return 1 if payload.get("verdict") in {"degraded", "rejected_by_front", "tcp_reached_no_xray_accept", "not_seen_on_server"} else 0
+    return 1 if payload.get("verdict") in {"degraded", "loss_observed", "rejected_by_front", "tcp_reached_no_xray_accept", "not_seen_on_server"} else 0
 
 def _cleanup_iperf_rules(foreign: RemoteTarget) -> None:
     ssh_capture(

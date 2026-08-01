@@ -97,6 +97,17 @@ class AuditRunnerTests(unittest.TestCase):
             with self.assertRaises(audit_runner.AuditFailure):
                 runner.run_command("demo", ["echo", "ok"])
 
+    def test_run_command_bounds_external_process_and_saves_partial_output(self) -> None:
+        runner = self.make_runner()
+        expired = subprocess.TimeoutExpired(["docker", "exec"], 7, output="partial-out", stderr="partial-error")
+        with patch("vpn_installer.audit.runner.subprocess.run", side_effect=expired) as run:
+            with self.assertRaisesRegex(audit_runner.AuditFailure, "timeout after 7s"):
+                runner.run_command("bounded", ["docker", "exec"], timeout_seconds=7)
+
+        self.assertEqual(run.call_args.kwargs["timeout"], 7)
+        self.assertEqual((runner.logs_dir / "bounded" / "stdout.log").read_text(encoding="utf-8"), "partial-out")
+        self.assertEqual((runner.logs_dir / "bounded" / "stderr.log").read_text(encoding="utf-8"), "partial-error")
+
     def test_run_bash_and_powershell_delegate(self) -> None:
         runner = self.make_runner()
         with patch.object(audit_runner, "require_command"), patch.object(runner, "run_command", return_value=completed(0)) as run:
@@ -199,6 +210,7 @@ class AuditRunnerTests(unittest.TestCase):
             runner.docker_network_connect("net", "container", "203.0.113.2")
             runner.lab_curl("demo", "http://example.com/")
         self.assertGreaterEqual(run_command.call_count, 5)
+        self.assertTrue(all(call.kwargs["timeout_seconds"] == audit_runner.AUDIT_DOCKER_TIMEOUT_SECONDS for call in run_command.call_args_list))
 
     def test_docker_container_and_network_cleanup_respects_keep_flag(self) -> None:
         runner = self.make_runner()
