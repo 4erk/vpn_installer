@@ -553,6 +553,18 @@ def empty_tcp_metrics() -> dict[str, Any]:
     }
 
 
+ACTIVE_TCP_STATES = frozenset({"ESTAB"})
+CLOSING_TCP_STATES = frozenset({"FIN-WAIT-1", "FIN-WAIT-2", "CLOSE-WAIT", "LAST-ACK", "CLOSING", "TIME-WAIT"})
+
+
+def tcp_socket_phase(states: dict[str, int]) -> str:
+    if any(int(states.get(state, 0)) for state in ACTIVE_TCP_STATES):
+        return "active"
+    if any(int(states.get(state, 0)) for state in CLOSING_TCP_STATES):
+        return "closing"
+    return "handshake"
+
+
 def add_tcp_info(metrics: dict[str, Any], line: str) -> None:
     float_values = ((r"\brtt:([0-9.]+)", "rtts"),)
     scalar_values = (
@@ -632,6 +644,7 @@ def render_tcp_metrics(values: dict[str, Any]) -> dict[str, Any]:
         "keepalive_timer_connections": values["keepalive_timers"],
         "idle_ms_p95": percentile(values["idle_ms"], 95),
     }
+    rendered["phase"] = tcp_socket_phase(rendered["states"])
     rendered["quality"] = client_front_quality(rendered)
     return rendered
 
@@ -676,9 +689,16 @@ def tcp_front_snapshot(port: int) -> dict[str, Any]:
             continue
         add_tcp_info(current_flow, line)
     per_client: dict[str, dict[str, Any]] = {}
+    active_per_client: dict[str, dict[str, Any]] = {}
     for values in per_flow.values():
         merge_tcp_metrics(per_client.setdefault(values["source"], empty_tcp_metrics()), values)
-    all_client_metrics = {source: render_tcp_metrics(values) for source, values in per_client.items()}
+        if tcp_socket_phase(values["states"]) == "active":
+            merge_tcp_metrics(active_per_client.setdefault(values["source"], empty_tcp_metrics()), values)
+    all_client_socket_metrics = {source: render_tcp_metrics(values) for source, values in per_client.items()}
+    all_client_metrics = {
+        source: render_tcp_metrics(active_per_client.get(source, values))
+        for source, values in per_client.items()
+    }
     all_flow_metrics = {
         key: {
             "source": values["source"],
@@ -698,41 +718,53 @@ def tcp_front_snapshot(port: int) -> dict[str, Any]:
             key=lambda item: (item[1]["quality"] != "degraded", -int(item[1]["bytes_retrans"]), item[0]),
         )[:100]
     )
-    rtts = [rtt for values in per_flow.values() for rtt in values["rtts"]]
-    retrans = sum(int(value["retransmissions"]) for value in all_client_metrics.values())
-    bytes_sent = sum(int(value["bytes_sent"]) for value in all_client_metrics.values())
-    bytes_retrans = sum(int(value["bytes_retrans"]) for value in all_client_metrics.values())
-    unacked = sum(int(value["unacked"]) for value in all_client_metrics.values())
-    keepalive_timers = sum(int(value["keepalive_timer_connections"]) for value in all_flow_metrics.values())
-    stale_5m = sum(1 for value in all_flow_metrics.values() if float(value.get("idle_ms_p95") or 0) >= 300_000)
-    stale_1h = sum(1 for value in all_flow_metrics.values() if float(value.get("idle_ms_p95") or 0) >= 3_600_000)
-    fin_wait_sources = sorted(
+    active_flows = [metrics for metrics in all_flow_metrics.values() if metrics["phase"] == "active"]
+    closing_flows = [metrics for metrics in all_flow_metrics.values() if metrics["phase"] == "closing"]
+    rtts = [
+        rtt
+        for endpoint, values in per_flow.items()
+        if all_flow_metrics[endpoint]["phase"] == "active"
+        for rtt in values["rtts"]
+    ]
+    retrans = sum(int(value["retransmissions"]) for value in active_flows)
+    bytes_sent = sum(int(value["bytes_sent"]) for value in active_flows)
+    bytes_retrans = sum(int(value["bytes_retrans"]) for value in active_flows)
+    unacked = sum(int(value["unacked"]) for value in active_flows)
+    keepalive_timers = sum(int(value["keepalive_timer_connections"]) for value in active_flows)
+    stale_5m = sum(1 for value in active_flows if float(value.get("idle_ms_p95") or 0) >= 300_000)
+    stale_1h = sum(1 for value in active_flows if float(value.get("idle_ms_p95") or 0) >= 3_600_000)
+    closing_churn_sources = sorted(
         source
-        for source, values in all_client_metrics.items()
+        for source, values in all_client_socket_metrics.items()
         if int(values["states"].get("FIN-WAIT-1", 0)) >= 25
     )
     degraded_sources = {
         str(metrics["source"])
         for metrics in all_flow_metrics.values()
-        if metrics["quality"] == "degraded"
+        if metrics["phase"] == "active" and metrics["quality"] == "degraded"
     }
     loss_observed_sources = sorted(
         source
-        for source, metrics in all_client_metrics.items()
-        if metrics["quality"] == "loss_observed"
+        for source in all_client_metrics
+        if any(
+            metrics["source"] == source and metrics["phase"] == "active" and metrics["quality"] == "loss_observed"
+            for metrics in all_flow_metrics.values()
+        )
     )
-    listener = run(["ss", "-Hln", f"sport = :{port}"], timeout=5)
+    listener = run(["ss", "-Hltn", f"sport = :{port}"], timeout=5)
     return {
         "port": port,
         "listening": bool(listener.stdout.strip()),
         "state_counts": dict(states),
         "connections": sum(states.values()),
+        "active_connections": len(active_flows),
+        "closing_connections": len(closing_flows),
         "top_sources": dict(clients.most_common(20)),
         "clients": client_metrics,
         "flows": flow_metrics,
         "rtt_ms": {"min": min(rtts) if rtts else None, "median": percentile(rtts, 50), "p95": percentile(rtts, 95), "max": max(rtts) if rtts else None},
         "socket_retransmissions": retrans,
-        "socket_retransmissions_scope": "lifetime counters of currently open sockets",
+        "socket_retransmissions_scope": "lifetime counters of currently active ESTAB sockets",
         "bytes_sent": bytes_sent,
         "bytes_retrans": bytes_retrans,
         "retransmit_ratio_pct": round(bytes_retrans * 100 / bytes_sent, 3) if bytes_sent else 0.0,
@@ -742,12 +774,16 @@ def tcp_front_snapshot(port: int) -> dict[str, Any]:
         "keepalive_timer_connections": keepalive_timers,
         "stale_connections_5m": stale_5m,
         "stale_connections_1h": stale_1h,
-        "fin_wait_1_sources": fin_wait_sources,
+        "closing_churn_sources": closing_churn_sources,
         **xray_front_socket_policy(port),
     }
 
 
 def client_front_quality(metrics: dict[str, Any]) -> str:
+    if metrics.get("phase") == "closing":
+        return "closing"
+    if metrics.get("phase") == "handshake":
+        return "handshake"
     bytes_sent = int(metrics.get("bytes_sent", 0))
     retransmissions = int(metrics.get("retransmissions", 0))
     retransmit_ratio_pct = float(metrics.get("retransmit_ratio_pct", 0.0))
@@ -789,6 +825,8 @@ def front_counter_snapshot(front: dict[str, Any], observed_at: str) -> dict[str,
     flows: dict[str, dict[str, Any]] = {}
     for endpoint, metrics in front.get("flows", {}).items():
         if not isinstance(metrics, dict):
+            continue
+        if metrics.get("phase", "active") != "active":
             continue
         flow_id = str(metrics.get("socket_id") or endpoint)
         flows[flow_id] = {
@@ -932,24 +970,59 @@ def xray_front_socket_policy(port: int) -> dict[str, int]:
     return {}
 
 
+def public_hy2_snapshot(port: int) -> dict[str, Any]:
+    config = read_json(SINGBOX_CONFIG_PATH, {})
+    inbound: dict[str, Any] = {}
+    for candidate in config.get("inbounds", []) if isinstance(config, dict) else []:
+        if not isinstance(candidate, dict):
+            continue
+        try:
+            candidate_port = int(candidate.get("listen_port", 0))
+        except (TypeError, ValueError):
+            continue
+        if candidate.get("type") == "hysteria2" and candidate.get("tag") == "public-hy2-in" and candidate_port == port:
+            inbound = candidate
+            break
+    listener = run(["ss", "-Hlun", f"sport = :{port}"], timeout=5)
+    ruleset = run(["nft", "list", "table", "inet", "vpnstack"], timeout=8)
+    rules = ruleset.stdout
+    firewall = (
+        ruleset.returncode == 0
+        and "vpnstack-hy2-in-notrack" in rules
+        and "vpnstack-hy2-out-notrack" in rules
+        and re.search(rf"\budp dport {port}\b.*\baccept\b", rules) is not None
+    )
+    tls = inbound.get("tls", {}) if isinstance(inbound, dict) else {}
+    users = inbound.get("users", []) if isinstance(inbound, dict) else []
+    return {
+        "port": port,
+        "protocol": "hysteria2",
+        "configured": bool(inbound and isinstance(users, list) and len(users) == 1 and isinstance(tls, dict) and tls.get("enabled") is True),
+        "listening": listener.returncode == 0 and bool(listener.stdout.strip()),
+        "firewall": firewall,
+    }
+
+
 def front_observation(front: dict[str, Any], interval: dict[str, Any] | None = None) -> str:
-    """Separate one lossy source from degradation shared by several clients."""
-    fin_wait_sources = front.get("fin_wait_1_sources")
-    if not isinstance(fin_wait_sources, list):
-        clients = front.get("clients", {})
-        fin_wait_sources = [
-            source
-            for source, metrics in clients.items()
-            if int(metrics.get("states", {}).get("FIN-WAIT-1", 0)) >= 25
-        ]
+    """Classify active data-path loss without conflating socket teardown."""
     interval_sources = set((interval or {}).get("degraded_sources", []))
     degraded_sources = set(front.get("degraded_sources", [])) | interval_sources
-    noisy_sources = degraded_sources | set(fin_wait_sources)
     if int(front.get("stale_connections_5m", 0)) >= 25 and int(front.get("keepalive_timer_connections", 0)) < int(front.get("stale_connections_5m", 0)):
         return "degraded"
-    if len(noisy_sources) >= 3:
+    if len(degraded_sources) >= 3:
         return "degraded"
-    if noisy_sources:
+    if degraded_sources:
+        return "client_specific"
+    return "observed"
+
+
+def closing_churn_observation(front: dict[str, Any]) -> str:
+    sources = front.get("closing_churn_sources", [])
+    if not isinstance(sources, list):
+        return "observed"
+    if len(sources) >= 3:
+        return "shared"
+    if sources:
         return "client_specific"
     return "observed"
 
@@ -985,17 +1058,19 @@ def front_degradation_evidence(
         for key, metrics in interval.get("flows", {}).items()
         if isinstance(metrics, dict) and metrics.get("quality") == "degraded"
     }
-    degraded_sources = sorted(
-        set(front.get("degraded_sources", []))
-        | set(front.get("fin_wait_1_sources", []))
-        | set(interval.get("degraded_sources", []))
-    )
-    if not degraded_sources and not degraded_flows and not interval_flows:
+    degraded_sources = sorted(set(front.get("degraded_sources", [])) | set(interval.get("degraded_sources", [])))
+    closing_sources = sorted(set(front.get("closing_churn_sources", [])))
+    if not degraded_sources and not degraded_flows and not interval_flows and not closing_sources:
         return {}
     return {
         "observed_at": observed_at,
         "observation": front_observation(front, interval),
         "degraded_sources": degraded_sources,
+        "closing_churn": {
+            "observation": closing_churn_observation(front),
+            "sources": closing_sources,
+            "connections": front.get("closing_connections", 0),
+        },
         "aggregate": {
             "connections": front.get("connections", 0),
             "bytes_sent": front.get("bytes_sent", 0),
@@ -1449,7 +1524,7 @@ def public_front_snapshot(minutes: int, source: str | None = None, *, live_probe
             "invalid_reality": invalid_total,
             "disabled_invalid": disabled_total,
         },
-        "transport": {"udp_443_policy": udp_443_policy()},
+        "transport": {"udp_443_policy": udp_443_policy(), "public_client": public_hy2_snapshot(port)},
         "top_sources": dict(source_counts.most_common(20)),
         "observation": observation,
         "probes": probes,
@@ -2056,6 +2131,7 @@ def snapshot(*, live_probes: bool = False, profile: str = "light", full_logs: bo
     transport = {"interserver": interserver_transport_snapshot(role, env)}
     if role == "ru-gateway":
         transport["udp_443_policy"] = udp_443_policy()
+        transport["public_client"] = public_hy2_snapshot(port)
     tcp_adaptation = tcp_adaptation_snapshot(public_iface)
     resolver = resolver_snapshot()
     root_filesystem = root_filesystem_snapshot()
@@ -2085,6 +2161,11 @@ def snapshot(*, live_probes: bool = False, profile: str = "light", full_logs: bo
         reasons.append(f"live_probes_failed:{failed}" if failed else "live_probes_failed")
     if role == "ru-gateway" and transport.get("udp_443_policy") != "routed":
         reasons.append(f"udp_443_policy={transport.get('udp_443_policy')}")
+    public_client_transport = transport.get("public_client", {})
+    if role == "ru-gateway":
+        for requirement in ("configured", "listening", "firewall"):
+            if public_client_transport.get(requirement) is not True:
+                reasons.append(f"public_hy2_{requirement}=false")
     if role == "ru-gateway" and not conntrack.get("front_bypass", {}).get("active"):
         reasons.append("xray_conntrack_bypass=inactive")
     interserver = transport.get("interserver", {})
@@ -2102,9 +2183,12 @@ def snapshot(*, live_probes: bool = False, profile: str = "light", full_logs: bo
     server_path = "failed" if reasons else "verified" if live_probes else "inconclusive"
     host_integrity = str(root_filesystem.get("verdict", "inconclusive"))
     client_observation = front_observation(front, recent_front_interval) if front else "not-applicable"
+    closing_churn = closing_churn_observation(front) if front else "not-applicable"
     public_front = "not-applicable"
+    public_quic = "not-applicable"
     if role == "ru-gateway":
         public_front = public_front_verdict(services["xray"], front, recent_front_interval)
+        public_quic = "verified" if all(public_client_transport.get(name) is True for name in ("configured", "listening", "firewall")) else "failed"
     external_capabilities = "degraded" if capability_failures else "verified" if live_probes else "inconclusive"
     degradations = ([f"external_capabilities_failed:{','.join(capability_failures)}"] if capability_failures else [])
     if public_front == "degraded":
@@ -2120,7 +2204,7 @@ def snapshot(*, live_probes: bool = False, profile: str = "light", full_logs: bo
     recent_conntrack_full = int(conntrack.get("table_full_events", {}).get("5", 0))
     if recent_conntrack_full:
         degradations.append(f"conntrack_table_full_5m={recent_conntrack_full}")
-    overall = "failed" if "failed" in {server_path, public_front, host_integrity} else "degraded" if degradations or client_observation in {"client_specific", "degraded"} else "verified" if server_path == "verified" else "inconclusive"
+    overall = "failed" if "failed" in {server_path, public_front, public_quic, host_integrity} else "degraded" if degradations or client_observation in {"client_specific", "degraded"} else "verified" if server_path == "verified" else "inconclusive"
     healthy_exits = int(
         services.get("sing-box") == "active"
         and (not live_probes or release_gate_ok(probes))
@@ -2171,7 +2255,7 @@ def snapshot(*, live_probes: bool = False, profile: str = "light", full_logs: bo
                 "selected": selected_transport or ("to-foreign-hy2" if interserver.get("listening") else ""),
             },
         },
-        "verdicts": {"server_path": server_path, "public_front": public_front, "client_observation": client_observation, "host_integrity": host_integrity, "external_capabilities": external_capabilities, "overall": overall, "reasons": reasons + degradations + ([f"host_integrity=failed:{root_filesystem.get('reason') or 'unknown'}"] if host_integrity == "failed" else [])},
+        "verdicts": {"server_path": server_path, "public_front": public_front, "public_quic": public_quic, "client_observation": client_observation, "closing_churn": closing_churn, "host_integrity": host_integrity, "external_capabilities": external_capabilities, "overall": overall, "reasons": reasons + degradations + ([f"host_integrity=failed:{root_filesystem.get('reason') or 'unknown'}"] if host_integrity == "failed" else [])},
     }
 
 
@@ -2216,6 +2300,9 @@ def health() -> dict[str, Any]:
         client_observation = current.get("verdicts", {}).get("client_observation")
         if client_observation in {"client_specific", "degraded"}:
             soft_reasons.append(f"public_front={client_observation}")
+        closing_churn = current.get("verdicts", {}).get("closing_churn")
+        if closing_churn in {"client_specific", "shared"}:
+            soft_reasons.append(f"public_front_closing_churn={closing_churn}")
         if host_integrity in {"degraded", "inconclusive"}:
             soft_reasons.append(f"host_integrity={host_integrity}")
         front_evidence = front_degradation_evidence(
@@ -2275,6 +2362,28 @@ def health() -> dict[str, Any]:
             payload["post_recovery_verdicts"] = postcheck["verdicts"]
         write_json_atomic(HEALTH_STATE_PATH, payload)
         return payload
+
+
+def health_log_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    interval = payload.get("front_interval", {})
+    if not isinstance(interval, dict):
+        interval = {}
+    return {
+        "schema_version": payload.get("schema_version"),
+        "updated_at": payload.get("updated_at"),
+        "state": payload.get("state"),
+        "consecutive_failures": payload.get("consecutive_failures", 0),
+        "last_action": payload.get("last_action", "none"),
+        "hard_reasons": payload.get("hard_reasons", []),
+        "probe_failures": payload.get("probe_failures", []),
+        "soft_reasons": payload.get("soft_reasons", []),
+        "verdicts": payload.get("verdicts", {}),
+        "front_interval": {
+            "observation": interval.get("observation", "observed"),
+            "degraded_sources": interval.get("degraded_sources", []),
+            "aggregate": interval.get("aggregate", {}),
+        },
+    }
 
 
 def positive_counter_deltas(current: Any, previous: Any) -> Any:
@@ -2436,7 +2545,8 @@ def main(argv: list[str] | None = None) -> int:
         payload = routes_command(args)
     else:
         payload = assets_snapshot()
-    print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    output = health_log_summary(payload) if args.command == "health" else payload
+    print(json.dumps(output, ensure_ascii=False, sort_keys=True))
     if args.command in {"health", "transport"} and payload.get("state") in {"failed", "recovering"}:
         return 1
     return 0

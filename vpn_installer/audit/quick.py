@@ -14,6 +14,7 @@ from unittest.mock import patch
 from ..common import OUT_DIR, ROOT_DIR, RUNTIME_SITE_PACKAGES
 from ..config import load_env_file
 from ..manifest import XRAY_VERSION
+from ..public_transport import PUBLIC_HY2_OUTBOUND_TAG, PUBLIC_SELECTOR_TAG, PUBLIC_VLESS_OUTBOUND_TAG
 from ..render import find_cached_asset, render_all_artifacts
 from ..runtime_deps import ensure_python_package
 from ..targets import build_target
@@ -384,6 +385,12 @@ def test_user_artifacts(out_dir: Path) -> dict[str, str]:
     linux_payload = json.loads(linux_json_path.read_text(encoding="utf-8"))
     if hiddify_payload.get("inbounds", [{}])[0].get("auto_redirect") is not False:
         raise AuditFailure("Hiddify profile должен отключать auto_redirect")
+    hiddify_outbounds = {item.get("tag"): item for item in hiddify_payload.get("outbounds", []) if isinstance(item, dict)}
+    selector = hiddify_outbounds.get(PUBLIC_SELECTOR_TAG, {})
+    if selector.get("type") != "urltest" or selector.get("outbounds") != [PUBLIC_HY2_OUTBOUND_TAG, PUBLIC_VLESS_OUTBOUND_TAG]:
+        raise AuditFailure("Hiddify profile не содержит ожидаемый adaptive QUIC/TCP urltest")
+    if selector.get("interrupt_exist_connections") is not False:
+        raise AuditFailure("Hiddify adaptive selector не должен обрывать существующие соединения")
     if linux_payload.get("inbounds", [{}])[0].get("auto_redirect") is not True:
         raise AuditFailure("Linux sing-box profile должен включать auto_redirect")
     linux_payload["inbounds"][0]["auto_redirect"] = False
@@ -457,7 +464,10 @@ def test_ru_singbox_runtime_smoke(runner: AuditRunner, out_dir: Path) -> dict[st
     router_config = json.loads(config_path.read_text(encoding="utf-8"))
     inbound = router_config["inbounds"][0]
     if inbound.get("type") != "mixed" or inbound.get("tag") != "router-in" or inbound.get("listen") != "127.0.0.1":
-        raise AuditFailure("RU sing-box должен быть локальным mixed-router, а публичный VLESS/Reality должен быть в Xray")
+        raise AuditFailure("RU sing-box не содержит локальный mixed-router перед routing policy")
+    public_hy2 = next((item for item in router_config["inbounds"] if item.get("tag") == "public-hy2-in"), None)
+    if not isinstance(public_hy2, dict) or public_hy2.get("type") != "hysteria2":
+        raise AuditFailure("RU sing-box не содержит публичный Hysteria2 ingress")
     router_listen_port = int(inbound.get("listen_port", 0))
     if not (1 <= router_listen_port <= 65535):
         raise AuditFailure("RU sing-box router содержит некорректный listen_port")

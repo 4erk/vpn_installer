@@ -112,27 +112,44 @@ class AdminWebTests(unittest.TestCase):
         self.assertEqual(admin_web.parse_established_client_ips(sample, 443), {"198.51.100.10", "203.0.113.20", "192.0.2.44"})
         self.assertEqual(admin_web.split_endpoint("missing-port"), ("", ""))
 
+    def test_hysteria_active_client_parsing_requires_authenticated_public_inbound(self) -> None:
+        payload = {
+            "connections": [
+                {"metadata": {"type": "hysteria2/public-hy2-in", "sourceIP": "198.51.100.10"}},
+                {"metadata": {"type": "hysteria2/public-hy2-in", "sourceIP": "::ffff:203.0.113.20"}},
+                {"metadata": {"type": "hysteria2/interserver-hy2-in", "sourceIP": "192.0.2.1"}},
+                {"metadata": {"type": "hysteria2/public-hy2-in", "sourceIP": "not-an-ip"}},
+            ]
+        }
+        self.assertEqual(admin_web.parse_hysteria_client_ips(payload), {"198.51.100.10", "203.0.113.20"})
+
+    def test_xray_client_query_handles_missing_ss(self) -> None:
+        with patch("vpn_installer.admin_web.subprocess.run", side_effect=OSError("no ss")):
+            self.assertEqual(admin_web.xray_client_ips(443), set())
+
     def test_active_client_access_allows_any_current_vpn_peer(self) -> None:
         env = {"ADMIN_WEB_BIND": "0.0.0.0", "RU_LISTEN_PORT": "443"}
-        with patch.object(admin_web, "active_xray_client_ips", return_value={"198.51.100.10", "203.0.113.20"}):
+        with patch.object(admin_web, "active_public_client_ips", return_value={"198.51.100.10", "203.0.113.20"}):
             self.assertTrue(admin_web.client_ip_allowed("198.51.100.10", env))
             self.assertTrue(admin_web.client_ip_allowed("203.0.113.20", env))
             self.assertFalse(admin_web.client_ip_allowed("203.0.113.21", env))
 
     def test_active_client_cache_and_fallback_paths(self) -> None:
         admin_web.CLIENT_IP_CACHE.update({"expires_at": 0.0, "listen_port": None, "ips": set()})
-        completed = subprocess.CompletedProcess(["ss"], 0, stdout="0 0 94.232.248.35:443 198.51.100.10:53000\n", stderr="")
-        with patch("vpn_installer.admin_web.subprocess.run", return_value=completed) as run_mock:
-            self.assertEqual(admin_web.active_xray_client_ips(443), {"198.51.100.10"})
-            self.assertEqual(admin_web.active_xray_client_ips(443), {"198.51.100.10"})
-        run_mock.assert_called_once()
+        with patch.object(admin_web, "xray_client_ips", return_value={"198.51.100.10"}) as xray_mock, patch.object(
+            admin_web, "hysteria_client_ips", return_value={"203.0.113.20"}
+        ) as hysteria_mock:
+            self.assertEqual(admin_web.active_public_client_ips(443), {"198.51.100.10", "203.0.113.20"})
+            self.assertEqual(admin_web.active_public_client_ips(443), {"198.51.100.10", "203.0.113.20"})
+        xray_mock.assert_called_once()
+        hysteria_mock.assert_called_once()
 
         admin_web.CLIENT_IP_CACHE.update({"expires_at": 0.0, "listen_port": None, "ips": set()})
-        with patch("vpn_installer.admin_web.subprocess.run", side_effect=OSError("no ss")):
-            self.assertEqual(admin_web.active_xray_client_ips(443), set())
+        with patch.object(admin_web, "xray_client_ips", return_value=set()), patch.object(admin_web, "hysteria_client_ips", return_value=set()):
+            self.assertEqual(admin_web.active_public_client_ips(443), set())
 
     def test_active_client_helpers_handle_disabled_and_bad_ports(self) -> None:
-        with patch.object(admin_web, "active_xray_client_ips", return_value={"198.51.100.10"}) as active_mock:
+        with patch.object(admin_web, "active_public_client_ips", return_value={"198.51.100.10"}) as active_mock:
             self.assertFalse(admin_web.active_client_ip_allowed("198.51.100.10", {"ADMIN_WEB_ACTIVE_CLIENT_REQUIRED": "0"}))
             self.assertTrue(admin_web.active_client_ip_allowed("198.51.100.10", {"RU_LISTEN_PORT": "bad"}))
             self.assertTrue(admin_web.any_active_client({"RU_LISTEN_PORT": "bad"}))
@@ -148,20 +165,20 @@ class AdminWebTests(unittest.TestCase):
             "WG_RU_ADDRESS": "10.74.0.1/32",
             "WG_FOREIGN_ADDRESS": "10.74.0.2/32",
         }
-        with patch.object(admin_web, "active_xray_client_ips", return_value=set()):
+        with patch.object(admin_web, "active_public_client_ips", return_value=set()):
             self.assertFalse(admin_web.client_ip_allowed("94.232.248.35", env))
             self.assertFalse(admin_web.client_ip_allowed("132.243.21.108", env))
-        with patch.object(admin_web, "active_xray_client_ips", return_value={"198.51.100.10"}):
+        with patch.object(admin_web, "active_public_client_ips", return_value={"198.51.100.10"}):
             self.assertTrue(admin_web.client_ip_allowed("94.232.248.35", env))
             self.assertTrue(admin_web.client_ip_allowed("132.243.21.108", env))
         self.assertFalse(admin_web.tunnel_source_allowed("not-an-ip", env))
         self.assertFalse(admin_web.tunnel_source_allowed("94.232.248.35", {**env, "ADMIN_WEB_ALLOW_TUNNEL_CLIENTS": "0"}))
-        with patch.object(admin_web, "active_xray_client_ips", return_value={"198.51.100.10"}):
+        with patch.object(admin_web, "active_public_client_ips", return_value={"198.51.100.10"}):
             self.assertFalse(admin_web.tunnel_source_allowed("94.232.248.36", {**env, "RU_PUBLIC_IP": "bad-cidr"}))
 
     def test_sync_admin_client_nft_set_adds_current_peers_with_timeout(self) -> None:
         env = {"RU_LISTEN_PORT": "443", "ADMIN_WEB_ACTIVE_CLIENT_TIMEOUT_SECONDS": "5"}
-        with patch.object(admin_web, "active_xray_client_ips", return_value={"198.51.100.10"}), patch("vpn_installer.admin_web.subprocess.run") as run_mock:
+        with patch.object(admin_web, "active_public_client_ips", return_value={"198.51.100.10"}), patch("vpn_installer.admin_web.subprocess.run") as run_mock:
             admin_web.sync_admin_client_nft_set(env)
         run_mock.assert_called_once()
         self.assertEqual(
@@ -174,9 +191,15 @@ class AdminWebTests(unittest.TestCase):
             admin_web.sync_admin_client_nft_set({"ADMIN_WEB_ACTIVE_CLIENT_REQUIRED": "0"})
         run_mock.assert_not_called()
 
-        with patch.object(admin_web, "active_xray_client_ips", return_value={"198.51.100.10"}), patch("vpn_installer.admin_web.subprocess.run") as run_mock:
+        with patch.object(admin_web, "active_public_client_ips", return_value={"198.51.100.10"}), patch("vpn_installer.admin_web.subprocess.run") as run_mock:
             admin_web.sync_admin_client_nft_set({"RU_LISTEN_PORT": "bad", "ADMIN_WEB_ACTIVE_CLIENT_TIMEOUT_SECONDS": "1"})
-        self.assertEqual(run_mock.call_args.args[0][-1], "{ 198.51.100.10 timeout 5s }")
+        self.assertEqual(run_mock.call_args.args[0][-1], "{ 198.51.100.10 timeout 2s }")
+
+    def test_active_client_sync_interval_tracks_nft_timeout_without_busy_polling(self) -> None:
+        self.assertEqual(admin_web.active_client_sync_interval({"ADMIN_WEB_ACTIVE_CLIENT_TIMEOUT_SECONDS": "2"}), 1.0)
+        self.assertEqual(admin_web.active_client_sync_interval({"ADMIN_WEB_ACTIVE_CLIENT_TIMEOUT_SECONDS": "5"}), 2.5)
+        self.assertEqual(admin_web.active_client_sync_interval({"ADMIN_WEB_ACTIVE_CLIENT_TIMEOUT_SECONDS": "300"}), 5.0)
+        self.assertEqual(admin_web.active_client_sync_interval({"ADMIN_WEB_ACTIVE_CLIENT_TIMEOUT_SECONDS": "bad"}), 2.5)
 
     def test_client_ip_allowed_rejects_bad_sources_and_invalid_allowlist_entries(self) -> None:
         self.assertTrue(admin_web.is_loopback_bind("localhost"))

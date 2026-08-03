@@ -35,6 +35,7 @@ from .models import (
     UDP_RMEM_MAX,
     UDP_WMEM_MAX,
 )
+from .public_transport import render_public_hy2_inbound
 from .routing_policy import build_ru_routing_policy
 from .specs import DeploymentSpec
 from .system_resolver import render_resolved_dropin
@@ -164,7 +165,8 @@ def render_ru_singbox(env: dict[str, str]) -> str:
                 "tag": "router-in",
                 "listen": "127.0.0.1",
                 "listen_port": env_int(env, "RU_ROUTER_LISTEN_PORT"),
-            }
+            },
+            render_public_hy2_inbound(env),
         ],
         "outbounds": policy_parts["outbounds"],
         "route": {
@@ -428,12 +430,14 @@ def render_ru_firewall_nftables(env: dict[str, str]) -> str:
             "    type filter hook prerouting priority raw;",
             "    policy accept;",
             f'    tcp dport {env["RU_LISTEN_PORT"]} counter notrack comment "vpnstack-xray-in-notrack"',
+            f'    udp dport {env["RU_LISTEN_PORT"]} counter notrack comment "vpnstack-hy2-in-notrack"',
             "  }",
             "",
             "  chain output_raw {",
             "    type filter hook output priority raw;",
             "    policy accept;",
             f'    tcp sport {env["RU_LISTEN_PORT"]} counter notrack comment "vpnstack-xray-out-notrack"',
+            f'    udp sport {env["RU_LISTEN_PORT"]} counter notrack comment "vpnstack-hy2-out-notrack"',
             "  }",
             "",
             "  chain input {",
@@ -457,6 +461,7 @@ def render_ru_firewall_nftables(env: dict[str, str]) -> str:
         lines.append(f"    ip saddr {{ {', '.join(admin_allowed_cidrs)} }} tcp dport {admin_port} counter accept")
     lines.append(f"    tcp dport {env['SSH_PORT']} counter accept")
     lines.append(f"    tcp dport {env['RU_LISTEN_PORT']} counter accept")
+    lines.append(f"    udp dport {env['RU_LISTEN_PORT']} counter accept")
     lines.extend(["  }", "}", ""])
     return "\n".join(lines)
 

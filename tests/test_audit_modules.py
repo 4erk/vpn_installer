@@ -94,12 +94,20 @@ class AuditModuleTests(unittest.TestCase):
                 preview / "foreign" / "sing-box.json",
             ]:
                 path.write_text("{}\n", encoding="utf-8")
+            adaptive_outbounds = [
+                {
+                    "type": "urltest",
+                    "tag": "ru-gateway",
+                    "outbounds": ["ru-gateway-quic", "ru-gateway-tcp"],
+                    "interrupt_exist_connections": False,
+                }
+            ]
             (client / "hiddify-cross-platform.json").write_text(
-                json.dumps({"inbounds": [{"auto_redirect": False}]}) + "\n",
+                json.dumps({"inbounds": [{"auto_redirect": False}], "outbounds": adaptive_outbounds}) + "\n",
                 encoding="utf-8",
             )
             (client / "linux-sing-box.json").write_text(
-                json.dumps({"inbounds": [{"auto_redirect": True}]}) + "\n",
+                json.dumps({"inbounds": [{"auto_redirect": True}], "outbounds": adaptive_outbounds}) + "\n",
                 encoding="utf-8",
             )
             (client / "android-v2rayng-xray.json").write_text(

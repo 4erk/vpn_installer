@@ -6,6 +6,24 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.13.0] - 2026-08-03
+
+### Added
+
+- RU получил второй публичный transport на том же `:443`: Xray продолжает принимать основной VLESS/Reality по TCP, а sing-box принимает аутентифицированный Hysteria2 по UDP. Оба входа используют одну server-side routing policy, foreign-трафик не переводится в `direct-ru`.
+- `hiddify-cross-platform.json`, `hiddify-android.json` и `linux-sing-box.json` теперь содержат нативный sing-box `urltest` из QUIC и канонического VLESS/Reality. QUIC стоит первым при сопоставимом delay, недоступный UDP автоматически оставляет новые соединения на TCP, а `interrupt_exist_connections=false` не обрывает уже установленные потоки.
+- `verify live` независимо строит и запускает два эфемерных внешних клиента: из неизменного `vless-uri.txt` и из публичного Hysteria2 transport. Оба обязаны подтвердить RU/foreign identity, HTTP, UDP DNS, IPv6 literal, private/fake reject и first-load reliability; явный throughput-флаг проверяет оба пути.
+- Manifest/agent/activation gate проверяют public Hysteria2 config, UDP listener и nftables allow/notrack. `status` показывает этот transport отдельно от межсерверного Hysteria2/WireGuard selector.
+- Web-admin сохранён: active-client gate объединяет установленные Xray/TCP-сокеты с аутентифицированными `public-hy2-in` sessions из локального Clash API. Неаутентифицированный UDP traffic не добавляет source IP в firewall allow-set.
+
+### Fixed
+
+- TCP-front telemetry больше не смешивает `ESTAB` с `FIN-WAIT-*`, `LAST-ACK` и другими closing states. Fresh interval считает только монотонные counters активных data sockets; неподтверждённое закрытие выводится отдельным `closing_churn` и не выдаётся за потерю пользовательской передачи.
+- Общесистемные TCP retransmit counters явно помечены как host-wide. Public-front verdict по-прежнему деградирует на измеренной потере активных flows, но closing churn остаётся soft evidence и не запускает restart или route switch.
+- Health timer сохраняет полный structured state на диске, но пишет в journald только bounded summary без списка TCP flows. Web-admin обновляет nft allow-set с интервалом, производным от уже существующего element timeout, вместо постоянного односекундного polling.
+
+Основной `out/1/client/vless-uri.txt`, его Hiddify/v2rayN URI aliases, Xray/Reality TCP front, web-admin, server-side split-routing, WireGuard MTU и локальный VPN-клиент не изменены.
+
 ## [0.12.8] - 2026-08-01
 
 ### Fixed

@@ -121,22 +121,22 @@ $env:VPN_SSH_BIND_ADDRESS="192.168.0.101"
 - простой `VLESS URI` копируется в буфер обмена и считается основным профилем
 - `vless-uri.txt` — главный низкоуровневый артефакт для клиентов с поддержкой `VLESS/Reality`
 - `windows-xray.json` и `android-v2rayng-xray.json` — JSON fallback, если конкретный клиент не умеет нормально импортировать URI
-- `hiddify-cross-platform.json` — fallback, если нужен локальный JSON-файл
-- `hiddify-android.json` — Android-safe fallback
+- `hiddify-cross-platform.json` — адаптивный профиль с QUIC и TCP Reality
+- `hiddify-android.json` — Android-safe вариант того же адаптивного профиля
 - `hiddify-uri.txt` — совместимый alias того же `VLESS URI` для старых сценариев
 - `v2rayn-uri.txt` — удобный alias того же `VLESS URI` для v2rayN
 
 ## Как подключить клиент
 
 1. Сначала импортируй простой `vless-uri.txt`
-2. Если нужен Hiddify, сначала пробуй `hiddify-uri.txt`, это тот же `VLESS URI`
+2. Если нужен автоматический обход деградации TCP в Hiddify, импортируй `hiddify-cross-platform.json` или `hiddify-android.json`; `hiddify-uri.txt` остаётся совместимым alias основного `VLESS URI`
 3. Для v2rayN скопируй URI из `v2rayn-uri.txt` и выбери импорт share link из буфера; отдельный custom-config слой не добавляется
-4. JSON-файлы используй как fallback для клиентов, которым нужен импорт файлом
+4. JSON-профиль использует нативный `urltest`: при исправном UDP новые соединения предпочитают Hysteria2/QUIC, а при его недоступности остаются на VLESS/Reality TCP без обрыва существующих потоков
 5. Если сайты висят, сначала смотри `vpn status --deployment <name> --role ru-gateway`, затем запускай свежую acceptance-проверку `vpn verify live --deployment <name>`
 6. `vpn status` выводит отдельные счётчики DNS, domain, IPv4-literal, IPv6-literal и private/fake ошибок за свежее и историческое окна
 7. Если включён TUN/full VPN и `client-check` показывает self-tunnel, используй route bypass helper ниже
 
-Сервер ожидает обычный VLESS/Reality tunnel. Публичный вход на российском сервере принимает Xray, восстанавливает домен из SNI, если клиент пришёл по IPv6 literal, и передаёт трафик во внутренний `sing-box` router. Если клиент отправляет private/fake IP вроде `fdfd::...` без домена, такие случаи явно группируются в `status/diagnose`.
+Основной публичный вход принимает обычный VLESS/Reality tunnel через Xray TCP `:443` и передаёт трафик во внутренний `sing-box` router. На UDP того же порта работает дополнительный Hysteria2 ingress для адаптивных JSON-профилей; он использует ту же routing policy. Если клиент отправляет private/fake IP вроде `fdfd::...` без домена, такие случаи явно группируются в `status/diagnose`.
 
 Внешняя подписка с сервера больше не считается штатным путём; локальные JSON остаются управляемым вариантом.
 
@@ -189,7 +189,7 @@ http://<ip-российского-сервера>:11333
 
 Как работает доступ:
 
-- `ADMIN_WEB_ACTIVE_CLIENT_REQUIRED=1` — порт доступен только IP-адресам, у которых прямо сейчас есть активная TCP-сессия к VPN-порту российского сервера.
+- `ADMIN_WEB_ACTIVE_CLIENT_REQUIRED=1` — порт доступен только IP-адресам с активной Xray/TCP-сессией или подтверждённой Hysteria2/QUIC-сессией к VPN-порту российского сервера; одиночный неаутентифицированный UDP-пакет доступ не открывает.
 - `ADMIN_WEB_ALLOW_TUNNEL_CLIENTS=1` — если браузер пришёл в админку через VPN/hairpin и сервер видит source как свой или соседний серверный IP, такой вход разрешён только пока есть хотя бы один активный VPN-клиент.
 - `ADMIN_WEB_ALLOWED_CIDR` и `ADMIN_WEB_ALLOW_WG` остаются аварийными ручными allowlist-настройками.
 
@@ -238,7 +238,7 @@ SSH-туннель остаётся запасным способом админ
 .\vpn.cmd verify live --deployment my-vpn --non-interactive
 ```
 
-`status` читает services, manifest, WireGuard, public front и журналы без нагрузочных скачиваний. `verify live` дополнительно запускает свежие DNS/domain/literal probes и эфемерный sing-box client из `vless-uri.txt`; он проходит публичный Reality front, выполняет девять независимых first-load запросов через RU и foreign routes и подтверждает HTTP, UDP DNS и TCP IPv6 literal. Каждая попытка имеет origin/status/latency в JSON-результате. Только эта команда может подтвердить dataplane после переустановки.
+`status` читает services, manifest, WireGuard, оба public transport и журналы без нагрузочных скачиваний. `verify live` дополнительно запускает свежие DNS/domain/literal probes и два эфемерных внешних sing-box client: канонический из `vless-uri.txt` проходит Reality/TCP, второй проходит Hysteria2/QUIC. Каждый подтверждает HTTP, UDP DNS, TCP IPv6 literal, обе egress identity и девять независимых first-load запросов. Только эта команда может подтвердить dataplane после переустановки.
 
 Для release throughput acceptance запусти короткое 60-секундное измерение через тот же VLESS path. Первые 30 секунд проверяют доступную capacity без rate limit, оставшееся окно держит одно HTTPS-соединение с cap 16 Mbit/s и требует не менее 10 Mbit/s без обрывов. Runner проверяет два HTTPS download endpoint, global lock исключает конкурирующие запуски, а controller lease и target-side deadline завершают process group при потере управляющей команды. Нагрузка запускается только явным флагом:
 
@@ -252,7 +252,7 @@ SSH-туннель остаётся запасным способом админ
 .\vpn.cmd diagnose path --deployment my-vpn
 ```
 
-Отчёт сохраняется в `out/diagnostics` как JSON. Для конкретного устройства используй `vpn diagnose client --source <public-ip>`: он группирует TCP socket state, retransmitted bytes/ratio, PMTU, MSS, cwnd, delivery rate, reordering и Xray TCP/UDP events именно по этому source IP. IPv4-mapped IPv6 из kernel `ss` нормализуется к тому же IPv4 ключу. Накопленные counters открытого сокета выводятся как `loss_observed`, но не выдаются за свежий сбой. Каждые две минуты agent считает монотонные дельты тех же kernel socket ID и агрегирует их по source IP: только измеренная потеря текущего интервала или подтверждённый RTT/RTO stall дают `client_specific/degraded`. Agent ничего не закрывает принудительно и оставляет восстановление TCP/QUIC transport.
+Отчёт сохраняется в `out/diagnostics` как JSON. Для конкретного устройства используй `vpn diagnose client --source <public-ip>`: он группирует TCP socket state, retransmitted bytes/ratio, PMTU, MSS, cwnd, delivery rate, reordering и Xray events именно по этому source IP. IPv4-mapped IPv6 из kernel `ss` нормализуется к тому же IPv4 ключу. Активные `ESTAB` flows и closing states учитываются раздельно: накопленная потеря активного сокета выводится как `loss_observed`, свежая потеря считается по монотонным дельтам того же kernel socket ID, а `FIN-WAIT` churn не подменяет собой потерю данных. Только измеренная потеря текущего интервала или подтверждённый RTT/RTO stall дают `client_specific/degraded`; agent не закрывает потоки и не меняет маршрут по этому soft signal.
 
 Для самопроверки на обычном пользовательском ПК:
 

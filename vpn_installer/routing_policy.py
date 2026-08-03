@@ -14,7 +14,7 @@ from .interserver_transport import (
     derive_transport_password,
 )
 
-POLICY_VERSION = "0.12.0"
+POLICY_VERSION = "0.13.0"
 
 TRAFFIC_CLASSES = (
     "ru_direct_domain",

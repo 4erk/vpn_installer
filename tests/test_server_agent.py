@@ -276,6 +276,32 @@ class ServerAgentTests(unittest.TestCase):
         self.assertEqual(result["soft_reasons"], ["conntrack_table_full_5m=2"])
         recover.assert_not_called()
 
+    def test_health_log_summary_omits_persistent_flow_counters(self) -> None:
+        payload = {
+            "schema_version": 2,
+            "updated_at": "2026-08-03T20:12:26+00:00",
+            "state": "degraded",
+            "consecutive_failures": 0,
+            "last_action": "none",
+            "hard_reasons": [],
+            "probe_failures": [],
+            "soft_reasons": ["public_front=client_specific"],
+            "verdicts": {"overall": "degraded"},
+            "front_counters": {"flows": {"socket": {"bytes_sent": 1000}}},
+            "front_interval": {
+                "observation": "client_specific",
+                "degraded_sources": ["203.0.113.20"],
+                "aggregate": {"bytes_sent": 1000, "bytes_retrans": 100},
+                "flows": {"203.0.113.20:50000": {"bytes_sent": 1000}},
+            },
+        }
+
+        summary = server_agent.health_log_summary(payload)
+
+        self.assertNotIn("front_counters", summary)
+        self.assertNotIn("flows", summary["front_interval"])
+        self.assertEqual(summary["front_interval"]["aggregate"]["bytes_retrans"], 100)
+
     def test_health_reports_client_specific_front_loss_without_recovery(self) -> None:
         current = {
             "generated_at": "2026-07-20T08:00:00+00:00",
@@ -439,6 +465,7 @@ class ServerAgentTests(unittest.TestCase):
             patch.object(server_agent, "journal_lines", return_value=[]),
             patch.object(server_agent, "journal_lines_since", return_value=[]),
             patch.object(server_agent, "tcp_front_snapshot", return_value={"listening": True, "state_counts": {}, "socket_retransmissions": 0}),
+            patch.object(server_agent, "public_hy2_snapshot", return_value={"configured": True, "listening": True, "firewall": True}),
             patch.object(server_agent, "wireguard_snapshot", return_value={"peers": []}),
             patch.object(server_agent, "default_interface", return_value="ens3"),
             patch.object(server_agent, "interface_counters", return_value={"ens3": {}}),
@@ -608,6 +635,69 @@ class ServerAgentTests(unittest.TestCase):
         self.assertEqual(flow["retransmit_ratio_pct"], 4.0)
         self.assertEqual(front["degraded_sources"], [])
         self.assertEqual(front["loss_observed_sources"], ["203.0.113.20"])
+
+    def test_front_snapshot_does_not_classify_fin_retransmits_as_active_loss(self) -> None:
+        sockets = "".join(
+            f"FIN-WAIT-1 0 0 192.0.2.10:443 203.0.113.20:{port}\n"
+            for port in range(50100, 50125)
+        )
+        details = "".join(
+            f"FIN-WAIT-1 0 0 192.0.2.10:443 203.0.113.20:{port}\n"
+            "\t cubic rtt:900/100 rto:76000 bytes_sent:0 bytes_retrans:64000 retrans:0/20\n"
+            for port in range(50100, 50125)
+        )
+
+        def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            if "-Htan" in args:
+                return subprocess.CompletedProcess(args, 0, sockets, "")
+            if "-Htoein" in args:
+                return subprocess.CompletedProcess(args, 0, details, "")
+            return subprocess.CompletedProcess(args, 0, "LISTEN 0 4096 192.0.2.10:443 0.0.0.0:*\n", "")
+
+        with patch.object(server_agent, "run", side_effect=fake_run):
+            front = server_agent.tcp_front_snapshot(443)
+
+        self.assertEqual(front["active_connections"], 0)
+        self.assertEqual(front["closing_connections"], 25)
+        self.assertEqual(front["bytes_retrans"], 0)
+        self.assertEqual(front["degraded_sources"], [])
+        self.assertEqual(front["closing_churn_sources"], ["203.0.113.20"])
+        self.assertEqual(server_agent.front_observation(front), "observed")
+        self.assertEqual(server_agent.closing_churn_observation(front), "client_specific")
+
+    def test_front_client_metrics_exclude_closing_socket_counters(self) -> None:
+        sockets = (
+            "ESTAB 0 0 192.0.2.10:443 203.0.113.20:50000\n"
+            + "".join(
+                f"FIN-WAIT-1 0 0 192.0.2.10:443 203.0.113.20:{port}\n"
+                for port in range(50100, 50125)
+            )
+        )
+        details = (
+            "ESTAB 0 0 192.0.2.10:443 203.0.113.20:50000\n"
+            "\t cubic rtt:65/5 rto:220 bytes_sent:1000000 bytes_retrans:1000 retrans:0/1\n"
+            + "".join(
+                f"FIN-WAIT-1 0 0 192.0.2.10:443 203.0.113.20:{port}\n"
+                "\t cubic rtt:900/100 rto:76000 bytes_sent:0 bytes_retrans:64000 retrans:0/20\n"
+                for port in range(50100, 50125)
+            )
+        )
+
+        def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            if "-Htan" in args:
+                return subprocess.CompletedProcess(args, 0, sockets, "")
+            if "-Htoein" in args:
+                return subprocess.CompletedProcess(args, 0, details, "")
+            return subprocess.CompletedProcess(args, 0, "LISTEN 0 4096 192.0.2.10:443 0.0.0.0:*\n", "")
+
+        with patch.object(server_agent, "run", side_effect=fake_run):
+            front = server_agent.tcp_front_snapshot(443)
+
+        client = front["clients"]["203.0.113.20"]
+        self.assertEqual(client["phase"], "active")
+        self.assertEqual(client["states"], {"ESTAB": 1})
+        self.assertEqual(client["bytes_retrans"], 1000)
+        self.assertEqual(front["closing_churn_sources"], ["203.0.113.20"])
 
     def test_front_interval_uses_monotonic_counters_from_the_same_socket(self) -> None:
         first = {
@@ -907,11 +997,13 @@ class ServerAgentTests(unittest.TestCase):
         self.assertEqual(payload["events"]["accepted"], 1)
         self.assertEqual(payload["front"]["client"], {"connections": 1})
 
-    def test_front_observation_keeps_one_noisy_client_separate_from_shared_degradation(self) -> None:
-        isolated = {"clients": {"203.0.113.20": {"states": {"FIN-WAIT-1": 200}, "retransmissions": 5}}}
-        shared = {"clients": {f"203.0.113.{index}": {"states": {"FIN-WAIT-1": 30}, "retransmissions": 0} for index in range(1, 4)}}
-        self.assertEqual(server_agent.front_observation(isolated), "client_specific")
-        self.assertEqual(server_agent.front_observation(shared), "degraded")
+    def test_front_observation_separates_closing_churn_from_active_loss(self) -> None:
+        isolated = {"closing_churn_sources": ["203.0.113.20"]}
+        shared = {"closing_churn_sources": [f"203.0.113.{index}" for index in range(1, 4)]}
+        self.assertEqual(server_agent.front_observation(isolated), "observed")
+        self.assertEqual(server_agent.front_observation(shared), "observed")
+        self.assertEqual(server_agent.closing_churn_observation(isolated), "client_specific")
+        self.assertEqual(server_agent.closing_churn_observation(shared), "shared")
 
     def test_front_observation_does_not_treat_lifetime_retransmissions_as_fresh_failure(self) -> None:
         front = {"clients": {"203.0.113.20": {"states": {"ESTAB": 1}, "retransmissions": 200}}}
@@ -969,6 +1061,43 @@ class ServerAgentTests(unittest.TestCase):
             },
         )
 
+    def test_public_hysteria_snapshot_requires_config_listener_and_firewall(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "sing-box.json"
+            config.write_text(
+                json.dumps(
+                    {
+                        "inbounds": [
+                            {
+                                "type": "hysteria2",
+                                "tag": "public-hy2-in",
+                                "listen_port": 443,
+                                "users": [{"password": "secret"}],
+                                "tls": {"enabled": True},
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+                if args[0] == "ss":
+                    return subprocess.CompletedProcess(args, 0, "UNCONN 0 0 0.0:443 0.0.0.0:*\n", "")
+                return subprocess.CompletedProcess(
+                    args,
+                    0,
+                    'udp dport 443 notrack comment "vpnstack-hy2-in-notrack"\n'
+                    'udp sport 443 notrack comment "vpnstack-hy2-out-notrack"\n'
+                    "udp dport 443 counter accept\n",
+                    "",
+                )
+
+            with patch.object(server_agent, "SINGBOX_CONFIG_PATH", config), patch.object(server_agent, "run", side_effect=fake_run):
+                result = server_agent.public_hy2_snapshot(443)
+
+        self.assertEqual(result, {"port": 443, "protocol": "hysteria2", "configured": True, "listening": True, "firewall": True})
+
     def test_front_live_diagnostics_fail_when_downstream_path_fails(self) -> None:
         with (
             patch.object(server_agent, "parse_env", return_value={"RU_LISTEN_PORT": "443"}),
@@ -976,6 +1105,7 @@ class ServerAgentTests(unittest.TestCase):
             patch.object(server_agent, "tcp_front_snapshot", return_value={"listening": True, "clients": {}, "flows": {}}),
             patch.object(server_agent, "service_state", return_value="active"),
             patch.object(server_agent, "udp_443_policy", return_value="routed"),
+            patch.object(server_agent, "public_hy2_snapshot", return_value={"configured": True, "listening": True, "firewall": True}),
             patch.object(
                 server_agent,
                 "run_probes",

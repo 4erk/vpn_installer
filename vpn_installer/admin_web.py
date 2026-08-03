@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 import urllib.parse
+import urllib.request
 import ipaddress
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -30,6 +31,7 @@ APPLY_SCRIPT = Path("/usr/local/lib/vpn-stack/admin_apply.py")
 PBKDF2_ROUNDS = 200_000
 CSRF_TOKEN = secrets.token_urlsafe(32)
 CLIENT_IP_CACHE: dict[str, Any] = {"expires_at": 0.0, "listen_port": None, "ips": set()}
+CLASH_CONNECTIONS_URL = "http://127.0.0.1:19090/connections"
 
 
 def load_env(path: Path | None = None) -> dict[str, str]:
@@ -159,10 +161,7 @@ def parse_established_client_ips(ss_text: str, listen_port: int) -> set[str]:
     return ips
 
 
-def active_xray_client_ips(listen_port: int) -> set[str]:
-    now = time.monotonic()
-    if CLIENT_IP_CACHE["listen_port"] == listen_port and now < float(CLIENT_IP_CACHE["expires_at"]):
-        return set(CLIENT_IP_CACHE["ips"])
+def xray_client_ips(listen_port: int) -> set[str]:
     try:
         completed = subprocess.run(
             ["ss", "-Htn", "state", "established"],
@@ -172,9 +171,44 @@ def active_xray_client_ips(listen_port: int) -> set[str]:
             timeout=3,
         )
     except Exception:
-        ips: set[str] = set()
-    else:
-        ips = parse_established_client_ips(completed.stdout, listen_port)
+        return set()
+    return parse_established_client_ips(completed.stdout, listen_port)
+
+
+def parse_hysteria_client_ips(payload: dict[str, Any]) -> set[str]:
+    ips: set[str] = set()
+    connections = payload.get("connections", []) if isinstance(payload, dict) else []
+    for connection in connections if isinstance(connections, list) else []:
+        metadata = connection.get("metadata", {}) if isinstance(connection, dict) else {}
+        if not isinstance(metadata, dict) or metadata.get("type") != "hysteria2/public-hy2-in":
+            continue
+        try:
+            ip = ipaddress.ip_address(str(metadata.get("sourceIP", "")))
+        except ValueError:
+            continue
+        if ip.version == 6 and ip.ipv4_mapped:
+            ip = ip.ipv4_mapped
+        if ip.version == 4:
+            ips.add(str(ip))
+    return ips
+
+
+def hysteria_client_ips() -> set[str]:
+    try:
+        request = urllib.request.Request(CLASH_CONNECTIONS_URL, headers={"Accept": "application/json"})
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(request, timeout=2) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return set()
+    return parse_hysteria_client_ips(payload)
+
+
+def active_public_client_ips(listen_port: int) -> set[str]:
+    now = time.monotonic()
+    if CLIENT_IP_CACHE["listen_port"] == listen_port and now < float(CLIENT_IP_CACHE["expires_at"]):
+        return set(CLIENT_IP_CACHE["ips"])
+    ips = xray_client_ips(listen_port) | hysteria_client_ips()
     CLIENT_IP_CACHE.update({"expires_at": now + 1, "listen_port": listen_port, "ips": set(ips)})
     return ips
 
@@ -186,7 +220,7 @@ def active_client_ip_allowed(client_ip: str, env: dict[str, str]) -> bool:
         listen_port = int(env.get("RU_LISTEN_PORT", "443") or "443")
     except ValueError:
         listen_port = 443
-    return client_ip in active_xray_client_ips(listen_port)
+    return client_ip in active_public_client_ips(listen_port)
 
 
 def any_active_client(env: dict[str, str]) -> bool:
@@ -196,7 +230,7 @@ def any_active_client(env: dict[str, str]) -> bool:
         listen_port = int(env.get("RU_LISTEN_PORT", "443") or "443")
     except ValueError:
         listen_port = 443
-    return bool(active_xray_client_ips(listen_port))
+    return bool(active_public_client_ips(listen_port))
 
 
 def tunnel_source_allowed(client_ip: str, env: dict[str, str]) -> bool:
@@ -224,17 +258,27 @@ def tunnel_source_allowed(client_ip: str, env: dict[str, str]) -> bool:
     return False
 
 
+def active_client_timeout_seconds(env: dict[str, str]) -> int:
+    try:
+        timeout_seconds = int(env.get("ADMIN_WEB_ACTIVE_CLIENT_TIMEOUT_SECONDS", "5") or "5")
+    except ValueError:
+        timeout_seconds = 5
+    return max(2, min(timeout_seconds, 300))
+
+
+def active_client_sync_interval(env: dict[str, str]) -> float:
+    return max(1.0, min(5.0, active_client_timeout_seconds(env) / 2))
+
+
 def sync_admin_client_nft_set(env: dict[str, str]) -> None:
     if env.get("ADMIN_WEB_ACTIVE_CLIENT_REQUIRED", "1").strip().lower() not in {"1", "true", "yes", "on"}:
         return
     try:
         listen_port = int(env.get("RU_LISTEN_PORT", "443") or "443")
-        timeout_seconds = int(env.get("ADMIN_WEB_ACTIVE_CLIENT_TIMEOUT_SECONDS", "5") or "5")
     except ValueError:
         listen_port = 443
-        timeout_seconds = 5
-    timeout_seconds = max(2, min(timeout_seconds, 300))
-    for ip in active_xray_client_ips(listen_port):
+    timeout_seconds = active_client_timeout_seconds(env)
+    for ip in active_public_client_ips(listen_port):
         subprocess.run(
             ["nft", "add", "element", "inet", "vpnstack", "admin_clients_ipv4", f"{{ {ip} timeout {timeout_seconds}s }}"],
             check=False,
@@ -246,11 +290,13 @@ def sync_admin_client_nft_set(env: dict[str, str]) -> None:
 
 def sync_admin_client_nft_set_loop() -> None:
     while True:
+        env: dict[str, str] = {}
         try:
-            sync_admin_client_nft_set(load_env())
+            env = load_env()
+            sync_admin_client_nft_set(env)
         except Exception:
             pass
-        time.sleep(1)
+        time.sleep(active_client_sync_interval(env))
 
 
 def client_ip_allowed(client_ip: str, env: dict[str, str]) -> bool:

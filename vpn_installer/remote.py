@@ -484,8 +484,10 @@ def bootstrap_from_snapshot(snapshot: dict[str, Any]) -> dict[str, str]:
         "front_retransmissions_lifetime": str(front.get("socket_retransmissions", 0)),
         "front_retransmitted_bytes": str(front.get("bytes_retrans", 0)),
         "front_retransmit_ratio_pct": str(front.get("retransmit_ratio_pct", 0)),
-        "front_retransmissions_scope": str(front.get("socket_retransmissions_scope", "lifetime counters of currently open sockets")),
+        "front_retransmissions_scope": str(front.get("socket_retransmissions_scope", "lifetime counters of currently active ESTAB sockets")),
         "front_fin_wait_1": str(front.get("state_counts", {}).get("FIN-WAIT-1", 0)),
+        "front_active_connections": str(front.get("active_connections", 0)),
+        "front_closing_connections": str(front.get("closing_connections", 0)),
         "front_rtt_p95_ms": str(front.get("rtt_ms", {}).get("p95", "")),
         "tcp_congestion_control": str(tcp_adaptation.get("congestion_control", "")),
         "tcp_default_qdisc": str(tcp_adaptation.get("qdisc", "")),
@@ -523,6 +525,8 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
         f"rtt_p95_ms={preflight.get('front_rtt_p95_ms', '-')}, "
         f"retransmissions_lifetime={preflight.get('front_retransmissions_lifetime', '0')}, "
         f"retransmit_ratio_pct={preflight.get('front_retransmit_ratio_pct', '0')}, "
+        f"active={preflight.get('front_active_connections', '0')}, "
+        f"closing={preflight.get('front_closing_connections', '0')}, "
         f"fin_wait_1={preflight.get('front_fin_wait_1', '0')}"
     )
     print(f"front retransmission scope: {preflight.get('front_retransmissions_scope', 'unknown')}")

@@ -55,7 +55,7 @@ class InstallSupportTests(unittest.TestCase):
             self.assertEqual(rc, 0)
             router_payload = json.loads((output_dir / "sing-box.json").read_text(encoding="utf-8"))
             xray_payload = json.loads((output_dir / "xray.json").read_text(encoding="utf-8"))
-        self.assertEqual([inbound["listen_port"] for inbound in router_payload["inbounds"]], [2080])
+        self.assertEqual([inbound["listen_port"] for inbound in router_payload["inbounds"]], [2080, 8443])
         self.assertEqual(xray_payload["inbounds"][0]["port"], 8443)
         self.assertNotIn("maxTimeDiff", xray_payload["inbounds"][0]["streamSettings"]["realitySettings"])
 

@@ -3,14 +3,15 @@
 ## Контракт и границы
 
 ```text
-клиент с vless-uri.txt -> RU Xray/Reality :443 -> RU sing-box :2080
-                                                   -> direct-ru
-                                                   -> Hysteria2/QUIC -> foreign sing-box -> foreign egress
-                                                   -> WireGuard fallback -> foreign egress
+клиент с vless-uri.txt ------> RU Xray/Reality TCP :443 --┐
+адаптивный JSON -> urltest --> RU Hysteria2 UDP :443 -----┴-> RU sing-box routing policy
+                                                              -> direct-ru
+                                                              -> Hysteria2/QUIC -> foreign egress
+                                                              -> WireGuard fallback -> foreign egress
 ```
 
 - `out/<deployment>/client/vless-uri.txt` является главным и неизменным клиентским контрактом.
-- Xray владеет публичным VLESS/Reality front. `sing-box` на RU является только локальным router.
+- Xray владеет основным публичным VLESS/Reality TCP front. RU `sing-box` владеет локальным router и дополнительным публичным Hysteria2/UDP ingress; оба входа завершаются одной routing policy.
 - Routing policy, health и проверка не меняют локальные VPN-клиенты и их профили.
 - Web-admin на RU сохраняется. Он управляет только явными operator rules; rules проходят validation и применяются атомарно.
 - `VPN_SSH_BIND_ADDRESS` - временный control-plane input, не часть deployment env. Он привязывает SSH/SFTP к физическому локальному адресу, когда default route клиента находится в TUN, и не меняет client/server dataplane.
@@ -39,9 +40,10 @@
 - Buffer/backlog sysctl не применяются без `softnet`, UDP buffer или interface delta evidence. После трёх воспроизводимых burst-окон `UdpRcvbufErrors` RU transport использует единый managed profile: `rmem_default=8 MiB`, `rmem_max=16 MiB`, `wmem_max=16 MiB`; backlog не меняется без собственных drops. Это не публичные ручки для оперативного лечения. QUIC implementations рекомендуют UDP buffers около 7.5 MiB для высокоскоростных соединений: [quic-go UDP buffer sizes](https://github.com/quic-go/quic-go/wiki/UDP-Buffer-Sizes).
 - CAKE/HTB не включаются по одному высокому RTT. CAKE управляет очередью только перед известным общим bottleneck и для egress требует обоснованного bandwidth; его `autorate-ingress` не оценивает участок сети ниже qdisc. При source-specific деградации глобальный shaper урежет исправных клиентов, не исправляя удалённую очередь. См. [tc-cake(8)](https://man7.org/linux/man-pages/man8/tc-cake.8.html).
 - Между теми же RU/foreign узлами работают два transport: основной Hysteria2/QUIC и резервный WireGuard. Hysteria2 не получает статических `up_mbps/down_mbps`, поэтому использует BBR congestion control ([sing-box Hysteria2](https://sing-box.sagernet.org/configuration/outbound/hysteria2/)). Один sing-box selector закреплён за Hysteria2; отдельный supervisor одновременно проверяет оба raw outbound, хранит bounded median/MAD и меняет путь только после подтверждения. Hard failure требует двух циклов, quality switch и возврат на primary — трёх. Общесистемные UDP counters не являются route evidence; учитывается только свежая дельта конкретного Hysteria socket вместе с худшим парным probe. `--shadow` вычисляет рекомендацию без selector `PUT`. QUIC восстанавливает потерянные пакеты внутри transport; уже созданный TCP stream намеренно не мигрирует между transport.
+- Для client-to-RU доступны два транспорта на одном номере порта: канонический VLESS/Reality использует TCP, Hysteria2 использует UDP. Адаптивный JSON компилируется из тех же deployment values и использует нативный [sing-box URLTest](https://sing-box.sagernet.org/configuration/outbound/urltest/): QUIC указан первым, проверка выполняется раз в 30 секунд, а `interrupt_exist_connections=false` применяет новый выбор только к новым inbound-соединениям. Static bandwidth и connect timeout не задаются. TLS Hysteria2 проверяется pinned SPKI и именем сертификата; plaintext secret или `insecure` в профиле отсутствуют.
 - Host resolver не зависит от одного провайдерского DNS: renderer создаёт единый `systemd-resolved` drop-in с тремя независимыми upstreams, локальным cache и часовым stale retention. Это сокращает повторные сетевые DNS-запросы и позволяет использовать известные positive records при кратком отказе upstream; NXDOMAIN не подменяется stale-ответом ([resolved.conf](https://www.freedesktop.org/software/systemd/man/resolved.conf.html)).
 - Transport redundancy не является egress redundancy: оба пути заканчиваются на одном foreign VPS. Snapshot поэтому отдельно выводит `redundancy.transport` и `redundancy.egress`; второй независимый foreign сервер по-прежнему не выдумывается.
-- Один статический VLESS URI не может автоматически сменить публичный AS, TCP port или transport. Для отказоустойчивости client-to-RU path нужен второй независимый RU ingress либо новый клиентский transport contract. RAW/Reality/Vision не заменяется на XHTTP вслепую: полевые отчёты показывают и обход ISP policing, и отдельные compatibility/latency regressions ([net4people/bbs #546](https://github.com/net4people/bbs/issues/546), [Xray-core #5332](https://github.com/XTLS/Xray-core/issues/5332)).
+- Один статический VLESS URI не может сменить transport и поэтому остаётся совместимым TCP-контрактом. Адаптивность client-to-RU доступна только в дополнительном JSON, где QUIC и TCP являются явными кандидатами; при блокировке UDP остаётся TCP, при деградации конкретного TCP-маршрута новые соединения предпочитают QUIC. Это transport redundancy к одному RU, не независимый RU egress. RAW/Reality/Vision не заменяется на XHTTP вслепую: полевые отчёты показывают и обход ISP policing, и отдельные compatibility/latency regressions ([net4people/bbs #546](https://github.com/net4people/bbs/issues/546), [Xray-core #5332](https://github.com/XTLS/Xray-core/issues/5332)).
 
 ## Routing policy
 
@@ -68,11 +70,11 @@ Snapshot schema 2 содержит:
 - service state, manifest drift и hashes всех managed artifacts, включая resolver drop-in и состояние `/etc/resolv.conf` stub;
 - root filesystem source/type, ext4 state и runtime error counters, время последней проверки и `fs_passno` загрузочного `fsck`;
 - WireGuard, выбранный межсерверный transport и delay кандидатов, interface/conntrack, protocol и softnet counters; health хранит дельты UDP receive/send overflow, softnet drops и missed packets;
-- TCP front telemetry: socket states, RTT, retransmitted bytes/ratio, PMTU, MSS, cwnd, delivery rate, reordering и unacked по каждому `source IP:port` с последующей агрегацией по canonical IPv4/IPv6 адресу, включая kernel-формат `::ffff:<IPv4>`; свежий интервал считается по монотонным counters одного kernel socket ID и затем суммируется по source IP, поэтому port reuse/counter reset не создают ложную потерю, а распределённая по нескольким потокам потеря не скрывается; lifetime loss остаётся отдельным `loss_observed`;
+- TCP front telemetry: active `ESTAB` и closing states разнесены до агрегации; RTT, retransmitted bytes/ratio, PMTU, MSS, cwnd, delivery rate, reordering и unacked считаются по каждому активному `source IP:port`, а `FIN-WAIT/LAST-ACK/CLOSING` формируют отдельный `closing_churn`; свежий loss interval использует только монотонные counters того же активного kernel socket ID, поэтому teardown, port reuse и counter reset не создают ложную потерю;
 - fresh, 30-minute и 24-hour log windows;
 - mutually exclusive buckets: DNS timeout, domain timeout, IPv4 literal timeout, IPv6 literal timeout, private/fake block, client reset/EOF, invalid Reality и disabled-invalid;
 - парные DNS/router сообщения sing-box одного request ID дедуплицируются в одном DNS bucket;
-- maintenance state и отдельные `server_path`, `public_front`, `client_observation`, `host_integrity` verdicts.
+- maintenance state и отдельные `server_path`, `public_front`, `public_quic`, `client_observation`, `closing_churn`, `host_integrity` verdicts.
 
 `vpn status` собирает компактный snapshot за последние 5 минут без live probes и исторического сканирования. `vpn diagnose path` сохраняет полный structured JSON с окнами 5m/30m/24h. `vpn diagnose front` одновременно проверяет публичный listener и свежие RU/WG/router paths. `vpn diagnose client --source <public-ip>` показывает потоки и Xray destinations проблемного источника, не смешивая устройства за одним NAT.
 
@@ -98,7 +100,7 @@ Journald ограничивается managed drop-in. APT periodic settings в�
 
 ## Live verification
 
-`vpn verify live --deployment <name>` обязателен после install/reinstall. Он собирает agent acceptance snapshots на обеих ролях и запускает эфемерный sing-box client, построенный напрямую из `vless-uri.txt`. Этот client соединяется с RU `:443`, проходит VLESS/Reality/Xray/sing-box и выбранный Hysteria2/WireGuard transport, затем проверяет egress identity, GitHub, Google, UDP DNS, TCP IPv6 literal, быстрый SOCKS reject private/fake destinations и девять отдельных first-load GET через RU/foreign routes.
+`vpn verify live --deployment <name>` обязателен после install/reinstall. Он собирает agent acceptance snapshots на обеих ролях и запускает на внешнем runner два эфемерных sing-box client: первый строится напрямую из `vless-uri.txt` и проходит VLESS/Reality/Xray, второй независимо проходит публичный Hysteria2 ingress. Оба затем используют одну RU routing policy и выбранный межсерверный Hysteria2/WireGuard transport, проверяя egress identity, GitHub, Google, UDP DNS, TCP IPv6 literal, быстрый SOCKS reject private/fake destinations и девять first-load GET.
 
 Дополнительно проверяются DNS, direct/domain routes, IPv4 literal, IPv6 literal и reject private/fake. Итог только один из `verified`, `degraded`, `failed`, `inconclusive`; зелёный `status` не является acceptance доказательством.
 
@@ -106,14 +108,14 @@ Server-side route acceptance использует HTTP `HEAD`: его задач
 
 Для RU acceptance прямой egress подтверждается отдельной identity-проверкой. Foreign-домены обязаны пройти через `wg0` и local router, IPv4 literal через оба пути, а IPv6 literal через router и проверенный IPv6 egress foreign. Прямой запрос RU к заблокированному foreign-домену и raw `curl --interface wg0 -6` не являются пользовательским dataplane и записываются как наблюдения, но не вызывают ложный rollback.
 
-`verify live --throughput-seconds 60` дополнительно проверяет public VLESS path на нескольких HTTPS download endpoints: 30-секундный uncapped burst должен подтвердить capacity не менее 50 Mbit/s, затем одно непрерывное bounded-соединение держит до 16 Mbit/s и требует не менее 10 Mbit/s без обрывов. Один global lock защищает SOCKS port от конкурирующих запусков; target-side deadline и обновляемая SSH controller lease завершают remote process group при аварийном исчезновении локального процесса. Проверка не входит в health timer и не должна длительно насыщать production path.
+`verify live --throughput-seconds 60` применяет одинаковый короткий capacity/stability contract к VLESS/TCP и Hysteria2/QUIC: 30-секундный uncapped burst должен подтвердить не менее 50 Mbit/s, затем bounded-соединение требует не менее 10 Mbit/s без обрывов. Один global lock сериализует runner-профили; target-side deadline и SSH controller lease завершают process group при исчезновении локального процесса. Проверка не входит в health timer.
 
 Проверяющий runner сейчас запускается на foreign role, поэтому он проверяет полный публичный VLESS path и server capacity, но не измеряет маршрут конкретного пользователя до RU. Одновременный `client_specific/degraded` не маскируется успешным runner: это два разных component verdict.
 
 ## CLI
 
 - `status`: read-only agent snapshot. Без live probes его `inconclusive` означает только отсутствие route acceptance; это явно выводится вместе с командой `verify live`.
-- `verify live`: full server acceptance plus public VLESS contract.
+- `verify live`: full server acceptance plus independent public VLESS/TCP and Hysteria2/QUIC contracts.
 - `diagnose path|front|client`: structured incident evidence.
 - `routes list|add|remove`: CLI к тому же backend, который использует web-admin.
 - `maintain`: security-update/reboot reporting and controlled rollout.

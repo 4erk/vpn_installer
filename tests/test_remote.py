@@ -440,7 +440,7 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("host: demo", output)
         self.assertIn("services: wg=active, nft=active, sing-box=active, xray=active, resolver=active, transport=active, health=active", output)
         self.assertIn("wireguard: handshake_age_s=4, transfer_rx_tx=1/2", output)
-        self.assertIn("front: rtt_p95_ms=40, retransmissions_lifetime=3, retransmit_ratio_pct=1.2, fin_wait_1=0", output)
+        self.assertIn("front: rtt_p95_ms=40, retransmissions_lifetime=3, retransmit_ratio_pct=1.2, active=0, closing=0, fin_wait_1=0", output)
         self.assertIn("front retransmission scope: lifetime counters of currently open sockets", output)
         self.assertIn(
             "tcp adaptation: cc=bbr, qdisc=fq, mtu_probing=1, mtu_floor=536, "

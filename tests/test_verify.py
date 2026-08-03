@@ -25,7 +25,7 @@ def acceptance_snapshot(role: str, **overrides: object) -> DiagnosticsSnapshot:
     }
     if role == ROLE_RU:
         services.update({"sing-box": "active", "xray": "active", "transport": "active"})
-        verdicts.update({"public_front": "verified", "client_observation": "observed"})
+        verdicts.update({"public_front": "verified", "public_quic": "verified", "client_observation": "observed"})
     payload: dict[str, object] = {
         "role": role,
         "services": services,
@@ -92,13 +92,13 @@ class VerifyTests(unittest.TestCase):
         self.assertIn("agent host_integrity failed", verified.reasons)
 
     def test_verify_snapshot_degrades_for_front_socket_churn(self) -> None:
-        verdicts = {"server_path": "verified", "public_front": "verified", "client_observation": "degraded", "host_integrity": "verified"}
+        verdicts = {"server_path": "verified", "public_front": "verified", "public_quic": "verified", "client_observation": "degraded", "host_integrity": "verified"}
         verified = _verify_snapshot(acceptance_snapshot(ROLE_RU, component_verdicts=verdicts))
         self.assertEqual(verified.verdict, "degraded")
-        self.assertIn("public TCP front shows retransmission or socket churn", verified.reasons)
+        self.assertIn("public TCP front shows active data-path degradation", verified.reasons)
 
     def test_verify_snapshot_degrades_for_one_measured_lossy_client(self) -> None:
-        verdicts = {"server_path": "verified", "public_front": "verified", "client_observation": "client_specific", "host_integrity": "verified"}
+        verdicts = {"server_path": "verified", "public_front": "verified", "public_quic": "verified", "client_observation": "client_specific", "host_integrity": "verified"}
         verified = _verify_snapshot(acceptance_snapshot(ROLE_RU, component_verdicts=verdicts))
         self.assertEqual(verified.verdict, "degraded")
 
@@ -172,10 +172,10 @@ class VerifyTests(unittest.TestCase):
         self.assertEqual(reconciled.reasons, [])
 
         snapshot.verdict = "degraded"
-        snapshot.reasons = ["external capability probe failed", "public TCP front shows retransmission or socket churn"]
+        snapshot.reasons = ["external capability probe failed", "public TCP front shows active data-path degradation"]
         reconciled = _reconcile_public_capabilities(snapshot, {"verdict": "verified"})
         self.assertEqual(reconciled.verdict, "degraded")
-        self.assertEqual(reconciled.reasons, ["public TCP front shows retransmission or socket churn"])
+        self.assertEqual(reconciled.reasons, ["public TCP front shows active data-path degradation"])
 
     def test_verify_snapshot_requires_foreign_transport_service(self) -> None:
         verified = _verify_snapshot(
@@ -199,17 +199,19 @@ class VerifyTests(unittest.TestCase):
             patch("vpn_installer.verify.workflows.print_summary"),
             patch("vpn_installer.verify._collect_agent_snapshot", side_effect=[acceptance_snapshot(ROLE_RU, drift="server-mutated"), acceptance_snapshot(ROLE_FOREIGN)]),
             patch("vpn_installer.verify._verify_public_vless_uri", return_value={"verdict": "verified", "result": {}}),
+            patch("vpn_installer.verify._verify_public_hysteria2", return_value={"verdict": "verified", "result": {}}),
         ):
             self.assertEqual(verify_live_workflow("demo", non_interactive=True), 1)
 
     def test_verify_live_workflow_returns_nonzero_when_agent_acceptance_fails(self) -> None:
         targets = [RemoteTarget(role=ROLE_RU, ssh_host="ru.example"), RemoteTarget(role=ROLE_FOREIGN, ssh_host="foreign.example")]
-        broken = acceptance_snapshot(ROLE_RU, route_probes={"profile": "acceptance", "ok": False}, component_verdicts={"server_path": "failed", "public_front": "verified", "client_observation": "observed", "host_integrity": "verified"})
+        broken = acceptance_snapshot(ROLE_RU, route_probes={"profile": "acceptance", "ok": False}, component_verdicts={"server_path": "failed", "public_front": "verified", "public_quic": "verified", "client_observation": "observed", "host_integrity": "verified"})
         with (
             patch("vpn_installer.verify.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), {}, {}, targets, {})),
             patch("vpn_installer.verify.workflows.print_summary"),
             patch("vpn_installer.verify._collect_agent_snapshot", side_effect=[broken, acceptance_snapshot(ROLE_FOREIGN)]),
             patch("vpn_installer.verify._verify_public_vless_uri", return_value={"verdict": "verified", "result": {}}),
+            patch("vpn_installer.verify._verify_public_hysteria2", return_value={"verdict": "verified", "result": {}}),
         ):
             self.assertEqual(verify_live_workflow("demo", non_interactive=True), 1)
 
@@ -221,6 +223,10 @@ class VerifyTests(unittest.TestCase):
             sequence.append("public-vless")
             return {"verdict": "verified", "result": {}}
 
+        def public_hysteria2(*_args, **_kwargs) -> dict[str, object]:
+            sequence.append("public-hysteria2")
+            return {"verdict": "verified", "result": {}}
+
         def collect(target: RemoteTarget) -> DiagnosticsSnapshot:
             sequence.append(f"snapshot:{target.role}")
             return acceptance_snapshot(target.role)
@@ -230,10 +236,11 @@ class VerifyTests(unittest.TestCase):
             patch("vpn_installer.verify.workflows.print_summary"),
             patch("vpn_installer.verify._collect_agent_snapshot", side_effect=collect) as collect_mock,
             patch("vpn_installer.verify._verify_public_vless_uri", side_effect=public_vless),
+            patch("vpn_installer.verify._verify_public_hysteria2", side_effect=public_hysteria2),
         ):
             self.assertEqual(verify_live_workflow("demo", non_interactive=True), 0)
         self.assertEqual(collect_mock.call_count, 2)
-        self.assertEqual(sequence, ["public-vless", f"snapshot:{ROLE_RU}", f"snapshot:{ROLE_FOREIGN}"])
+        self.assertEqual(sequence, ["public-vless", "public-hysteria2", f"snapshot:{ROLE_RU}", f"snapshot:{ROLE_FOREIGN}"])
         self.assertFalse(prepare.call_args.kwargs["run_live_probes"])
         self.assertFalse(prepare.call_args.kwargs["enforce_safe_route"])
 

@@ -150,8 +150,8 @@ class RenderTests(unittest.TestCase):
         env = self.make_env()
         router_payload = json.loads(render.render_ru_singbox(env))
         xray_payload = json.loads(render.render_ru_xray(env))
-        self.assertEqual([inbound["listen_port"] for inbound in router_payload["inbounds"]], [2080])
-        self.assertEqual([inbound["tag"] for inbound in router_payload["inbounds"]], ["router-in"])
+        self.assertEqual([inbound["listen_port"] for inbound in router_payload["inbounds"]], [2080, 443])
+        self.assertEqual([inbound["tag"] for inbound in router_payload["inbounds"]], ["router-in", "public-hy2-in"])
         inbound_rules = [rule for rule in router_payload["route"]["rules"] if rule.get("inbound")]
         self.assertEqual(inbound_rules, [{"inbound": ["router-in"], "action": "sniff", "timeout": "250ms"}])
         self.assertEqual(xray_payload["inbounds"][0]["port"], 443)

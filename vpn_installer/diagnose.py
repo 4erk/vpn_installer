@@ -78,7 +78,7 @@ def diagnose_front_workflow(deployment: str | None, *, source_ip: str | None = N
     )
     print(
         "front: "
-        f"listening={front.get('listening', False)}, connections={front.get('connections', 0)}, "
+        f"listening={front.get('listening', False)}, active={front.get('active_connections', 0)}, closing={front.get('closing_connections', 0)}, "
         f"rtt_p95_ms={front.get('rtt_ms', {}).get('p95', '-')}, retransmissions_lifetime={front.get('socket_retransmissions', 0)}, "
         f"retransmitted_bytes={front.get('bytes_retrans', 0)}, retransmit_ratio_pct={front.get('retransmit_ratio_pct', 0)}"
     )
@@ -86,7 +86,8 @@ def diagnose_front_workflow(deployment: str | None, *, source_ip: str | None = N
     print(
         f"front observation: {payload.get('observation', 'unknown')}; "
         f"degraded_sources={len(front.get('degraded_sources', []))}; "
-        f"lifetime_loss_sources={len(front.get('loss_observed_sources', []))}"
+        f"lifetime_loss_sources={len(front.get('loss_observed_sources', []))}; "
+        f"closing_churn_sources={len(front.get('closing_churn_sources', []))}"
     )
     requirements = payload.get("probes", {}).get("requirements", {})
     failed_requirements = ",".join(name for name, passed in requirements.items() if passed is not True) or "-"
@@ -97,6 +98,13 @@ def diagnose_front_workflow(deployment: str | None, *, source_ip: str | None = N
     )
     print(f"verdict: {payload.get('verdict', 'inconclusive')}")
     print(f"udp/443 policy: {payload.get('transport', {}).get('udp_443_policy', '-')}")
+    public_client = payload.get("transport", {}).get("public_client", {})
+    if public_client:
+        print(
+            "public QUIC: "
+            f"configured={public_client.get('configured', False)}, listener={public_client.get('listening', False)}, "
+            f"firewall={public_client.get('firewall', False)}"
+        )
     print(f"report: {report_path}")
     return 1 if payload.get("verdict") == "failed" else 0
 

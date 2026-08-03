@@ -120,7 +120,7 @@ class StatusOutputTests(unittest.TestCase):
         self.assertIn("protocol counters (lifetime): UdpRcvbufErrors=816", rendered)
         self.assertIn("protocol deltas (last health cycle): UdpRcvbufErrors=+3", rendered)
         self.assertIn("interface deltas (last health cycle): eth0.rx_dropped=+64", rendered)
-        self.assertIn("tcp deltas (last health cycle): out=10000, retrans=125 (1.250%)", rendered)
+        self.assertIn("host-wide tcp deltas (last health cycle): out=10000, retrans=125 (1.250%)", rendered)
         self.assertIn("tcp recovery deltas: TcpExtTCPSACKReorder=+20, TcpExtTCPDSACKRecv=+7, TcpExtTCPTimeouts=+2", rendered)
         self.assertIn("last front degradation: at=2026-07-20T07:58:00+00:00, sources=203.0.113.20", rendered)
         self.assertIn(
@@ -232,7 +232,7 @@ class StatusOutputTests(unittest.TestCase):
         lines = format_snapshot_summary(
             DiagnosticsSnapshot(network={"recent_health_deltas": {"protocol": {"TcpRetransSegs": 229}}})
         )
-        self.assertIn("tcp deltas (last health cycle): out=unavailable, retrans=229", lines)
+        self.assertIn("host-wide tcp deltas (last health cycle): out=unavailable, retrans=229", lines)
 
 
 if __name__ == "__main__":

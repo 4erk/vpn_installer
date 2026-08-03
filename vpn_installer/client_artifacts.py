@@ -9,6 +9,7 @@ from typing import Any
 from .common import OUT_DIR, write_text
 from .config import require_env
 from .models import REQUIRED_ENV_VARS
+from .public_transport import render_adaptive_public_outbounds
 
 
 def _env_int(env: dict[str, str], key: str) -> int:
@@ -74,21 +75,7 @@ def render_client_profile(env: dict[str, str], auto_redirect: bool, *, android_s
             }
         ],
         "outbounds": [
-            {
-                "type": "vless",
-                "tag": "ru-gateway",
-                "server": env["RU_PUBLIC_IP"],
-                "server_port": _env_int(env, "RU_LISTEN_PORT"),
-                "uuid": env["CLIENT_UUID"],
-                "flow": env["CLIENT_FLOW"],
-                "packet_encoding": "xudp",
-                "tls": {
-                    "enabled": True,
-                    "server_name": env["RU_REALITY_SERVER_NAME"],
-                    "utls": {"enabled": True, "fingerprint": env["UTLS_FINGERPRINT"]},
-                    "reality": {"enabled": True, "public_key": env["RU_REALITY_PUBLIC_KEY"], "short_id": env["RU_REALITY_SHORT_ID"]},
-                },
-            },
+            *render_adaptive_public_outbounds(env),
             {"type": "direct", "tag": "direct"},
             {"type": "block", "tag": "block"},
         ],
@@ -307,8 +294,8 @@ def render_next_steps(env: dict[str, str], *, out_dir: Path | None = None) -> st
             f"- Нативный v2rayN URI alias: {paths['v2rayn_uri']}",
             f"- Дополнительный Windows/v2rayN Xray JSON: {paths['windows_xray_json']}",
             f"- Дополнительный Android/v2rayNG Xray JSON: {paths['android_xray_json']}",
-            f"- JSON fallback для Hiddify: {paths['hiddify_json']}",
-            f"- Android JSON fallback для Hiddify: {paths['android_hiddify_json']}",
+            f"- Адаптивный TCP/QUIC профиль для Hiddify: {paths['hiddify_json']}",
+            f"- Адаптивный Android профиль для Hiddify: {paths['android_hiddify_json']}",
             f"- Windows route bypass helper: {paths['windows_route_bypass']}",
             f"- JSON backup для Linux sing-box: {paths['linux_json']}",
             "",
@@ -317,7 +304,7 @@ def render_next_steps(env: dict[str, str], *, out_dir: Path | None = None) -> st
             f"2. Для v2rayN скопируй строку из {paths['v2rayn_uri'].name} и выбери импорт share link из буфера; это тот же канонический VLESS URI без custom-config слоя.",
             f"3. Если клиенту нужен JSON-импорт, используй {paths['windows_xray_json'].name} или {paths['android_xray_json'].name} как compatibility fallback, а не как обязательный путь.",
             f"4. Если клиентский JSON/TUN начинает отправлять на сервер private/fake IP вместо домена, `vpn status` покажет это в отдельном bucket `blocked_private_fake`.",
-            f"5. Если нужен Hiddify, сначала пробуй URI {paths['hiddify_uri_compat'].name}; локальные JSON {paths['hiddify_json'].name} и {paths['android_hiddify_json'].name} остаются запасным вариантом.",
+            f"5. Адаптивный профиль TCP Reality + QUIC находится в {paths['hiddify_json'].name} и {paths['android_hiddify_json'].name}; основной URI {paths['hiddify_uri_compat'].name} остаётся совместимым TCP-вариантом.",
             f"6. Если сайты висят, сначала смотри серверные группы ошибок: vpn status --deployment {env['DEPLOY_NAME']} --role ru-gateway",
             f"7. Если включён TUN/full VPN и client-check показывает self-tunnel, запусти PowerShell от администратора: .\\{paths['windows_route_bypass'].name}",
             f"8. После install/reinstall запусти live-приёмку: vpn verify live --deployment {env['DEPLOY_NAME']}",

@@ -46,6 +46,14 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
         loss_sources = snapshot.front.get("loss_observed_sources", [])
         if loss_sources:
             lines.append("public front lifetime loss sources: " + ",".join(str(source) for source in loss_sources))
+        lines.append(
+            "public TCP sockets: "
+            f"active={snapshot.front.get('active_connections', 0)}, "
+            f"closing={snapshot.front.get('closing_connections', 0)}"
+        )
+        closing_sources = snapshot.front.get("closing_churn_sources", [])
+        if closing_sources:
+            lines.append("public front closing churn sources: " + ",".join(str(source) for source in closing_sources))
     tcp_adaptation = snapshot.network.get("tcp_adaptation", {})
     if tcp_adaptation:
         lines.append(
@@ -121,6 +129,15 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
             details.append(f"listener={'active' if interserver.get('listening') else 'inactive'}")
             details.append(f"source={interserver.get('source_restricted_to') or '-'}")
         lines.append("interserver transport: " + ", ".join(details))
+    public_client = snapshot.transport.get("public_client", {})
+    if public_client:
+        lines.append(
+            "public QUIC transport: "
+            f"configured={public_client.get('configured', False)}, "
+            f"listener={public_client.get('listening', False)}, "
+            f"firewall={public_client.get('firewall', False)}, "
+            f"port={public_client.get('port', '-')}"
+        )
     health_state = snapshot.network.get("health_state", "")
     if health_state:
         health = f"health: {health_state}"
@@ -153,9 +170,9 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
     outgoing = int(recent_protocol.get("TcpOutSegs", 0) or 0)
     if outgoing:
         ratio = retrans * 100 / outgoing
-        lines.append(f"tcp deltas (last health cycle): out={outgoing}, retrans={retrans} ({ratio:.3f}%)")
+        lines.append(f"host-wide tcp deltas (last health cycle): out={outgoing}, retrans={retrans} ({ratio:.3f}%)")
     elif retrans:
-        lines.append(f"tcp deltas (last health cycle): out=unavailable, retrans={retrans}")
+        lines.append(f"host-wide tcp deltas (last health cycle): out=unavailable, retrans={retrans}")
     recovery_signals = {
         key: int(recent_protocol.get(key, 0) or 0)
         for key in ("TcpExtTCPSACKReorder", "TcpExtTCPDSACKRecv", "TcpExtTCPTimeouts", "TcpExtTCPSpuriousRTOs")
