@@ -30,6 +30,7 @@ class RoutingPolicyTests(unittest.TestCase):
         self.assertEqual(outbounds["to-foreign"]["type"], "selector")
         self.assertEqual(outbounds["to-foreign"]["default"], "to-foreign-hy2")
         self.assertEqual(outbounds["to-foreign-hy2"]["type"], "hysteria2")
+        self.assertEqual(outbounds["to-foreign-hy2"]["obfs"]["type"], "salamander")
         self.assertNotIn("up_mbps", outbounds["to-foreign-hy2"])
         self.assertNotIn("down_mbps", outbounds["to-foreign-hy2"])
         self.assertEqual(outbounds["to-foreign-wg"]["bind_interface"], "wg0")

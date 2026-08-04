@@ -11,10 +11,11 @@ from .interserver_transport import (
     TRANSPORT_FALLBACK_TAG,
     TRANSPORT_PRIMARY_TAG,
     TRANSPORT_SELECTOR_TAG,
+    derive_transport_obfs_password,
     derive_transport_password,
 )
 
-POLICY_VERSION = "0.13.0"
+POLICY_VERSION = "0.14.0"
 
 TRAFFIC_CLASSES = (
     "ru_direct_domain",
@@ -222,6 +223,7 @@ def build_ru_routing_policy(env: dict[str, str]) -> RoutingPolicy:
         "tag": TRANSPORT_PRIMARY_TAG,
         "server": env["FOREIGN_PUBLIC_IP"],
         "server_port": HY2_PORT,
+        "obfs": {"type": "salamander", "password": derive_transport_obfs_password(env["WG_PRESHARED_KEY"])},
         "password": derive_transport_password(env["WG_PRESHARED_KEY"]),
         "tls": {
             "enabled": True,

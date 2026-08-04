@@ -184,7 +184,7 @@ def diagnose_server_client_workflow(deployment: str | None, *, source_ip: str, m
     print(f"verdict: {verdict}{f'; basis: {verdict_basis}' if verdict_basis else ''}")
     print(f"udp/443 policy: {payload.get('transport', {}).get('udp_443_policy', '-')}")
     print(f"report: {report_path}")
-    return 1 if payload.get("verdict") in {"degraded", "loss_observed", "rejected_by_front", "tcp_reached_no_xray_accept", "not_seen_on_server"} else 0
+    return 1 if payload.get("verdict") in {"degraded", "rejected_by_front", "tcp_reached_no_xray_accept", "not_seen_on_server"} else 0
 
 def _cleanup_iperf_rules(foreign: RemoteTarget) -> None:
     ssh_capture(

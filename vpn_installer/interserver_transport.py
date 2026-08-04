@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
-import statistics
 from datetime import datetime, timezone
 from typing import Any
 
@@ -14,59 +13,23 @@ TRANSPORT_SELECTOR_TAG = "to-foreign"
 TRANSPORT_PRIMARY_TAG = "to-foreign-hy2"
 TRANSPORT_FALLBACK_TAG = "to-foreign-wg"
 TRANSPORT_HEALTHCHECK_URL = "https://1.1.1.1/cdn-cgi/trace"
-TRANSPORT_PROBE_TIMEOUT_MS = 2500
-TRANSPORT_PROBE_INTERVAL_SECONDS = 5
-TRANSPORT_PRIMARY_FAILURES = 2
-TRANSPORT_PRIMARY_RECOVERY_SUCCESSES = 3
-TRANSPORT_QUALITY_CONFIRMATIONS = 3
-TRANSPORT_DELAY_TOLERANCE_MS = 50
-TRANSPORT_HISTORY_LIMIT = 12
-TRANSPORT_STATE_SCHEMA_VERSION = 2
+TRANSPORT_PROBE_TIMEOUT_MS = 1200
+TRANSPORT_PROBE_INTERVAL_SECONDS = 2
+TRANSPORT_FAILURE_CONFIRMATIONS = 2
+TRANSPORT_PRIMARY_RECOVERY_SUCCESSES = 2
+TRANSPORT_STATE_SCHEMA_VERSION = 3
 
 
-def _successful_delays(history: list[dict[str, Any]]) -> list[int]:
-    return [
-        int(sample["delay_ms"])
-        for sample in history
-        if sample.get("ok") is True and int(sample.get("delay_ms", 0) or 0) > 0
-    ]
-
-
-def _candidate_score(history: list[dict[str, Any]]) -> dict[str, Any]:
-    delays = _successful_delays(history)
-    if not delays:
-        return {"available": False, "samples": 0, "delay_ms": None, "jitter_ms": None}
-    median = float(statistics.median(delays))
-    deviations = [abs(value - median) for value in delays]
+def _normalize_probe(probe: dict[str, Any] | None) -> dict[str, Any]:
+    probe = probe or {}
+    checked = probe.get("checked") is True if "checked" in probe else bool(probe)
     return {
-        "available": True,
-        "samples": len(delays),
-        "delay_ms": round(median, 1),
-        "jitter_ms": round(float(statistics.median(deviations)), 1),
+        "checked": checked,
+        "ok": checked and probe.get("ok") is True,
+        "attempts": max(0, int(probe.get("attempts", 1 if checked else 0) or 0)),
+        "delay_ms": max(0, int(probe.get("delay_ms", 0) or 0)),
+        "error": str(probe.get("error", ""))[:240],
     }
-
-
-def _append_probe_history(
-    previous: dict[str, Any],
-    probes: dict[str, dict[str, Any]],
-    observed_at: str,
-) -> dict[str, list[dict[str, Any]]]:
-    previous_history = previous.get("history", {}) if isinstance(previous, dict) else {}
-    history: dict[str, list[dict[str, Any]]] = {}
-    for tag in (TRANSPORT_PRIMARY_TAG, TRANSPORT_FALLBACK_TAG):
-        prior = previous_history.get(tag, []) if isinstance(previous_history, dict) else []
-        samples = [dict(sample) for sample in prior if isinstance(sample, dict)]
-        probe = probes.get(tag, {})
-        samples.append(
-            {
-                "observed_at": observed_at,
-                "ok": probe.get("ok") is True,
-                "delay_ms": int(probe.get("delay_ms", 0) or 0),
-                "error": str(probe.get("error", ""))[:160],
-            }
-        )
-        history[tag] = samples[-TRANSPORT_HISTORY_LIMIT:]
-    return history
 
 
 def evaluate_transport_policy(
@@ -74,13 +37,11 @@ def evaluate_transport_policy(
     selected: str,
     probes: dict[str, dict[str, Any]],
     previous: dict[str, Any] | None = None,
-    passive_deltas: dict[str, int] | None = None,
     observed_at: str | None = None,
 ) -> dict[str, Any]:
     """Return a deterministic recommendation without changing the selector."""
 
     previous = previous or {}
-    passive_deltas = passive_deltas or {}
     observed_at = observed_at or datetime.now(timezone.utc).isoformat()
     if selected not in {TRANSPORT_PRIMARY_TAG, TRANSPORT_FALLBACK_TAG}:
         return {
@@ -90,99 +51,67 @@ def evaluate_transport_policy(
             "selected": selected,
             "recommended": selected,
             "would_switch": False,
-            "pending_target": "",
-            "pending_cycles": 0,
+            "primary_recovery_successes": 0,
             "hard_failure_evidence": False,
             "probes": {},
-            "scores": {},
-            "history": {},
-            "passive_deltas": dict(passive_deltas),
             "reason": "selected transport is invalid",
         }
 
     normalized_probes = {
-        tag: {
-            "ok": probes.get(tag, {}).get("ok") is True,
-            "delay_ms": int(probes.get(tag, {}).get("delay_ms", 0) or 0),
-            "error": str(probes.get(tag, {}).get("error", ""))[:240],
-        }
+        tag: _normalize_probe(probes.get(tag))
         for tag in (TRANSPORT_PRIMARY_TAG, TRANSPORT_FALLBACK_TAG)
     }
-    history = _append_probe_history(previous, normalized_probes, observed_at)
-    scores = {tag: _candidate_score(samples) for tag, samples in history.items()}
     primary = normalized_probes[TRANSPORT_PRIMARY_TAG]
     fallback = normalized_probes[TRANSPORT_FALLBACK_TAG]
     selected_probe = normalized_probes[selected]
     alternate = TRANSPORT_FALLBACK_TAG if selected == TRANSPORT_PRIMARY_TAG else TRANSPORT_PRIMARY_TAG
     alternate_probe = normalized_probes[alternate]
-    hysteria_socket_drops = max(0, int(passive_deltas.get("hysteria_socket_drops", 0) or 0))
-
-    desired = selected
-    evidence = "selected transport is healthy"
-    required_confirmations = TRANSPORT_QUALITY_CONFIRMATIONS
+    recovery_successes = 0
+    recommended = selected
+    state = "healthy" if selected == TRANSPORT_PRIMARY_TAG else "degraded"
     hard_failure = False
-    if not primary["ok"] and not fallback["ok"]:
-        return {
-            "schema_version": TRANSPORT_STATE_SCHEMA_VERSION,
-            "updated_at": observed_at,
-            "state": "failed",
-            "selected": selected,
-            "recommended": selected,
-            "would_switch": False,
-            "pending_target": "",
-            "pending_cycles": 0,
-            "hard_failure_evidence": True,
-            "probes": normalized_probes,
-            "scores": scores,
-            "history": history,
-            "passive_deltas": dict(passive_deltas),
-            "reason": "both interserver transports failed",
-        }
-    if not selected_probe["ok"] and alternate_probe["ok"]:
-        desired = alternate
+    evidence = "selected transport is healthy"
+
+    if not selected_probe["checked"]:
+        state = "failed"
+        evidence = "selected transport was not probed"
+    elif selected_probe["ok"]:
+        if selected == TRANSPORT_FALLBACK_TAG:
+            previous_successes = (
+                int(previous.get("primary_recovery_successes", 0) or 0)
+                if previous.get("selected") == selected
+                else 0
+            )
+            if primary["checked"] and primary["ok"]:
+                recovery_successes = previous_successes + 1
+                state = "recovering"
+                evidence = (
+                    "primary recovery confirmed"
+                    if recovery_successes >= TRANSPORT_PRIMARY_RECOVERY_SUCCESSES
+                    else f"primary recovery confirmation {recovery_successes}/{TRANSPORT_PRIMARY_RECOVERY_SUCCESSES}"
+                )
+                if recovery_successes >= TRANSPORT_PRIMARY_RECOVERY_SUCCESSES:
+                    recommended = TRANSPORT_PRIMARY_TAG
+            else:
+                evidence = "fallback transport remains healthy"
+        elif selected_probe["attempts"] > 1:
+            evidence = "primary recovered during immediate confirmation"
+    elif selected_probe["attempts"] < TRANSPORT_FAILURE_CONFIRMATIONS:
+        state = "suspect"
+        evidence = f"{selected} failed once; immediate confirmation is required"
+    elif alternate_probe["checked"] and alternate_probe["ok"]:
         hard_failure = True
-        required_confirmations = TRANSPORT_PRIMARY_FAILURES
-        evidence = f"{selected} failed while {alternate} is reachable"
-    elif primary["ok"] and fallback["ok"]:
-        primary_delay = float(scores[TRANSPORT_PRIMARY_TAG]["delay_ms"] or primary["delay_ms"])
-        fallback_delay = float(scores[TRANSPORT_FALLBACK_TAG]["delay_ms"] or fallback["delay_ms"])
-        if selected == TRANSPORT_PRIMARY_TAG:
-            primary_slower = primary_delay > fallback_delay + TRANSPORT_DELAY_TOLERANCE_MS
-            passive_loss_confirmed = hysteria_socket_drops > 0 and primary_delay > fallback_delay
-            if primary_slower or passive_loss_confirmed:
-                desired = TRANSPORT_FALLBACK_TAG
-                if passive_loss_confirmed:
-                    evidence = (
-                        "primary socket loss and delay are worse than fallback "
-                        f"(drops={hysteria_socket_drops})"
-                    )
-                else:
-                    evidence = f"primary delay exceeds fallback by more than {TRANSPORT_DELAY_TOLERANCE_MS}ms"
-        elif primary_delay <= fallback_delay + TRANSPORT_DELAY_TOLERANCE_MS:
-            desired = TRANSPORT_PRIMARY_TAG
-            required_confirmations = TRANSPORT_PRIMARY_RECOVERY_SUCCESSES
-            evidence = "primary recovered within the preferred-path tolerance"
-
-    same_selection = previous.get("selected") == selected
-    previous_target = str(previous.get("pending_target", "")) if same_selection else ""
-    previous_cycles = int(previous.get("pending_cycles", 0) or 0) if same_selection else 0
-    pending_cycles = previous_cycles + 1 if previous_target == desired and desired != selected else 1
-    pending_target = desired if desired != selected else ""
-    if desired == selected:
-        pending_cycles = 0
-    confirmed = desired != selected and pending_cycles >= required_confirmations
-    recommended = desired if confirmed else selected
-
-    if confirmed:
-        state = "degraded" if recommended == TRANSPORT_FALLBACK_TAG else "recovering"
-    elif desired != selected:
-        state = "suspect" if selected == TRANSPORT_PRIMARY_TAG else "recovering"
-        evidence += f"; awaiting confirmation {pending_cycles}/{required_confirmations}"
-    elif selected == TRANSPORT_FALLBACK_TAG:
-        state = "degraded"
-        evidence = "fallback transport remains selected"
+        recommended = alternate
+        state = "degraded" if alternate == TRANSPORT_FALLBACK_TAG else "recovering"
+        evidence = f"{selected} failed twice while {alternate} is reachable"
+    elif alternate_probe["checked"]:
+        state = "failed"
+        hard_failure = True
+        evidence = "both interserver transports failed"
     else:
-        state = "healthy"
+        state = "failed"
+        hard_failure = True
+        evidence = f"{selected} failed twice and alternate transport was not probed"
 
     return {
         "schema_version": TRANSPORT_STATE_SCHEMA_VERSION,
@@ -191,13 +120,9 @@ def evaluate_transport_policy(
         "selected": selected,
         "recommended": recommended,
         "would_switch": recommended != selected,
-        "pending_target": pending_target,
-        "pending_cycles": pending_cycles,
+        "primary_recovery_successes": recovery_successes,
         "hard_failure_evidence": hard_failure,
         "probes": normalized_probes,
-        "scores": scores,
-        "history": history,
-        "passive_deltas": dict(passive_deltas),
         "reason": evidence,
     }
 
@@ -209,7 +134,7 @@ def generate_transport_identity() -> dict[str, str]:
 
     ensure_python_package("cryptography", "cryptography>=45,<47")
     from cryptography import x509
-    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import ed25519
     from cryptography.x509.oid import NameOID
 
@@ -283,12 +208,20 @@ def decode_transport_pem(value: str, label: str) -> list[str]:
     return lines
 
 
-def derive_transport_password(wireguard_preshared_key: str) -> str:
+def _derive_transport_secret(wireguard_preshared_key: str, context: bytes) -> str:
     try:
         root_key = base64.b64decode(wireguard_preshared_key, validate=True)
     except ValueError as exc:
         raise ValueError("invalid WireGuard preshared key") from exc
     if len(root_key) != 32:
         raise ValueError("invalid WireGuard preshared key length")
-    token = hmac.new(root_key, b"vpn-stack/interserver/hysteria2/auth/v1", hashlib.sha256).digest()
+    token = hmac.new(root_key, context, hashlib.sha256).digest()
     return base64.urlsafe_b64encode(token).decode("ascii").rstrip("=")
+
+
+def derive_transport_password(wireguard_preshared_key: str) -> str:
+    return _derive_transport_secret(wireguard_preshared_key, b"vpn-stack/interserver/hysteria2/auth/v1")
+
+
+def derive_transport_obfs_password(wireguard_preshared_key: str) -> str:
+    return _derive_transport_secret(wireguard_preshared_key, b"vpn-stack/interserver/hysteria2/obfs/v1")

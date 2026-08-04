@@ -204,13 +204,6 @@ class StatusOutputTests(unittest.TestCase):
                                     }
                                 },
                             },
-                            "shadow_state": {
-                                "state": "healthy",
-                                "selected": "to-foreign-hy2",
-                                "recommended": "to-foreign-hy2",
-                                "fresh": False,
-                                "age_seconds": 120.0,
-                            },
                         }
                     },
                 )
@@ -218,10 +211,6 @@ class StatusOutputTests(unittest.TestCase):
         )
         self.assertIn("to-foreign-hy2=stale(62ms,age=120.0s)", rendered)
         self.assertIn("adaptation=stale(healthy,age=120.0s)", rendered)
-        self.assertIn(
-            "shadow=stale(healthy/to-foreign-hy2->to-foreign-hy2,age=120.0s)",
-            rendered,
-        )
         self.assertIn(
             "front interval: at=2026-07-30T20:02:00+00:00, observation=client_specific, "
             "flows=2, sources=203.0.113.20, retrans=80000/2000000 (4.0%)",

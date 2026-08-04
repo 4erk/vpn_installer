@@ -226,6 +226,7 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(outbounds["to-foreign"]["default"], "to-foreign-hy2")
         self.assertFalse(outbounds["to-foreign"]["interrupt_exist_connections"])
         self.assertEqual(outbounds["to-foreign-hy2"]["server"], env["FOREIGN_PUBLIC_IP"])
+        self.assertEqual(outbounds["to-foreign-hy2"]["obfs"]["type"], "salamander")
         self.assertNotIn("up_mbps", outbounds["to-foreign-hy2"])
         self.assertNotIn("down_mbps", outbounds["to-foreign-hy2"])
         self.assertEqual(outbounds["to-foreign-wg"]["domain_resolver"]["server"], "dns-ru-direct")
@@ -594,6 +595,7 @@ class RenderTests(unittest.TestCase):
         self.assertIn(f"PreDown = ip -4 route del {foreign_wg_host}/32 dev {env['WG_INTERFACE']} 2>/dev/null || true", config)
         self.assertIn(f"PreDown = ip -6 route del {foreign_wg_v6_host}/128 dev {env['WG_INTERFACE']} 2>/dev/null || true", config)
         self.assertIn("AllowedIPs = 0.0.0.0/0, ::/0", config)
+        self.assertNotIn("PersistentKeepalive", config)
         self.assertNotIn("PostUp = ip -4 route add default", config)
 
     def test_foreign_wireguard_accepts_ru_ipv4_and_ipv6_peer_addresses(self) -> None:
@@ -613,6 +615,7 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(inbound["tag"], "interserver-hy2-in")
         self.assertNotIn("up_mbps", inbound)
         self.assertNotIn("down_mbps", inbound)
+        self.assertEqual(inbound["obfs"]["type"], "salamander")
         self.assertTrue(inbound["tls"]["certificate"][0].startswith("-----BEGIN CERTIFICATE-----"))
         self.assertTrue(inbound["tls"]["key"][0].startswith("-----BEGIN PRIVATE KEY-----"))
 
@@ -679,7 +682,8 @@ class RenderTests(unittest.TestCase):
         self.assertIn(f"tcp dport {env['SSH_PORT']} counter accept", rules)
         self.assertNotIn("ssh_guard", rules)
         self.assertNotIn(f"tcp dport {env['SSH_PORT']} counter drop", rules)
-        self.assertIn(f"udp dport {env['WG_PORT']} accept", rules)
+        self.assertIn(f"ip saddr {env['RU_PUBLIC_IP']} udp dport {env['WG_PORT']} counter accept", rules)
+        self.assertNotIn(f"    udp dport {env['WG_PORT']} accept", rules)
         self.assertIn(f"ip saddr {env['RU_PUBLIC_IP']} udp dport 18443 counter accept", rules)
         self.assertIn(f'iifname "{env["WG_INTERFACE"]}" oifname "eth0" tcp flags syn tcp option maxseg size set 1320 accept', rules)
         self.assertIn(f'iifname "eth0" oifname "{env["WG_INTERFACE"]}" tcp flags syn tcp option maxseg size set 1320 accept', rules)

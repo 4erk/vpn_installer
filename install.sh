@@ -770,13 +770,14 @@ remove_managed_files() {
     "${LEGACY_ADAPTIVE_ROUTING_RULES_PATH}" \
     "${LEGACY_DATAPLANE_CACHE_PATH}" \
     "${HEALTH_STATE_PATH}" \
-    "${TRANSPORT_STATE_PATH}"
+    "${TRANSPORT_STATE_PATH}" \
+    "/var/lib/vpn-stack/transport-shadow-state.json"
   rm -rf "${SUBSCRIPTION_ROOT}"
   rm -rf "${RULESET_DIR}"
 }
 
 reset_install_runtime_state() {
-  rm -f "${LEGACY_DATAPLANE_CACHE_PATH}" "${HEALTH_STATE_PATH}" "${TRANSPORT_STATE_PATH}"
+  rm -f "${LEGACY_DATAPLANE_CACHE_PATH}" "${HEALTH_STATE_PATH}" "${TRANSPORT_STATE_PATH}" "/var/lib/vpn-stack/transport-shadow-state.json"
   if [[ "${ROLE}" == "ru-gateway" ]]; then
     rm -f "${LEGACY_ADAPTIVE_ROUTING_RULES_PATH}"
   fi

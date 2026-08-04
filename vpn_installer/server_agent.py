@@ -31,6 +31,7 @@ try:
         TRANSPORT_PROBE_INTERVAL_SECONDS,
         TRANSPORT_PROBE_TIMEOUT_MS,
         TRANSPORT_SELECTOR_TAG,
+        TRANSPORT_STATE_SCHEMA_VERSION,
         evaluate_transport_policy,
     )
 except ImportError:  # Installed agent runs as a standalone script.
@@ -45,6 +46,7 @@ except ImportError:  # Installed agent runs as a standalone script.
         TRANSPORT_PROBE_INTERVAL_SECONDS,
         TRANSPORT_PROBE_TIMEOUT_MS,
         TRANSPORT_SELECTOR_TAG,
+        TRANSPORT_STATE_SCHEMA_VERSION,
         evaluate_transport_policy,
     )
 
@@ -90,10 +92,8 @@ ENV_PATH = ROOT / "deployment.env"
 STATE_DIR = Path("/var/lib/vpn-stack")
 HEALTH_STATE_PATH = STATE_DIR / "health-state.json"
 TRANSPORT_STATE_PATH = STATE_DIR / "transport-state.json"
-TRANSPORT_SHADOW_STATE_PATH = STATE_DIR / "transport-shadow-state.json"
 LOCK_PATH = Path("/run/vpn-stack-agent.lock")
 TRANSPORT_LOCK_PATH = Path("/run/vpn-stack-transport.lock")
-TRANSPORT_SHADOW_LOCK_PATH = Path("/run/vpn-stack-transport-shadow.lock")
 SINGBOX_CONFIG_PATH = Path("/etc/sing-box/config.json")
 XRAY_CONFIG_PATH = Path("/etc/xray/config.json")
 SYSCTL_PATH = Path("/etc/sysctl.d/90-vpn-stack.conf")
@@ -1188,21 +1188,69 @@ def transport_candidate_probe(controller: str, tag: str) -> dict[str, Any]:
         delay = int(payload.get("delay", 0) or 0)
         if delay <= 0:
             raise ValueError("delay result is missing")
-        return {"ok": True, "delay_ms": delay, "error": ""}
+        return {"checked": True, "ok": True, "attempts": 1, "delay_ms": delay, "error": ""}
     except (OSError, ValueError, urllib.error.URLError) as exc:
         return {
+            "checked": True,
             "ok": False,
+            "attempts": 1,
             "delay_ms": 0,
             "elapsed_ms": round((time.monotonic() - started) * 1000),
             "error": str(exc)[:240],
         }
 
 
-def probe_transport_candidates(controller: str) -> dict[str, dict[str, Any]]:
-    tags = (TRANSPORT_PRIMARY_TAG, TRANSPORT_FALLBACK_TAG)
+def probe_transport_candidates(controller: str, tags: tuple[str, ...]) -> dict[str, dict[str, Any]]:
     with ThreadPoolExecutor(max_workers=len(tags)) as executor:
         results = executor.map(lambda tag: transport_candidate_probe(controller, tag), tags)
     return dict(zip(tags, results))
+
+
+def merge_probe_attempts(*attempts: dict[str, Any]) -> dict[str, Any]:
+    checked = [attempt for attempt in attempts if attempt.get("checked") is True]
+    successful = next((attempt for attempt in reversed(checked) if attempt.get("ok") is True), None)
+    return {
+        "checked": bool(checked),
+        "ok": successful is not None,
+        "attempts": sum(max(1, int(attempt.get("attempts", 1) or 1)) for attempt in checked),
+        "delay_ms": int(successful.get("delay_ms", 0) or 0) if successful else 0,
+        "error": "" if successful else "; ".join(str(attempt.get("error", "")) for attempt in checked)[-240:],
+    }
+
+
+def collect_transport_probes(controller: str, selected: str) -> dict[str, dict[str, Any]]:
+    unchecked = {"checked": False, "ok": False, "attempts": 0, "delay_ms": 0, "error": ""}
+    probes = {
+        TRANSPORT_PRIMARY_TAG: dict(unchecked),
+        TRANSPORT_FALLBACK_TAG: dict(unchecked),
+    }
+    if selected == TRANSPORT_PRIMARY_TAG:
+        first = transport_candidate_probe(controller, selected)
+        probes[selected] = first
+        if first.get("ok") is True:
+            return probes
+        confirmation = probe_transport_candidates(
+            controller,
+            (TRANSPORT_PRIMARY_TAG, TRANSPORT_FALLBACK_TAG),
+        )
+        probes[selected] = merge_probe_attempts(first, confirmation[selected])
+        probes[TRANSPORT_FALLBACK_TAG] = confirmation[TRANSPORT_FALLBACK_TAG]
+        return probes
+
+    first = probe_transport_candidates(
+        controller,
+        (TRANSPORT_FALLBACK_TAG, TRANSPORT_PRIMARY_TAG),
+    )
+    probes.update(first)
+    if first[TRANSPORT_FALLBACK_TAG].get("ok") is True:
+        return probes
+    confirmation = probe_transport_candidates(
+        controller,
+        (TRANSPORT_FALLBACK_TAG, TRANSPORT_PRIMARY_TAG),
+    )
+    for tag in (TRANSPORT_FALLBACK_TAG, TRANSPORT_PRIMARY_TAG):
+        probes[tag] = merge_probe_attempts(first[tag], confirmation[tag])
+    return probes
 
 
 def select_transport(controller: str, tag: str) -> None:
@@ -1215,66 +1263,9 @@ def select_transport(controller: str, tag: str) -> None:
     )
 
 
-def hysteria_socket_drop_count(server: str, port: int) -> int:
-    if not server or port <= 0:
-        return 0
-    total = 0
-    matched_socket = False
-    for raw_line in run(["ss", "-Hnuapim"], timeout=5).stdout.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        if not raw_line[:1].isspace():
-            fields = line.split()
-            matched_socket = (
-                any(
-                    remote_port == port and normalize_source(host) == normalize_source(server)
-                    for host, remote_port in (split_endpoint(field) for field in fields)
-                )
-                and '"sing-box"' in line
-            )
-            continue
-        if not matched_socket or "skmem:" not in line:
-            continue
-        match = re.search(r"(?:^|,)d(\d+)(?:,|\))", line)
-        if match:
-            total += int(match.group(1))
-        matched_socket = False
-    return total
-
-
-def transport_passive_snapshot(primary: dict[str, Any]) -> dict[str, int]:
-    protocol = protocol_counters_snapshot()
-    try:
-        port = int(primary.get("server_port", 0) or 0)
-    except (TypeError, ValueError):
-        port = 0
-    return {
-        **{
-            key: int(protocol.get(key, 0) or 0)
-            for key in ("UdpRcvbufErrors", "Udp6RcvbufErrors", "UdpSndbufErrors", "Udp6SndbufErrors")
-        },
-        "HysteriaSocketDrops": hysteria_socket_drop_count(
-            str(primary.get("server", "")),
-            port,
-        ),
-    }
-
-
-def transport_passive_deltas(current: dict[str, int], previous: dict[str, Any]) -> dict[str, int]:
-    raw = positive_counter_deltas(current, previous)
-    return {
-        "udp_receive_drops": int(raw.get("UdpRcvbufErrors", 0)) + int(raw.get("Udp6RcvbufErrors", 0)),
-        "udp_send_drops": int(raw.get("UdpSndbufErrors", 0)) + int(raw.get("Udp6SndbufErrors", 0)),
-        "hysteria_socket_drops": int(raw.get("HysteriaSocketDrops", 0)),
-    }
-
-
-def reconcile_interserver_transport(*, shadow: bool = False) -> dict[str, Any]:
-    state_path = TRANSPORT_SHADOW_STATE_PATH if shadow else TRANSPORT_STATE_PATH
-    lock_path = TRANSPORT_SHADOW_LOCK_PATH if shadow else TRANSPORT_LOCK_PATH
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("w", encoding="utf-8") as lock:
+def reconcile_interserver_transport() -> dict[str, Any]:
+    TRANSPORT_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with TRANSPORT_LOCK_PATH.open("w", encoding="utf-8") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         config = read_json(SINGBOX_CONFIG_PATH, {})
         outbounds = {
@@ -1284,12 +1275,11 @@ def reconcile_interserver_transport(*, shadow: bool = False) -> dict[str, Any]:
         } if isinstance(config, dict) else {}
         selector = outbounds.get(TRANSPORT_SELECTOR_TAG, {})
         controller = str(config.get("experimental", {}).get("clash_api", {}).get("external_controller", "")) if isinstance(config, dict) else ""
-        previous = read_json(state_path, {})
+        previous = read_json(TRANSPORT_STATE_PATH, {})
         payload: dict[str, Any] = {
-            "schema_version": 2,
+            "schema_version": TRANSPORT_STATE_SCHEMA_VERSION,
             "updated_at": utc_now(),
             "state": "failed",
-            "mode": "shadow" if shadow else "apply",
             "selected": "",
             "recommended": "",
             "would_switch": False,
@@ -1303,35 +1293,25 @@ def reconcile_interserver_transport(*, shadow: bool = False) -> dict[str, Any]:
             or not controller
         ):
             payload["reason"] = "priority transport selector is not configured"
-            write_json_atomic(state_path, payload)
+            write_json_atomic(TRANSPORT_STATE_PATH, payload)
             return payload
         selection = selector_selection_snapshot(config)
         selected = str(selection.get("selected", ""))
         if not selection.get("available"):
             payload["reason"] = str(selection.get("reason", "selector state is unavailable"))
-            write_json_atomic(state_path, payload)
+            write_json_atomic(TRANSPORT_STATE_PATH, payload)
             return payload
 
-        probes = probe_transport_candidates(controller)
-        primary = outbounds.get(TRANSPORT_PRIMARY_TAG, {})
-        passive_counters = transport_passive_snapshot(primary if isinstance(primary, dict) else {})
-        passive_deltas = transport_passive_deltas(passive_counters, previous.get("passive_counters", {}))
+        probes = collect_transport_probes(controller, selected)
         payload = evaluate_transport_policy(
             selected=selected,
             probes=probes,
             previous=previous,
-            passive_deltas=passive_deltas,
             observed_at=utc_now(),
         )
-        payload.update(
-            {
-                "mode": "shadow" if shadow else "apply",
-                "passive_counters": passive_counters,
-                "changed": False,
-            }
-        )
+        payload["changed"] = False
         target = str(payload.get("recommended", selected))
-        if not shadow and target != selected and payload.get("state") != "failed":
+        if target != selected and payload.get("state") != "failed":
             try:
                 select_transport(controller, target)
                 payload.update(
@@ -1339,8 +1319,7 @@ def reconcile_interserver_transport(*, shadow: bool = False) -> dict[str, Any]:
                         "selected": target,
                         "recommended": target,
                         "would_switch": False,
-                        "pending_target": "",
-                        "pending_cycles": 0,
+                        "primary_recovery_successes": 0,
                         "changed": True,
                         "state": "healthy" if target == TRANSPORT_PRIMARY_TAG else "degraded",
                         "reason": f"{payload.get('reason', '')}; selector updated",
@@ -1350,30 +1329,28 @@ def reconcile_interserver_transport(*, shadow: bool = False) -> dict[str, Any]:
                 payload["state"] = "failed"
                 payload["would_switch"] = False
                 payload["reason"] = f"selector update failed: {str(exc)[:180]}"
-        write_json_atomic(state_path, payload)
+        write_json_atomic(TRANSPORT_STATE_PATH, payload)
         return payload
 
 
-def watch_interserver_transport(*, shadow: bool = False) -> None:
-    state_path = TRANSPORT_SHADOW_STATE_PATH if shadow else TRANSPORT_STATE_PATH
+def watch_interserver_transport() -> None:
     previous_signature: tuple[str, str, str] | None = None
     while True:
         started = time.monotonic()
         try:
-            payload = reconcile_interserver_transport(shadow=shadow)
+            payload = reconcile_interserver_transport()
         except (OSError, RuntimeError, ValueError) as exc:
             payload = {
-                "schema_version": 2,
+                "schema_version": TRANSPORT_STATE_SCHEMA_VERSION,
                 "updated_at": utc_now(),
                 "state": "failed",
-                "mode": "shadow" if shadow else "apply",
                 "selected": "",
                 "recommended": "",
                 "would_switch": False,
                 "probes": {},
                 "reason": str(exc)[:240],
             }
-            write_json_atomic(state_path, payload)
+            write_json_atomic(TRANSPORT_STATE_PATH, payload)
         signature = (
             str(payload.get("state", "")),
             str(payload.get("selected", "")),
@@ -1434,6 +1411,7 @@ def interserver_transport_snapshot(role: str, env: dict[str, str]) -> dict[str, 
             and group.get("default") == TRANSPORT_PRIMARY_TAG
             and group.get("interrupt_exist_connections") is False
             and primary.get("type") == "hysteria2"
+            and primary.get("obfs", {}).get("type") == "salamander"
             and fallback.get("type") == "direct"
             and bool(primary.get("tls", {}).get("certificate_public_key_sha256"))
         )
@@ -1448,7 +1426,6 @@ def interserver_transport_snapshot(role: str, env: dict[str, str]) -> dict[str, 
             "hysteria_session_active": session_active,
             "selection": selection,
             "adaptive_state": transport_state_snapshot(TRANSPORT_STATE_PATH),
-            "shadow_state": transport_state_snapshot(TRANSPORT_SHADOW_STATE_PATH),
         }
     if role == "foreign-exit":
         inbound = next(
@@ -1466,6 +1443,7 @@ def interserver_transport_snapshot(role: str, env: dict[str, str]) -> dict[str, 
         ) if port else False
         configured = (
             inbound.get("type") == "hysteria2"
+            and inbound.get("obfs", {}).get("type") == "salamander"
             and bool(inbound.get("users"))
             and bool(inbound.get("tls", {}).get("certificate"))
             and bool(inbound.get("tls", {}).get("key"))
@@ -1807,7 +1785,9 @@ def run_probes(env: dict[str, str], role: str, profile: str) -> dict[str, Any]:
         targets = [*required_targets, *observed_targets]
     paths = {"direct": {}}
     if role == "ru-gateway":
-        paths.update({"via_wg": {"interface": wg_interface}, "router": {"proxy": "socks5h://127.0.0.1:2080"}})
+        paths["router"] = {"proxy": "socks5h://127.0.0.1:2080"}
+        if profile == "acceptance":
+            paths["via_wg"] = {"interface": wg_interface}
     domain_matrix = probe_url_matrix([(url, {}) for url in targets], paths)
     direct = domain_matrix["direct"]
     via_wg = domain_matrix.get("via_wg", [])
@@ -1835,7 +1815,7 @@ def run_probes(env: dict[str, str], role: str, profile: str) -> dict[str, Any]:
         "router": router,
     }
     if profile != "acceptance":
-        required_paths = {"foreign_direct": direct} if role != "ru-gateway" else {"ru_direct": direct, "via_wg": via_wg, "router": router}
+        required_paths = {"foreign_direct": direct} if role != "ru-gateway" else {"ru_direct": direct, "router": router}
         result["requirements"] = {name: all(item["ok"] for item in items) for name, items in required_paths.items()}
         required_names = {"foreign_direct"} if role != "ru-gateway" else {"ru_direct", "router"}
         result["ok"] = all(result["requirements"].get(name) is True for name in required_names)
@@ -2499,10 +2479,8 @@ def build_parser() -> argparse.ArgumentParser:
     front.add_argument("--since", type=int, default=30)
     front.add_argument("--live-probes", action="store_true")
     sub.add_parser("health")
-    transport = sub.add_parser("transport")
-    transport.add_argument("--shadow", action="store_true")
-    transport_watch = sub.add_parser("transport-watch")
-    transport_watch.add_argument("--shadow", action="store_true")
+    sub.add_parser("transport")
+    sub.add_parser("transport-watch")
     routes = sub.add_parser("routes")
     route_sub = routes.add_subparsers(dest="routes_action", required=True)
     route_sub.add_parser("list")
@@ -2537,9 +2515,9 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "health":
         payload = health()
     elif args.command == "transport":
-        payload = reconcile_interserver_transport(shadow=args.shadow)
+        payload = reconcile_interserver_transport()
     elif args.command == "transport-watch":
-        watch_interserver_transport(shadow=args.shadow)
+        watch_interserver_transport()
         return 0
     elif args.command == "routes":
         payload = routes_command(args)

@@ -121,7 +121,7 @@ class DiagnoseTests(unittest.TestCase):
             ):
                 result = diagnose.diagnose_server_client_workflow("demo", source_ip="203.0.113.44", non_interactive=True)
 
-        self.assertEqual(result, 1)
+        self.assertEqual(result, 0)
         self.assertIn("verdict: loss_observed", stream.getvalue())
         self.assertIn("no fresh degraded interval is available", stream.getvalue())
 

@@ -11,6 +11,7 @@ from vpn_installer.interserver_transport import (
     TRANSPORT_FALLBACK_TAG,
     TRANSPORT_PRIMARY_TAG,
     decode_transport_pem,
+    derive_transport_obfs_password,
     derive_transport_password,
     evaluate_transport_policy,
     generate_transport_identity,
@@ -63,6 +64,7 @@ class InterserverTransportIdentityTests(unittest.TestCase):
         self.assertEqual(first, derive_transport_password(preshared_key))
         self.assertNotEqual(first, preshared_key)
         self.assertNotIn("=", first)
+        self.assertNotEqual(first, derive_transport_obfs_password(preshared_key))
 
     def test_transport_password_rejects_invalid_root_key(self) -> None:
         with self.assertRaisesRegex(ValueError, "preshared key"):
@@ -75,76 +77,50 @@ class InterserverTransportPolicyTests(unittest.TestCase):
         self.assertEqual(result["state"], "failed")
         self.assertFalse(result["would_switch"])
 
-    def test_confirms_hard_failure_before_recommending_fallback(self) -> None:
-        first = evaluate_transport_policy(
-            selected=TRANSPORT_PRIMARY_TAG,
-            probes=probes(primary_delay=0),
-            observed_at="2026-07-30T20:00:00+00:00",
-        )
-        second = evaluate_transport_policy(
-            selected=TRANSPORT_PRIMARY_TAG,
-            probes=probes(primary_delay=0),
-            previous=first,
-            observed_at="2026-07-30T20:00:05+00:00",
-        )
-        self.assertEqual(first["state"], "suspect")
-        self.assertFalse(first["would_switch"])
-        self.assertTrue(second["would_switch"])
-        self.assertEqual(second["recommended"], TRANSPORT_FALLBACK_TAG)
-
-    def test_confirms_sustained_quality_difference_before_switching(self) -> None:
-        state: dict[str, object] = {}
-        results = []
-        for index in range(3):
-            state = evaluate_transport_policy(
-                selected=TRANSPORT_PRIMARY_TAG,
-                probes=probes(primary_delay=180, fallback_delay=70),
-                previous=state,
-                observed_at=f"2026-07-30T20:00:{index * 5:02d}+00:00",
-            )
-            results.append(state)
-        self.assertEqual([item["would_switch"] for item in results], [False, False, True])
-        self.assertEqual(results[-1]["recommended"], TRANSPORT_FALLBACK_TAG)
-
-    def test_global_udp_errors_are_diagnostic_only(self) -> None:
+    def test_primary_success_does_not_require_a_fallback_probe(self) -> None:
         result = evaluate_transport_policy(
             selected=TRANSPORT_PRIMARY_TAG,
-            probes=probes(primary_delay=50, fallback_delay=80),
-            passive_deltas={"udp_receive_drops": 10_000, "udp_send_drops": 10_000},
+            probes={
+                TRANSPORT_PRIMARY_TAG: {"checked": True, "ok": True, "delay_ms": 50},
+                TRANSPORT_FALLBACK_TAG: {"checked": False, "ok": False, "attempts": 0},
+            },
+        )
+        self.assertEqual(result["state"], "healthy")
+        self.assertFalse(result["probes"][TRANSPORT_FALLBACK_TAG]["checked"])
+
+    def test_one_failure_is_suspect_without_switching(self) -> None:
+        result = evaluate_transport_policy(
+            selected=TRANSPORT_PRIMARY_TAG,
+            probes=probes(primary_delay=0),
+        )
+        self.assertEqual(result["state"], "suspect")
+        self.assertFalse(result["would_switch"])
+
+    def test_two_failures_with_reachable_fallback_switch_immediately(self) -> None:
+        failed_primary = {"ok": False, "attempts": 2, "delay_ms": 0, "error": "timeout"}
+        result = evaluate_transport_policy(
+            selected=TRANSPORT_PRIMARY_TAG,
+            probes={
+                TRANSPORT_PRIMARY_TAG: failed_primary,
+                TRANSPORT_FALLBACK_TAG: {"ok": True, "delay_ms": 70},
+            },
+        )
+        self.assertTrue(result["would_switch"])
+        self.assertEqual(result["recommended"], TRANSPORT_FALLBACK_TAG)
+        self.assertTrue(result["hard_failure_evidence"])
+
+    def test_latency_difference_alone_never_changes_transport(self) -> None:
+        result = evaluate_transport_policy(
+            selected=TRANSPORT_PRIMARY_TAG,
+            probes=probes(primary_delay=500, fallback_delay=50),
         )
         self.assertEqual(result["state"], "healthy")
         self.assertFalse(result["would_switch"])
 
-    def test_external_selector_change_resets_pending_confirmation(self) -> None:
-        result = evaluate_transport_policy(
-            selected=TRANSPORT_PRIMARY_TAG,
-            probes=probes(primary_delay=180, fallback_delay=70),
-            previous={
-                "selected": TRANSPORT_FALLBACK_TAG,
-                "pending_target": TRANSPORT_FALLBACK_TAG,
-                "pending_cycles": 2,
-            },
-        )
-        self.assertEqual(result["pending_cycles"], 1)
-        self.assertFalse(result["would_switch"])
-
-    def test_attributed_socket_loss_still_requires_quality_confirmation(self) -> None:
-        state: dict[str, object] = {}
-        for index in range(3):
-            state = evaluate_transport_policy(
-                selected=TRANSPORT_PRIMARY_TAG,
-                probes=probes(primary_delay=90, fallback_delay=80),
-                previous=state,
-                passive_deltas={"hysteria_socket_drops": 2},
-                observed_at=f"2026-07-30T20:00:{index * 5:02d}+00:00",
-            )
-        self.assertTrue(state["would_switch"])
-        self.assertIn("primary socket loss", state["reason"])
-
-    def test_primary_recovery_requires_three_confirmations(self) -> None:
+    def test_primary_recovery_requires_two_confirmations(self) -> None:
         state: dict[str, object] = {}
         results = []
-        for index in range(3):
+        for index in range(2):
             state = evaluate_transport_policy(
                 selected=TRANSPORT_FALLBACK_TAG,
                 probes=probes(primary_delay=70, fallback_delay=80),
@@ -152,13 +128,27 @@ class InterserverTransportPolicyTests(unittest.TestCase):
                 observed_at=f"2026-07-30T20:00:{index * 5:02d}+00:00",
             )
             results.append(state)
-        self.assertEqual([item["would_switch"] for item in results], [False, False, True])
+        self.assertEqual([item["would_switch"] for item in results], [False, True])
         self.assertEqual(results[-1]["recommended"], TRANSPORT_PRIMARY_TAG)
+
+    def test_fallback_failure_returns_to_reachable_primary_after_confirmation(self) -> None:
+        result = evaluate_transport_policy(
+            selected=TRANSPORT_FALLBACK_TAG,
+            probes={
+                TRANSPORT_PRIMARY_TAG: {"ok": True, "delay_ms": 60},
+                TRANSPORT_FALLBACK_TAG: {"ok": False, "attempts": 2, "error": "timeout"},
+            },
+        )
+        self.assertTrue(result["would_switch"])
+        self.assertEqual(result["recommended"], TRANSPORT_PRIMARY_TAG)
 
     def test_both_failed_has_no_unsafe_recommendation(self) -> None:
         result = evaluate_transport_policy(
             selected=TRANSPORT_PRIMARY_TAG,
-            probes=probes(primary_delay=0, fallback_delay=0),
+            probes={
+                TRANSPORT_PRIMARY_TAG: {"ok": False, "attempts": 2, "error": "timeout"},
+                TRANSPORT_FALLBACK_TAG: {"ok": False, "error": "timeout"},
+            },
         )
         self.assertEqual(result["state"], "failed")
         self.assertEqual(result["recommended"], TRANSPORT_PRIMARY_TAG)

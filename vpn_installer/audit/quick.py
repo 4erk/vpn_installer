@@ -570,6 +570,8 @@ def test_interserver_hysteria_runtime(runner: AuditRunner, out_dir: Path) -> dic
     )
     if not isinstance(primary, dict) or primary.get("type") != "hysteria2":
         raise AuditFailure("RU config не содержит Hysteria2 primary outbound")
+    if primary.get("obfs", {}).get("type") != "salamander":
+        raise AuditFailure("Interserver Hysteria2 primary не содержит Salamander obfs")
     primary = dict(primary)
     primary["server"] = server_ip
     selector = {

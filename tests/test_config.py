@@ -142,6 +142,7 @@ class ConfigTests(unittest.TestCase):
     def test_default_network_contract_keeps_only_stable_wireguard_settings(self) -> None:
         env = config.generate_default_env("sample")
         self.assertEqual(env["WG_MTU"], "1360")
+        self.assertNotIn("WG_KEEPALIVE", env)
         self.assertNotIn("RU_BLOCK_QUIC", env)
         self.assertNotIn("RUNTIME_QDISC", env)
         self.assertNotIn("DISABLE_NIC_OFFLOADS", env)
@@ -166,11 +167,13 @@ class ConfigTests(unittest.TestCase):
             {
                 "CLIENT_COMPAT_UUID": "11111111-1111-1111-1111-111111111111",
                 "RU_COMPAT_LISTEN_PORTS": "8443",
+                "WG_KEEPALIVE": "25",
             },
             "sample",
         )
         self.assertNotIn("CLIENT_COMPAT_UUID", env)
         self.assertNotIn("RU_COMPAT_LISTEN_PORTS", env)
+        self.assertNotIn("WG_KEEPALIVE", env)
 
     def test_default_reality_time_tolerance_is_explicit(self) -> None:
         env = config.generate_default_env("sample")

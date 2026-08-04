@@ -114,17 +114,6 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
             details.append(f"hy2_session={'active' if interserver.get('hysteria_session_active') else 'inactive'}")
             if adaptive.get("reason"):
                 details.append(f"reason={adaptive['reason']}")
-            shadow = interserver.get("shadow_state", {})
-            if shadow:
-                shadow_label = (
-                    f"{shadow.get('state', '-')}/{shadow.get('selected', '-')}->{shadow.get('recommended', '-')}"
-                )
-                if shadow.get("fresh") is False:
-                    shadow_label = f"stale({shadow_label},age={shadow.get('age_seconds', '-')}s)"
-                details.append(
-                    "shadow="
-                    + shadow_label
-                )
         elif snapshot.role == "foreign-exit":
             details.append(f"listener={'active' if interserver.get('listening') else 'inactive'}")
             details.append(f"source={interserver.get('source_restricted_to') or '-'}")

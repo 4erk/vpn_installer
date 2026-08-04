@@ -20,7 +20,13 @@ from .client_artifacts import (
 )
 from .common import INSTALL_SCRIPT_PATH, OUT_DIR, ROOT_DIR, ensure_file_parent, print_header, warn, write_text
 from .config import apply_ru_direct_overlays, download_asset, parse_env_text, render_env_text, require_env, split_asset_sources
-from .interserver_transport import HY2_CLASH_API_LISTEN, HY2_PORT, decode_transport_pem, derive_transport_password
+from .interserver_transport import (
+    HY2_CLASH_API_LISTEN,
+    HY2_PORT,
+    decode_transport_pem,
+    derive_transport_obfs_password,
+    derive_transport_password,
+)
 from .manifest import render_manifest
 from .models import (
     CONNTRACK_MAX,
@@ -241,6 +247,10 @@ def render_foreign_singbox(env: dict[str, str]) -> str:
                     "tag": "interserver-hy2-in",
                     "listen": "0.0.0.0",
                     "listen_port": HY2_PORT,
+                    "obfs": {
+                        "type": "salamander",
+                        "password": derive_transport_obfs_password(env["WG_PRESHARED_KEY"]),
+                    },
                     "users": [{"password": derive_transport_password(env["WG_PRESHARED_KEY"])}],
                     "tls": {
                         "enabled": True,
@@ -285,7 +295,6 @@ def render_ru_wg(env: dict[str, str]) -> str:
             f"PresharedKey = {env['WG_PRESHARED_KEY']}",
             "AllowedIPs = 0.0.0.0/0, ::/0",
             f"Endpoint = {env['FOREIGN_PUBLIC_IP']}:{env['WG_PORT']}",
-            f"PersistentKeepalive = {env['WG_KEEPALIVE']}",
             "",
         ]
     )
@@ -348,7 +357,7 @@ def render_foreign_nftables(env: dict[str, str], wan_iface: str) -> str:
     )
     lines.append(f"    tcp dport {env['SSH_PORT']} counter accept")
     forward_rules = [
-        f"    udp dport {env['WG_PORT']} accept",
+        f"    ip saddr {env['RU_PUBLIC_IP']} udp dport {env['WG_PORT']} counter accept",
         f"    ip saddr {env['RU_PUBLIC_IP']} udp dport {HY2_PORT} counter accept",
         "  }",
         "",

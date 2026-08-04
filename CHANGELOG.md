@@ -6,6 +6,30 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.14.0] - 2026-08-04
+
+### Changed
+
+- Межсерверный supervisor переведён на selected-path priority policy. В штатном состоянии он проверяет только выбранный Hysteria2 раз в две секунды; лёгкий health также не зондирует dormant WireGuard. Первый отказ немедленно подтверждается второй попыткой, одновременно проверяется fallback, поэтому подтверждённый переход занимает не больше одного короткого confirmation cycle. WireGuard отдельно доказывается обязательной release acceptance.
+- Переключение больше не зависит от synthetic RTT, rolling median/MAD, socket-drop counters или quality tolerance. Эти сигналы полезны для диагностики, но не доказывают отказ пользовательского пути и больше не вызывают route churn.
+- Возврат с WireGuard на Hysteria2 требует двух последовательных успехов. `interrupt_exist_connections=false` сохраняет уже установленные потоки; новый transport применяется только к новым соединениям.
+
+### Security
+
+- Внутренний Hysteria2 между RU и foreign использует Salamander с отдельным ключом, детерминированно выведенным из deployment secret. Публичный VLESS URI и ранее импортированные клиентские профили не меняются.
+- Foreign nftables принимает WireGuard и Hysteria2 только от RU public IP. `PersistentKeepalive` удалён: оба VPS имеют прямые публичные адреса, а резервный tunnel активируется реальным probe/traffic по необходимости.
+
+### Removed
+
+- Удалены transport shadow mode, дублирующее shadow-state, rolling history/scoring и decision logic на общесистемных UDP counters. Миграция удаляет старый state-файл при штатной переустановке.
+
+### Fixed
+
+- `diagnose client` больше не возвращает process failure для одного `loss_observed`: это lifetime counters открытых сокетов, а не доказанная свежая деградация. Verdict и метрики сохраняются в отчёте; ненулевой код остаётся для текущего `degraded`, front rejection и отсутствующего ожидаемого server evidence.
+- Transport state сохраняет `checked=false` для dormant fallback; нормализация больше не превращает явно непроверенный кандидат в проверенный только из-за наличия структурных полей.
+
+Основной `out/1/client/vless-uri.txt`, публичные TCP/UDP ingress, web-admin, routing classes, WireGuard MTU и локальный VPN-клиент не изменены.
+
 ## [0.13.0] - 2026-08-03
 
 ### Added
