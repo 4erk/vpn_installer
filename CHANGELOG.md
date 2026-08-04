@@ -6,6 +6,21 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.14.1] - 2026-08-04
+
+### Fixed
+
+- Удалено ошибочное принудительное RU-direct направление глобального CDN `*.gstatic.com`, Google messaging и Microsoft connectivity endpoints. Они снова используют общий foreign-route и не зависят от доступности глобальных сервисов из российского дата-центра.
+- Нормализация deployment env и operator overlays удаляет устаревшие `.gstatic.com`/`mtalk.google.com`; renderer дополнительно не допускает их возврата из старого server-authoritative env.
+
+### Changed
+
+- Класс маршрутизации `connectivity_check` удалён: разрешённые точные RU-домены, suffix-правила и `ru-geosite` теперь компилируются единым `ru_direct_domain` без дублирования route-решений.
+- Runtime-аудит запрещает попадание глобальных CDN в `direct-ru` и проверяет порядок explicit foreign overrides перед `ru-geosite`; основной `vless-uri.txt` остаётся неизменным.
+- Четыре дублирующих Docker lifecycle-сценария объединены в одну role-scoped matrix для `status`, `reinstall`, `remove` и `purge`; внешний asset network больше не влияет на этот тест.
+- Адаптивные Hiddify/sing-box профили ставят канонический VLESS перед Hysteria2: нативный `urltest` сохраняет основной путь при сопоставимом latency и использует QUIC как доступный fallback, а не как безусловительный speed preference.
+- Throughput acceptance разделён по роли: основной VLESS сохраняет floor `50 Mbit/s`, резервный Hysteria2 обязан обеспечить минимум `10 Mbit/s`; общий stability floor остаётся `10 Mbit/s` без transfer failures.
+
 ## [0.14.0] - 2026-08-04
 
 ### Changed

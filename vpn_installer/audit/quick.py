@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 from ..common import OUT_DIR, ROOT_DIR, RUNTIME_SITE_PACKAGES
 from ..config import load_env_file
+from ..dns_policy import GLOBAL_FOREIGN_DOMAINS, GLOBAL_FOREIGN_DOMAIN_SUFFIXES
 from ..manifest import XRAY_VERSION
 from ..public_transport import PUBLIC_HY2_OUTBOUND_TAG, PUBLIC_SELECTOR_TAG, PUBLIC_VLESS_OUTBOUND_TAG
 from ..render import find_cached_asset, render_all_artifacts
@@ -387,8 +388,8 @@ def test_user_artifacts(out_dir: Path) -> dict[str, str]:
         raise AuditFailure("Hiddify profile должен отключать auto_redirect")
     hiddify_outbounds = {item.get("tag"): item for item in hiddify_payload.get("outbounds", []) if isinstance(item, dict)}
     selector = hiddify_outbounds.get(PUBLIC_SELECTOR_TAG, {})
-    if selector.get("type") != "urltest" or selector.get("outbounds") != [PUBLIC_HY2_OUTBOUND_TAG, PUBLIC_VLESS_OUTBOUND_TAG]:
-        raise AuditFailure("Hiddify profile не содержит ожидаемый adaptive QUIC/TCP urltest")
+    if selector.get("type") != "urltest" or selector.get("outbounds") != [PUBLIC_VLESS_OUTBOUND_TAG, PUBLIC_HY2_OUTBOUND_TAG]:
+        raise AuditFailure("Hiddify profile не содержит ожидаемый primary VLESS / fallback QUIC urltest")
     if selector.get("interrupt_exist_connections") is not False:
         raise AuditFailure("Hiddify adaptive selector не должен обрывать существующие соединения")
     if linux_payload.get("inbounds", [{}])[0].get("auto_redirect") is not True:
@@ -462,6 +463,31 @@ def test_ru_singbox_runtime_smoke(runner: AuditRunner, out_dir: Path) -> dict[st
     router_plain_path = work_dir / "ru-sing-box-router.json"
 
     router_config = json.loads(config_path.read_text(encoding="utf-8"))
+    direct_rules = [rule for rule in router_config.get("route", {}).get("rules", []) if rule.get("outbound") == "direct-ru"]
+    direct_domains = {domain.lower() for rule in direct_rules for domain in rule.get("domain", [])}
+    direct_suffixes = {suffix.lower() for rule in direct_rules for suffix in rule.get("domain_suffix", [])}
+    leaked_domains = direct_domains & {domain.lower() for domain in GLOBAL_FOREIGN_DOMAINS}
+    leaked_suffixes = direct_suffixes & {suffix.lower() for suffix in GLOBAL_FOREIGN_DOMAIN_SUFFIXES}
+    if leaked_domains or leaked_suffixes:
+        leaked = ", ".join(sorted(leaked_domains | leaked_suffixes))
+        raise AuditFailure(f"RU direct policy перехватывает global foreign traffic: {leaked}")
+    route_rules = router_config.get("route", {}).get("rules", [])
+    global_domain_index = next(
+        (index for index, rule in enumerate(route_rules) if rule.get("outbound") == "to-foreign" and "mtalk.google.com" in rule.get("domain", [])),
+        None,
+    )
+    global_suffix_index = next(
+        (index for index, rule in enumerate(route_rules) if rule.get("outbound") == "to-foreign" and ".gstatic.com" in rule.get("domain_suffix", [])),
+        None,
+    )
+    ru_asset_index = next(
+        (index for index, rule in enumerate(route_rules) if rule.get("outbound") == "direct-ru" and rule.get("rule_set") == ["ru-geosite"]),
+        None,
+    )
+    if None in {global_domain_index, global_suffix_index, ru_asset_index} or not (
+        global_domain_index < ru_asset_index and global_suffix_index < ru_asset_index
+    ):
+        raise AuditFailure("Global foreign overrides должны предшествовать RU geosite routing")
     inbound = router_config["inbounds"][0]
     if inbound.get("type") != "mixed" or inbound.get("tag") != "router-in" or inbound.get("listen") != "127.0.0.1":
         raise AuditFailure("RU sing-box не содержит локальный mixed-router перед routing policy")

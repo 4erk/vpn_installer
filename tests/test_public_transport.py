@@ -42,13 +42,13 @@ class PublicTransportTests(unittest.TestCase):
         self.assertIn("udp sport 443 counter notrack", firewall)
         self.assertIn("udp dport 443 counter accept", firewall)
 
-    def test_adaptive_profile_prefers_quic_and_falls_back_to_canonical_vless(self) -> None:
+    def test_adaptive_profile_prefers_canonical_vless_and_keeps_quic_fallback(self) -> None:
         env = self.make_env()
         profile = json.loads(render_client_profile(env, auto_redirect=False))
         outbounds = {item["tag"]: item for item in profile["outbounds"]}
         selector = outbounds[PUBLIC_SELECTOR_TAG]
         self.assertEqual(selector["type"], "urltest")
-        self.assertEqual(selector["outbounds"], [PUBLIC_HY2_OUTBOUND_TAG, PUBLIC_VLESS_OUTBOUND_TAG])
+        self.assertEqual(selector["outbounds"], [PUBLIC_VLESS_OUTBOUND_TAG, PUBLIC_HY2_OUTBOUND_TAG])
         self.assertEqual(selector["interval"], "30s")
         self.assertFalse(selector["interrupt_exist_connections"])
         self.assertNotIn("up_mbps", outbounds[PUBLIC_HY2_OUTBOUND_TAG])

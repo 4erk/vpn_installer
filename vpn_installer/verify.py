@@ -44,7 +44,8 @@ from .vless_verify import (
 
 
 VLESS_RUNNER_POLL_INTERVAL_SECONDS = 5
-VLESS_CAPACITY_FLOOR_BYTES_PER_SECOND = 6_250_000
+PRIMARY_CAPACITY_FLOOR_BYTES_PER_SECOND = 6_250_000
+FALLBACK_CAPACITY_FLOOR_BYTES_PER_SECOND = 1_250_000
 VLESS_RUNNER_LOCK_PATH = "/run/lock/vpn-stack-vless-verify.lock"
 
 
@@ -156,6 +157,7 @@ def _validate_public_transport_result(
     *,
     label: str,
     throughput_seconds: int = 0,
+    capacity_floor_bytes_per_second: int = PRIMARY_CAPACITY_FLOOR_BYTES_PER_SECOND,
 ) -> dict[str, object]:
     statuses = {str(result.get("github_status", "")), str(result.get("google_status", ""))}
     expected_foreign_ip = foreign_target.public_ip or foreign_target.ssh_host
@@ -212,8 +214,9 @@ def _validate_public_transport_result(
                 "reason": f"{label} throughput had {source_failures} unexpected source failures: {measurement.get('source_metrics', [])}",
                 "result": result,
             }
-        if speed_bps < VLESS_CAPACITY_FLOOR_BYTES_PER_SECOND:
-            return {"verdict": "failed", "reason": f"{label} capacity below 50 Mbit/s: {speed_bps * 8 / 1_000_000:.2f} Mbit/s", "result": result}
+        if speed_bps < capacity_floor_bytes_per_second:
+            floor_mbps = capacity_floor_bytes_per_second * 8 / 1_000_000
+            return {"verdict": "failed", "reason": f"{label} capacity below {floor_mbps:g} Mbit/s: {speed_bps * 8 / 1_000_000:.2f} Mbit/s", "result": result}
         expected_stability_seconds = max(0, throughput_seconds - THROUGHPUT_CAPACITY_SECONDS)
         if expected_stability_seconds and stability_bps < THROUGHPUT_STABILITY_FLOOR_BYTES_PER_SECOND:
             return {"verdict": "failed", "reason": f"{label} sustained rate below 10 Mbit/s: {stability_bps * 8 / 1_000_000:.2f} Mbit/s", "result": result}
@@ -450,6 +453,7 @@ def _verify_public_hysteria2(env: dict[str, str], foreign_target, *, throughput_
         foreign_target,
         label="public Hysteria2",
         throughput_seconds=throughput_seconds,
+        capacity_floor_bytes_per_second=FALLBACK_CAPACITY_FLOOR_BYTES_PER_SECOND,
     )
 
 

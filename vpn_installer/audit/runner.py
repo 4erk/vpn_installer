@@ -500,12 +500,14 @@ class AuditRunner:
         *,
         expect_code: int = 0,
         expected_codes: set[int] | None = None,
+        timeout_seconds: int = AUDIT_DOCKER_TIMEOUT_SECONDS,
     ) -> subprocess.CompletedProcess[str]:
         return self.docker(
             f"exec-{container}",
             ["exec", container, "bash", "-lc", script],
             expect_code=expect_code,
             expected_codes=expected_codes,
+            timeout_seconds=timeout_seconds,
         )
 
     @contextmanager

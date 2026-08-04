@@ -297,20 +297,25 @@ class RenderTests(unittest.TestCase):
         self.assertIn("ipv4-internet.yandex.net", direct_domain_dns_rule["domain"])
         self.assertNotIn("ipv6-internet.yandex.net", direct_domain_dns_rule["domain"])
         self.assertIn("2ip.ru", direct_domain_dns_rule["domain"])
-        self.assertIn("www.msftconnecttest.com", direct_domain_dns_rule["domain"])
+        self.assertNotIn("www.msftconnecttest.com", direct_domain_dns_rule["domain"])
+        self.assertNotIn("mtalk.google.com", direct_domain_dns_rule["domain"])
         ipv6_probe_reject_rule = next(rule for rule in dns_rules if "ipv6.msftconnecttest.com" in rule.get("domain", []))
         self.assertEqual(ipv6_probe_reject_rule["action"], "reject")
         self.assertIn("ipv6-internet.yandex.net", ipv6_probe_reject_rule["domain"])
 
-        direct_suffix_dns_rule = next(rule for rule in dns_rules if "domain_suffix" in rule)
-        self.assertIn(".gstatic.com", direct_suffix_dns_rule["domain_suffix"])
+        direct_suffix_dns_rule = next(
+            rule
+            for rule in dns_rules
+            if "domain_suffix" in rule and rule.get("server") == "dns-ru-direct"
+        )
+        self.assertNotIn(".gstatic.com", direct_suffix_dns_rule["domain_suffix"])
         self.assertIn(".ipify.org", direct_suffix_dns_rule["domain_suffix"])
         self.assertIn(".ipinfo.io", direct_suffix_dns_rule["domain_suffix"])
 
         direct_domain_route_rule = next(rule for rule in route_rules if rule.get("outbound") == "direct-ru" and "domain" in rule)
         self.assertIn("gosuslugi.ru", direct_domain_route_rule["domain"])
         self.assertIn("ipapi.co", direct_domain_route_rule["domain"])
-        self.assertIn("www.msftncsi.com", direct_domain_route_rule["domain"])
+        self.assertNotIn("www.msftncsi.com", direct_domain_route_rule["domain"])
         self.assertIn("icanhazip.com", direct_domain_route_rule["domain"])
         self.assertIn("ip.mail.ru", direct_domain_route_rule["domain"])
         self.assertIn("ipv4-internet.yandex.net", direct_domain_route_rule["domain"])
@@ -320,6 +325,7 @@ class RenderTests(unittest.TestCase):
         direct_suffix_route_rule = next(rule for rule in route_rules if rule.get("outbound") == "direct-ru" and "domain_suffix" in rule)
         self.assertIn(".ident.me", direct_suffix_route_rule["domain_suffix"])
         self.assertIn(".icanhazip.com", direct_suffix_route_rule["domain_suffix"])
+        self.assertNotIn(".gstatic.com", direct_suffix_route_rule["domain_suffix"])
 
         self.assertFalse(any(rule.get("domain") == ["api.ok.ru"] and rule.get("outbound") == "block" for rule in route_rules))
 

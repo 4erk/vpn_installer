@@ -4,7 +4,7 @@ import textwrap
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
-from .dns_policy import CONNECTIVITY_CHECK_DIRECT_DOMAINS, CONNECTIVITY_CHECK_IPV6_ONLY_DOMAINS, merged_domains
+from .dns_policy import GLOBAL_FOREIGN_DOMAINS, GLOBAL_FOREIGN_DOMAIN_SUFFIXES, CONNECTIVITY_CHECK_IPV6_ONLY_DOMAINS
 from .interserver_transport import (
     HY2_PORT,
     HY2_SERVER_NAME,
@@ -15,14 +15,14 @@ from .interserver_transport import (
     derive_transport_password,
 )
 
-POLICY_VERSION = "0.14.0"
+POLICY_VERSION = "0.14.1"
 
 TRAFFIC_CLASSES = (
     "ru_direct_domain",
     "ru_direct_ip",
     "private_or_fake",
-    "connectivity_check",
     "connectivity_check_ipv6_only",
+    "global_foreign",
     "dns_global",
     "domain_foreign",
     "ipv4_literal_foreign",
@@ -134,9 +134,18 @@ def _traffic_class(
 def build_ru_routing_policy(env: dict[str, str]) -> RoutingPolicy:
     sniff_timeout = env.get("RU_SNIFF_TIMEOUT", "250ms").strip() or "250ms"
     ipv6_only_domains = {domain.lower() for domain in CONNECTIVITY_CHECK_IPV6_ONLY_DOMAINS}
-    direct_domains = [domain for domain in _env_list(env, "RU_FORCE_DIRECT_DOMAIN") if domain.lower() not in ipv6_only_domains]
-    direct_domains = merged_domains(CONNECTIVITY_CHECK_DIRECT_DOMAINS, direct_domains)
-    direct_suffixes = _env_list(env, "RU_FORCE_DIRECT_DOMAIN_SUFFIX")
+    foreign_domains = {domain.lower() for domain in GLOBAL_FOREIGN_DOMAINS}
+    foreign_suffixes = {suffix.lower() for suffix in GLOBAL_FOREIGN_DOMAIN_SUFFIXES}
+    direct_domains = [
+        domain
+        for domain in _env_list(env, "RU_FORCE_DIRECT_DOMAIN")
+        if domain.lower() not in ipv6_only_domains | foreign_domains
+    ]
+    direct_suffixes = [
+        suffix
+        for suffix in _env_list(env, "RU_FORCE_DIRECT_DOMAIN_SUFFIX")
+        if suffix.lower() not in foreign_suffixes
+    ]
     direct_cidrs = _env_list(env, "RU_FORCE_DIRECT_IP_CIDR")
     if env.get("RU_PUBLIC_IP", "").strip():
         public_cidr = f"{env['RU_PUBLIC_IP'].strip()}/32"
@@ -144,6 +153,8 @@ def build_ru_routing_policy(env: dict[str, str]) -> RoutingPolicy:
             direct_cidrs.append(public_cidr)
     blocked_cidrs = _env_list(env, "RU_BLOCK_IP_CIDR")
     raw_ru_geoip_route = {"rule_set": ["ru-geoip"], "action": "route", "outbound": "direct-ru"}
+    global_domains = list(GLOBAL_FOREIGN_DOMAINS)
+    global_suffixes = list(GLOBAL_FOREIGN_DOMAIN_SUFFIXES)
 
     control_rules: list[dict[str, Any]] = [
         {"inbound": ["router-in"], "action": "sniff", "timeout": sniff_timeout},
@@ -158,22 +169,34 @@ def build_ru_routing_policy(env: dict[str, str]) -> RoutingPolicy:
             pre_routes=({"domain": list(CONNECTIVITY_CHECK_IPV6_ONLY_DOMAINS), "action": "reject"},),
         ),
         _traffic_class(
-            "connectivity_check", "direct-ru", "dns-ru-direct", "none", "direct_ru", "dns-global",
-            dns=({"domain": direct_domains, "action": "route", "server": "dns-ru-direct", "strategy": "ipv4_only"},) if direct_domains else (),
-            pre_routes=({"domain": direct_domains, "action": "resolve", "server": "dns-ru-direct", "strategy": "ipv4_only"},) if direct_domains else (),
-            routes=({"domain": direct_domains, "action": "route", "outbound": "direct-ru"},) if direct_domains else (),
+            "global_foreign", "to-foreign", "dns-global", "system", "domain_to_foreign_timeout", "none",
+            dns=(
+                {"domain": global_domains, "action": "route", "server": "dns-global", "strategy": "ipv4_only"},
+                {"domain_suffix": global_suffixes, "action": "route", "server": "dns-global", "strategy": "ipv4_only"},
+            ),
+            pre_routes=(
+                {"domain": global_domains, "action": "resolve", "server": "dns-global", "strategy": "ipv4_only"},
+                {"domain_suffix": global_suffixes, "action": "resolve", "server": "dns-global", "strategy": "ipv4_only"},
+            ),
+            routes=(
+                {"domain": global_domains, "action": "route", "outbound": "to-foreign"},
+                {"domain_suffix": global_suffixes, "action": "route", "outbound": "to-foreign"},
+            ),
         ),
         _traffic_class(
             "ru_direct_domain", "direct-ru", "dns-ru-direct", "none", "direct_ru", "blocked",
             dns=(
+                *(({"domain": direct_domains, "action": "route", "server": "dns-ru-direct", "strategy": "ipv4_only"},) if direct_domains else ()),
                 *(({"domain_suffix": direct_suffixes, "action": "route", "server": "dns-ru-direct", "strategy": "ipv4_only"},) if direct_suffixes else ()),
                 {"rule_set": ["ru-geosite"], "action": "route", "server": "dns-ru-direct", "strategy": "ipv4_only"},
             ),
             pre_routes=(
+                *(({"domain": direct_domains, "action": "resolve", "server": "dns-ru-direct", "strategy": "ipv4_only"},) if direct_domains else ()),
                 *(({"domain_suffix": direct_suffixes, "action": "resolve", "server": "dns-ru-direct", "strategy": "ipv4_only"},) if direct_suffixes else ()),
                 {"rule_set": ["ru-geosite"], "action": "resolve", "server": "dns-ru-direct", "strategy": "ipv4_only"},
             ),
             routes=(
+                *(({"domain": direct_domains, "action": "route", "outbound": "direct-ru"},) if direct_domains else ()),
                 *(({"domain_suffix": direct_suffixes, "action": "route", "outbound": "direct-ru"},) if direct_suffixes else ()),
                 {"rule_set": ["ru-geosite"], "action": "route", "outbound": "direct-ru"},
             ),

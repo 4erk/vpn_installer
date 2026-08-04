@@ -8,7 +8,18 @@ from unittest.mock import patch
 
 from vpn_installer.diagnostics import DiagnosticsSnapshot
 from vpn_installer.models import ROLE_FOREIGN, ROLE_RU, RemoteTarget
-from vpn_installer.verify import _reconcile_public_capabilities, _validate_public_vless_result, _verify_public_vless_uri, _verify_snapshot, _vless_runner_timeout, _wait_for_vless_runner, verify_live_workflow
+from vpn_installer.verify import (
+    FALLBACK_CAPACITY_FLOOR_BYTES_PER_SECOND,
+    _reconcile_public_capabilities,
+    _validate_public_transport_result,
+    _validate_public_vless_result,
+    _verify_public_hysteria2,
+    _verify_public_vless_uri,
+    _verify_snapshot,
+    _vless_runner_timeout,
+    _wait_for_vless_runner,
+    verify_live_workflow,
+)
 from vpn_installer.vless_verify import parse_vless_uri
 
 
@@ -267,6 +278,71 @@ class VerifyTests(unittest.TestCase):
         self.assertEqual(_validate_public_vless_result({**result, "throughput": {**result["throughput"], "stability_bytes_per_second": 1_000_000}}, uri, foreign, throughput_seconds=60)["verdict"], "failed")
         self.assertEqual(_vless_runner_timeout(0), 189)
         self.assertEqual(_vless_runner_timeout(600), 794)
+
+    def test_public_fallback_uses_availability_floor_without_weakening_primary(self) -> None:
+        foreign = RemoteTarget(role=ROLE_FOREIGN, public_ip="198.51.100.20", ssh_host="198.51.100.20")
+        result = {
+            "ru_egress_ip": "203.0.113.10",
+            "foreign_egress_ip": "198.51.100.20",
+            "github_status": "200",
+            "google_status": "204",
+            "udp_dns": {"ok": True, "private_reject": {"ok": True}},
+            "ipv6_literal_status": "200",
+            "first_load_reliability": FIRST_LOAD_OK,
+            "throughput": {
+                "capacity_bytes_per_second": 2_000_000,
+                "duration_seconds": 30,
+                "failures": 0,
+                "source_failures": 0,
+            },
+        }
+        fallback = _validate_public_transport_result(
+            result,
+            "203.0.113.10",
+            foreign,
+            label="public Hysteria2",
+            throughput_seconds=30,
+            capacity_floor_bytes_per_second=FALLBACK_CAPACITY_FLOOR_BYTES_PER_SECOND,
+        )
+        primary = _validate_public_transport_result(
+            result,
+            "203.0.113.10",
+            foreign,
+            label="public VLESS",
+            throughput_seconds=30,
+        )
+        self.assertEqual(fallback["verdict"], "verified")
+        self.assertEqual(primary["verdict"], "failed")
+
+    def test_public_hysteria_runner_and_validator_keep_separate_contracts(self) -> None:
+        foreign = RemoteTarget(role=ROLE_FOREIGN, public_ip="198.51.100.20", ssh_host="198.51.100.20")
+        result = {
+            "ru_egress_ip": "203.0.113.10",
+            "foreign_egress_ip": "198.51.100.20",
+            "github_status": "200",
+            "google_status": "204",
+            "udp_dns": {"ok": True, "private_reject": {"ok": True}},
+            "ipv6_literal_status": "200",
+            "first_load_reliability": FIRST_LOAD_OK,
+            "throughput": {
+                "capacity_bytes_per_second": 2_000_000,
+                "duration_seconds": 30,
+                "failures": 0,
+                "source_failures": 0,
+            },
+        }
+
+        def run_profile(_config, _target, *, label: str, throughput_seconds: int) -> dict[str, object]:
+            self.assertEqual(label, "public Hysteria2")
+            self.assertEqual(throughput_seconds, 30)
+            return {"verdict": "completed", "result": result}
+
+        with (
+            patch("vpn_installer.verify.render_public_hy2_outbound", return_value={"type": "direct", "tag": "ru-gateway"}),
+            patch("vpn_installer.verify._run_external_public_profile", side_effect=run_profile),
+        ):
+            verified = _verify_public_hysteria2({"RU_PUBLIC_IP": "203.0.113.10"}, foreign, throughput_seconds=30)
+        self.assertEqual(verified["verdict"], "verified")
 
     def test_public_vless_runner_uploads_lf_script_and_executes_it(self) -> None:
         uri_text = "vless://00000000-0000-0000-0000-000000000000@203.0.113.10:443?security=reality&sni=www.bing.com&pbk=public-key&sid=0123456789abcdef&fp=chrome&type=tcp&flow=xtls-rprx-vision"

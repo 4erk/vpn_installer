@@ -129,6 +129,11 @@ RU_DIRECT_OVERLAY_FILES = {
     "RU_FORCE_DIRECT_IP_CIDR": "ru-direct-cidrs.txt",
 }
 
+RETIRED_DIRECT_POLICY_VALUES = {
+    "RU_FORCE_DIRECT_DOMAIN": frozenset({"mtalk.google.com"}),
+    "RU_FORCE_DIRECT_DOMAIN_SUFFIX": frozenset({".gstatic.com"}),
+}
+
 
 def validate_deployment_name(raw_name: str) -> str:
     cleaned = sanitize_name(raw_name)
@@ -265,8 +270,8 @@ def generate_default_env(deploy_name: str) -> dict[str, str]:
         "GLOBAL_DOH_SERVER": "8.8.8.8",
         "GLOBAL_DOH_SERVER_NAME": "dns.google",
         "GLOBAL_DOH_PATH": "/dns-query",
-        "RU_FORCE_DIRECT_DOMAIN": "api.oneme.ru,mtalk.google.com,calls.okcdn.ru,gosuslugi.ru,api.ok.ru,ifconfig.me,ifconfig.co,checkip.amazonaws.com,ipapi.co,ipinfo.io,ident.me,tnedi.me,icanhazip.com,ip.mail.ru,ipv4-internet.yandex.net,2ip.ru",
-        "RU_FORCE_DIRECT_DOMAIN_SUFFIX": ".gstatic.com,.gosuslugi.ru,.ipify.org,.ipinfo.io,.ident.me,.tnedi.me,.icanhazip.com",
+        "RU_FORCE_DIRECT_DOMAIN": "api.oneme.ru,calls.okcdn.ru,gosuslugi.ru,api.ok.ru,ifconfig.me,ifconfig.co,checkip.amazonaws.com,ipapi.co,ipinfo.io,ident.me,tnedi.me,icanhazip.com,ip.mail.ru,ipv4-internet.yandex.net,2ip.ru",
+        "RU_FORCE_DIRECT_DOMAIN_SUFFIX": ".gosuslugi.ru,.ipify.org,.ipinfo.io,.ident.me,.tnedi.me,.icanhazip.com",
         "RU_FORCE_DIRECT_IP_CIDR": "",
         "RU_BLOCK_IP_CIDR": "",
         "RULESET_DIR": "/var/lib/vpn-stack/rules",
@@ -336,6 +341,11 @@ def _merge_csv_defaults(existing_value: str, default_value: str) -> str:
     return ",".join(merged)
 
 
+def _normalize_policy_csv(key: str, value: str) -> str:
+    retired = RETIRED_DIRECT_POLICY_VALUES.get(key, frozenset())
+    return ",".join(item for item in _split_csv_values(value) if item.lower() not in retired)
+
+
 def _merge_source_defaults(existing_value: str, default_value: str) -> str:
     merged: list[str] = []
     seen: set[str] = set()
@@ -365,6 +375,7 @@ def merge_env_with_defaults(
     for key in MERGED_CSV_DEFAULT_KEYS:
         if existing.get(key):
             merged[key] = _merge_csv_defaults(existing[key], defaults[key])
+        merged[key] = _normalize_policy_csv(key, merged[key])
     for key in MERGED_SOURCE_DEFAULT_KEYS:
         if existing.get(key):
             merged[key] = _merge_source_defaults(existing[key], defaults[key])
@@ -388,7 +399,10 @@ def apply_ru_direct_overlays(env: dict[str, str], env_path: Path | None) -> dict
         overlay_items = _split_overlay_values(read_text(path))
         if not overlay_items:
             continue
-        effective[env_key] = _merge_csv_defaults(effective.get(env_key, ""), ",".join(overlay_items))
+        effective[env_key] = _normalize_policy_csv(
+            env_key,
+            _merge_csv_defaults(effective.get(env_key, ""), ",".join(overlay_items)),
+        )
     return effective
 
 

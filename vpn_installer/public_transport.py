@@ -85,7 +85,7 @@ def render_public_selector(*, tag: str = PUBLIC_SELECTOR_TAG) -> dict[str, Any]:
     return {
         "type": "urltest",
         "tag": tag,
-        "outbounds": [PUBLIC_HY2_OUTBOUND_TAG, PUBLIC_VLESS_OUTBOUND_TAG],
+        "outbounds": [PUBLIC_VLESS_OUTBOUND_TAG, PUBLIC_HY2_OUTBOUND_TAG],
         "url": PUBLIC_URLTEST_URL,
         "interval": PUBLIC_URLTEST_INTERVAL,
         "tolerance": PUBLIC_URLTEST_TOLERANCE_MS,

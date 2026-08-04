@@ -10,7 +10,7 @@ from pathlib import Path
 from ..common import INSTALL_SCRIPT_PATH, ROOT_DIR
 from ..models import ROLE_FOREIGN, ROLE_RU
 from ..render import render_all_artifacts
-from .runner import AUDIT_IMAGE, AuditFailure, AuditRunner, write_text
+from .runner import AUDIT_COMMAND_TIMEOUT_SECONDS, AUDIT_IMAGE, AuditFailure, AuditRunner, write_text
 
 
 def run(runner: AuditRunner) -> None:
@@ -18,10 +18,7 @@ def run(runner: AuditRunner) -> None:
     runner.record("docker-unmanaged-remove-purge-render-only", lambda: test_unmanaged_remove_purge_render_only(runner))
     runner.record("docker-asset-fail-fast", lambda: test_asset_fail_fast(runner))
     runner.record("docker-install-rollback-state", lambda: test_install_rollback_state(runner))
-    runner.record("docker-status-readonly-role", lambda: test_status_readonly_role(runner))
-    runner.record("docker-remote-action-reinstall-role", lambda: test_remote_action_role(runner, "reinstall"))
-    runner.record("docker-remote-action-remove-role", lambda: test_remote_action_role(runner, "remove"))
-    runner.record("docker-remote-action-purge-role", lambda: test_remote_action_role(runner, "purge"))
+    runner.record("docker-role-scoped-workflows", lambda: test_role_scoped_workflows(runner))
 
 
 def test_unmanaged_remove_purge_render_only(runner: AuditRunner) -> dict[str, str]:
@@ -231,7 +228,13 @@ def test_install_rollback_state(runner: AuditRunner) -> dict[str, str]:
 def prepare_mock_state(runner: AuditRunner, action: str) -> tuple[Path, Path]:
     env_path, env = runner.create_env(
         f"mock-{action}",
-        {"WG_INTERFACE": "wg-test", "RU_PUBLIC_IP": "203.0.113.10", "FOREIGN_PUBLIC_IP": "198.51.100.20"},
+        {
+            "WG_INTERFACE": "wg-test",
+            "RU_PUBLIC_IP": "203.0.113.10",
+            "FOREIGN_PUBLIC_IP": "198.51.100.20",
+            "RU_GEOSITE_URL": "file:///work/fixtures/geosite-ru.srs",
+            "RU_GEOIP_URL": "file:///work/fixtures/geoip-ru.srs",
+        },
     )
     state_dir = runner.work_dir / f"state-{action}"
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -380,89 +383,56 @@ def write_mock_ssh_scripts(base_dir: Path, *, allow_foreign: bool = False) -> tu
     return ssh_path, scp_path
 
 
-def test_status_readonly_role(runner: AuditRunner) -> dict[str, str]:
-    env_path, state_path = prepare_mock_state(runner, "status")
-    temp_repo = runner.work_dir / "mock-status"
+def test_role_scoped_workflows(runner: AuditRunner) -> dict[str, str]:
+    scenarios = ("status", "reinstall", "remove", "purge")
+    fixtures = {action: prepare_mock_state(runner, action) for action in scenarios}
+    temp_repo = runner.work_dir / "mock-role-scoped"
     deploy_dir = temp_repo / "deployments"
     state_dir = temp_repo / "state"
     deploy_dir.mkdir(parents=True, exist_ok=True)
     state_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(env_path, deploy_dir / env_path.name)
-    shutil.copy2(state_path, state_dir / state_path.name)
+    for env_path, state_path in fixtures.values():
+        shutil.copy2(env_path, deploy_dir / env_path.name)
+        shutil.copy2(state_path, state_dir / state_path.name)
     write_mock_ssh_scripts(temp_repo)
-    container = f"audit-status-{runner.run_id}"
-    with runner.docker_container(container, "python:3.13"):
-        runner.docker_exec(container, "mkdir -p /work/deployments /work/state /work/fakebin")
-        runner.docker_copy(container, ROOT_DIR / "vpn_installer", "/work")
-        runner.docker_copy(container, deploy_dir / env_path.name, f"/work/deployments/{env_path.name}")
-        runner.docker_copy(container, state_dir / state_path.name, f"/work/state/{state_path.name}")
-        runner.docker_copy(container, temp_repo / "fakebin" / "ssh", "/work/fakebin/ssh")
-        runner.docker_copy(container, temp_repo / "fakebin" / "scp", "/work/fakebin/scp")
-        runner.docker_exec(
-            container,
-            textwrap.dedent(
-                f"""\
-                set -euo pipefail
-                chmod +x /work/fakebin/ssh /work/fakebin/scp
-                : > /work/calls.log
-                env_before=$(stat -c %Y /work/deployments/{env_path.name})
-                state_before=$(stat -c %Y /work/state/{state_path.name})
-                PATH=/work/fakebin:$PATH PYTHONPATH=/work python3 -m vpn_installer status --deployment {env_path.stem} --role ru-gateway >/work/status.out
-                env_after=$(stat -c %Y /work/deployments/{env_path.name})
-                state_after=$(stat -c %Y /work/state/{state_path.name})
-                test "$env_before" = "$env_after"
-                test "$state_before" = "$state_after"
-                grep -q "ru.example" /work/calls.log
-                if grep -q "foreign.example" /work/calls.log; then
-                  exit 41
-                fi
-                grep -q "vpn-stack-agent.py snapshot" /work/calls.log
-                """
-            ),
-        )
-    return {"deployment": env_path.stem}
-
-
-def test_remote_action_role(runner: AuditRunner, action: str) -> dict[str, str]:
-    env_path, state_path = prepare_mock_state(runner, action)
-    temp_repo = runner.work_dir / f"mock-{action}"
-    deploy_dir = temp_repo / "deployments"
-    state_dir = temp_repo / "state"
-    deploy_dir.mkdir(parents=True, exist_ok=True)
-    state_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(env_path, deploy_dir / env_path.name)
-    shutil.copy2(state_path, state_dir / state_path.name)
-    write_mock_ssh_scripts(temp_repo)
+    status_env, status_state = fixtures["status"]
+    action_rows = [(action, fixtures[action][0].stem) for action in scenarios if action != "status"]
     driver = textwrap.dedent(
         f"""\
-        import vpn_installer.prompts as prompts
+        from pathlib import Path
+
         import vpn_installer.workflows as wf
 
-        answers = iter([True])
+        status_env = Path("/work/deployments/{status_env.name}")
+        status_state = Path("/work/state/{status_state.name}")
+        before = (status_env.stat().st_mtime_ns, status_state.stat().st_mtime_ns)
+        status_rc = wf.status_workflow("{status_env.stem}", "ru-gateway", non_interactive=True)
+        after = (status_env.stat().st_mtime_ns, status_state.stat().st_mtime_ns)
+        if before != after:
+            raise RuntimeError("status mutated deployment env or state")
+        print(f"scenario=status rc={{status_rc}}", flush=True)
 
-        def fake_prompt_yes_no(label: str, default: bool = True) -> bool:
-            return next(answers)
-
-        def fake_prompt_choice(label: str, options, default: str):
-            if "подключением" in label:
-                return "reuse"
-            return default
-
-        wf.prompt_yes_no = fake_prompt_yes_no
-        prompts.prompt_choice = fake_prompt_choice
-        rc = wf.remote_action_workflow("{env_path.stem}", "ru-gateway", "{action}")
-        print(f"rc={{rc}}")
+        for action, deployment in {action_rows!r}:
+            rc = wf.remote_action_workflow(
+                deployment,
+                "ru-gateway",
+                action,
+                non_interactive=True,
+                yes=True,
+            )
+            print(f"scenario={{action}} rc={{rc}}", flush=True)
         """
     )
     driver_path = temp_repo / "driver.py"
     write_text(driver_path, driver)
-    container = f"audit-{action}-{runner.run_id}"
+    container = f"audit-role-scoped-{runner.run_id}"
     with runner.docker_container(container, "python:3.13"):
-        runner.docker_exec(container, "mkdir -p /work/deployments /work/state /work/fakebin")
+        runner.docker_exec(container, "mkdir -p /work/deployments /work/state /work/fakebin /work/fixtures")
         runner.docker_copy(container, INSTALL_SCRIPT_PATH, "/work/install.sh")
         runner.docker_copy(container, ROOT_DIR / "vpn_installer", "/work")
-        runner.docker_copy(container, deploy_dir / env_path.name, f"/work/deployments/{env_path.name}")
-        runner.docker_copy(container, state_dir / state_path.name, f"/work/state/{state_path.name}")
+        for env_path, state_path in fixtures.values():
+            runner.docker_copy(container, deploy_dir / env_path.name, f"/work/deployments/{env_path.name}")
+            runner.docker_copy(container, state_dir / state_path.name, f"/work/state/{state_path.name}")
         runner.docker_copy(container, temp_repo / "fakebin" / "ssh", "/work/fakebin/ssh")
         runner.docker_copy(container, temp_repo / "fakebin" / "scp", "/work/fakebin/scp")
         runner.docker_copy(container, driver_path, "/work/driver.py")
@@ -471,21 +441,25 @@ def test_remote_action_role(runner: AuditRunner, action: str) -> dict[str, str]:
             textwrap.dedent(
                 f"""\
                 set -euo pipefail
-                mkdir -p /work/out/{env_path.stem}/assets
-                echo dummy >/work/out/{env_path.stem}/assets/geosite-ru.srs
-                echo dummy >/work/out/{env_path.stem}/assets/geoip-ru.srs
-                echo 203.0.113.0/24 >/work/out/{env_path.stem}/assets/ru-ipv4.zone
-                echo 2001:db8::/32 >/work/out/{env_path.stem}/assets/ru-ipv6.zone
+                echo geosite >/work/fixtures/geosite-ru.srs
+                echo geoip >/work/fixtures/geoip-ru.srs
                 chmod +x /work/fakebin/ssh /work/fakebin/scp
                 : > /work/calls.log
                 PATH=/work/fakebin:$PATH PYTHONPATH=/work python3 /work/driver.py >/work/driver.out
-                grep -q "rc=0" /work/driver.out
+                grep -q "scenario=status rc=0" /work/driver.out
+                grep -q "scenario=reinstall rc=0" /work/driver.out
+                grep -q "scenario=remove rc=0" /work/driver.out
+                grep -q "scenario=purge rc=0" /work/driver.out
                 grep -q "ru.example" /work/calls.log
                 if grep -q "foreign.example" /work/calls.log; then
                   exit 42
                 fi
                 grep -q "vpn-stack-agent.py snapshot" /work/calls.log
+                grep -q -- "--action reinstall" /work/calls.log
+                grep -q -- "--action remove" /work/calls.log
+                grep -q -- "--action purge" /work/calls.log
                 """
             ),
+            timeout_seconds=AUDIT_COMMAND_TIMEOUT_SECONDS,
         )
-    return {"action": action, "deployment": env_path.stem}
+    return {"scenarios": ",".join(scenarios), "container": container}

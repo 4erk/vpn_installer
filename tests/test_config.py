@@ -201,8 +201,10 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("ipv4-internet.yandex.net", env["RU_FORCE_DIRECT_DOMAIN"])
         self.assertNotIn("ipv6-internet.yandex.net", env["RU_FORCE_DIRECT_DOMAIN"])
         self.assertIn("2ip.ru", env["RU_FORCE_DIRECT_DOMAIN"])
+        self.assertNotIn("mtalk.google.com", env["RU_FORCE_DIRECT_DOMAIN"])
         self.assertIn(".ipify.org", env["RU_FORCE_DIRECT_DOMAIN_SUFFIX"])
         self.assertIn(".ipinfo.io", env["RU_FORCE_DIRECT_DOMAIN_SUFFIX"])
+        self.assertNotIn(".gstatic.com", env["RU_FORCE_DIRECT_DOMAIN_SUFFIX"])
         self.assertEqual(env["RU_BLOCK_IP_CIDR"], "")
         self.assertNotIn("RU_BLOCK_QUIC", env)
         self.assertEqual(env["CLIENT_ENABLE_IPV6"], "0")
@@ -235,8 +237,8 @@ class ConfigTests(unittest.TestCase):
     def test_merge_env_with_defaults_appends_new_direct_domain_defaults(self) -> None:
         merged = config.merge_env_with_defaults(
             {
-                "RU_FORCE_DIRECT_DOMAIN": "api.oneme.ru,legacy.example",
-                "RU_FORCE_DIRECT_DOMAIN_SUFFIX": ".legacy.example,.ipify.org",
+                "RU_FORCE_DIRECT_DOMAIN": "api.oneme.ru,legacy.example,mtalk.google.com",
+                "RU_FORCE_DIRECT_DOMAIN_SUFFIX": ".legacy.example,.ipify.org,.gstatic.com",
             },
             "sample",
         )
@@ -247,9 +249,11 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("2ip.ru", domains)
         self.assertIn("ip.mail.ru", domains)
         self.assertEqual(domains.count("api.oneme.ru"), 1)
+        self.assertNotIn("mtalk.google.com", domains)
         self.assertIn(".legacy.example", suffixes)
         self.assertIn(".ipify.org", suffixes)
         self.assertEqual(suffixes.count(".ipify.org"), 1)
+        self.assertNotIn(".gstatic.com", suffixes)
 
     def test_merge_env_with_defaults_removes_legacy_network_defaults(self) -> None:
         block_merged = config.merge_env_with_defaults(
@@ -299,7 +303,7 @@ class ConfigTests(unittest.TestCase):
             (Path(tmp) / "demo.ru-direct-cidrs.txt").write_text("203.0.113.0/24\n198.51.100.10/32\n", encoding="utf-8")
             merged = config.apply_ru_direct_overlays(env, env_path)
         self.assertEqual(merged["RU_FORCE_DIRECT_DOMAIN"], "api.oneme.ru,example.com,another.example")
-        self.assertEqual(merged["RU_FORCE_DIRECT_DOMAIN_SUFFIX"], ".gstatic.com,.example.com")
+        self.assertEqual(merged["RU_FORCE_DIRECT_DOMAIN_SUFFIX"], ".example.com")
         self.assertEqual(merged["RU_FORCE_DIRECT_IP_CIDR"], "203.0.113.0/24,198.51.100.10/32")
 
     def test_critical_env_view_includes_expected_keys(self) -> None:

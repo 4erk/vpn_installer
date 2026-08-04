@@ -98,7 +98,7 @@ class AuditModuleTests(unittest.TestCase):
                 {
                     "type": "urltest",
                     "tag": "ru-gateway",
-                    "outbounds": ["ru-gateway-quic", "ru-gateway-tcp"],
+                    "outbounds": ["ru-gateway-tcp", "ru-gateway-quic"],
                     "interrupt_exist_connections": False,
                 }
             ]
@@ -153,7 +153,7 @@ class AuditModuleTests(unittest.TestCase):
         runner = FakeRunner()
         audit_docker.run(runner)  # type: ignore[arg-type]
         self.assertIn("docker-unmanaged-remove-purge-render-only", runner.records)
-        self.assertIn("docker-remote-action-purge-role", runner.records)
+        self.assertIn("docker-role-scoped-workflows", runner.records)
 
     def test_lab_builders_return_expected_content(self) -> None:
         self.assertIn("address=/ya.ru/", audit_lab.build_lab_dnsmasq())

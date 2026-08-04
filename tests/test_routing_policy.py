@@ -19,6 +19,7 @@ class RoutingPolicyTests(unittest.TestCase):
         self.assertEqual(policy.classes["ipv4_literal_foreign"].outbound, "to-foreign")
         self.assertEqual(policy.classes["ipv6_literal_foreign"].outbound, "to-foreign")
         self.assertEqual(policy.classes["domain_foreign"].outbound, "to-foreign")
+        self.assertEqual(policy.classes["global_foreign"].outbound, "to-foreign")
         self.assertNotIn("resolved_ru_ip", policy.classes)
         self.assertNotIn("client_dns_dot", policy.classes)
 
@@ -61,15 +62,27 @@ class RoutingPolicyTests(unittest.TestCase):
         rules = build_ru_routing_policy(self.make_env()).route_rules
         direct_resolve_index = next(i for i, rule in enumerate(rules) if rule.get("action") == "resolve" and rule.get("rule_set") == ["ru-geosite"])
         direct_route_index = next(i for i, rule in enumerate(rules) if rule.get("outbound") == "direct-ru" and rule.get("rule_set") == ["ru-geosite"])
-        foreign_resolve_index = next(i for i, rule in enumerate(rules) if rule.get("action") == "resolve" and rule.get("server") == "dns-global")
+        foreign_resolve_index = next(
+            i
+            for i, rule in enumerate(rules)
+            if rule.get("action") == "resolve"
+            and rule.get("server") == "dns-global"
+            and "domain_regex" in rule
+        )
         foreign_route_index = next(i for i, rule in enumerate(rules) if rule.get("outbound") == "to-foreign" and "domain_regex" in rule)
-        connectivity_resolve_index = next(i for i, rule in enumerate(rules) if rule.get("action") == "resolve" and "domain" in rule)
-        connectivity_route_index = next(i for i, rule in enumerate(rules) if rule.get("outbound") == "direct-ru" and "domain" in rule)
+        global_resolve_index = next(
+            i
+            for i, rule in enumerate(rules)
+            if rule.get("action") == "resolve"
+            and rule.get("server") == "dns-global"
+            and "mtalk.google.com" in rule.get("domain", [])
+        )
+        direct_exact_route_index = next(i for i, rule in enumerate(rules) if rule.get("outbound") == "direct-ru" and "domain" in rule)
         private_indexes = [i for i, rule in enumerate(rules) if rule.get("ip_is_private") is True]
         self.assertTrue(any(direct_resolve_index < i < direct_route_index for i in private_indexes))
         self.assertTrue(any(foreign_resolve_index < i < foreign_route_index for i in private_indexes))
-        self.assertLess(connectivity_resolve_index, connectivity_route_index)
-        self.assertLess(connectivity_route_index, direct_resolve_index)
+        self.assertLess(global_resolve_index, direct_exact_route_index)
+        self.assertLess(direct_exact_route_index, direct_resolve_index)
         self.assertLess(direct_route_index, foreign_resolve_index)
         self.assertEqual(sum(rule.get("rule_set") == ["ru-geoip"] for rule in rules), 1)
 
@@ -89,6 +102,29 @@ class RoutingPolicyTests(unittest.TestCase):
         routed_domains = [domain for rule in policy.dns_rules if rule.get("action") == "route" for domain in rule.get("domain", [])]
         self.assertIn("ipv6-internet.yandex.net", rejected["domain"])
         self.assertNotIn("ipv6-internet.yandex.net", routed_domains)
+
+    def test_global_services_cannot_leak_from_legacy_direct_policy(self) -> None:
+        env = self.make_env()
+        env["RU_FORCE_DIRECT_DOMAIN"] += ",mtalk.google.com,www.msftconnecttest.com"
+        env["RU_FORCE_DIRECT_DOMAIN_SUFFIX"] += ",.gstatic.com"
+        policy = build_ru_routing_policy(env)
+        direct_domains = {
+            domain.lower()
+            for rule in policy.route_rules
+            if rule.get("outbound") == "direct-ru"
+            for domain in rule.get("domain", [])
+        }
+        direct_suffixes = {
+            suffix.lower()
+            for rule in policy.route_rules
+            if rule.get("outbound") == "direct-ru"
+            for suffix in rule.get("domain_suffix", [])
+        }
+        self.assertTrue({"mtalk.google.com", "www.msftconnecttest.com"}.isdisjoint(direct_domains))
+        self.assertNotIn(".gstatic.com", direct_suffixes)
+        global_routes = [rule for rule in policy.route_rules if rule.get("outbound") == "to-foreign"]
+        self.assertTrue(any("mtalk.google.com" in rule.get("domain", []) for rule in global_routes))
+        self.assertTrue(any(".gstatic.com" in rule.get("domain_suffix", []) for rule in global_routes))
 
     def test_private_addresses_including_tun_dot_reject_without_dns_override(self) -> None:
         rules = build_ru_routing_policy(self.make_env()).route_rules

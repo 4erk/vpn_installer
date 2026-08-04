@@ -1,8 +1,13 @@
 from __future__ import annotations
 
-CONNECTIVITY_CHECK_DIRECT_DOMAINS = (
+GLOBAL_FOREIGN_DOMAINS = (
     "www.msftconnecttest.com",
     "www.msftncsi.com",
+    "mtalk.google.com",
+)
+
+GLOBAL_FOREIGN_DOMAIN_SUFFIXES = (
+    ".gstatic.com",
 )
 
 CONNECTIVITY_CHECK_IPV6_ONLY_DOMAINS = (
@@ -11,15 +16,4 @@ CONNECTIVITY_CHECK_IPV6_ONLY_DOMAINS = (
     "ipv6-internet.yandex.net",
 )
 
-CONNECTIVITY_CHECK_DOMAINS = CONNECTIVITY_CHECK_DIRECT_DOMAINS + CONNECTIVITY_CHECK_IPV6_ONLY_DOMAINS
-
-
-def merged_domains(*groups: list[str] | tuple[str, ...]) -> list[str]:
-    domains: list[str] = []
-    seen: set[str] = set()
-    for group in groups:
-        for domain in group:
-            if domain not in seen:
-                seen.add(domain)
-                domains.append(domain)
-    return domains
+CONNECTIVITY_CHECK_DOMAINS = GLOBAL_FOREIGN_DOMAINS[:2] + CONNECTIVITY_CHECK_IPV6_ONLY_DOMAINS
