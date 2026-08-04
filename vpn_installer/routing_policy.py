@@ -15,7 +15,7 @@ from .interserver_transport import (
     derive_transport_password,
 )
 
-POLICY_VERSION = "0.14.1"
+POLICY_VERSION = "0.14.2"
 
 TRAFFIC_CLASSES = (
     "ru_direct_domain",
@@ -234,16 +234,16 @@ def build_ru_routing_policy(env: dict[str, str]) -> RoutingPolicy:
             routes=({"ip_cidr": ["0.0.0.0/0"], "action": "route", "outbound": "to-foreign"},),
         ),
     )
-    wireguard_fallback = {
+    wireguard_primary = {
         "type": "direct",
-        "tag": TRANSPORT_FALLBACK_TAG,
+        "tag": TRANSPORT_PRIMARY_TAG,
         "bind_interface": env["WG_INTERFACE"],
         "routing_mark": int(env["APP_ROUTE_MARK"]),
         "domain_resolver": {"server": "dns-ru-direct", "strategy": "ipv4_only"},
     }
-    resilient_primary = {
+    resilient_fallback = {
         "type": "hysteria2",
-        "tag": TRANSPORT_PRIMARY_TAG,
+        "tag": TRANSPORT_FALLBACK_TAG,
         "server": env["FOREIGN_PUBLIC_IP"],
         "server_port": HY2_PORT,
         "obfs": {"type": "salamander", "password": derive_transport_obfs_password(env["WG_PRESHARED_KEY"])},
@@ -263,8 +263,8 @@ def build_ru_routing_policy(env: dict[str, str]) -> RoutingPolicy:
     }
     outbounds = (
         {"type": "direct", "tag": "direct-ru", "domain_resolver": {"server": "dns-ru-direct", "strategy": "ipv4_only"}},
-        resilient_primary,
-        wireguard_fallback,
+        wireguard_primary,
+        resilient_fallback,
         adaptive_foreign,
     )
     deprecated = tuple(

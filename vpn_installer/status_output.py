@@ -39,7 +39,6 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
     if snapshot.role == "ru-gateway" and snapshot.front:
         lines.append(
             "public front liveness: "
-            f"tcp_user_timeout_ms={snapshot.front.get('tcp_user_timeout_ms', '-')}, "
             f"keepalive_idle_s={snapshot.front.get('tcp_keepalive_idle_seconds', '-')}, "
             f"keepalive_interval_s={snapshot.front.get('tcp_keepalive_interval_seconds', '-')}"
         )

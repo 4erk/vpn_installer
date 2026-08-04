@@ -95,6 +95,7 @@ class AuditQuickTests(unittest.TestCase):
             def __init__(self) -> None:
                 self.records: list[str] = []
                 self.skips: list[str] = []
+                self.actions = {}
                 self.run_dir = Path(tempfile.mkdtemp())
                 self.mode = "all"
 
@@ -107,20 +108,28 @@ class AuditQuickTests(unittest.TestCase):
             def ensure_audit_image(self) -> None:
                 self.records.append("ensure-audit-image")
 
-            def record(self, name, _fn):
+            def record(self, name, fn):
                 self.records.append(name)
+                self.actions[name] = fn
 
             def skip(self, name, _reason):
                 self.skips.append(name)
 
         fake_runner = FakeRunner()
         docker_info = subprocess.CompletedProcess(["docker", "info"], 0, stdout="ok", stderr="")
-        with patch("vpn_installer.audit.quick.shutil.which", return_value="found"), patch("vpn_installer.audit.quick.subprocess.run", return_value=docker_info), patch("vpn_installer.audit.quick.load_env_file", return_value={"DEPLOY_NAME": "demo"}):
+        with patch("vpn_installer.audit.quick.shutil.which", return_value="found"), patch("vpn_installer.audit.quick.subprocess.run", return_value=docker_info), patch("vpn_installer.audit.quick.load_env_file", return_value={"DEPLOY_NAME": "demo"}), patch("vpn_installer.audit.quick.test_render_all", return_value={"out_dir": "out/demo"}) as render:
             quick.run(fake_runner)
+            self.assertEqual(fake_runner.actions["quick-render-all"](), {"out_dir": "out/demo"})
         self.assertIn("quick-unittest", fake_runner.skips)
         self.assertIn("quick-coverage", fake_runner.records)
         self.assertIn("quick-xray-reality-interop", fake_runner.records)
         self.assertIn("ensure-audit-image", fake_runner.records)
+        render.assert_called_once_with(
+            Path("demo.env"),
+            {"DEPLOY_NAME": "demo"},
+            Path("out/demo"),
+            refresh_assets=False,
+        )
 
     def test_docker_readiness_treats_missing_daemon_as_unavailable(self) -> None:
         docker_info = subprocess.CompletedProcess(["docker", "info"], 1, stdout="", stderr="daemon down\n")

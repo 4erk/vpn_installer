@@ -134,6 +134,12 @@ RETIRED_DIRECT_POLICY_VALUES = {
     "RU_FORCE_DIRECT_DOMAIN_SUFFIX": frozenset({".gstatic.com"}),
 }
 
+TRANSPORT_IDENTITY_KEYS = (
+    "INTERSERVER_HY2_CERTIFICATE_B64",
+    "INTERSERVER_HY2_PRIVATE_KEY_B64",
+    "INTERSERVER_HY2_PUBLIC_KEY_SHA256",
+)
+
 
 def validate_deployment_name(raw_name: str) -> str:
     cleaned = sanitize_name(raw_name)
@@ -219,11 +225,17 @@ def generate_x25519_pair() -> tuple[bytes, bytes]:
     return private_key, x25519_public_from_private(private_key)
 
 
-def generate_default_env(deploy_name: str) -> dict[str, str]:
+def generate_default_env(
+    deploy_name: str,
+    *,
+    transport_identity: dict[str, str] | None = None,
+) -> dict[str, str]:
     reality_private, reality_public = generate_x25519_pair()
     ru_wg_private, ru_wg_public = generate_x25519_pair()
     foreign_wg_private, foreign_wg_public = generate_x25519_pair()
-    transport_identity = generate_transport_identity()
+    if transport_identity is not None and not all(transport_identity.get(key, "").strip() for key in TRANSPORT_IDENTITY_KEYS):
+        raise ValueError("transport identity must be complete")
+    transport_identity = transport_identity or generate_transport_identity()
     return {
         "DEPLOY_NAME": deploy_name,
         "RU_PUBLIC_IP": "",
@@ -363,12 +375,33 @@ def merge_env_with_defaults(
     *,
     fallback_defaults: dict[str, str] | None = None,
 ) -> dict[str, str]:
-    defaults = generate_default_env(deploy_name)
+    existing_transport_identity = (
+        {key: existing[key] for key in TRANSPORT_IDENTITY_KEYS}
+        if all(existing.get(key, "").strip() for key in TRANSPORT_IDENTITY_KEYS)
+        else None
+    )
+    fallback_transport_identity = (
+        {key: fallback_defaults[key] for key in TRANSPORT_IDENTITY_KEYS}
+        if fallback_defaults and all(fallback_defaults.get(key, "").strip() for key in TRANSPORT_IDENTITY_KEYS)
+        else None
+    )
+    defaults = generate_default_env(
+        deploy_name,
+        transport_identity=existing_transport_identity or fallback_transport_identity,
+    )
     if fallback_defaults:
-        defaults.update({key: value for key, value in fallback_defaults.items() if key in defaults})
+        defaults.update(
+            {
+                key: value
+                for key, value in fallback_defaults.items()
+                if key in defaults and key not in TRANSPORT_IDENTITY_KEYS
+            }
+        )
     merged = defaults.copy()
     for key, value in existing.items():
         if key in DEPRECATED_ENV_KEYS:
+            continue
+        if key in TRANSPORT_IDENTITY_KEYS and existing_transport_identity is None:
             continue
         if value or key in ALLOW_EMPTY_OVERRIDE:
             merged[key] = value

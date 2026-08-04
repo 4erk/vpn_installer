@@ -23,13 +23,13 @@ class RoutingPolicyTests(unittest.TestCase):
         self.assertNotIn("resolved_ru_ip", policy.classes)
         self.assertNotIn("client_dns_dot", policy.classes)
 
-    def test_policy_has_resilient_primary_and_wireguard_fallback_without_artificial_timeouts(self) -> None:
+    def test_policy_has_wireguard_primary_and_hysteria_fallback_without_artificial_timeouts(self) -> None:
         parts = build_ru_routing_policy(self.make_env()).singbox_parts()
         outbounds = {outbound["tag"]: outbound for outbound in parts["outbounds"]}
         self.assertEqual(set(outbounds), {"direct-ru", "to-foreign-hy2", "to-foreign-wg", "to-foreign"})
-        self.assertEqual(outbounds["to-foreign"]["outbounds"], ["to-foreign-hy2", "to-foreign-wg"])
+        self.assertEqual(outbounds["to-foreign"]["outbounds"], ["to-foreign-wg", "to-foreign-hy2"])
         self.assertEqual(outbounds["to-foreign"]["type"], "selector")
-        self.assertEqual(outbounds["to-foreign"]["default"], "to-foreign-hy2")
+        self.assertEqual(outbounds["to-foreign"]["default"], "to-foreign-wg")
         self.assertEqual(outbounds["to-foreign-hy2"]["type"], "hysteria2")
         self.assertEqual(outbounds["to-foreign-hy2"]["obfs"]["type"], "salamander")
         self.assertNotIn("up_mbps", outbounds["to-foreign-hy2"])

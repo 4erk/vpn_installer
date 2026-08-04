@@ -46,7 +46,7 @@ class StatusOutputTests(unittest.TestCase):
                         "qdisc": "fq",
                         "mtu_probing": 1,
                         "mtu_probe_floor": 536,
-                        "metrics_save_disabled": 1,
+                        "metrics_save_disabled": 0,
                         "probe_interval_seconds": 600,
                         "udp_rmem_default": 8388608,
                         "udp_rmem_max": 16777216,
@@ -81,11 +81,11 @@ class StatusOutputTests(unittest.TestCase):
                 },
                 transport={
                     "interserver": {
-                        "mode": "priority-hysteria2-wireguard",
+                        "mode": "priority-wireguard-hysteria2",
                         "hysteria_session_active": True,
                         "adaptive_state": {"state": "healthy", "reason": "primary transport is healthy"},
                         "selection": {
-                            "selected": "to-foreign-hy2",
+                            "selected": "to-foreign-wg",
                             "selection_pending": False,
                             "candidates": {
                                 "to-foreign-hy2": {"delay_ms": 23},
@@ -110,7 +110,7 @@ class StatusOutputTests(unittest.TestCase):
         self.assertIn("root filesystem: source=/dev/vda1, fs=ext4, state=clean, errors=0, boot_fsck=enabled, verdict=verified", rendered)
         self.assertIn("public front lifetime loss sources: 203.0.113.20", rendered)
         self.assertIn("domain_to_foreign_timeout present", rendered)
-        self.assertIn("tcp adaptation: cc=bbr, qdisc=fq, mtu_probing=1, mtu_floor=536, metrics_cache=disabled, probe_interval_s=600", rendered)
+        self.assertIn("tcp adaptation: cc=bbr, qdisc=fq, mtu_probing=1, mtu_floor=536, metrics_cache=enabled, probe_interval_s=600", rendered)
         self.assertIn("udp_rmem=8388608/16777216", rendered)
         self.assertIn("conntrack: 95/32768 (0.29%)", rendered)
         self.assertIn("xray_front_bypass=active", rendered)
@@ -124,7 +124,7 @@ class StatusOutputTests(unittest.TestCase):
         self.assertIn("tcp recovery deltas: TcpExtTCPSACKReorder=+20, TcpExtTCPDSACKRecv=+7, TcpExtTCPTimeouts=+2", rendered)
         self.assertIn("last front degradation: at=2026-07-20T07:58:00+00:00, sources=203.0.113.20", rendered)
         self.assertIn(
-            "interserver transport: mode=priority-hysteria2-wireguard, selected=to-foreign-hy2, "
+            "interserver transport: mode=priority-wireguard-hysteria2, selected=to-foreign-wg, "
             "candidates=to-foreign-hy2=23ms,to-foreign-wg=74ms, adaptation=healthy, hy2_session=active, "
             "reason=primary transport is healthy",
             rendered,
@@ -158,14 +158,14 @@ class StatusOutputTests(unittest.TestCase):
                     role="ru-gateway",
                     transport={
                         "interserver": {
-                            "mode": "priority-hysteria2-wireguard",
-                            "selection": {"selected": "to-foreign-hy2", "candidates": {"to-foreign-wg": {"delay_ms": None}}},
+                            "mode": "priority-wireguard-hysteria2",
+                            "selection": {"selected": "to-foreign-wg", "candidates": {"to-foreign-hy2": {"delay_ms": None}}},
                         }
                     },
                 )
             )
         )
-        self.assertIn("to-foreign-wg=not-probed", rendered)
+        self.assertIn("to-foreign-hy2=not-probed", rendered)
         self.assertNotIn("Nonems", rendered)
 
     def test_formats_stale_transport_shadow_and_fresh_front_interval(self) -> None:
@@ -188,7 +188,7 @@ class StatusOutputTests(unittest.TestCase):
                     },
                     transport={
                         "interserver": {
-                            "mode": "priority-hysteria2-wireguard",
+                            "mode": "priority-wireguard-hysteria2",
                             "adaptive_state": {
                                 "state": "healthy",
                                 "fresh": False,

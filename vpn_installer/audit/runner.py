@@ -88,6 +88,64 @@ def python_cmd() -> list[str]:
     return [sys.executable]
 
 
+def process_is_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+
+        process_query_limited_information = 0x1000
+        handle = ctypes.windll.kernel32.OpenProcess(process_query_limited_information, False, pid)
+        if not handle:
+            return False
+        exit_code = ctypes.c_ulong()
+        queried = ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+        ctypes.windll.kernel32.CloseHandle(handle)
+        return bool(queried) and exit_code.value == 259
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+@contextmanager
+def audit_run_lock(run_id: str, audit_root: Path | None = None):
+    lock_path = ensure_dir(audit_root or AUDIT_ROOT) / ".run.lock"
+    payload = {"pid": os.getpid(), "run_id": run_id, "started_at": utc_stamp()}
+    for _attempt in range(3):
+        try:
+            descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            try:
+                owner = json.loads(lock_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError):
+                owner = {}
+            owner_pid = int(owner.get("pid", 0) or 0)
+            if process_is_running(owner_pid):
+                owner_run = str(owner.get("run_id", "unknown"))
+                raise AuditFailure(f"audit already running: {owner_run} (pid {owner_pid})")
+            lock_path.unlink(missing_ok=True)
+            continue
+        else:
+            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+                json.dump(payload, handle, ensure_ascii=False)
+                handle.write("\n")
+            break
+    else:
+        raise AuditFailure("could not acquire audit lock")
+
+    try:
+        yield
+    finally:
+        try:
+            owner = json.loads(lock_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            owner = {}
+        if owner.get("pid") == payload["pid"] and owner.get("run_id") == run_id:
+            lock_path.unlink(missing_ok=True)
+
+
 class AuditRunner:
     def __init__(self, mode: str, keep_docker: bool = False, json_output: bool = False) -> None:
         self.mode = mode
@@ -134,20 +192,21 @@ class AuditRunner:
         quick_checks = importlib.import_module("vpn_installer.audit.quick")
 
         try:
-            if self.mode == "quick":
-                quick_checks.run(self)
-            elif self.mode == "docker":
-                docker_checks.run(self)
-            elif self.mode == "lab":
-                lab_checks.run(self)
-            elif self.mode == "interop":
-                quick_checks.run_interop(self)
-            elif self.mode == "all":
-                quick_checks.run(self)
-                docker_checks.run(self)
-                lab_checks.run(self)
-            else:
-                raise AuditFailure(f"Неизвестный режим: {self.mode}")
+            with audit_run_lock(self.run_id, self.run_dir.parent):
+                if self.mode == "quick":
+                    quick_checks.run(self)
+                elif self.mode == "docker":
+                    docker_checks.run(self)
+                elif self.mode == "lab":
+                    lab_checks.run(self)
+                elif self.mode == "interop":
+                    quick_checks.run_interop(self)
+                elif self.mode == "all":
+                    quick_checks.run(self)
+                    docker_checks.run(self)
+                    lab_checks.run(self)
+                else:
+                    raise AuditFailure(f"Неизвестный режим: {self.mode}")
         except Exception as exc:  # noqa: BLE001
             self.failures += 1
             self.note(f"FAIL: {exc}")
@@ -326,7 +385,15 @@ class AuditRunner:
         inspect = subprocess.run(["docker", "image", "inspect", AUDIT_IMAGE], capture_output=True, text=True, check=False, timeout=AUDIT_DOCKER_TIMEOUT_SECONDS)
         if inspect.returncode == 0:
             version = subprocess.run(
-                ["docker", "run", "--rm", AUDIT_IMAGE, "bash", "-lc", "sing-box version | awk 'NR == 1 {print $3}'"],
+                [
+                    "docker",
+                    "run",
+                    "--rm",
+                    AUDIT_IMAGE,
+                    "bash",
+                    "-lc",
+                    "python3 -c 'import cryptography' && sing-box version | awk 'NR == 1 {print $3}'",
+                ],
                 capture_output=True,
                 text=True,
                 check=False,
@@ -354,6 +421,7 @@ class AuditRunner:
                 nftables \
                 procps \
                 python3 \
+                python3-cryptography \
                 tar \
                 wireguard-tools \
                 && rm -rf /var/lib/apt/lists/*
@@ -436,24 +504,42 @@ class AuditRunner:
 
     def cleanup_stale_lab_resources(self) -> None:
         containers = subprocess.run(
-            ["docker", "ps", "-a", "--filter", "label=vpn-installer.audit=1", "--format", "{{.Names}}"],
+            [
+                "docker",
+                "ps",
+                "-a",
+                "--filter",
+                "label=vpn-installer.audit=1",
+                "--format",
+                '{{.Names}}|{{.Label "vpn-installer.audit.run"}}',
+            ],
             capture_output=True,
             text=True,
             check=False,
             timeout=AUDIT_DOCKER_TIMEOUT_SECONDS,
         )
-        for name in containers.stdout.splitlines():
-            if name:
+        for row in containers.stdout.splitlines():
+            name, _, run_id = row.partition("|")
+            if name and run_id != self.run_id:
                 subprocess.run(["docker", "rm", "-f", name], capture_output=True, text=True, check=False, timeout=AUDIT_DOCKER_TIMEOUT_SECONDS)
         networks = subprocess.run(
-            ["docker", "network", "ls", "--filter", "label=vpn-installer.audit=1", "--format", "{{.Name}}"],
+            [
+                "docker",
+                "network",
+                "ls",
+                "--filter",
+                "label=vpn-installer.audit=1",
+                "--format",
+                '{{.Name}}|{{.Label "vpn-installer.audit.run"}}',
+            ],
             capture_output=True,
             text=True,
             check=False,
             timeout=AUDIT_DOCKER_TIMEOUT_SECONDS,
         )
-        for name in networks.stdout.splitlines():
-            if name:
+        for row in networks.stdout.splitlines():
+            name, _, run_id = row.partition("|")
+            if name and run_id != self.run_id:
                 subprocess.run(["docker", "network", "rm", name], capture_output=True, text=True, check=False, timeout=AUDIT_DOCKER_TIMEOUT_SECONDS)
 
     def docker_copy(self, container: str, source: Path, destination: str) -> None:
@@ -475,7 +561,15 @@ class AuditRunner:
     ):
         if image == AUDIT_IMAGE:
             self.ensure_audit_image()
-        args = ["create", "--name", name, "--label", "vpn-installer.audit=1"]
+        args = [
+            "create",
+            "--name",
+            name,
+            "--label",
+            "vpn-installer.audit=1",
+            "--label",
+            f"vpn-installer.audit.run={self.run_id}",
+        ]
         if privileged:
             args.append("--privileged")
         if network:
@@ -512,7 +606,16 @@ class AuditRunner:
 
     @contextmanager
     def docker_network(self, name: str, subnet: str | None = None, gateway: str | None = None):
-        args = ["network", "create", "--label", "vpn-installer.audit=1", "--driver", "bridge"]
+        args = [
+            "network",
+            "create",
+            "--label",
+            "vpn-installer.audit=1",
+            "--label",
+            f"vpn-installer.audit.run={self.run_id}",
+            "--driver",
+            "bridge",
+        ]
         if subnet is not None:
             args.extend(["--subnet", subnet])
         if gateway is not None:
@@ -543,7 +646,7 @@ class AuditRunner:
     def _docker_cleanup(self, name: str, args: list[str]) -> None:
         completed = self.docker(name, args, expect_code=0, expected_codes={0, 1})
         output = f"{completed.stdout}\n{completed.stderr}".lower()
-        if completed.returncode == 1 and "not found" not in output:
+        if completed.returncode == 1 and not any(token in output for token in ("not found", "already in progress")):
             raise AuditFailure(f"{name}: cleanup failed unexpectedly.\nstdout/stderr saved in logs.")
 
 

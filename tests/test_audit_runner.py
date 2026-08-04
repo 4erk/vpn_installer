@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 import subprocess
 import tempfile
 import types
@@ -63,6 +65,24 @@ class AuditRunnerTests(unittest.TestCase):
         fake_quick.run_interop.assert_called_once_with(interop_runner)
         fake_docker.run.assert_not_called()
         fake_lab.run.assert_not_called()
+
+    def test_audit_lock_rejects_a_live_owner_and_reclaims_stale_owner(self) -> None:
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        lock = root / ".run.lock"
+        with patch.object(audit_runner, "AUDIT_ROOT", root):
+            lock.write_text(json.dumps({"pid": os.getpid(), "run_id": "active"}), encoding="utf-8")
+            with self.assertRaisesRegex(audit_runner.AuditFailure, "audit already running: active"):
+                with audit_runner.audit_run_lock("second"):
+                    pass
+
+            lock.write_text(json.dumps({"pid": 999_999_999, "run_id": "stale"}), encoding="utf-8")
+            with patch.object(audit_runner, "process_is_running", return_value=False):
+                with audit_runner.audit_run_lock("replacement"):
+                    owner = json.loads(lock.read_text(encoding="utf-8"))
+                    self.assertEqual(owner["run_id"], "replacement")
+            self.assertFalse(lock.exists())
 
     def test_runner_run_invalid_mode_fails(self) -> None:
         runner = self.make_runner("nope")
@@ -189,9 +209,9 @@ class AuditRunnerTests(unittest.TestCase):
         def fake_run(args, **_kwargs):
             calls.append(args)
             if args[:5] == ["docker", "ps", "-a", "--filter", "label=vpn-installer.audit=1"]:
-                return completed(0, stdout="ru-123-all\nclient-123-lab\n")
+                return completed(0, stdout=f"ru-current|{runner.run_id}\nru-123-all|old\nclient-123-lab|\n")
             if args[:5] == ["docker", "network", "ls", "--filter", "label=vpn-installer.audit=1"]:
-                return completed(0, stdout="audit-front-123-all\naudit-ru-123-lab\n")
+                return completed(0, stdout=f"audit-current|{runner.run_id}\naudit-front-123-all|old\naudit-ru-123-lab|\n")
             return completed(0)
 
         with patch("vpn_installer.audit.runner.subprocess.run", side_effect=fake_run):
@@ -200,6 +220,8 @@ class AuditRunnerTests(unittest.TestCase):
         self.assertIn(["docker", "rm", "-f", "client-123-lab"], calls)
         self.assertIn(["docker", "network", "rm", "audit-front-123-all"], calls)
         self.assertIn(["docker", "network", "rm", "audit-ru-123-lab"], calls)
+        self.assertNotIn(["docker", "rm", "-f", "ru-current"], calls)
+        self.assertNotIn(["docker", "network", "rm", "audit-current"], calls)
 
     def test_docker_helpers_delegate(self) -> None:
         runner = self.make_runner()
@@ -226,6 +248,15 @@ class AuditRunnerTests(unittest.TestCase):
         runner = self.make_runner()
         with patch.object(runner, "docker", return_value=completed(1, stderr="Error response from daemon: network demo not found")):
             runner._docker_cleanup("network-rm-demo", ["network", "rm", "demo"])
+
+    def test_docker_cleanup_accepts_an_idempotent_removal_in_progress(self) -> None:
+        runner = self.make_runner()
+        with patch.object(
+            runner,
+            "docker",
+            return_value=completed(1, stderr="Error response from daemon: removal of container demo is already in progress"),
+        ):
+            runner._docker_cleanup("rm-demo", ["rm", "-f", "demo"])
 
     def test_docker_cleanup_raises_for_other_errors(self) -> None:
         runner = self.make_runner()

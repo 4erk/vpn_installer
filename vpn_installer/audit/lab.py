@@ -15,6 +15,7 @@ from ..render import (
     render_ru_wg,
 )
 from .runner import AUDIT_IMAGE, AuditFailure, AuditRunner, write_text
+from .quick import seed_quick_asset_cache
 
 LAB_FRONT_SUBNET = "198.18.0.0/24"
 LAB_RU_SUBNET = "203.0.113.0/24"
@@ -138,10 +139,11 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
             "FOREIGN_BLOCK_RU": "1",
         },
     )
-    runner.seed_foreign_block_cache(env["DEPLOY_NAME"])
-    render_all_artifacts(env_path, env)
-    env = load_env_file(env_path)
     out_dir = OUT_DIR / env["DEPLOY_NAME"]
+    runner.seed_foreign_block_cache(env["DEPLOY_NAME"])
+    seed_quick_asset_cache(env, out_dir)
+    render_all_artifacts(env_path, env, fetch_assets_first=False)
+    env = load_env_file(env_path)
 
     front = f"audit-front-{runner.run_id}"
     ru_lan = f"audit-ru-{runner.run_id}"

@@ -10,14 +10,14 @@ HY2_PORT = 18443
 HY2_SERVER_NAME = "vpn-stack.internal"
 HY2_CLASH_API_LISTEN = "127.0.0.1:19090"
 TRANSPORT_SELECTOR_TAG = "to-foreign"
-TRANSPORT_PRIMARY_TAG = "to-foreign-hy2"
-TRANSPORT_FALLBACK_TAG = "to-foreign-wg"
+TRANSPORT_PRIMARY_TAG = "to-foreign-wg"
+TRANSPORT_FALLBACK_TAG = "to-foreign-hy2"
 TRANSPORT_HEALTHCHECK_URL = "https://1.1.1.1/cdn-cgi/trace"
 TRANSPORT_PROBE_TIMEOUT_MS = 1200
 TRANSPORT_PROBE_INTERVAL_SECONDS = 2
 TRANSPORT_FAILURE_CONFIRMATIONS = 2
 TRANSPORT_PRIMARY_RECOVERY_SUCCESSES = 2
-TRANSPORT_STATE_SCHEMA_VERSION = 3
+TRANSPORT_STATE_SCHEMA_VERSION = 4
 
 
 def _normalize_probe(probe: dict[str, Any] | None) -> dict[str, Any]:
@@ -132,7 +132,7 @@ def generate_transport_identity() -> dict[str, str]:
 
     from .runtime_deps import ensure_python_package
 
-    ensure_python_package("cryptography", "cryptography>=45,<47")
+    ensure_python_package("cryptography", "cryptography>=41,<47")
     from cryptography import x509
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import ed25519
@@ -171,7 +171,7 @@ def generate_transport_identity() -> dict[str, str]:
 def validate_transport_identity(env: dict[str, str]) -> None:
     from .runtime_deps import ensure_python_package
 
-    ensure_python_package("cryptography", "cryptography>=45,<47")
+    ensure_python_package("cryptography", "cryptography>=41,<47")
     from cryptography import x509
     from cryptography.hazmat.primitives import serialization
 
@@ -192,8 +192,13 @@ def validate_transport_identity(env: dict[str, str]) -> None:
         raise ValueError("interserver transport certificate pin does not match")
     if HY2_SERVER_NAME not in names:
         raise ValueError("interserver transport certificate name does not match")
+    not_before = getattr(certificate, "not_valid_before_utc", None)
+    not_after = getattr(certificate, "not_valid_after_utc", None)
+    if not_before is None or not_after is None:
+        not_before = certificate.not_valid_before.replace(tzinfo=timezone.utc)
+        not_after = certificate.not_valid_after.replace(tzinfo=timezone.utc)
     now = datetime.now(timezone.utc)
-    if not certificate.not_valid_before_utc <= now <= certificate.not_valid_after_utc:
+    if not not_before <= now <= not_after:
         raise ValueError("interserver transport certificate is not currently valid")
 
 

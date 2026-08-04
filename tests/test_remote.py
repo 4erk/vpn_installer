@@ -386,7 +386,7 @@ class RemoteTests(unittest.TestCase):
                         "qdisc": "fq",
                         "mtu_probing": 1,
                         "mtu_probe_floor": 536,
-                        "metrics_save_disabled": 1,
+                        "metrics_save_disabled": 0,
                         "probe_interval_seconds": 600,
                     },
                 },
@@ -432,7 +432,7 @@ class RemoteTests(unittest.TestCase):
                     "tcp_default_qdisc": "fq",
                     "tcp_mtu_probing": "1",
                     "tcp_mtu_probe_floor": "536",
-                    "tcp_metrics_save_disabled": "1",
+                    "tcp_metrics_save_disabled": "0",
                     "tcp_probe_interval_seconds": "600",
                 },
             )
@@ -444,7 +444,7 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("front retransmission scope: lifetime counters of currently open sockets", output)
         self.assertIn(
             "tcp adaptation: cc=bbr, qdisc=fq, mtu_probing=1, mtu_floor=536, "
-            "metrics_save_disabled=1, probe_interval_s=600",
+            "metrics_save_disabled=0, probe_interval_s=600",
             output,
         )
     def test_ensure_remote_privilege_paths(self) -> None:

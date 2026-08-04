@@ -158,6 +158,33 @@ class ConfigTests(unittest.TestCase):
         ):
             self.assertEqual(merged[key], local[key])
 
+    def test_merge_complete_env_does_not_regenerate_transport_identity(self) -> None:
+        existing = config.generate_default_env("sample")
+        with patch.object(
+            config,
+            "generate_transport_identity",
+            side_effect=AssertionError("existing identity must be reused"),
+        ):
+            merged = config.merge_env_with_defaults(existing, "sample")
+
+        for key in config.TRANSPORT_IDENTITY_KEYS:
+            self.assertEqual(merged[key], existing[key])
+
+    def test_merge_does_not_mix_partial_and_fallback_transport_identities(self) -> None:
+        fallback = config.generate_default_env("sample")
+        existing = {"INTERSERVER_HY2_CERTIFICATE_B64": "partial-invalid-certificate"}
+        merged = config.merge_env_with_defaults(existing, "sample", fallback_defaults=fallback)
+
+        for key in config.TRANSPORT_IDENTITY_KEYS:
+            self.assertEqual(merged[key], fallback[key])
+
+    def test_generate_defaults_rejects_a_partial_transport_identity(self) -> None:
+        with self.assertRaisesRegex(ValueError, "transport identity must be complete"):
+            config.generate_default_env(
+                "sample",
+                transport_identity={"INTERSERVER_HY2_CERTIFICATE_B64": "partial"},
+            )
+
     def test_default_ru_listen_port_stays_public_443(self) -> None:
         env = config.generate_default_env("sample")
         self.assertEqual(env["RU_LISTEN_PORT"], "443")

@@ -68,10 +68,18 @@ ACCEPTANCE_OBSERVED_TARGETS = ("https://telegram.org/",)
 PROBE_CONFIRMATION_DELAY_SECONDS = 2
 EXTERNAL_CAPABILITY_REQUIREMENTS = frozenset({"ipv6_literal", "ipv6_literal_via_router"})
 OPTIONAL_TRANSPORT_REQUIREMENTS = frozenset(
-    {"via_wg", "foreign_domains_via_wg", "wireguard_fallback_ipv4", "wireguard_fallback_identity"}
+    {
+        "foreign_domains_via_wg",
+        "wireguard_primary_ipv4",
+        "wireguard_primary_identity",
+        "hysteria_fallback_reachable",
+    }
 )
 FRONT_LOSS_MIN_BYTES = 1_000_000
 FRONT_LOSS_DEGRADED_PERCENT = 2.0
+FRONT_INTERVAL_LOSS_MIN_BYTES = 256 * 1024
+FRONT_INTERVAL_LOSS_MIN_RETRANSMISSIONS = 3
+FRONT_INTERVAL_LOSS_DEGRADED_PERCENT = 1.0
 FRONT_SMALL_FLOW_MIN_BYTES = 8_192
 FRONT_SMALL_FLOW_MIN_RETRANSMISSIONS = 3
 FRONT_SMALL_FLOW_DEGRADED_PERCENT = 10.0
@@ -80,6 +88,13 @@ FRONT_RTT_DEGRADED_MS = 250
 FRONT_RTT_INFLATION_FACTOR = 3
 FRONT_RTO_DEGRADED_MS = 1_000
 FRONT_COUNTER_MAX_INTERVAL_SECONDS = 300
+INTERFACE_RX_DROP_MIN_PACKETS = 10_000
+INTERFACE_RX_DROP_MIN_DROPS = 10
+INTERFACE_RX_DROP_DEGRADED_PERCENT = 0.02
+HOST_TCP_MIN_OUT_SEGMENTS = 100
+HOST_TCP_MIN_RETRANSMISSIONS = 3
+HOST_TCP_RETRANSMIT_DEGRADED_PERCENT = 2.0
+HOST_TCP_TIMEOUT_DEGRADED_COUNT = 3
 PROBLEM_LOG_GREP = (
     "ERROR|FATAL|processed invalid connection|accepted tcp:disabled[.]invalid|"
     "connection rejected|mux connection closed|EOF|connection reset|using outbound/vless"
@@ -853,8 +868,9 @@ def front_interval_metrics(counters: dict[str, int]) -> dict[str, Any]:
     activity_bytes = max(counters["bytes_sent"], counters["bytes_retrans"])
     ratio = round(counters["bytes_retrans"] * 100 / activity_bytes, 3) if activity_bytes else 0.0
     degraded = (
-        activity_bytes >= FRONT_LOSS_MIN_BYTES
-        and ratio >= FRONT_LOSS_DEGRADED_PERCENT
+        activity_bytes >= FRONT_INTERVAL_LOSS_MIN_BYTES
+        and counters["retransmissions"] >= FRONT_INTERVAL_LOSS_MIN_RETRANSMISSIONS
+        and ratio >= FRONT_INTERVAL_LOSS_DEGRADED_PERCENT
     ) or (
         activity_bytes >= FRONT_SMALL_FLOW_MIN_BYTES
         and counters["retransmissions"] >= FRONT_SMALL_FLOW_MIN_RETRANSMISSIONS
@@ -960,7 +976,6 @@ def xray_front_socket_policy(port: int) -> dict[str, int]:
         for output_name, config_name in (
             ("tcp_keepalive_idle_seconds", "tcpKeepAliveIdle"),
             ("tcp_keepalive_interval_seconds", "tcpKeepAliveInterval"),
-            ("tcp_user_timeout_ms", "tcpUserTimeout"),
         ):
             try:
                 result[output_name] = int(sockopt.get(config_name, 0))
@@ -1389,9 +1404,9 @@ def interserver_transport_snapshot(role: str, env: dict[str, str]) -> dict[str, 
         primary = outbounds.get(TRANSPORT_PRIMARY_TAG, {})
         fallback = outbounds.get(TRANSPORT_FALLBACK_TAG, {})
         candidates = group.get("outbounds", []) if isinstance(group, dict) else []
-        server = str(primary.get("server", "")) if isinstance(primary, dict) else ""
+        server = str(fallback.get("server", "")) if isinstance(fallback, dict) else ""
         try:
-            port = int(primary.get("server_port", 0)) if isinstance(primary, dict) else 0
+            port = int(fallback.get("server_port", 0)) if isinstance(fallback, dict) else 0
         except (TypeError, ValueError):
             port = 0
         session_active = False
@@ -1410,15 +1425,15 @@ def interserver_transport_snapshot(role: str, env: dict[str, str]) -> dict[str, 
             and candidates == [TRANSPORT_PRIMARY_TAG, TRANSPORT_FALLBACK_TAG]
             and group.get("default") == TRANSPORT_PRIMARY_TAG
             and group.get("interrupt_exist_connections") is False
-            and primary.get("type") == "hysteria2"
-            and primary.get("obfs", {}).get("type") == "salamander"
-            and fallback.get("type") == "direct"
-            and bool(primary.get("tls", {}).get("certificate_public_key_sha256"))
+            and primary.get("type") == "direct"
+            and fallback.get("type") == "hysteria2"
+            and fallback.get("obfs", {}).get("type") == "salamander"
+            and bool(fallback.get("tls", {}).get("certificate_public_key_sha256"))
         )
         selection = selector_selection_snapshot(config)
         return {
             "configured": configured,
-            "mode": "priority-hysteria2-wireguard",
+            "mode": "priority-wireguard-hysteria2",
             "primary": TRANSPORT_PRIMARY_TAG,
             "fallback": TRANSPORT_FALLBACK_TAG,
             "server": server,
@@ -1838,6 +1853,7 @@ def run_probes(env: dict[str, str], role: str, profile: str) -> dict[str, Any]:
         identities["router"] = probe_identity(proxy="socks5h://127.0.0.1:2080")
     private_reject = probe_private_reject("socks5h://127.0.0.1:2080") if role == "ru-gateway" else {"ok": True, "not_applicable": True}
     if role == "ru-gateway":
+        hysteria_fallback = transport_candidate_probe(HY2_CLASH_API_LISTEN, TRANSPORT_FALLBACK_TAG)
         required_paths: dict[str, list[dict[str, Any]]] = {
             "ru_direct_identity": [identities["direct"]],
             "foreign_domains_via_wg": required_domain_results(via_wg),
@@ -1845,8 +1861,9 @@ def run_probes(env: dict[str, str], role: str, profile: str) -> dict[str, Any]:
             "ipv4_literal_via_foreign": [literal_router[0]],
             "ipv6_literal_via_router": [literal_router[1]],
             "egress_identities": [identities["router"]],
-            "wireguard_fallback_ipv4": [literal_wg[0]],
-            "wireguard_fallback_identity": [identities["via_wg"]],
+            "wireguard_primary_ipv4": [literal_wg[0]],
+            "wireguard_primary_identity": [identities["via_wg"]],
+            "hysteria_fallback_reachable": [hysteria_fallback],
             "private_fake_reject": [private_reject],
         }
     else:
@@ -1858,6 +1875,7 @@ def run_probes(env: dict[str, str], role: str, profile: str) -> dict[str, Any]:
         }
     requirements = {name: all(item["ok"] for item in items) for name, items in required_paths.items()}
     gate_requirements = release_gate_requirements(requirements)
+    failed_names = {name for name, passed in requirements.items() if passed is not True}
     result.update(
         {
             "identities": identities,
@@ -1865,6 +1883,10 @@ def run_probes(env: dict[str, str], role: str, profile: str) -> dict[str, Any]:
             "ipv6_literal": {"direct": literal_direct[1], "via_wg": literal_wg[1] if literal_wg else None, "router": literal_router[1] if literal_router else None},
             "blocked_private_fake": private_reject,
             "requirements": requirements,
+            "capability_failures": {
+                "external": sorted(failed_names & EXTERNAL_CAPABILITY_REQUIREMENTS),
+                "transport": sorted(failed_names & OPTIONAL_TRANSPORT_REQUIREMENTS),
+            },
             "ok": all(requirements.values()),
             "release_gate_requirements": gate_requirements,
             "release_gate_ok": all(gate_requirements.values()),
@@ -2174,13 +2196,13 @@ def snapshot(*, live_probes: bool = False, profile: str = "light", full_logs: bo
     if public_front == "degraded":
         degradations.append(f"public_front={client_observation}")
     if transport_failures:
-        degradations.append(f"fallback_transport_failed:{','.join(transport_failures)}")
+        degradations.append(f"transport_capability_failed:{','.join(transport_failures)}")
     if host_integrity in {"degraded", "inconclusive"}:
         degradations.append(f"host_integrity={host_integrity}:{root_filesystem.get('reason') or 'unknown'}")
     selected_transport = str(interserver.get("selection", {}).get("selected", ""))
     router_path_ok = probe_path_ok(probes, "router", "foreign_domains_via_router")
-    if role == "ru-gateway" and live_probes and router_path_ok and selected_transport == "to-foreign-wg":
-        degradations.append("interserver_selected=to-foreign-wg")
+    if role == "ru-gateway" and live_probes and router_path_ok and selected_transport == TRANSPORT_FALLBACK_TAG:
+        degradations.append(f"interserver_selected={TRANSPORT_FALLBACK_TAG}")
     recent_conntrack_full = int(conntrack.get("table_full_events", {}).get("5", 0))
     if recent_conntrack_full:
         degradations.append(f"conntrack_table_full_5m={recent_conntrack_full}")
@@ -2232,7 +2254,7 @@ def snapshot(*, live_probes: bool = False, profile: str = "light", full_logs: bo
             "egress": {"available": False, "healthy_exits": healthy_exits, "reason": "single foreign egress configured"},
             "transport": {
                 "available": bool(interserver.get("configured")),
-                "selected": selected_transport or ("to-foreign-hy2" if interserver.get("listening") else ""),
+                "selected": selected_transport or (TRANSPORT_FALLBACK_TAG if interserver.get("listening") else ""),
             },
         },
         "verdicts": {"server_path": server_path, "public_front": public_front, "public_quic": public_quic, "client_observation": client_observation, "closing_churn": closing_churn, "host_integrity": host_integrity, "external_capabilities": external_capabilities, "overall": overall, "reasons": reasons + degradations + ([f"host_integrity=failed:{root_filesystem.get('reason') or 'unknown'}"] if host_integrity == "failed" else [])},
@@ -2396,6 +2418,28 @@ def network_soft_reasons(deltas: dict[str, Any]) -> list[str]:
     missed = sum(int(values.get("rx_missed_errors", 0)) for values in deltas.get("interfaces", {}).values())
     if missed:
         reasons.append(f"interface_rx_missed={missed}")
+    for name, counters in sorted(deltas.get("interfaces", {}).items()):
+        packets = int(counters.get("rx_packets", 0))
+        dropped = int(counters.get("rx_dropped", 0))
+        ratio = dropped * 100 / packets if packets else 0.0
+        if (
+            packets >= INTERFACE_RX_DROP_MIN_PACKETS
+            and dropped >= INTERFACE_RX_DROP_MIN_DROPS
+            and ratio >= INTERFACE_RX_DROP_DEGRADED_PERCENT
+        ):
+            reasons.append(f"interface_rx_dropped={name}:{dropped}/{packets}({ratio:.3f}%)")
+    tcp_out = int(protocol.get("TcpOutSegs", 0))
+    tcp_retrans = int(protocol.get("TcpRetransSegs", 0))
+    tcp_retrans_ratio = tcp_retrans * 100 / tcp_out if tcp_out else 0.0
+    if (
+        tcp_out >= HOST_TCP_MIN_OUT_SEGMENTS
+        and tcp_retrans >= HOST_TCP_MIN_RETRANSMISSIONS
+        and tcp_retrans_ratio >= HOST_TCP_RETRANSMIT_DEGRADED_PERCENT
+    ):
+        reasons.append(f"tcp_retransmissions={tcp_retrans}/{tcp_out}({tcp_retrans_ratio:.3f}%)")
+    tcp_timeouts = int(protocol.get("TcpExtTCPTimeouts", 0))
+    if tcp_timeouts >= HOST_TCP_TIMEOUT_DEGRADED_COUNT:
+        reasons.append(f"tcp_timeouts={tcp_timeouts}")
     return reasons
 
 

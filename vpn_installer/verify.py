@@ -9,7 +9,6 @@ from . import workflows
 from .common import OUT_DIR, print_header
 from .diagnostics import DiagnosticsSnapshot
 from .models import (
-    PUBLIC_FRONT_TCP_USER_TIMEOUT_MS,
     ROLE_FOREIGN,
     ROLE_RU,
     TCP_MTU_PROBE_FLOOR,
@@ -18,7 +17,7 @@ from .models import (
     UDP_RMEM_MAX,
     UDP_WMEM_MAX,
 )
-from .public_transport import PUBLIC_SELECTOR_TAG, render_public_hy2_outbound
+from .public_transport import PUBLIC_HY2_OUTBOUND_TAG, render_public_hy2_outbound
 from .remote import remote_agent_snapshot, scp_upload, ssh_capture
 from .roles import requested_roles
 from .vless_verify import (
@@ -61,8 +60,11 @@ def _verify_snapshot(snapshot: DiagnosticsSnapshot) -> DiagnosticsSnapshot:
         hard_failures.append(f"xray={snapshot.services.get('xray')}")
     if snapshot.role == ROLE_RU and snapshot.services.get("transport") != "active":
         hard_failures.append(f"transport={snapshot.services.get('transport') or 'missing'}")
-    if snapshot.role == ROLE_RU and snapshot.front.get("tcp_user_timeout_ms") != PUBLIC_FRONT_TCP_USER_TIMEOUT_MS:
-        hard_failures.append("public TCP front liveness policy is missing")
+    if snapshot.role == ROLE_RU and (
+        snapshot.front.get("tcp_keepalive_idle_seconds") != 90
+        or snapshot.front.get("tcp_keepalive_interval_seconds") != 15
+    ):
+        hard_failures.append("public TCP front keepalive policy is missing")
     if snapshot.drift == "server-mutated":
         hard_failures.append("installed config hash differs from render manifest")
     elif snapshot.drift == "unknown":
@@ -75,7 +77,7 @@ def _verify_snapshot(snapshot: DiagnosticsSnapshot) -> DiagnosticsSnapshot:
     if tcp_adaptation and tcp_adaptation.get("mtu_probe_floor") != TCP_MTU_PROBE_FLOOR:
         degradations.append("TCP PLPMTUD floor is not active")
     if tcp_adaptation and tcp_adaptation.get("metrics_save_disabled") != TCP_NO_METRICS_SAVE:
-        degradations.append("TCP destination metrics isolation is not active")
+        degradations.append("TCP destination metrics cache is not active")
     try:
         rmem_default = int(tcp_adaptation.get("udp_rmem_default", 0))
         rmem_max = int(tcp_adaptation.get("udp_rmem_max", 0))
@@ -118,7 +120,13 @@ def _verify_snapshot(snapshot: DiagnosticsSnapshot) -> DiagnosticsSnapshot:
         if snapshot.route_probes.get("release_gate_ok") is not True:
             hard_failures.append("acceptance release gate failed")
         elif snapshot.route_probes.get("ok") is not True:
-            degradations.append("external capability probe failed")
+            capability_failures = snapshot.route_probes.get("capability_failures", {})
+            transport_failures = capability_failures.get("transport", []) if isinstance(capability_failures, dict) else []
+            external_failures = capability_failures.get("external", []) if isinstance(capability_failures, dict) else []
+            if transport_failures:
+                degradations.append("transport capability probe failed: " + ",".join(map(str, transport_failures)))
+            if external_failures or not transport_failures:
+                degradations.append("external capability probe failed")
     elif snapshot.route_probes.get("ok") is not True:
         hard_failures.append("acceptance probes failed")
     if hard_failures:
@@ -436,8 +444,8 @@ def _verify_public_hysteria2(env: dict[str, str], foreign_target, *, throughput_
     payload = {
         "log": {"level": "warn", "timestamp": True},
         "inbounds": [{"type": "mixed", "listen": "127.0.0.1", "listen_port": 18080, "tag": "verify-in"}],
-        "outbounds": [render_public_hy2_outbound(env, tag=PUBLIC_SELECTOR_TAG)],
-        "route": {"final": PUBLIC_SELECTOR_TAG},
+        "outbounds": [render_public_hy2_outbound(env)],
+        "route": {"final": PUBLIC_HY2_OUTBOUND_TAG},
     }
     run_result = _run_external_public_profile(
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n",

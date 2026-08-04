@@ -15,7 +15,7 @@ from ..common import OUT_DIR, ROOT_DIR, RUNTIME_SITE_PACKAGES
 from ..config import load_env_file
 from ..dns_policy import GLOBAL_FOREIGN_DOMAINS, GLOBAL_FOREIGN_DOMAIN_SUFFIXES
 from ..manifest import XRAY_VERSION
-from ..public_transport import PUBLIC_HY2_OUTBOUND_TAG, PUBLIC_SELECTOR_TAG, PUBLIC_VLESS_OUTBOUND_TAG
+from ..public_transport import PUBLIC_HY2_OUTBOUND_TAG
 from ..render import find_cached_asset, render_all_artifacts
 from ..runtime_deps import ensure_python_package
 from ..targets import build_target
@@ -160,7 +160,7 @@ def run(runner: AuditRunner) -> None:
             env_path,
             env,
             out_dir,
-            refresh_assets=dev_mode,
+            refresh_assets=False,
         ),
     )
     runner.record("quick-validate-json", lambda: test_validate_json(out_dir))
@@ -387,11 +387,16 @@ def test_user_artifacts(out_dir: Path) -> dict[str, str]:
     if hiddify_payload.get("inbounds", [{}])[0].get("auto_redirect") is not False:
         raise AuditFailure("Hiddify profile должен отключать auto_redirect")
     hiddify_outbounds = {item.get("tag"): item for item in hiddify_payload.get("outbounds", []) if isinstance(item, dict)}
-    selector = hiddify_outbounds.get(PUBLIC_SELECTOR_TAG, {})
-    if selector.get("type") != "urltest" or selector.get("outbounds") != [PUBLIC_VLESS_OUTBOUND_TAG, PUBLIC_HY2_OUTBOUND_TAG]:
-        raise AuditFailure("Hiddify profile не содержит ожидаемый primary VLESS / fallback QUIC urltest")
-    if selector.get("interrupt_exist_connections") is not False:
-        raise AuditFailure("Hiddify adaptive selector не должен обрывать существующие соединения")
+    public_transport = hiddify_outbounds.get(PUBLIC_HY2_OUTBOUND_TAG, {})
+    if public_transport.get("type") != "hysteria2":
+        raise AuditFailure("Hiddify profile не содержит ожидаемый QUIC transport")
+    if any(item.get("type") == "urltest" for item in hiddify_payload.get("outbounds", []) if isinstance(item, dict)):
+        raise AuditFailure("Hiddify profile не должен использовать latency-based urltest как failover")
+    if hiddify_payload.get("route", {}).get("final") != PUBLIC_HY2_OUTBOUND_TAG:
+        raise AuditFailure("Hiddify profile не закрепляет default route за QUIC transport")
+    dns_servers = hiddify_payload.get("dns", {}).get("servers", [])
+    if not dns_servers or dns_servers[0].get("detour") != PUBLIC_HY2_OUTBOUND_TAG:
+        raise AuditFailure("Hiddify profile не закрепляет remote DNS за QUIC transport")
     if linux_payload.get("inbounds", [{}])[0].get("auto_redirect") is not True:
         raise AuditFailure("Linux sing-box profile должен включать auto_redirect")
     linux_payload["inbounds"][0]["auto_redirect"] = False
@@ -590,16 +595,16 @@ def test_interserver_hysteria_runtime(runner: AuditRunner, out_dir: Path) -> dic
     server_config_path = out_dir / "preview" / "foreign" / "sing-box.json"
 
     ru_config = json.loads((out_dir / "preview" / "ru" / "sing-box.json").read_text(encoding="utf-8"))
-    primary = next(
+    hysteria_fallback = next(
         (item for item in ru_config.get("outbounds", []) if item.get("tag") == "to-foreign-hy2"),
         None,
     )
-    if not isinstance(primary, dict) or primary.get("type") != "hysteria2":
-        raise AuditFailure("RU config не содержит Hysteria2 primary outbound")
-    if primary.get("obfs", {}).get("type") != "salamander":
-        raise AuditFailure("Interserver Hysteria2 primary не содержит Salamander obfs")
-    primary = dict(primary)
-    primary["server"] = server_ip
+    if not isinstance(hysteria_fallback, dict) or hysteria_fallback.get("type") != "hysteria2":
+        raise AuditFailure("RU config не содержит Hysteria2 fallback outbound")
+    if hysteria_fallback.get("obfs", {}).get("type") != "salamander":
+        raise AuditFailure("Interserver Hysteria2 fallback не содержит Salamander obfs")
+    hysteria_fallback = dict(hysteria_fallback)
+    hysteria_fallback["server"] = server_ip
     selector = {
         "type": "selector",
         "tag": "to-foreign",
@@ -610,7 +615,7 @@ def test_interserver_hysteria_runtime(runner: AuditRunner, out_dir: Path) -> dic
     client_config = {
         "log": {"level": "info", "timestamp": True},
         "inbounds": [{"type": "mixed", "tag": "probe-in", "listen": "0.0.0.0", "listen_port": 1080}],
-        "outbounds": [primary, selector],
+        "outbounds": [hysteria_fallback, selector],
         "route": {"final": "to-foreign"},
         "experimental": ru_config["experimental"],
     }

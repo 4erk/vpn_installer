@@ -6,6 +6,28 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.14.2] - 2026-08-04
+
+### Fixed
+
+- Основным межсерверным transport снова стал измеренно стабильный WireGuard. Hysteria2 сохранён как автоматически проверяемый резерв: после двух подтверждённых отказов WG selector переводит только новые соединения на Hysteria2 и возвращается после двух успешных WG-проб, не прерывая существующие потоки и не используя RU-direct.
+- Из публичного Xray inbound удалён socket-local `TCP_USER_TIMEOUT=30s`. Он преждевременно завершал established-потоки при краткой потере подтверждений и не устранял наблюдавшийся `FIN-WAIT-1`; штатные TCP recovery и keepalive снова отвечают за восстановление соединения.
+- Восстановлено кеширование TCP destination metrics (`tcp_no_metrics_save=0`). Installer больше не выполняет безусловный `ip tcp_metrics flush all`, поэтому частые короткие Reality-соединения сохраняют выученные RTT/MSS, а PLPMTUD по-прежнему адаптируется к реальному path failure.
+- Fresh-interval диагностика публичного TCP-front больше не ждёт накопления одного мегабайта lifetime-трафика: подтверждённые retransmissions и loss ratio классифицируются в текущем health cycle. Интерфейсные RX drops, host-wide TCP retransmissions и TCP timeouts выводятся как soft degradation и никогда сами не запускают restart или смену маршрута.
+- В управляемых sing-box и Xray client JSON multiplex явно выключен. Это исключает объединение независимых загрузок в один VLESS substream; основной простой VLESS URI при этом не меняется.
+- Audit runner получил атомарный repository lock и run-specific Docker labels. Параллельный или переживший timeout процесс больше не удаляет контейнеры другого запуска; stale cleanup пропускает ресурсы текущего run, а уже начатое идемпотентное удаление не считается дефектом dataplane.
+- Полный audit больше не зависит от повторного скачивания rule assets из внешних CDN: runtime/render проверки используют уже проверенный локальный cache, а отказ и rollback загрузки остаются отдельным Docker-сценарием. Это убирает три последовательных TLS timeout из каждого запуска без сокращения acceptance-покрытия.
+- Загрузка уже существующего deployment env больше не генерирует и не устанавливает через PyPI новую межсерверную certificate identity, которая затем всё равно перезаписывалась сохранённой. Identity обрабатывается как атомарный набор: полная существующая сохраняется, полная fallback используется для миграции, а несовместимые частичные фрагменты не смешиваются.
+- Единый audit image теперь обязательно проверяется на наличие `cryptography`, а role-scoped workflow использует его вместо голого `python:3.13`; transport certificate валидируется без runtime-установки из PyPI. Lab dataplane после явного seed также использует только локальные assets, поэтому внешний network outage больше не превращается в многоминутный тестовый timeout.
+- Проверка transport certificate поддерживает timezone-aware validity API `cryptography 41..46`; Ubuntu 24.04 package больше не падает на поле, появившемся только в поздних версиях, при этом проверки соответствия cert/key, pin, SAN и срока действия сохранены.
+- Из Hiddify/sing-box JSON удалён latency-based `urltest`. Физический A/B показал, что он может выбрать кратковременно быстрый TCP path, но не повторяет зависший запрос по QUIC. Управляемые JSON теперь напрямую используют Hysteria2/QUIC для DNS и данных; неиспользуемый VLESS outbound и selector knobs удалены.
+
+### Changed
+
+- Agent, status, verifier и тесты используют одну семантику `WireGuard primary -> Hysteria2 fallback`; transport state schema повышена до `4`, policy/version — до `0.14.2`.
+- Hiddify/sing-box JSON для деградирующего TCP path стал детерминированным Hysteria2/QUIC-профилем. Имена артефактов сохранены; основной `vless-uri.txt` остаётся отдельным Reality/TCP-контрактом для сетей без UDP.
+- Основной `out/1/client/vless-uri.txt`, публичный Reality/Vision front, web-admin и server-side split routing не изменены.
+
 ## [0.14.1] - 2026-08-04
 
 ### Fixed

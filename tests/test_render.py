@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from vpn_installer.config import generate_default_env
 from vpn_installer import render
+from vpn_installer.public_transport import PUBLIC_HY2_OUTBOUND_TAG
 import json
 
 
@@ -62,6 +63,7 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(outbound["streamSettings"]["realitySettings"]["fingerprint"], "chrome")
         self.assertEqual(outbound["streamSettings"]["realitySettings"]["publicKey"], env["RU_REALITY_PUBLIC_KEY"])
         self.assertEqual(outbound["streamSettings"]["realitySettings"]["shortId"], env["RU_REALITY_SHORT_ID"])
+        self.assertEqual(outbound["mux"], {"enabled": False})
         self.assertEqual(
             payload["routing"]["rules"][0],
             {"type": "field", "ip": ["::/0"], "outboundTag": "block"},
@@ -79,7 +81,7 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(set(servers), {"dns-remote"})
         self.assertNotIn("reverse_mapping", payload["dns"])
         self.assertEqual(payload["dns"]["rules"], [{"query_type": ["AAAA"], "action": "reject"}])
-        self.assertEqual(payload["route"]["final"], "ru-gateway")
+        self.assertEqual(payload["route"]["final"], PUBLIC_HY2_OUTBOUND_TAG)
         self.assertEqual(payload["route"]["default_domain_resolver"]["server"], "dns-remote")
         self.assertEqual(payload["route"]["rules"][0], {"inbound": ["tun-in"], "action": "sniff", "timeout": "1s"})
         self.assertEqual(payload["route"]["rules"][1]["ip_version"], 6)
@@ -98,7 +100,7 @@ class RenderTests(unittest.TestCase):
         payload = json.loads(render.render_client_profile(env, auto_redirect=False, android_safe=True))
         self.assertEqual(payload["inbounds"][0]["address"], [env["CLIENT_TUN_ADDRESS_V4"]])
         self.assertTrue(payload["route"]["override_android_vpn"])
-        self.assertEqual(payload["route"]["final"], "ru-gateway")
+        self.assertEqual(payload["route"]["final"], PUBLIC_HY2_OUTBOUND_TAG)
         self.assertEqual(
             payload["inbounds"][0]["route_exclude_address"][:2],
             [f"{env['RU_PUBLIC_IP']}/32", f"{env['FOREIGN_PUBLIC_IP']}/32"],
@@ -137,7 +139,7 @@ class RenderTests(unittest.TestCase):
         self.assertNotIn("multiplex", payload["inbounds"][0])
         self.assertEqual(
             payload["inbounds"][0]["streamSettings"]["sockopt"],
-            {"tcpKeepAliveIdle": 90, "tcpKeepAliveInterval": 15, "tcpUserTimeout": 30_000},
+            {"tcpKeepAliveIdle": 90, "tcpKeepAliveInterval": 15},
         )
 
     def test_ru_server_config_uses_configured_log_level(self) -> None:
@@ -221,9 +223,9 @@ class RenderTests(unittest.TestCase):
         ipv4_literal_index = next(index for index, rule in enumerate(route_rules) if rule.get("ip_cidr") == ["0.0.0.0/0"])
         raw_ru_geoip_index = next(index for index, rule in enumerate(route_rules) if rule.get("rule_set") == ["ru-geoip"])
         self.assertEqual(set(outbounds), {"direct-ru", "to-foreign-hy2", "to-foreign-wg", "to-foreign"})
-        self.assertEqual(outbounds["to-foreign"]["outbounds"], ["to-foreign-hy2", "to-foreign-wg"])
+        self.assertEqual(outbounds["to-foreign"]["outbounds"], ["to-foreign-wg", "to-foreign-hy2"])
         self.assertEqual(outbounds["to-foreign"]["type"], "selector")
-        self.assertEqual(outbounds["to-foreign"]["default"], "to-foreign-hy2")
+        self.assertEqual(outbounds["to-foreign"]["default"], "to-foreign-wg")
         self.assertFalse(outbounds["to-foreign"]["interrupt_exist_connections"])
         self.assertEqual(outbounds["to-foreign-hy2"]["server"], env["FOREIGN_PUBLIC_IP"])
         self.assertEqual(outbounds["to-foreign-hy2"]["obfs"]["type"], "salamander")
@@ -556,7 +558,7 @@ class RenderTests(unittest.TestCase):
         self.assertIn("net.ipv4.tcp_mtu_probing=1", ru_files["sysctl-vpn-stack.conf"])
         self.assertIn("net.ipv4.tcp_mtu_probing=1", foreign_files["sysctl-vpn-stack.conf"])
         self.assertIn("net.ipv4.tcp_mtu_probe_floor=536", ru_files["sysctl-vpn-stack.conf"])
-        self.assertIn("net.ipv4.tcp_no_metrics_save=1", ru_files["sysctl-vpn-stack.conf"])
+        self.assertIn("net.ipv4.tcp_no_metrics_save=0", ru_files["sysctl-vpn-stack.conf"])
         self.assertIn("net.core.rmem_default=8388608", ru_files["sysctl-vpn-stack.conf"])
         self.assertIn("net.core.rmem_max=16777216", foreign_files["sysctl-vpn-stack.conf"])
         self.assertIn("net.core.wmem_max=16777216", foreign_files["sysctl-vpn-stack.conf"])

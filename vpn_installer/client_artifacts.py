@@ -9,7 +9,7 @@ from typing import Any
 from .common import OUT_DIR, write_text
 from .config import require_env
 from .models import REQUIRED_ENV_VARS
-from .public_transport import render_adaptive_public_outbounds
+from .public_transport import PUBLIC_HY2_OUTBOUND_TAG, render_public_hy2_outbound
 
 
 def _env_int(env: dict[str, str], key: str) -> int:
@@ -55,7 +55,7 @@ def render_client_profile(env: dict[str, str], auto_redirect: bool, *, android_s
                     "server": env["GLOBAL_DOH_SERVER"],
                     "server_port": 443,
                     "path": env["GLOBAL_DOH_PATH"],
-                    "detour": "ru-gateway",
+                    "detour": PUBLIC_HY2_OUTBOUND_TAG,
                     "tls": {"enabled": True, "server_name": env["GLOBAL_DOH_SERVER_NAME"]},
                 },
             ],
@@ -75,7 +75,7 @@ def render_client_profile(env: dict[str, str], auto_redirect: bool, *, android_s
             }
         ],
         "outbounds": [
-            *render_adaptive_public_outbounds(env),
+            render_public_hy2_outbound(env),
             {"type": "direct", "tag": "direct"},
             {"type": "block", "tag": "block"},
         ],
@@ -89,7 +89,7 @@ def render_client_profile(env: dict[str, str], auto_redirect: bool, *, android_s
                 {"ip_is_private": True, "action": "route", "outbound": "direct"},
                 {"domain_suffix": ["local"], "action": "route", "outbound": "direct"},
             ],
-            "final": "ru-gateway",
+            "final": PUBLIC_HY2_OUTBOUND_TAG,
         },
     }
     if android_safe:
@@ -148,6 +148,7 @@ def render_xray_client_profile(env: dict[str, str]) -> str:
                         "spiderX": "/",
                     },
                 },
+                "mux": {"enabled": False},
             },
             {"tag": "direct", "protocol": "freedom"},
             {"tag": "block", "protocol": "blackhole"},
@@ -294,8 +295,8 @@ def render_next_steps(env: dict[str, str], *, out_dir: Path | None = None) -> st
             f"- Нативный v2rayN URI alias: {paths['v2rayn_uri']}",
             f"- Дополнительный Windows/v2rayN Xray JSON: {paths['windows_xray_json']}",
             f"- Дополнительный Android/v2rayNG Xray JSON: {paths['android_xray_json']}",
-            f"- Адаптивный TCP/QUIC профиль для Hiddify: {paths['hiddify_json']}",
-            f"- Адаптивный Android профиль для Hiddify: {paths['android_hiddify_json']}",
+            f"- Устойчивый QUIC профиль для Hiddify: {paths['hiddify_json']}",
+            f"- Устойчивый Android QUIC профиль для Hiddify: {paths['android_hiddify_json']}",
             f"- Windows route bypass helper: {paths['windows_route_bypass']}",
             f"- JSON backup для Linux sing-box: {paths['linux_json']}",
             "",
@@ -304,7 +305,7 @@ def render_next_steps(env: dict[str, str], *, out_dir: Path | None = None) -> st
             f"2. Для v2rayN скопируй строку из {paths['v2rayn_uri'].name} и выбери импорт share link из буфера; это тот же канонический VLESS URI без custom-config слоя.",
             f"3. Если клиенту нужен JSON-импорт, используй {paths['windows_xray_json'].name} или {paths['android_xray_json'].name} как compatibility fallback, а не как обязательный путь.",
             f"4. Если клиентский JSON/TUN начинает отправлять на сервер private/fake IP вместо домена, `vpn status` покажет это в отдельном bucket `blocked_private_fake`.",
-            f"5. Адаптивный профиль TCP Reality + QUIC находится в {paths['hiddify_json'].name} и {paths['android_hiddify_json'].name}; основной URI {paths['hiddify_uri_compat'].name} остаётся совместимым TCP-вариантом.",
+            f"5. Если путь TCP до RU теряет пакеты, используй QUIC профиль {paths['hiddify_json'].name} или {paths['android_hiddify_json'].name}. В нём нет latency-selector: каждый запрос сразу идёт по одному детерминированному transport.",
             f"6. Если сайты висят, сначала смотри серверные группы ошибок: vpn status --deployment {env['DEPLOY_NAME']} --role ru-gateway",
             f"7. Если включён TUN/full VPN и client-check показывает self-tunnel, запусти PowerShell от администратора: .\\{paths['windows_route_bypass'].name}",
             f"8. После install/reinstall запусти live-приёмку: vpn verify live --deployment {env['DEPLOY_NAME']}",

@@ -276,6 +276,48 @@ class ServerAgentTests(unittest.TestCase):
         self.assertEqual(result["soft_reasons"], ["conntrack_table_full_5m=2"])
         recover.assert_not_called()
 
+    def test_network_soft_reasons_report_fresh_interface_and_tcp_loss(self) -> None:
+        reasons = server_agent.network_soft_reasons(
+            {
+                "interfaces": {
+                    "eth0": {
+                        "rx_packets": 24_693,
+                        "rx_dropped": 67,
+                        "rx_missed_errors": 0,
+                    }
+                },
+                "protocol": {
+                    "TcpOutSegs": 171,
+                    "TcpRetransSegs": 26,
+                    "TcpExtTCPTimeouts": 20,
+                },
+                "softnet": {"dropped": 0},
+            }
+        )
+
+        self.assertEqual(
+            reasons,
+            [
+                "interface_rx_dropped=eth0:67/24693(0.271%)",
+                "tcp_retransmissions=26/171(15.205%)",
+                "tcp_timeouts=20",
+            ],
+        )
+
+    def test_network_soft_reasons_ignore_low_volume_counter_noise(self) -> None:
+        reasons = server_agent.network_soft_reasons(
+            {
+                "interfaces": {"eth0": {"rx_packets": 1_000, "rx_dropped": 9}},
+                "protocol": {
+                    "TcpOutSegs": 99,
+                    "TcpRetransSegs": 9,
+                    "TcpExtTCPTimeouts": 2,
+                },
+            }
+        )
+
+        self.assertEqual(reasons, [])
+
     def test_health_log_summary_omits_persistent_flow_counters(self) -> None:
         payload = {
             "schema_version": 2,
@@ -489,7 +531,7 @@ class ServerAgentTests(unittest.TestCase):
                 "net.ipv4.tcp_mtu_probing": "1\n",
                 "net.ipv4.tcp_mtu_probe_floor": "536\n",
                 "net.ipv4.tcp_probe_interval": "600\n",
-                "net.ipv4.tcp_no_metrics_save": "1\n",
+                "net.ipv4.tcp_no_metrics_save": "0\n",
                 "net.core.rmem_default": "8388608\n",
                 "net.core.rmem_max": "16777216\n",
                 "net.core.wmem_max": "16777216\n",
@@ -507,7 +549,7 @@ class ServerAgentTests(unittest.TestCase):
                 "mtu_probing": 1,
                 "mtu_probe_floor": 536,
                 "probe_interval_seconds": 600,
-                "metrics_save_disabled": 1,
+                "metrics_save_disabled": 0,
                 "udp_rmem_default": 8388608,
                 "udp_rmem_max": 16777216,
                 "udp_wmem_max": 16777216,
@@ -562,7 +604,7 @@ class ServerAgentTests(unittest.TestCase):
                 "net.core.rmem_default=8388608\n"
                 "net.core.wmem_max=16777216\n"
                 "net.ipv4.tcp_mtu_probe_floor=536\n"
-                "net.ipv4.tcp_no_metrics_save=1\n",
+                "net.ipv4.tcp_no_metrics_save=0\n",
                 encoding="utf-8",
             )
             expected = server_agent.managed_network_profile(path)
@@ -573,7 +615,7 @@ class ServerAgentTests(unittest.TestCase):
                 "udp_rmem_max": 16_777_216,
                 "udp_wmem_max": 16_777_216,
                 "mtu_probe_floor": 536,
-                "metrics_save_disabled": 1,
+                "metrics_save_disabled": 0,
             },
         )
         self.assertEqual(
@@ -583,7 +625,7 @@ class ServerAgentTests(unittest.TestCase):
                     "udp_rmem_max": 16_777_216,
                     "udp_wmem_max": 16_777_216,
                     "mtu_probe_floor": 536,
-                    "metrics_save_disabled": 1,
+                    "metrics_save_disabled": 0,
                 },
                 expected,
             ),
@@ -775,6 +817,19 @@ class ServerAgentTests(unittest.TestCase):
         self.assertEqual(interval["sources"]["203.0.113.20"]["quality"], "degraded")
         self.assertEqual(interval["degraded_sources"], ["203.0.113.20"])
         self.assertEqual(interval["observation"], "client_specific")
+
+    def test_front_interval_detects_fresh_loss_before_lifetime_threshold(self) -> None:
+        metrics = server_agent.front_interval_metrics(
+            {
+                "bytes_sent": 300_000,
+                "bytes_retrans": 3_600,
+                "retransmissions": 3,
+                "data_segs_out": 200,
+            }
+        )
+
+        self.assertEqual(metrics["retransmit_ratio_pct"], 1.2)
+        self.assertEqual(metrics["quality"], "degraded")
 
     def test_front_interval_does_not_join_replaced_or_reset_sockets(self) -> None:
         previous = {
@@ -1040,7 +1095,6 @@ class ServerAgentTests(unittest.TestCase):
                                     "sockopt": {
                                         "tcpKeepAliveIdle": 90,
                                         "tcpKeepAliveInterval": 15,
-                                        "tcpUserTimeout": 30_000,
                                     }
                                 },
                             }
@@ -1057,7 +1111,6 @@ class ServerAgentTests(unittest.TestCase):
             {
                 "tcp_keepalive_idle_seconds": 90,
                 "tcp_keepalive_interval_seconds": 15,
-                "tcp_user_timeout_ms": 30_000,
             },
         )
 
@@ -1213,12 +1266,12 @@ class ServerAgentTests(unittest.TestCase):
             with patch.object(server_agent, "SINGBOX_CONFIG_PATH", config_path):
                 self.assertEqual(server_agent.udp_443_policy(), "routed")
 
-    def test_interserver_transport_snapshot_reports_ru_primary_session(self) -> None:
+    def test_interserver_transport_snapshot_reports_ru_hysteria_fallback_session(self) -> None:
         config = {
             "outbounds": [
-                {"type": "hysteria2", "tag": "to-foreign-hy2", "server": "132.243.21.108", "server_port": 18443, "obfs": {"type": "salamander", "password": "secret"}, "tls": {"certificate_public_key_sha256": ["pin"]}},
                 {"type": "direct", "tag": "to-foreign-wg"},
-                {"type": "selector", "tag": "to-foreign", "outbounds": ["to-foreign-hy2", "to-foreign-wg"], "default": "to-foreign-hy2", "interrupt_exist_connections": False},
+                {"type": "hysteria2", "tag": "to-foreign-hy2", "server": "132.243.21.108", "server_port": 18443, "obfs": {"type": "salamander", "password": "secret"}, "tls": {"certificate_public_key_sha256": ["pin"]}},
+                {"type": "selector", "tag": "to-foreign", "outbounds": ["to-foreign-wg", "to-foreign-hy2"], "default": "to-foreign-wg", "interrupt_exist_connections": False},
             ]
         }
         sockets = subprocess.CompletedProcess(
@@ -1227,7 +1280,7 @@ class ServerAgentTests(unittest.TestCase):
             "ESTAB 0 0 94.232.248.35:45678 132.243.21.108:18443\n",
             "",
         )
-        selection = {"available": True, "selected": "to-foreign-hy2", "candidates": {"to-foreign-hy2": {"delay_ms": 42}}}
+        selection = {"available": True, "selected": "to-foreign-wg", "candidates": {"to-foreign-wg": {"delay_ms": 42}}}
         with (
             patch.object(server_agent, "read_json", return_value=config),
             patch.object(server_agent, "run", return_value=sockets),
@@ -1237,7 +1290,7 @@ class ServerAgentTests(unittest.TestCase):
 
         self.assertTrue(transport["configured"])
         self.assertTrue(transport["hysteria_session_active"])
-        self.assertEqual(transport["selection"]["selected"], "to-foreign-hy2")
+        self.assertEqual(transport["selection"]["selected"], "to-foreign-wg")
 
     def test_selector_selection_snapshot_reads_selected_transport_and_delays(self) -> None:
         payload = {
@@ -1266,32 +1319,32 @@ class ServerAgentTests(unittest.TestCase):
             ) as primary_probe,
             patch.object(server_agent, "probe_transport_candidates") as parallel_probe,
         ):
-            probes = server_agent.collect_transport_probes("127.0.0.1:19090", "to-foreign-hy2")
+            probes = server_agent.collect_transport_probes("127.0.0.1:19090", "to-foreign-wg")
 
-        primary_probe.assert_called_once_with("127.0.0.1:19090", "to-foreign-hy2")
+        primary_probe.assert_called_once_with("127.0.0.1:19090", "to-foreign-wg")
         parallel_probe.assert_not_called()
-        self.assertTrue(probes["to-foreign-hy2"]["ok"])
-        self.assertFalse(probes["to-foreign-wg"]["checked"])
+        self.assertTrue(probes["to-foreign-wg"]["ok"])
+        self.assertFalse(probes["to-foreign-hy2"]["checked"])
 
     def test_transport_probe_confirms_primary_failure_before_checking_fallback(self) -> None:
         first = {"checked": True, "ok": False, "attempts": 1, "delay_ms": 0, "error": "timeout"}
         confirmation = {
-            "to-foreign-hy2": dict(first),
-            "to-foreign-wg": {"checked": True, "ok": True, "attempts": 1, "delay_ms": 70, "error": ""},
+            "to-foreign-wg": dict(first),
+            "to-foreign-hy2": {"checked": True, "ok": True, "attempts": 1, "delay_ms": 70, "error": ""},
         }
         with (
             patch.object(server_agent, "transport_candidate_probe", return_value=first),
             patch.object(server_agent, "probe_transport_candidates", return_value=confirmation) as parallel_probe,
         ):
-            probes = server_agent.collect_transport_probes("127.0.0.1:19090", "to-foreign-hy2")
+            probes = server_agent.collect_transport_probes("127.0.0.1:19090", "to-foreign-wg")
 
         parallel_probe.assert_called_once_with(
             "127.0.0.1:19090",
-            ("to-foreign-hy2", "to-foreign-wg"),
+            ("to-foreign-wg", "to-foreign-hy2"),
         )
-        self.assertEqual(probes["to-foreign-hy2"]["attempts"], 2)
-        self.assertFalse(probes["to-foreign-hy2"]["ok"])
-        self.assertTrue(probes["to-foreign-wg"]["ok"])
+        self.assertEqual(probes["to-foreign-wg"]["attempts"], 2)
+        self.assertFalse(probes["to-foreign-wg"]["ok"])
+        self.assertTrue(probes["to-foreign-hy2"]["ok"])
 
     def test_transport_state_snapshot_marks_old_state_stale(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1310,80 +1363,8 @@ class ServerAgentTests(unittest.TestCase):
         config = {
             "experimental": {"clash_api": {"external_controller": "127.0.0.1:19090"}},
             "outbounds": [
-                {"type": "selector", "tag": "to-foreign", "outbounds": ["to-foreign-hy2", "to-foreign-wg"], "default": "to-foreign-hy2"},
+                {"type": "selector", "tag": "to-foreign", "outbounds": ["to-foreign-wg", "to-foreign-hy2"], "default": "to-foreign-wg"},
             ],
-        }
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            config_path = root / "sing-box.json"
-            state_path = root / "transport-state.json"
-            lock_path = root / "transport.lock"
-            config_path.write_text(json.dumps(config), encoding="utf-8")
-            with (
-                patch.object(server_agent, "SINGBOX_CONFIG_PATH", config_path),
-                patch.object(server_agent, "TRANSPORT_STATE_PATH", state_path),
-                patch.object(server_agent, "TRANSPORT_LOCK_PATH", lock_path),
-                patch.object(server_agent, "selector_selection_snapshot", return_value={"available": True, "selected": "to-foreign-hy2"}),
-                patch.object(
-                    server_agent,
-                    "collect_transport_probes",
-                    return_value={
-                        "to-foreign-hy2": {"ok": False, "attempts": 2, "delay_ms": 0, "error": "timeout"},
-                        "to-foreign-wg": {"ok": True, "delay_ms": 70, "error": ""},
-                    },
-                ),
-                patch.object(server_agent, "select_transport") as select_transport,
-            ):
-                result = server_agent.reconcile_interserver_transport()
-
-        self.assertEqual(result["state"], "degraded")
-        self.assertEqual(result["selected"], "to-foreign-wg")
-        select_transport.assert_called_once_with("127.0.0.1:19090", "to-foreign-wg")
-
-    def test_transport_reconciler_discards_one_transient_probe_failure(self) -> None:
-        config = {
-            "experimental": {"clash_api": {"external_controller": "127.0.0.1:19090"}},
-            "outbounds": [
-                {"type": "selector", "tag": "to-foreign", "outbounds": ["to-foreign-hy2", "to-foreign-wg"], "default": "to-foreign-hy2"},
-            ],
-        }
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            config_path = root / "sing-box.json"
-            state_path = root / "transport-state.json"
-            lock_path = root / "transport.lock"
-            config_path.write_text(json.dumps(config), encoding="utf-8")
-            with (
-                patch.object(server_agent, "SINGBOX_CONFIG_PATH", config_path),
-                patch.object(server_agent, "TRANSPORT_STATE_PATH", state_path),
-                patch.object(server_agent, "TRANSPORT_LOCK_PATH", lock_path),
-                patch.object(server_agent, "selector_selection_snapshot", return_value={"available": True, "selected": "to-foreign-hy2"}),
-                patch.object(
-                    server_agent,
-                    "collect_transport_probes",
-                    return_value={
-                        "to-foreign-hy2": {"ok": True, "attempts": 2, "delay_ms": 50, "error": ""},
-                        "to-foreign-wg": {"ok": True, "delay_ms": 70, "error": ""},
-                    },
-                ),
-                patch.object(server_agent, "select_transport") as select_transport,
-            ):
-                result = server_agent.reconcile_interserver_transport()
-
-        self.assertEqual(result["state"], "healthy")
-        self.assertTrue(result["probes"]["to-foreign-hy2"]["ok"])
-        select_transport.assert_not_called()
-
-    def test_transport_reconciler_returns_to_primary_after_two_successes(self) -> None:
-        config = {
-            "experimental": {"clash_api": {"external_controller": "127.0.0.1:19090"}},
-            "outbounds": [
-                {"type": "selector", "tag": "to-foreign", "outbounds": ["to-foreign-hy2", "to-foreign-wg"], "default": "to-foreign-hy2"},
-            ],
-        }
-        healthy = {
-            "to-foreign-hy2": {"ok": True, "delay_ms": 50, "error": ""},
-            "to-foreign-wg": {"ok": True, "delay_ms": 70, "error": ""},
         }
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1396,6 +1377,78 @@ class ServerAgentTests(unittest.TestCase):
                 patch.object(server_agent, "TRANSPORT_STATE_PATH", state_path),
                 patch.object(server_agent, "TRANSPORT_LOCK_PATH", lock_path),
                 patch.object(server_agent, "selector_selection_snapshot", return_value={"available": True, "selected": "to-foreign-wg"}),
+                patch.object(
+                    server_agent,
+                    "collect_transport_probes",
+                    return_value={
+                        "to-foreign-wg": {"ok": False, "attempts": 2, "delay_ms": 0, "error": "timeout"},
+                        "to-foreign-hy2": {"ok": True, "delay_ms": 70, "error": ""},
+                    },
+                ),
+                patch.object(server_agent, "select_transport") as select_transport,
+            ):
+                result = server_agent.reconcile_interserver_transport()
+
+        self.assertEqual(result["state"], "degraded")
+        self.assertEqual(result["selected"], "to-foreign-hy2")
+        select_transport.assert_called_once_with("127.0.0.1:19090", "to-foreign-hy2")
+
+    def test_transport_reconciler_discards_one_transient_probe_failure(self) -> None:
+        config = {
+            "experimental": {"clash_api": {"external_controller": "127.0.0.1:19090"}},
+            "outbounds": [
+                {"type": "selector", "tag": "to-foreign", "outbounds": ["to-foreign-wg", "to-foreign-hy2"], "default": "to-foreign-wg"},
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "sing-box.json"
+            state_path = root / "transport-state.json"
+            lock_path = root / "transport.lock"
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            with (
+                patch.object(server_agent, "SINGBOX_CONFIG_PATH", config_path),
+                patch.object(server_agent, "TRANSPORT_STATE_PATH", state_path),
+                patch.object(server_agent, "TRANSPORT_LOCK_PATH", lock_path),
+                patch.object(server_agent, "selector_selection_snapshot", return_value={"available": True, "selected": "to-foreign-wg"}),
+                patch.object(
+                    server_agent,
+                    "collect_transport_probes",
+                    return_value={
+                        "to-foreign-wg": {"ok": True, "attempts": 2, "delay_ms": 50, "error": ""},
+                        "to-foreign-hy2": {"ok": True, "delay_ms": 70, "error": ""},
+                    },
+                ),
+                patch.object(server_agent, "select_transport") as select_transport,
+            ):
+                result = server_agent.reconcile_interserver_transport()
+
+        self.assertEqual(result["state"], "healthy")
+        self.assertTrue(result["probes"]["to-foreign-wg"]["ok"])
+        select_transport.assert_not_called()
+
+    def test_transport_reconciler_returns_to_primary_after_two_successes(self) -> None:
+        config = {
+            "experimental": {"clash_api": {"external_controller": "127.0.0.1:19090"}},
+            "outbounds": [
+                {"type": "selector", "tag": "to-foreign", "outbounds": ["to-foreign-wg", "to-foreign-hy2"], "default": "to-foreign-wg"},
+            ],
+        }
+        healthy = {
+            "to-foreign-wg": {"ok": True, "delay_ms": 50, "error": ""},
+            "to-foreign-hy2": {"ok": True, "delay_ms": 70, "error": ""},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "sing-box.json"
+            state_path = root / "transport-state.json"
+            lock_path = root / "transport.lock"
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            with (
+                patch.object(server_agent, "SINGBOX_CONFIG_PATH", config_path),
+                patch.object(server_agent, "TRANSPORT_STATE_PATH", state_path),
+                patch.object(server_agent, "TRANSPORT_LOCK_PATH", lock_path),
+                patch.object(server_agent, "selector_selection_snapshot", return_value={"available": True, "selected": "to-foreign-hy2"}),
                 patch.object(server_agent, "collect_transport_probes", return_value=healthy),
                 patch.object(server_agent, "select_transport") as select_transport,
             ):
@@ -1404,8 +1457,8 @@ class ServerAgentTests(unittest.TestCase):
 
         self.assertEqual(first["state"], "recovering")
         self.assertEqual(second["state"], "healthy")
-        self.assertEqual(second["selected"], "to-foreign-hy2")
-        select_transport.assert_called_once_with("127.0.0.1:19090", "to-foreign-hy2")
+        self.assertEqual(second["selected"], "to-foreign-wg")
+        select_transport.assert_called_once_with("127.0.0.1:19090", "to-foreign-wg")
 
     def test_interserver_transport_snapshot_reports_foreign_listener(self) -> None:
         config = {
@@ -1474,6 +1527,7 @@ class ServerAgentTests(unittest.TestCase):
             patch.object(server_agent, "probe_url", side_effect=probe),
             patch.object(server_agent, "probe_identity", return_value={"ok": True}),
             patch.object(server_agent, "probe_private_reject", return_value={"ok": True}),
+            patch.object(server_agent, "transport_candidate_probe", return_value={"ok": True}),
         ):
             result = server_agent.run_probes({"WG_INTERFACE": "wg0"}, "ru-gateway", "acceptance")
 
@@ -1489,7 +1543,7 @@ class ServerAgentTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertTrue(result["release_gate_ok"])
 
-    def test_light_health_profile_does_not_probe_dormant_wireguard(self) -> None:
+    def test_light_health_profile_does_not_duplicate_the_selected_transport_probe(self) -> None:
         calls: list[dict[str, object]] = []
 
         def probe(url: str, **kwargs: object) -> dict[str, object]:
@@ -1512,6 +1566,7 @@ class ServerAgentTests(unittest.TestCase):
             patch.object(server_agent, "probe_url", side_effect=probe),
             patch.object(server_agent, "probe_identity", return_value={"ok": True}),
             patch.object(server_agent, "probe_private_reject", return_value={"ok": True}),
+            patch.object(server_agent, "transport_candidate_probe", return_value={"ok": True}),
         ):
             result = server_agent.run_probes({"WG_INTERFACE": "wg0"}, "ru-gateway", "acceptance")
 
@@ -1521,7 +1576,7 @@ class ServerAgentTests(unittest.TestCase):
         self.assertNotIn("ipv6_literal_via_router", result["release_gate_requirements"])
         self.assertTrue(server_agent.release_gate_ok(result))
 
-    def test_wireguard_failure_is_degraded_when_router_transport_is_healthy(self) -> None:
+    def test_wireguard_primary_failure_is_degraded_when_hysteria_router_path_is_healthy(self) -> None:
         def probe(url: str, *, interface: str = "", proxy: str = "", **_kwargs: object) -> dict[str, object]:
             return {"target": url, "ok": not bool(interface)}
 
@@ -1529,13 +1584,28 @@ class ServerAgentTests(unittest.TestCase):
             patch.object(server_agent, "probe_url", side_effect=probe),
             patch.object(server_agent, "probe_identity", side_effect=lambda **kwargs: {"ok": not bool(kwargs.get("interface"))}),
             patch.object(server_agent, "probe_private_reject", return_value={"ok": True}),
+            patch.object(server_agent, "transport_candidate_probe", return_value={"ok": True}),
         ):
             result = server_agent.run_probes({"WG_INTERFACE": "wg0"}, "ru-gateway", "acceptance")
 
         self.assertFalse(result["requirements"]["foreign_domains_via_wg"])
-        self.assertFalse(result["requirements"]["wireguard_fallback_identity"])
+        self.assertFalse(result["requirements"]["wireguard_primary_identity"])
         self.assertTrue(result["requirements"]["foreign_domains_via_router"])
         self.assertTrue(result["release_gate_ok"])
+
+    def test_hysteria_fallback_failure_is_reported_without_rejecting_a_healthy_primary(self) -> None:
+        with (
+            patch.object(server_agent, "probe_url", return_value={"ok": True}),
+            patch.object(server_agent, "probe_identity", return_value={"ok": True}),
+            patch.object(server_agent, "probe_private_reject", return_value={"ok": True}),
+            patch.object(server_agent, "transport_candidate_probe", return_value={"ok": False, "error": "timeout"}),
+        ):
+            result = server_agent.run_probes({"WG_INTERFACE": "wg0"}, "ru-gateway", "acceptance")
+
+        self.assertFalse(result["requirements"]["hysteria_fallback_reachable"])
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["release_gate_ok"])
+        self.assertEqual(result["capability_failures"]["transport"], ["hysteria_fallback_reachable"])
 
     def test_release_gate_still_rejects_core_foreign_path_failure(self) -> None:
         probes = {

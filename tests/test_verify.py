@@ -47,13 +47,13 @@ def acceptance_snapshot(role: str, **overrides: object) -> DiagnosticsSnapshot:
                 "qdisc": "fq",
                 "mtu_probing": 1,
                 "mtu_probe_floor": 536,
-                "metrics_save_disabled": 1,
+                "metrics_save_disabled": 0,
                 "udp_rmem_default": 8_388_608,
                 "udp_rmem_max": 16_777_216,
                 "udp_wmem_max": 16_777_216,
             }
         },
-        "front": {"tcp_user_timeout_ms": 30_000} if role == ROLE_RU else {},
+        "front": {"tcp_keepalive_idle_seconds": 90, "tcp_keepalive_interval_seconds": 15} if role == ROLE_RU else {},
         "storage": {
             "root_filesystem": {
                 "filesystem": "ext4",
@@ -81,10 +81,10 @@ class VerifyTests(unittest.TestCase):
         self.assertEqual(verified.verdict, "failed")
         self.assertIn("agent verdict fields are incomplete", verified.reasons)
 
-    def test_verify_snapshot_requires_public_front_liveness_policy(self) -> None:
+    def test_verify_snapshot_requires_public_front_keepalive_policy(self) -> None:
         verified = _verify_snapshot(acceptance_snapshot(ROLE_RU, front={}))
         self.assertEqual(verified.verdict, "failed")
-        self.assertIn("public TCP front liveness policy is missing", verified.reasons)
+        self.assertIn("public TCP front keepalive policy is missing", verified.reasons)
 
     def test_verify_snapshot_requires_root_filesystem_integrity_fields(self) -> None:
         verified = _verify_snapshot(acceptance_snapshot(ROLE_FOREIGN, storage={}))
@@ -121,7 +121,7 @@ class VerifyTests(unittest.TestCase):
                     "tcp_adaptation": {
                         "mtu_probing": 0,
                         "mtu_probe_floor": 536,
-                        "metrics_save_disabled": 1,
+                        "metrics_save_disabled": 0,
                         "udp_rmem_default": 8_388_608,
                         "udp_rmem_max": 16_777_216,
                     }
@@ -139,7 +139,7 @@ class VerifyTests(unittest.TestCase):
                     "tcp_adaptation": {
                         "mtu_probing": 1,
                         "mtu_probe_floor": 536,
-                        "metrics_save_disabled": 1,
+                        "metrics_save_disabled": 0,
                         "udp_rmem_default": 212_992,
                         "udp_rmem_max": 212_992,
                     }
@@ -187,6 +187,22 @@ class VerifyTests(unittest.TestCase):
         reconciled = _reconcile_public_capabilities(snapshot, {"verdict": "verified"})
         self.assertEqual(reconciled.verdict, "degraded")
         self.assertEqual(reconciled.reasons, ["public TCP front shows active data-path degradation"])
+
+    def test_public_vless_does_not_hide_a_failed_transport_fallback(self) -> None:
+        snapshot = acceptance_snapshot(
+            ROLE_RU,
+            route_probes={
+                "profile": "acceptance",
+                "ok": False,
+                "release_gate_ok": True,
+                "capability_failures": {"external": [], "transport": ["hysteria_fallback_reachable"]},
+            },
+        )
+        verified = _verify_snapshot(snapshot)
+        reconciled = _reconcile_public_capabilities(verified, {"verdict": "verified"})
+
+        self.assertEqual(reconciled.verdict, "degraded")
+        self.assertEqual(reconciled.reasons, ["transport capability probe failed: hysteria_fallback_reachable"])
 
     def test_verify_snapshot_requires_foreign_transport_service(self) -> None:
         verified = _verify_snapshot(

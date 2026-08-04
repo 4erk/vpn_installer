@@ -426,7 +426,7 @@ def test_role_scoped_workflows(runner: AuditRunner) -> dict[str, str]:
     driver_path = temp_repo / "driver.py"
     write_text(driver_path, driver)
     container = f"audit-role-scoped-{runner.run_id}"
-    with runner.docker_container(container, "python:3.13"):
+    with runner.docker_container(container, AUDIT_IMAGE):
         runner.docker_exec(container, "mkdir -p /work/deployments /work/state /work/fakebin /work/fixtures")
         runner.docker_copy(container, INSTALL_SCRIPT_PATH, "/work/install.sh")
         runner.docker_copy(container, ROOT_DIR / "vpn_installer", "/work")

@@ -7,8 +7,6 @@ from vpn_installer.client_artifacts import render_client_profile, render_vless_u
 from vpn_installer.config import generate_default_env
 from vpn_installer.public_transport import (
     PUBLIC_HY2_OUTBOUND_TAG,
-    PUBLIC_SELECTOR_TAG,
-    PUBLIC_VLESS_OUTBOUND_TAG,
     derive_public_hy2_password,
 )
 from vpn_installer.render import render_ru_firewall_nftables, render_ru_singbox
@@ -42,20 +40,16 @@ class PublicTransportTests(unittest.TestCase):
         self.assertIn("udp sport 443 counter notrack", firewall)
         self.assertIn("udp dport 443 counter accept", firewall)
 
-    def test_adaptive_profile_prefers_canonical_vless_and_keeps_quic_fallback(self) -> None:
+    def test_managed_profile_uses_deterministic_quic_transport(self) -> None:
         env = self.make_env()
         profile = json.loads(render_client_profile(env, auto_redirect=False))
         outbounds = {item["tag"]: item for item in profile["outbounds"]}
-        selector = outbounds[PUBLIC_SELECTOR_TAG]
-        self.assertEqual(selector["type"], "urltest")
-        self.assertEqual(selector["outbounds"], [PUBLIC_VLESS_OUTBOUND_TAG, PUBLIC_HY2_OUTBOUND_TAG])
-        self.assertEqual(selector["interval"], "30s")
-        self.assertFalse(selector["interrupt_exist_connections"])
         self.assertNotIn("up_mbps", outbounds[PUBLIC_HY2_OUTBOUND_TAG])
         self.assertNotIn("down_mbps", outbounds[PUBLIC_HY2_OUTBOUND_TAG])
-        self.assertEqual(outbounds[PUBLIC_VLESS_OUTBOUND_TAG]["flow"], env["CLIENT_FLOW"])
-        self.assertEqual(profile["route"]["final"], PUBLIC_SELECTOR_TAG)
-        self.assertEqual(profile["dns"]["servers"][0]["detour"], PUBLIC_SELECTOR_TAG)
+        self.assertEqual({item["type"] for item in profile["outbounds"]}, {"hysteria2", "direct", "block"})
+        self.assertFalse(any(item["type"] == "urltest" for item in profile["outbounds"]))
+        self.assertEqual(profile["route"]["final"], PUBLIC_HY2_OUTBOUND_TAG)
+        self.assertEqual(profile["dns"]["servers"][0]["detour"], PUBLIC_HY2_OUTBOUND_TAG)
 
     def test_primary_vless_uri_contract_remains_tcp_reality(self) -> None:
         env = self.make_env()

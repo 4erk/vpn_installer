@@ -10,12 +10,6 @@ from .interserver_transport import HY2_SERVER_NAME, decode_transport_pem
 
 PUBLIC_HY2_INBOUND_TAG = "public-hy2-in"
 PUBLIC_HY2_OUTBOUND_TAG = "ru-gateway-quic"
-PUBLIC_VLESS_OUTBOUND_TAG = "ru-gateway-tcp"
-PUBLIC_SELECTOR_TAG = "ru-gateway"
-PUBLIC_URLTEST_URL = "https://www.gstatic.com/generate_204"
-PUBLIC_URLTEST_INTERVAL = "30s"
-PUBLIC_URLTEST_TOLERANCE_MS = 50
-PUBLIC_URLTEST_IDLE_TIMEOUT = "10m"
 
 
 def derive_public_hy2_password(client_uuid: str) -> str:
@@ -44,28 +38,6 @@ def render_public_hy2_inbound(env: dict[str, str]) -> dict[str, Any]:
     }
 
 
-def render_public_vless_outbound(env: dict[str, str], *, tag: str = PUBLIC_VLESS_OUTBOUND_TAG) -> dict[str, Any]:
-    return {
-        "type": "vless",
-        "tag": tag,
-        "server": env["RU_PUBLIC_IP"],
-        "server_port": int(env["RU_LISTEN_PORT"]),
-        "uuid": env["CLIENT_UUID"],
-        "flow": env["CLIENT_FLOW"],
-        "packet_encoding": "xudp",
-        "tls": {
-            "enabled": True,
-            "server_name": env["RU_REALITY_SERVER_NAME"],
-            "utls": {"enabled": True, "fingerprint": env["UTLS_FINGERPRINT"]},
-            "reality": {
-                "enabled": True,
-                "public_key": env["RU_REALITY_PUBLIC_KEY"],
-                "short_id": env["RU_REALITY_SHORT_ID"],
-            },
-        },
-    }
-
-
 def render_public_hy2_outbound(env: dict[str, str], *, tag: str = PUBLIC_HY2_OUTBOUND_TAG) -> dict[str, Any]:
     return {
         "type": "hysteria2",
@@ -79,24 +51,3 @@ def render_public_hy2_outbound(env: dict[str, str], *, tag: str = PUBLIC_HY2_OUT
             "certificate_public_key_sha256": [env["INTERSERVER_HY2_PUBLIC_KEY_SHA256"]],
         },
     }
-
-
-def render_public_selector(*, tag: str = PUBLIC_SELECTOR_TAG) -> dict[str, Any]:
-    return {
-        "type": "urltest",
-        "tag": tag,
-        "outbounds": [PUBLIC_VLESS_OUTBOUND_TAG, PUBLIC_HY2_OUTBOUND_TAG],
-        "url": PUBLIC_URLTEST_URL,
-        "interval": PUBLIC_URLTEST_INTERVAL,
-        "tolerance": PUBLIC_URLTEST_TOLERANCE_MS,
-        "idle_timeout": PUBLIC_URLTEST_IDLE_TIMEOUT,
-        "interrupt_exist_connections": False,
-    }
-
-
-def render_adaptive_public_outbounds(env: dict[str, str]) -> list[dict[str, Any]]:
-    return [
-        render_public_hy2_outbound(env),
-        render_public_vless_outbound(env),
-        render_public_selector(),
-    ]
