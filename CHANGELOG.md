@@ -6,6 +6,19 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.16.2] - 2026-08-06
+
+### Fixed
+
+- Повторная 30-секундная проверка полного VLESS-пути после `0.16.1` передала `364572800` байт без application failures, но одновременно дала на foreign ровно `+252 UdpSndbufErrors` и `+252 fq drops`. Structured `tc` подтвердил: все `6731` накопленных qdisc drops были `flows_plimit` при стандартном `fq flow_limit=100`, то есть высокоскоростная Hysteria2/QUIC-сессия упиралась в локальный per-flow hard limit уже после исправления socket buffer.
+- Единый managed network profile теперь задаёт `fq limit=10000 flow_limit=512`. Профиль применяется идемпотентно при установке и перед health cycle только при фактическом drift; route, transport selection, MTU и bandwidth не переключаются.
+- Agent, manifest, status и live verifier проверяют structured `qdisc kind/limit/flow_limit`, показывают `drops/flows_plimit` и не дублируют один qdisc drop как отдельную socket-buffer ошибку.
+
+### Changed
+
+- Network constants вынесены из общей модели в маленький `network_profile.py`, поставляемый и хешируемый как release artifact. Новых env-параметров нет.
+- Основной `vless-uri.txt`, routing policy, public ingress, web-admin и локальный клиент не изменены.
+
 ## [0.16.1] - 2026-08-06
 
 ### Fixed

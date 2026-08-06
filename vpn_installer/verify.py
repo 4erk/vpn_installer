@@ -11,6 +11,11 @@ from .diagnostics import DiagnosticsSnapshot
 from .models import (
     ROLE_FOREIGN,
     ROLE_RU,
+)
+from .network_profile import (
+    FQ_FLOW_LIMIT,
+    FQ_KIND,
+    FQ_PACKET_LIMIT,
     TCP_MTU_PROBE_FLOOR,
     TCP_NO_METRICS_SAVE,
     UDP_RMEM_DEFAULT,
@@ -91,6 +96,17 @@ def _verify_snapshot(snapshot: DiagnosticsSnapshot) -> DiagnosticsSnapshot:
         or wmem_max < UDP_WMEM_MAX
     ):
         degradations.append("UDP socket buffer profile is not active")
+    try:
+        qdisc_limit = int(tcp_adaptation.get("qdisc_limit", 0))
+        qdisc_flow_limit = int(tcp_adaptation.get("qdisc_flow_limit", 0))
+    except (TypeError, ValueError):
+        qdisc_limit = qdisc_flow_limit = 0
+    if tcp_adaptation and (
+        tcp_adaptation.get("qdisc") != FQ_KIND
+        or qdisc_limit != FQ_PACKET_LIMIT
+        or qdisc_flow_limit != FQ_FLOW_LIMIT
+    ):
+        hard_failures.append("managed fq profile is not active")
     required_verdicts = {"server_path", "public_front", "client_observation", "host_integrity"}
     if snapshot.role == ROLE_RU:
         required_verdicts.add("public_quic")

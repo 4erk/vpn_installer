@@ -206,6 +206,7 @@ class RenderTests(unittest.TestCase):
 
     def test_health_service_delegates_to_agent(self) -> None:
         service = render.render_health_service()
+        self.assertIn("ExecStartPre=/usr/bin/python3 /usr/local/lib/vpn-stack/vpn-stack-agent.py network-apply", service)
         self.assertIn("ExecStart=/usr/bin/python3 /usr/local/lib/vpn-stack/vpn-stack-agent.py health", service)
         self.assertNotIn("sync-state.sh", service)
 
@@ -542,6 +543,7 @@ class RenderTests(unittest.TestCase):
         self.assertIn("vpn-stack-health.timer", files)
         self.assertNotIn("vpn-stack-transport.service", files)
         self.assertIn("interserver_transport.py", files)
+        self.assertIn("network_profile.py", files)
         self.assertNotIn("vpn-stack-guard.service", files)
         self.assertNotIn("vpn-stack-guard.timer", files)
         self.assertIn("admin_apply.py", files)
@@ -550,6 +552,7 @@ class RenderTests(unittest.TestCase):
         self.assertIn("vpn-stack-xray.service", files)
         foreign_files = render.rendered_files_for_role(env, render.ROLE_FOREIGN)
         self.assertIn("interserver_transport.py", foreign_files)
+        self.assertIn("network_profile.py", foreign_files)
         self.assertNotIn("vpn-stack-transport.service", foreign_files)
         self.assertNotIn("admin_apply.py", foreign_files)
         self.assertNotIn("admin_web.py", foreign_files)

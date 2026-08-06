@@ -36,6 +36,7 @@ def installed_artifact_paths(role: str) -> dict[str, str]:
         "vpn-stack-agent.py": "/usr/local/lib/vpn-stack/vpn-stack-agent.py",
         "log_classifier.py": "/usr/local/lib/vpn-stack/log_classifier.py",
         "interserver_transport.py": "/usr/local/lib/vpn-stack/interserver_transport.py",
+        "network_profile.py": "/usr/local/lib/vpn-stack/network_profile.py",
         "vpn-stack-health.service": "/etc/systemd/system/vpn-stack-health.service",
         "vpn-stack-health.timer": "/etc/systemd/system/vpn-stack-health.timer",
     }

@@ -32,6 +32,7 @@ class PackageTests(unittest.TestCase):
         self.assertIn('AGENT_SCRIPT_PATH="/usr/local/lib/vpn-stack/vpn-stack-agent.py"', script)
         self.assertIn('AGENT_LOG_CLASSIFIER_PATH="/usr/local/lib/vpn-stack/log_classifier.py"', script)
         self.assertIn('AGENT_TRANSPORT_POLICY_PATH="/usr/local/lib/vpn-stack/interserver_transport.py"', script)
+        self.assertIn('AGENT_NETWORK_PROFILE_PATH="/usr/local/lib/vpn-stack/network_profile.py"', script)
         self.assertIn('TRANSPORT_SERVICE_PATH="/etc/systemd/system/vpn-stack-transport.service"', script)
         self.assertIn("stage_release()", script)
         self.assertIn("publish_staged_release()", script)
@@ -42,6 +43,7 @@ class PackageTests(unittest.TestCase):
         self.assertIn('chmod 0600 "${source_dir}/${WG_INTERFACE}.conf"', script)
         self.assertIn("validate_staged_release()", script)
         self.assertIn('python3 "${source_dir}/vpn-stack-agent.py" --help', script)
+        self.assertIn('python3 "${AGENT_SCRIPT_PATH}" network-apply', script)
         self.assertIn("activate_staged_release", script)
         self.assertIn("mv -Tf", script)
         self.assertIn("vpn-stack-sync.timer vpn-stack-sync.service", script)
@@ -55,6 +57,7 @@ class PackageTests(unittest.TestCase):
         self.assertNotIn("ip tcp_metrics flush all", script)
         self.assertIn("snapshot --live-probes --profile acceptance", script)
         self.assertIn('verdicts.get("host_integrity") != "verified"', script)
+        self.assertIn("post-activation network profile drift detected", script)
         self.assertIn("e2fsprogs", script)
         self.assertIn("VPNSTACK_FAILED_ACCEPTANCE_FILE", script)
         self.assertIn("VPNSTACK_PREVIOUS_RELEASE", script)
@@ -83,7 +86,7 @@ class PackageTests(unittest.TestCase):
 
     def test_package_exposes_version_via_getattr(self) -> None:
         package = importlib.import_module("vpn_installer")
-        self.assertEqual(package.__version__, "0.16.1")
+        self.assertEqual(package.__version__, "0.16.2")
         with self.assertRaises(AttributeError):
             package.__getattr__("nope")
 

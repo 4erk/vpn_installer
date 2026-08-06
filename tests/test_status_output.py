@@ -44,6 +44,10 @@ class StatusOutputTests(unittest.TestCase):
                     "tcp_adaptation": {
                         "congestion_control": "bbr",
                         "qdisc": "fq",
+                        "qdisc_limit": 10000,
+                        "qdisc_flow_limit": 512,
+                        "qdisc_drops": 7,
+                        "qdisc_flow_limit_drops": 7,
                         "mtu_probing": 1,
                         "mtu_probe_floor": 536,
                         "metrics_save_disabled": 0,
@@ -112,7 +116,11 @@ class StatusOutputTests(unittest.TestCase):
         self.assertIn("root filesystem: source=/dev/vda1, fs=ext4, state=clean, errors=0, boot_fsck=enabled, verdict=verified", rendered)
         self.assertIn("public front lifetime loss sources: 203.0.113.20", rendered)
         self.assertIn("domain_to_foreign_timeout present", rendered)
-        self.assertIn("tcp adaptation: cc=bbr, qdisc=fq, mtu_probing=1, mtu_floor=536, metrics_cache=enabled, probe_interval_s=600", rendered)
+        self.assertIn(
+            "tcp adaptation: cc=bbr, qdisc=fq(limit=10000,flow_limit=512,drops=7,flow_limit_drops=7), "
+            "mtu_probing=1, mtu_floor=536, metrics_cache=enabled, probe_interval_s=600",
+            rendered,
+        )
         self.assertIn("udp_rmem=8388608/16777216", rendered)
         self.assertIn("udp_wmem=8388608/16777216", rendered)
         self.assertIn("conntrack: 95/32768 (0.29%)", rendered)

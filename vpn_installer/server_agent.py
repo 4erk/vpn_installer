@@ -55,6 +55,11 @@ except ImportError:  # Installed agent runs as a standalone script.
     )
 
 try:
+    from .network_profile import FQ_FLOW_LIMIT, FQ_KIND, FQ_PACKET_LIMIT
+except ImportError:  # Installed agent runs as a standalone script.
+    from network_profile import FQ_FLOW_LIMIT, FQ_KIND, FQ_PACKET_LIMIT  # type: ignore[no-redef]
+
+try:
     import fcntl
 except ImportError:  # pragma: no cover - local Windows tests only
     class _NoopFcntl:
@@ -410,6 +415,52 @@ def default_interface() -> str:
     return str(routes[0].get("dev", "")) if routes else ""
 
 
+def qdisc_snapshot(interface: str) -> dict[str, Any]:
+    if not interface:
+        return {"qdisc": "", "qdisc_limit": 0, "qdisc_flow_limit": 0, "qdisc_drops": 0, "qdisc_flow_limit_drops": 0}
+    result = run(["tc", "-j", "-s", "qdisc", "show", "dev", interface], timeout=3)
+    payload = read_json_text(result.stdout, [])
+    root = next((item for item in payload if isinstance(item, dict) and item.get("root") is True), {}) if isinstance(payload, list) else {}
+    if root:
+        options = root.get("options", {}) if isinstance(root.get("options"), dict) else {}
+        return {
+            "qdisc": str(root.get("kind", "")),
+            "qdisc_limit": int(options.get("limit", 0) or 0),
+            "qdisc_flow_limit": int(options.get("flow_limit", 0) or 0),
+            "qdisc_drops": int(root.get("drops", 0) or 0),
+            "qdisc_flow_limit_drops": int(root.get("flows_plimit", 0) or 0),
+        }
+    fields = result.stdout.split()
+    return {
+        "qdisc": fields[1] if len(fields) > 1 and fields[0] == "qdisc" else "",
+        "qdisc_limit": 0,
+        "qdisc_flow_limit": 0,
+        "qdisc_drops": 0,
+        "qdisc_flow_limit_drops": 0,
+    }
+
+
+def apply_qdisc_profile() -> dict[str, Any]:
+    interface = default_interface()
+    if not interface:
+        raise RuntimeError("default interface is unavailable")
+    before = qdisc_snapshot(interface)
+    expected = {"qdisc": FQ_KIND, "qdisc_limit": FQ_PACKET_LIMIT, "qdisc_flow_limit": FQ_FLOW_LIMIT}
+    if all(before.get(name) == value for name, value in expected.items()):
+        return {"interface": interface, "changed": False, **before}
+    result = run(
+        ["tc", "qdisc", "replace", "dev", interface, "root", FQ_KIND, "limit", str(FQ_PACKET_LIMIT), "flow_limit", str(FQ_FLOW_LIMIT)],
+        timeout=10,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"unable to apply managed qdisc profile: {result.stderr.strip()[:240]}")
+    after = qdisc_snapshot(interface)
+    mismatches = [name for name, value in expected.items() if after.get(name) != value]
+    if mismatches:
+        raise RuntimeError(f"managed qdisc profile did not converge: {','.join(mismatches)}")
+    return {"interface": interface, "changed": True, **after}
+
+
 def tcp_adaptation_snapshot(interface: str) -> dict[str, Any]:
     values: dict[str, Any] = {}
     for field, name in (
@@ -426,13 +477,11 @@ def tcp_adaptation_snapshot(interface: str) -> dict[str, Any]:
         result = run(["sysctl", "-n", name], timeout=3)
         value = result.stdout.strip()
         values[field] = int(value) if value.isdigit() else value
-    qdisc = run(["tc", "qdisc", "show", "dev", interface], timeout=3) if interface else None
-    fields = qdisc.stdout.split() if qdisc and qdisc.returncode == 0 else []
-    values["qdisc"] = fields[1] if len(fields) > 1 else ""
+    values.update(qdisc_snapshot(interface))
     return values
 
 
-def managed_network_profile(path: Path = SYSCTL_PATH) -> dict[str, int]:
+def managed_network_profile(path: Path = SYSCTL_PATH) -> dict[str, Any]:
     field_names = {
         "net.core.rmem_default": "udp_rmem_default",
         "net.core.rmem_max": "udp_rmem_max",
@@ -456,10 +505,10 @@ def managed_network_profile(path: Path = SYSCTL_PATH) -> dict[str, int]:
             values[field] = int(raw_value.strip())
         except ValueError:
             continue
-    return values
+    return {**values, "qdisc": FQ_KIND, "qdisc_limit": FQ_PACKET_LIMIT, "qdisc_flow_limit": FQ_FLOW_LIMIT}
 
 
-def network_profile_mismatches(actual: dict[str, Any], expected: dict[str, int]) -> list[str]:
+def network_profile_mismatches(actual: dict[str, Any], expected: dict[str, Any]) -> list[str]:
     return sorted(name for name, value in expected.items() if actual.get(name) != value)
 
 
@@ -2158,6 +2207,10 @@ def health() -> dict[str, Any]:
             "interfaces": current.get("network", {}).get("interfaces", {}),
             "protocol": current.get("network", {}).get("protocol_counters", {}),
             "softnet": current.get("network", {}).get("softnet_counters", {}),
+            "qdisc": {
+                "drops": int(current.get("network", {}).get("tcp_adaptation", {}).get("qdisc_drops", 0) or 0),
+                "flow_limit_drops": int(current.get("network", {}).get("tcp_adaptation", {}).get("qdisc_flow_limit_drops", 0) or 0),
+            },
         }
         network_deltas = positive_counter_deltas(network_counters, previous.get("network_counters", {}))
         soft_reasons = network_soft_reasons(network_deltas)
@@ -2275,8 +2328,16 @@ def network_soft_reasons(deltas: dict[str, Any]) -> list[str]:
     receive_errors = int(protocol.get("UdpRcvbufErrors", 0)) + int(protocol.get("Udp6RcvbufErrors", 0))
     if receive_errors:
         reasons.append(f"udp_receive_buffer_drops={receive_errors}")
+    qdisc = deltas.get("qdisc", {})
+    qdisc_drops = int(qdisc.get("drops", 0))
+    flow_limit_drops = int(qdisc.get("flow_limit_drops", 0))
+    if qdisc_drops:
+        reasons.append(f"qdisc_drops={qdisc_drops}")
+    if flow_limit_drops:
+        reasons.append(f"qdisc_flow_limit_drops={flow_limit_drops}")
     send_errors = int(protocol.get("UdpSndbufErrors", 0)) + int(protocol.get("Udp6SndbufErrors", 0))
-    if send_errors:
+    qdisc_explains_send_errors = send_errors > 0 and send_errors == qdisc_drops == flow_limit_drops
+    if send_errors and not qdisc_explains_send_errors:
         reasons.append(f"udp_send_buffer_drops={send_errors}")
     if int(softnet.get("dropped", 0)):
         reasons.append(f"softnet_drops={softnet['dropped']}")
@@ -2304,7 +2365,14 @@ def recover(current: dict[str, Any]) -> str:
             return f"restart:{unit}:{'ok' if result.returncode == 0 else 'failed'}"
     artifacts_clean = current.get("artifacts", {}).get("drift") == "none"
     network = current.get("network", {})
-    if artifacts_clean and network.get("profile_mismatches"):
+    profile_mismatches = set(network.get("profile_mismatches", []))
+    if artifacts_clean and profile_mismatches & {"qdisc", "qdisc_limit", "qdisc_flow_limit"}:
+        try:
+            applied = apply_qdisc_profile()
+            return f"apply:qdisc:{'changed' if applied.get('changed') else 'ok'}"
+        except RuntimeError:
+            return "apply:qdisc:failed"
+    if artifacts_clean and profile_mismatches:
         result = run(["sysctl", "--load", str(SYSCTL_PATH)], timeout=30)
         return f"reload:sysctl:{'ok' if result.returncode == 0 else 'failed'}"
     bypass = network.get("conntrack", {}).get("front_bypass", {})
@@ -2366,6 +2434,7 @@ def build_parser() -> argparse.ArgumentParser:
     front.add_argument("--since", type=int, default=30)
     front.add_argument("--live-probes", action="store_true")
     sub.add_parser("health")
+    sub.add_parser("network-apply")
     routes = sub.add_parser("routes")
     route_sub = routes.add_subparsers(dest="routes_action", required=True)
     route_sub.add_parser("list")
@@ -2399,6 +2468,8 @@ def main(argv: list[str] | None = None) -> int:
         payload = public_front_snapshot(args.since, live_probes=args.live_probes)
     elif args.command == "health":
         payload = health()
+    elif args.command == "network-apply":
+        payload = apply_qdisc_profile()
     elif args.command == "routes":
         payload = routes_command(args)
     else:

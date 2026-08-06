@@ -321,6 +321,24 @@ class ServerAgentTests(unittest.TestCase):
 
         self.assertEqual(reasons, [])
 
+    def test_network_soft_reasons_attribute_udp_send_errors_to_fq_flow_limit_once(self) -> None:
+        reasons = server_agent.network_soft_reasons(
+            {
+                "protocol": {"UdpSndbufErrors": 252, "Udp6SndbufErrors": 0},
+                "qdisc": {"drops": 252, "flow_limit_drops": 252},
+            }
+        )
+        self.assertEqual(reasons, ["qdisc_drops=252", "qdisc_flow_limit_drops=252"])
+
+    def test_network_soft_reasons_keep_independent_udp_send_errors(self) -> None:
+        reasons = server_agent.network_soft_reasons(
+            {
+                "protocol": {"UdpSndbufErrors": 10},
+                "qdisc": {"drops": 252, "flow_limit_drops": 252},
+            }
+        )
+        self.assertEqual(reasons, ["qdisc_drops=252", "qdisc_flow_limit_drops=252", "udp_send_buffer_drops=10"])
+
     def test_health_log_summary_omits_persistent_flow_counters(self) -> None:
         payload = {
             "schema_version": 2,
@@ -451,6 +469,19 @@ class ServerAgentTests(unittest.TestCase):
         self.assertEqual(action, "reload:sysctl:ok")
         run_mock.assert_called_once_with(["sysctl", "--load", str(server_agent.SYSCTL_PATH)], timeout=30)
 
+    def test_recovery_reapplies_clean_managed_qdisc_profile(self) -> None:
+        current = {
+            "role": "foreign-exit",
+            "services": {"wireguard": "active", "nftables": "active", "sing-box": "active"},
+            "wireguard": {"interface": "wg0"},
+            "artifacts": {"drift": "none"},
+            "network": {"profile_mismatches": ["qdisc_flow_limit"]},
+        }
+        with patch.object(server_agent, "apply_qdisc_profile", return_value={"changed": True}) as apply_mock:
+            action = server_agent.recover(current)
+        self.assertEqual(action, "apply:qdisc:changed")
+        apply_mock.assert_called_once_with()
+
     def test_recovery_reloads_clean_nftables_when_bypass_is_missing(self) -> None:
         current = {
             "role": "ru-gateway",
@@ -514,7 +545,11 @@ class ServerAgentTests(unittest.TestCase):
             patch.object(server_agent, "wireguard_snapshot", return_value={"peers": []}),
             patch.object(server_agent, "default_interface", return_value="ens3"),
             patch.object(server_agent, "interface_counters", return_value={"ens3": {}}),
-            patch.object(server_agent, "tcp_adaptation_snapshot", return_value={"congestion_control": "bbr", "qdisc": "fq", "mtu_probing": 1}),
+            patch.object(
+                server_agent,
+                "tcp_adaptation_snapshot",
+                return_value={"congestion_control": "bbr", "qdisc": "fq", "qdisc_limit": 10_000, "qdisc_flow_limit": 512, "mtu_probing": 1},
+            ),
             patch.object(server_agent, "conntrack_snapshot", return_value={}),
             patch.object(server_agent, "xray_conntrack_bypass_snapshot", return_value={"active": True, "ingress": True, "egress": True}),
             patch.object(server_agent, "host_snapshot", return_value={"hostname": "ru-host", "login_user": "root", "is_root": True, "has_sudo": True, "os_id": "ubuntu", "os_version": "24.04", "default_interface": "ens3"}) as host_snapshot,
@@ -542,7 +577,12 @@ class ServerAgentTests(unittest.TestCase):
             }
             if args[0] == "sysctl":
                 return subprocess.CompletedProcess(args, 0, values[args[-1]], "")
-            return subprocess.CompletedProcess(args, 0, "qdisc fq 0: root\n", "")
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                '[{"kind":"fq","root":true,"options":{"limit":10000,"flow_limit":512},"drops":3,"flows_plimit":2}]\n',
+                "",
+            )
 
         with patch.object(server_agent, "run", side_effect=fake_run):
             snapshot = server_agent.tcp_adaptation_snapshot("ens3")
@@ -559,8 +599,37 @@ class ServerAgentTests(unittest.TestCase):
                 "udp_wmem_default": 8388608,
                 "udp_wmem_max": 16777216,
                 "qdisc": "fq",
+                "qdisc_limit": 10000,
+                "qdisc_flow_limit": 512,
+                "qdisc_drops": 3,
+                "qdisc_flow_limit_drops": 2,
             },
         )
+
+    def test_apply_qdisc_profile_replaces_only_a_mismatched_profile(self) -> None:
+        before = {"qdisc": "fq", "qdisc_limit": 10_000, "qdisc_flow_limit": 100, "qdisc_drops": 7, "qdisc_flow_limit_drops": 7}
+        after = {**before, "qdisc_flow_limit": 512, "qdisc_drops": 0, "qdisc_flow_limit_drops": 0}
+        completed = subprocess.CompletedProcess(["tc"], 0, "", "")
+        with (
+            patch.object(server_agent, "default_interface", return_value="eth0"),
+            patch.object(server_agent, "qdisc_snapshot", side_effect=[before, after]),
+            patch.object(server_agent, "run", return_value=completed) as run_mock,
+        ):
+            result = server_agent.apply_qdisc_profile()
+        self.assertTrue(result["changed"])
+        run_mock.assert_called_once_with(
+            ["tc", "qdisc", "replace", "dev", "eth0", "root", "fq", "limit", "10000", "flow_limit", "512"],
+            timeout=10,
+        )
+
+        with (
+            patch.object(server_agent, "default_interface", return_value="eth0"),
+            patch.object(server_agent, "qdisc_snapshot", return_value=after),
+            patch.object(server_agent, "run") as unchanged_run,
+        ):
+            unchanged = server_agent.apply_qdisc_profile()
+        self.assertFalse(unchanged["changed"])
+        unchanged_run.assert_not_called()
 
     def test_conntrack_snapshot_reports_capacity_and_fresh_kernel_events(self) -> None:
         def read_text(path: Path, *_args: object, **_kwargs: object) -> str:
@@ -623,6 +692,9 @@ class ServerAgentTests(unittest.TestCase):
                 "udp_wmem_max": 16_777_216,
                 "mtu_probe_floor": 536,
                 "metrics_save_disabled": 0,
+                "qdisc": "fq",
+                "qdisc_limit": 10_000,
+                "qdisc_flow_limit": 512,
             },
         )
         self.assertEqual(
@@ -634,6 +706,9 @@ class ServerAgentTests(unittest.TestCase):
                     "udp_wmem_max": 16_777_216,
                     "mtu_probe_floor": 536,
                     "metrics_save_disabled": 0,
+                    "qdisc": "fq",
+                    "qdisc_limit": 10_000,
+                    "qdisc_flow_limit": 512,
                 },
                 expected,
             ),
@@ -645,8 +720,13 @@ class ServerAgentTests(unittest.TestCase):
             path = Path(tmp) / "sysctl.conf"
             path.write_text("net.netfilter.nf_conntrack_max=32768\n", encoding="utf-8")
             expected = server_agent.managed_network_profile(path)
-        self.assertEqual(expected, {"conntrack_max": 32768})
-        self.assertEqual(server_agent.network_profile_mismatches({"conntrack_max": 6144}, expected), ["conntrack_max"])
+        self.assertEqual(expected, {"conntrack_max": 32768, "qdisc": "fq", "qdisc_limit": 10_000, "qdisc_flow_limit": 512})
+        self.assertEqual(
+            server_agent.network_profile_mismatches(
+                {"conntrack_max": 6144, "qdisc": "fq", "qdisc_limit": 10_000, "qdisc_flow_limit": 512}, expected
+            ),
+            ["conntrack_max"],
+        )
 
     def test_front_snapshot_groups_tcp_metrics_by_client_source(self) -> None:
         def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -1421,6 +1501,7 @@ class ServerAgentTests(unittest.TestCase):
             shutil.copy2(source_root / "server_agent.py", agent)
             shutil.copy2(source_root / "log_classifier.py", target / "log_classifier.py")
             shutil.copy2(source_root / "interserver_transport.py", target / "interserver_transport.py")
+            shutil.copy2(source_root / "network_profile.py", target / "network_profile.py")
             result = subprocess.run([sys.executable, str(agent), "--help"], text=True, capture_output=True, check=False, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("vpn-stack-agent", result.stdout)

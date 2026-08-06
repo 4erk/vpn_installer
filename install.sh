@@ -148,6 +148,7 @@ SSHD_CONFIG_PATH="/etc/ssh/sshd_config.d/90-vpn-stack.conf"
 AGENT_SCRIPT_PATH="/usr/local/lib/vpn-stack/vpn-stack-agent.py"
 AGENT_LOG_CLASSIFIER_PATH="/usr/local/lib/vpn-stack/log_classifier.py"
 AGENT_TRANSPORT_POLICY_PATH="/usr/local/lib/vpn-stack/interserver_transport.py"
+AGENT_NETWORK_PROFILE_PATH="/usr/local/lib/vpn-stack/network_profile.py"
 ADMIN_WEB_SCRIPT_PATH="/usr/local/lib/vpn-stack/admin_web.py"
 ADMIN_APPLY_SCRIPT_PATH="/usr/local/lib/vpn-stack/admin_apply.py"
 HEALTH_SERVICE_PATH="/etc/systemd/system/vpn-stack-health.service"
@@ -381,6 +382,7 @@ managed_paths() {
     "${AGENT_SCRIPT_PATH}" \
     "${AGENT_LOG_CLASSIFIER_PATH}" \
     "${AGENT_TRANSPORT_POLICY_PATH}" \
+    "${AGENT_NETWORK_PROFILE_PATH}" \
     "${ADMIN_WEB_SCRIPT_PATH}" \
     "${ADMIN_APPLY_SCRIPT_PATH}" \
     "${HEALTH_SERVICE_PATH}" \
@@ -446,7 +448,7 @@ backup_path_if_present() {
 extend_baseline_contract() {
   local path=""
   local backup_path=""
-  for path in "${RESOLVED_DROPIN_PATH}" "${RESOLV_CONF_PATH}" "${AGENT_TRANSPORT_POLICY_PATH}" "${TRANSPORT_SERVICE_PATH}" "${TRANSPORT_STATE_PATH}"; do
+  for path in "${RESOLVED_DROPIN_PATH}" "${RESOLV_CONF_PATH}" "${AGENT_TRANSPORT_POLICY_PATH}" "${AGENT_NETWORK_PROFILE_PATH}" "${TRANSPORT_SERVICE_PATH}" "${TRANSPORT_STATE_PATH}"; do
     backup_path="$(backup_target_path "${VPNSTACK_BASELINE_DIR}" "${path}")"
     if [[ ! -e "${backup_path}" && ! -L "${backup_path}" ]]; then
       backup_path_if_present "${VPNSTACK_BASELINE_DIR}" "${path}"
@@ -755,6 +757,7 @@ remove_managed_files() {
     "${AGENT_SCRIPT_PATH}" \
     "${AGENT_LOG_CLASSIFIER_PATH}" \
     "${AGENT_TRANSPORT_POLICY_PATH}" \
+    "${AGENT_NETWORK_PROFILE_PATH}" \
     "${ADMIN_WEB_SCRIPT_PATH}" \
     "${ADMIN_APPLY_SCRIPT_PATH}" \
     "${HEALTH_SERVICE_PATH}" \
@@ -982,6 +985,7 @@ copy_role_artifacts() {
   copy_if_present "${source_dir}/vpn-stack-agent.py" "${AGENT_SCRIPT_PATH}" || { echo "Missing vpn-stack-agent.py in ${source_dir}" >&2; exit 1; }
   copy_if_present "${source_dir}/log_classifier.py" "${AGENT_LOG_CLASSIFIER_PATH}" || { echo "Missing log_classifier.py in ${source_dir}" >&2; exit 1; }
   copy_if_present "${source_dir}/interserver_transport.py" "${AGENT_TRANSPORT_POLICY_PATH}" || { echo "Missing interserver_transport.py in ${source_dir}" >&2; exit 1; }
+  copy_if_present "${source_dir}/network_profile.py" "${AGENT_NETWORK_PROFILE_PATH}" || { echo "Missing network_profile.py in ${source_dir}" >&2; exit 1; }
   if [[ "$ROLE" == "ru-gateway" ]]; then
     mkdir -p "$(dirname "${XRAY_CONFIG_PATH}")"
     copy_if_present "${source_dir}/xray.json" "${XRAY_CONFIG_PATH}" || { echo "Missing xray.json in ${source_dir}" >&2; exit 1; }
@@ -1018,6 +1022,7 @@ copy_role_artifacts() {
   fi
   rm -f "${LEGACY_SYNC_SCRIPT_PATH}" "${LEGACY_HEALTH_SCRIPT_PATH}" "${LEGACY_GUARD_SCRIPT_PATH}" "${LEGACY_SYNC_SERVICE_PATH}" "${LEGACY_SYNC_TIMER_PATH}" "${LEGACY_GUARD_SERVICE_PATH}" "${LEGACY_GUARD_TIMER_PATH}"
   chmod 0755 "${AGENT_SCRIPT_PATH}"
+  chmod 0644 "${AGENT_LOG_CLASSIFIER_PATH}" "${AGENT_TRANSPORT_POLICY_PATH}" "${AGENT_NETWORK_PROFILE_PATH}"
 }
 
 release_id_from_manifest() {
@@ -1101,7 +1106,8 @@ validate_staged_release() {
   [[ -s "${source_dir}/vpn-stack-agent.py" ]] || { echo "missing server agent" >&2; return 1; }
   [[ -s "${source_dir}/log_classifier.py" ]] || { echo "missing log classifier" >&2; return 1; }
   [[ -s "${source_dir}/interserver_transport.py" ]] || { echo "missing interserver transport policy" >&2; return 1; }
-  python3 -m py_compile "${source_dir}/vpn-stack-agent.py" "${source_dir}/log_classifier.py" "${source_dir}/interserver_transport.py"
+  [[ -s "${source_dir}/network_profile.py" ]] || { echo "missing network profile" >&2; return 1; }
+  python3 -m py_compile "${source_dir}/vpn-stack-agent.py" "${source_dir}/log_classifier.py" "${source_dir}/interserver_transport.py" "${source_dir}/network_profile.py"
   PYTHONPATH="${source_dir}${PYTHONPATH:+:${PYTHONPATH}}" python3 "${source_dir}/vpn-stack-agent.py" --help >/dev/null
   python3 - "${source_dir}" <<'PY'
 import hashlib
@@ -1170,6 +1176,9 @@ if verdicts.get("host_integrity") != "verified":
     raise SystemExit(f"post-activation host integrity failed: {verdicts.get('host_integrity')}")
 if payload.get("artifacts", {}).get("drift") != "none":
     raise SystemExit("post-activation artifact drift detected")
+profile_mismatches = payload.get("network", {}).get("profile_mismatches", [])
+if profile_mismatches:
+    raise SystemExit(f"post-activation network profile drift detected: {profile_mismatches}")
 PY
   then
     mv -f "${report_tmp}" "${VPNSTACK_FAILED_ACCEPTANCE_FILE}"
@@ -1454,6 +1463,7 @@ configure_journald_limits
 configure_unattended_security_updates
 configure_system_resolver
 systemctl daemon-reload
+python3 "${AGENT_SCRIPT_PATH}" network-apply >/dev/null
 disable_legacy_proxy_services
 configure_ssh_daemon_mode
 systemctl enable nftables

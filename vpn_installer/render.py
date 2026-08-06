@@ -29,11 +29,14 @@ from .interserver_transport import (
 )
 from .manifest import render_manifest
 from .models import (
-    CONNTRACK_MAX,
     DEFAULT_ASSET_TIMEOUT,
     REQUIRED_ENV_VARS,
     ROLE_FOREIGN,
     ROLE_RU,
+)
+from .network_profile import (
+    CONNTRACK_MAX,
+    FQ_KIND,
     TCP_MTU_PROBE_FLOOR,
     TCP_NO_METRICS_SAVE,
     UDP_RMEM_DEFAULT,
@@ -536,7 +539,7 @@ def render_sshd_hardening(env: dict[str, str]) -> str:
 
 def render_sysctl(role: str) -> str:
     lines = [
-        "net.core.default_qdisc=fq",
+        f"net.core.default_qdisc={FQ_KIND}",
         f"net.core.rmem_max={UDP_RMEM_MAX}",
         f"net.core.rmem_default={UDP_RMEM_DEFAULT}",
         f"net.core.wmem_default={UDP_WMEM_DEFAULT}",
@@ -592,6 +595,7 @@ def render_health_service() -> str:
             "",
             "[Service]",
             "Type=oneshot",
+            "ExecStartPre=/usr/bin/python3 /usr/local/lib/vpn-stack/vpn-stack-agent.py network-apply",
             "ExecStart=/usr/bin/python3 /usr/local/lib/vpn-stack/vpn-stack-agent.py health",
             "",
             "[Install]",
@@ -662,6 +666,7 @@ def rendered_files_for_role(env: dict[str, str], role: str, *, assets: dict[str,
             "vpn-stack-agent.py": server_script_asset("server_agent.py"),
             "log_classifier.py": server_script_asset("log_classifier.py"),
             "interserver_transport.py": server_script_asset("interserver_transport.py"),
+            "network_profile.py": server_script_asset("network_profile.py"),
             "admin_apply.py": server_script_asset("admin_apply.py"),
             "admin_web.py": server_script_asset("admin_web.py"),
             "vpn-stack-health.service": render_health_service(),
@@ -686,6 +691,7 @@ def rendered_files_for_role(env: dict[str, str], role: str, *, assets: dict[str,
         "vpn-stack-agent.py": server_script_asset("server_agent.py"),
         "log_classifier.py": server_script_asset("log_classifier.py"),
         "interserver_transport.py": server_script_asset("interserver_transport.py"),
+        "network_profile.py": server_script_asset("network_profile.py"),
         "vpn-stack-health.service": render_health_service(),
         "vpn-stack-health.timer": render_health_timer(),
     }

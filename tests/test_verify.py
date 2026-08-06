@@ -45,6 +45,8 @@ def acceptance_snapshot(role: str, **overrides: object) -> DiagnosticsSnapshot:
             "tcp_adaptation": {
                 "congestion_control": "bbr",
                 "qdisc": "fq",
+                "qdisc_limit": 10_000,
+                "qdisc_flow_limit": 512,
                 "mtu_probing": 1,
                 "mtu_probe_floor": 536,
                 "metrics_save_disabled": 0,
@@ -120,6 +122,9 @@ class VerifyTests(unittest.TestCase):
                 ROLE_RU,
                 network={
                     "tcp_adaptation": {
+                        "qdisc": "fq",
+                        "qdisc_limit": 10_000,
+                        "qdisc_flow_limit": 512,
                         "mtu_probing": 0,
                         "mtu_probe_floor": 536,
                         "metrics_save_disabled": 0,
@@ -140,6 +145,9 @@ class VerifyTests(unittest.TestCase):
                 ROLE_FOREIGN,
                 network={
                     "tcp_adaptation": {
+                        "qdisc": "fq",
+                        "qdisc_limit": 10_000,
+                        "qdisc_flow_limit": 512,
                         "mtu_probing": 1,
                         "mtu_probe_floor": 536,
                         "metrics_save_disabled": 0,
@@ -160,6 +168,9 @@ class VerifyTests(unittest.TestCase):
                 ROLE_FOREIGN,
                 network={
                     "tcp_adaptation": {
+                        "qdisc": "fq",
+                        "qdisc_limit": 10_000,
+                        "qdisc_flow_limit": 512,
                         "mtu_probing": 1,
                         "mtu_probe_floor": 536,
                         "metrics_save_disabled": 0,
@@ -173,6 +184,13 @@ class VerifyTests(unittest.TestCase):
         )
         self.assertEqual(verified.verdict, "degraded")
         self.assertIn("UDP socket buffer profile is not active", verified.reasons)
+
+    def test_verify_snapshot_fails_when_fq_flow_limit_is_not_managed(self) -> None:
+        snapshot = acceptance_snapshot(ROLE_FOREIGN)
+        snapshot.network["tcp_adaptation"]["qdisc_flow_limit"] = 100
+        verified = _verify_snapshot(snapshot)
+        self.assertEqual(verified.verdict, "failed")
+        self.assertIn("managed fq profile is not active", verified.reasons)
 
     def test_verify_snapshot_requires_acceptance_probes(self) -> None:
         verified = _verify_snapshot(acceptance_snapshot(ROLE_FOREIGN, route_probes={"profile": "light", "ok": True}))

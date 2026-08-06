@@ -384,6 +384,10 @@ class RemoteTests(unittest.TestCase):
                     "tcp_adaptation": {
                         "congestion_control": "bbr",
                         "qdisc": "fq",
+                        "qdisc_limit": 10000,
+                        "qdisc_flow_limit": 512,
+                        "qdisc_drops": 7,
+                        "qdisc_flow_limit_drops": 7,
                         "mtu_probing": 1,
                         "mtu_probe_floor": 536,
                         "metrics_save_disabled": 0,
@@ -402,6 +406,7 @@ class RemoteTests(unittest.TestCase):
         self.assertEqual(preflight["default_iface"], "eth0")
         self.assertEqual(preflight["resolver"], "active")
         self.assertEqual(preflight["udp_wmem_default"], "8388608")
+        self.assertEqual(preflight["tcp_qdisc_flow_limit"], "512")
 
     def test_print_preflight_emits_lifecycle_summary(self) -> None:
         with patch("sys.stdout", new_callable=io.StringIO) as stream:
@@ -433,6 +438,10 @@ class RemoteTests(unittest.TestCase):
                     "front_fin_wait_1": "0",
                     "tcp_congestion_control": "bbr",
                     "tcp_default_qdisc": "fq",
+                    "tcp_qdisc_limit": "10000",
+                    "tcp_qdisc_flow_limit": "512",
+                    "tcp_qdisc_drops": "7",
+                    "tcp_qdisc_flow_limit_drops": "7",
                     "tcp_mtu_probing": "1",
                     "tcp_mtu_probe_floor": "536",
                     "tcp_metrics_save_disabled": "0",
@@ -450,7 +459,8 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("front: rtt_p95_ms=40, retransmissions_lifetime=3, retransmit_ratio_pct=1.2, active=0, closing=0, fin_wait_1=0", output)
         self.assertIn("front retransmission scope: lifetime counters of currently open sockets", output)
         self.assertIn(
-            "tcp adaptation: cc=bbr, qdisc=fq, mtu_probing=1, mtu_floor=536, "
+            "tcp adaptation: cc=bbr, qdisc=fq(limit=10000,flow_limit=512,drops=7,flow_limit_drops=7), "
+            "mtu_probing=1, mtu_floor=536, "
             "metrics_save_disabled=0, probe_interval_s=600",
             output,
         )
