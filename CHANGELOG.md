@@ -6,6 +6,17 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.16.1] - 2026-08-06
+
+### Fixed
+
+- Live load установил причину единичной потери UDP DNS после transfer: счётчик foreign `UdpSndbufErrors` вырос на `126`, а фактический send buffer Hysteria2 socket был всего `212992` байта. Managed profile теперь задаёт `net.core.wmem_default=8 MiB` при ceiling `16 MiB`; agent, manifest drift, status и live verifier проверяют оба send-значения.
+- Live verifier больше не требует удалённый `vpn-stack-transport.service`. Доступность native URLTest проверяется agent snapshot и route acceptance, а не устаревшим service field.
+
+### Changed
+
+- Routing policy, основной VLESS URI, public ingress, web-admin и локальный клиент не изменены.
+
 ## [0.16.0] - 2026-08-06
 
 ### Fixed

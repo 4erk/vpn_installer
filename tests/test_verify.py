@@ -35,7 +35,7 @@ def acceptance_snapshot(role: str, **overrides: object) -> DiagnosticsSnapshot:
         "host_integrity": "verified",
     }
     if role == ROLE_RU:
-        services.update({"sing-box": "active", "xray": "active", "transport": "active"})
+        services.update({"sing-box": "active", "xray": "active"})
         verdicts.update({"public_front": "verified", "public_quic": "verified", "client_observation": "observed"})
     payload: dict[str, object] = {
         "role": role,
@@ -50,6 +50,7 @@ def acceptance_snapshot(role: str, **overrides: object) -> DiagnosticsSnapshot:
                 "metrics_save_disabled": 0,
                 "udp_rmem_default": 8_388_608,
                 "udp_rmem_max": 16_777_216,
+                "udp_wmem_default": 8_388_608,
                 "udp_wmem_max": 16_777_216,
             }
         },
@@ -124,6 +125,8 @@ class VerifyTests(unittest.TestCase):
                         "metrics_save_disabled": 0,
                         "udp_rmem_default": 8_388_608,
                         "udp_rmem_max": 16_777_216,
+                        "udp_wmem_default": 8_388_608,
+                        "udp_wmem_max": 16_777_216,
                     }
                 },
             )
@@ -142,6 +145,28 @@ class VerifyTests(unittest.TestCase):
                         "metrics_save_disabled": 0,
                         "udp_rmem_default": 212_992,
                         "udp_rmem_max": 212_992,
+                        "udp_wmem_default": 8_388_608,
+                        "udp_wmem_max": 16_777_216,
+                    }
+                },
+            )
+        )
+        self.assertEqual(verified.verdict, "degraded")
+        self.assertIn("UDP socket buffer profile is not active", verified.reasons)
+
+    def test_verify_snapshot_degrades_when_udp_send_default_is_inactive(self) -> None:
+        verified = _verify_snapshot(
+            acceptance_snapshot(
+                ROLE_FOREIGN,
+                network={
+                    "tcp_adaptation": {
+                        "mtu_probing": 1,
+                        "mtu_probe_floor": 536,
+                        "metrics_save_disabled": 0,
+                        "udp_rmem_default": 8_388_608,
+                        "udp_rmem_max": 16_777_216,
+                        "udp_wmem_default": 212_992,
+                        "udp_wmem_max": 16_777_216,
                     }
                 },
             )
@@ -204,7 +229,7 @@ class VerifyTests(unittest.TestCase):
         self.assertEqual(reconciled.verdict, "degraded")
         self.assertEqual(reconciled.reasons, ["transport capability probe failed: hysteria_candidate_reachable"])
 
-    def test_verify_snapshot_requires_foreign_transport_service(self) -> None:
+    def test_verify_snapshot_requires_foreign_singbox_service(self) -> None:
         verified = _verify_snapshot(
             acceptance_snapshot(
                 ROLE_FOREIGN,

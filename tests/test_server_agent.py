@@ -537,6 +537,7 @@ class ServerAgentTests(unittest.TestCase):
                 "net.ipv4.tcp_no_metrics_save": "0\n",
                 "net.core.rmem_default": "8388608\n",
                 "net.core.rmem_max": "16777216\n",
+                "net.core.wmem_default": "8388608\n",
                 "net.core.wmem_max": "16777216\n",
             }
             if args[0] == "sysctl":
@@ -555,6 +556,7 @@ class ServerAgentTests(unittest.TestCase):
                 "metrics_save_disabled": 0,
                 "udp_rmem_default": 8388608,
                 "udp_rmem_max": 16777216,
+                "udp_wmem_default": 8388608,
                 "udp_wmem_max": 16777216,
                 "qdisc": "fq",
             },
@@ -605,6 +607,7 @@ class ServerAgentTests(unittest.TestCase):
             path.write_text(
                 "net.core.rmem_max=16777216\n"
                 "net.core.rmem_default=8388608\n"
+                "net.core.wmem_default=8388608\n"
                 "net.core.wmem_max=16777216\n"
                 "net.ipv4.tcp_mtu_probe_floor=536\n"
                 "net.ipv4.tcp_no_metrics_save=0\n",
@@ -616,6 +619,7 @@ class ServerAgentTests(unittest.TestCase):
             {
                 "udp_rmem_default": 8_388_608,
                 "udp_rmem_max": 16_777_216,
+                "udp_wmem_default": 8_388_608,
                 "udp_wmem_max": 16_777_216,
                 "mtu_probe_floor": 536,
                 "metrics_save_disabled": 0,
@@ -626,6 +630,7 @@ class ServerAgentTests(unittest.TestCase):
                 {
                     "udp_rmem_default": 212_992,
                     "udp_rmem_max": 16_777_216,
+                    "udp_wmem_default": 8_388_608,
                     "udp_wmem_max": 16_777_216,
                     "mtu_probe_floor": 536,
                     "metrics_save_disabled": 0,

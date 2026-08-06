@@ -496,6 +496,8 @@ def bootstrap_from_snapshot(snapshot: dict[str, Any]) -> dict[str, str]:
         "tcp_probe_interval_seconds": str(tcp_adaptation.get("probe_interval_seconds", "")),
         "udp_rmem_default": str(tcp_adaptation.get("udp_rmem_default", "")),
         "udp_rmem_max": str(tcp_adaptation.get("udp_rmem_max", "")),
+        "udp_wmem_default": str(tcp_adaptation.get("udp_wmem_default", "")),
+        "udp_wmem_max": str(tcp_adaptation.get("udp_wmem_max", "")),
     }
 
 def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
@@ -534,7 +536,8 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
         f"mtu_probing={preflight.get('tcp_mtu_probing', '-')}, mtu_floor={preflight.get('tcp_mtu_probe_floor', '-')}, "
         f"metrics_save_disabled={preflight.get('tcp_metrics_save_disabled', '-')}, "
         f"probe_interval_s={preflight.get('tcp_probe_interval_seconds', '-')}, "
-        f"udp_rmem={preflight.get('udp_rmem_default', '-')}/{preflight.get('udp_rmem_max', '-')}"
+        f"udp_rmem={preflight.get('udp_rmem_default', '-')}/{preflight.get('udp_rmem_max', '-')}, "
+        f"udp_wmem={preflight.get('udp_wmem_default', '-')}/{preflight.get('udp_wmem_max', '-')}"
     )
 
 

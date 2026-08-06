@@ -15,6 +15,7 @@ from .models import (
     TCP_NO_METRICS_SAVE,
     UDP_RMEM_DEFAULT,
     UDP_RMEM_MAX,
+    UDP_WMEM_DEFAULT,
     UDP_WMEM_MAX,
 )
 from .public_transport import PUBLIC_HY2_OUTBOUND_TAG, render_public_hy2_outbound
@@ -58,8 +59,6 @@ def _verify_snapshot(snapshot: DiagnosticsSnapshot) -> DiagnosticsSnapshot:
             hard_failures.append(f"{service_name}={state or 'missing'}")
     if snapshot.role == ROLE_RU and snapshot.services.get("xray") != "active":
         hard_failures.append(f"xray={snapshot.services.get('xray')}")
-    if snapshot.role == ROLE_RU and snapshot.services.get("transport") != "active":
-        hard_failures.append(f"transport={snapshot.services.get('transport') or 'missing'}")
     if snapshot.role == ROLE_RU and (
         snapshot.front.get("tcp_keepalive_idle_seconds") != 90
         or snapshot.front.get("tcp_keepalive_interval_seconds") != 15
@@ -81,10 +80,16 @@ def _verify_snapshot(snapshot: DiagnosticsSnapshot) -> DiagnosticsSnapshot:
     try:
         rmem_default = int(tcp_adaptation.get("udp_rmem_default", 0))
         rmem_max = int(tcp_adaptation.get("udp_rmem_max", 0))
+        wmem_default = int(tcp_adaptation.get("udp_wmem_default", 0))
         wmem_max = int(tcp_adaptation.get("udp_wmem_max", 0))
     except (TypeError, ValueError):
-        rmem_default = rmem_max = wmem_max = 0
-    if tcp_adaptation and (rmem_default < UDP_RMEM_DEFAULT or rmem_max < UDP_RMEM_MAX or wmem_max < UDP_WMEM_MAX):
+        rmem_default = rmem_max = wmem_default = wmem_max = 0
+    if tcp_adaptation and (
+        rmem_default < UDP_RMEM_DEFAULT
+        or rmem_max < UDP_RMEM_MAX
+        or wmem_default < UDP_WMEM_DEFAULT
+        or wmem_max < UDP_WMEM_MAX
+    ):
         degradations.append("UDP socket buffer profile is not active")
     required_verdicts = {"server_path", "public_front", "client_observation", "host_integrity"}
     if snapshot.role == ROLE_RU:

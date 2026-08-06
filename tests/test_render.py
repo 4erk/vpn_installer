@@ -565,6 +565,7 @@ class RenderTests(unittest.TestCase):
         self.assertIn("net.ipv4.tcp_no_metrics_save=0", ru_files["sysctl-vpn-stack.conf"])
         self.assertIn("net.core.rmem_default=8388608", ru_files["sysctl-vpn-stack.conf"])
         self.assertIn("net.core.rmem_max=16777216", foreign_files["sysctl-vpn-stack.conf"])
+        self.assertIn("net.core.wmem_default=8388608", foreign_files["sysctl-vpn-stack.conf"])
         self.assertIn("net.core.wmem_max=16777216", foreign_files["sysctl-vpn-stack.conf"])
         self.assertIn("net.ipv4.conf.all.src_valid_mark=1", ru_files["sysctl-vpn-stack.conf"])
         self.assertIn("net.ipv4.ip_forward=1", foreign_files["sysctl-vpn-stack.conf"])

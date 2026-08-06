@@ -388,6 +388,10 @@ class RemoteTests(unittest.TestCase):
                         "mtu_probe_floor": 536,
                         "metrics_save_disabled": 0,
                         "probe_interval_seconds": 600,
+                        "udp_rmem_default": 8388608,
+                        "udp_rmem_max": 16777216,
+                        "udp_wmem_default": 8388608,
+                        "udp_wmem_max": 16777216,
                     },
                 },
                 "front": {"rtt_ms": {"p95": 40}, "socket_retransmissions": 3, "bytes_retrans": 1200, "retransmit_ratio_pct": 1.2, "state_counts": {"FIN-WAIT-1": 0}},
@@ -397,6 +401,7 @@ class RemoteTests(unittest.TestCase):
         self.assertEqual(preflight["installed"], "1")
         self.assertEqual(preflight["default_iface"], "eth0")
         self.assertEqual(preflight["resolver"], "active")
+        self.assertEqual(preflight["udp_wmem_default"], "8388608")
 
     def test_print_preflight_emits_lifecycle_summary(self) -> None:
         with patch("sys.stdout", new_callable=io.StringIO) as stream:
@@ -432,6 +437,10 @@ class RemoteTests(unittest.TestCase):
                     "tcp_mtu_probe_floor": "536",
                     "tcp_metrics_save_disabled": "0",
                     "tcp_probe_interval_seconds": "600",
+                    "udp_rmem_default": "8388608",
+                    "udp_rmem_max": "16777216",
+                    "udp_wmem_default": "8388608",
+                    "udp_wmem_max": "16777216",
                 },
             )
         output = stream.getvalue()
@@ -445,6 +454,7 @@ class RemoteTests(unittest.TestCase):
             "metrics_save_disabled=0, probe_interval_s=600",
             output,
         )
+        self.assertIn("udp_rmem=8388608/16777216, udp_wmem=8388608/16777216", output)
     def test_ensure_remote_privilege_paths(self) -> None:
         target = RemoteTarget(role=ROLE_RU)
         ensure_remote_privilege(target, {"is_root": "1"}, prompt_yes_no=lambda *_args, **_kwargs: True, prompt_secret=lambda *_args, **_kwargs: "x")

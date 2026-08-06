@@ -38,6 +38,7 @@ from .models import (
     TCP_NO_METRICS_SAVE,
     UDP_RMEM_DEFAULT,
     UDP_RMEM_MAX,
+    UDP_WMEM_DEFAULT,
     UDP_WMEM_MAX,
 )
 from .public_transport import render_public_hy2_inbound
@@ -538,6 +539,7 @@ def render_sysctl(role: str) -> str:
         "net.core.default_qdisc=fq",
         f"net.core.rmem_max={UDP_RMEM_MAX}",
         f"net.core.rmem_default={UDP_RMEM_DEFAULT}",
+        f"net.core.wmem_default={UDP_WMEM_DEFAULT}",
         f"net.core.wmem_max={UDP_WMEM_MAX}",
         f"net.netfilter.nf_conntrack_max={CONNTRACK_MAX}",
         "net.ipv4.tcp_syncookies=1",

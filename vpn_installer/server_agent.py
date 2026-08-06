@@ -420,6 +420,7 @@ def tcp_adaptation_snapshot(interface: str) -> dict[str, Any]:
         ("metrics_save_disabled", "net.ipv4.tcp_no_metrics_save"),
         ("udp_rmem_default", "net.core.rmem_default"),
         ("udp_rmem_max", "net.core.rmem_max"),
+        ("udp_wmem_default", "net.core.wmem_default"),
         ("udp_wmem_max", "net.core.wmem_max"),
     ):
         result = run(["sysctl", "-n", name], timeout=3)
@@ -435,6 +436,7 @@ def managed_network_profile(path: Path = SYSCTL_PATH) -> dict[str, int]:
     field_names = {
         "net.core.rmem_default": "udp_rmem_default",
         "net.core.rmem_max": "udp_rmem_max",
+        "net.core.wmem_default": "udp_wmem_default",
         "net.core.wmem_max": "udp_wmem_max",
         "net.netfilter.nf_conntrack_max": "conntrack_max",
         "net.ipv4.tcp_mtu_probe_floor": "mtu_probe_floor",

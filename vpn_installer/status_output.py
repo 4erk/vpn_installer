@@ -62,7 +62,7 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
             f"metrics_cache={'disabled' if tcp_adaptation.get('metrics_save_disabled') == 1 else 'enabled'}, "
             f"probe_interval_s={tcp_adaptation.get('probe_interval_seconds', '-')}, "
             f"udp_rmem={tcp_adaptation.get('udp_rmem_default', '-')}/{tcp_adaptation.get('udp_rmem_max', '-')}, "
-            f"udp_wmem_max={tcp_adaptation.get('udp_wmem_max', '-')}"
+            f"udp_wmem={tcp_adaptation.get('udp_wmem_default', '-')}/{tcp_adaptation.get('udp_wmem_max', '-')}"
         )
     conntrack = snapshot.network.get("conntrack", {})
     if conntrack:
