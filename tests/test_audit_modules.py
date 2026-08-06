@@ -96,13 +96,14 @@ class AuditModuleTests(unittest.TestCase):
                 path.write_text("{}\n", encoding="utf-8")
             public_outbounds = [
                 {
-                    "type": "hysteria2",
-                    "tag": "ru-gateway-quic",
+                    "type": "vless",
+                    "tag": "ru-gateway-vless",
+                    "multiplex": {"enabled": False},
                 }
             ]
             public_profile = {
-                "dns": {"servers": [{"detour": "ru-gateway-quic"}]},
-                "route": {"final": "ru-gateway-quic"},
+                "dns": {"servers": [{"detour": "ru-gateway-vless"}]},
+                "route": {"final": "ru-gateway-vless"},
                 "outbounds": public_outbounds,
             }
             (client / "hiddify-cross-platform.json").write_text(

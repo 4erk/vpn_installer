@@ -122,31 +122,31 @@ $env:VPN_SSH_BIND_ADDRESS="192.168.0.101"
 - простой `VLESS URI` копируется в буфер обмена и считается основным профилем
 - `vless-uri.txt` — главный низкоуровневый артефакт для клиентов с поддержкой `VLESS/Reality`
 - `windows-xray.json` и `android-v2rayng-xray.json` — JSON fallback, если конкретный клиент не умеет нормально импортировать URI
-- `hiddify-cross-platform.json` — устойчивый к потерям QUIC-профиль
+- `hiddify-cross-platform.json` — route-safe VLESS/Reality-профиль с явно выключенным multiplex
 - `hysteria2-uri.txt` — стандартный дополнительный QUIC URI для импорта в Hiddify/v2rayN
-- `hiddify-android.json` — Android-safe вариант того же QUIC-профиля
+- `hiddify-android.json` — Android-safe вариант того же mux-free VLESS-профиля
 - `hiddify-uri.txt` — совместимый alias того же `VLESS URI` для старых сценариев
 - `v2rayn-uri.txt` — удобный alias того же `VLESS URI` для v2rayN
 
 ## Как подключить клиент
 
 1. Сначала импортируй простой `vless-uri.txt`
-2. Если путь Reality/TCP до RU теряет пакеты, импортируй `hiddify-cross-platform.json` или `hiddify-android.json`: это отдельный QUIC-путь к тому же RU router; `hiddify-uri.txt` остаётся alias основного `VLESS URI`
-3. Для импорта QUIC как обычного узла в Hiddify/v2rayN используй `hysteria2-uri.txt`; сертификат проверяется SHA-256 pin, а `vless-uri.txt` остаётся основным контрактом для сетей без UDP
+2. Если клиент поддерживает JSON, `hiddify-cross-platform.json` и `hiddify-android.json` задают тот же VLESS/Reality-контракт, route bypass и `multiplex.enabled=false`; это исключает TCP head-of-line blocking между независимыми загрузками
+3. Для отдельного QUIC-узла в Hiddify/v2rayN используй `hysteria2-uri.txt`; сертификат проверяется SHA-256 pin, а `vless-uri.txt` остаётся основным контрактом
 4. Переключение узла применяется только к новым соединениям: уже переданный TCP/QUIC payload нельзя безопасно повторить через другой transport без поддержки приложения
 5. Для v2rayN скопируй URI из `v2rayn-uri.txt` и выбери импорт share link из буфера; отдельный custom-config слой не добавляется
-6. Детерминированный QUIC-профиль не использует `urltest`: в sing-box 1.13 он выбирает по delay и не переигрывает неудачный запрос через следующий outbound
+6. Клиентский multiplex для VLESS должен оставаться выключенным: он сокращает handshakes, но объединяет независимые загрузки в один TCP-поток; `vpn diagnose client` показывает такое объединение по активному outer socket
 7. Если сайты висят, сначала смотри `vpn status --deployment <name> --role ru-gateway`, затем запускай свежую acceptance-проверку `vpn verify live --deployment <name>`
 8. `vpn status` выводит отдельные счётчики DNS, domain, IPv4-literal, IPv6-literal и private/fake ошибок за свежее и историческое окна
 9. Если включён TUN/full VPN и `client-check` показывает self-tunnel, используй route bypass helper ниже
 
-Основной публичный вход принимает обычный VLESS/Reality tunnel через Xray TCP `:443` и передаёт трафик во внутренний `sing-box` router. На UDP того же порта работает дополнительный Hysteria2 ingress для QUIC JSON-профилей; он использует ту же routing policy. Если клиент отправляет private/fake IP вроде `fdfd::...` без домена, такие случаи явно группируются в `status/diagnose`.
+Основной публичный вход принимает обычный VLESS/Reality tunnel через Xray TCP `:443` и передаёт трафик во внутренний `sing-box` router. На UDP того же порта работает дополнительный Hysteria2 ingress для стандартного `hysteria2://` URI; он использует ту же routing policy. Если клиент отправляет private/fake IP вроде `fdfd::...` без домена, такие случаи явно группируются в `status/diagnose`.
 
 Внешняя подписка с сервера больше не считается штатным путём; локальные JSON остаются управляемым вариантом.
 
 Сервер остаётся источником истины для split-маршрутизации: клиенту не нужно знать, что считать российским или зарубежным трафиком. Он просто даёт туннель до `российского сервера`, а сама логика маршрутов живёт на серверной стороне.
 
-Между серверами foreign-трафик штатно идёт через WireGuard, а Hysteria2/QUIC остаётся автоматическим резервом. Supervisor проверяет выбранный путь; резерв включается в проверку только после первого отказа или пока он уже выбран. После двух подтверждённых отказов смена применяется только к новым соединениям, а два успешных WG-probe возвращают штатный путь; synthetic RTT и общесистемные counters маршрут не меняют. Оба transport заканчиваются на одном зарубежном VPS, поэтому это не подменяет второй независимый egress. Публичный клиентский контракт при этом остаётся тем же VLESS/Reality URI; для client-to-RU дополнительно выпускаются детерминированный Hysteria2 JSON и стандартный `hysteria2://` URI.
+Между серверами foreign-трафик штатно идёт через WireGuard, а Hysteria2/QUIC остаётся автоматическим резервом. Supervisor проверяет выбранный путь; резерв включается в проверку только после первого отказа или пока он уже выбран. После двух подтверждённых отказов смена применяется только к новым соединениям, а два успешных WG-probe возвращают штатный путь; synthetic RTT и общесистемные counters маршрут не меняют. Оба transport заканчиваются на одном зарубежном VPS, поэтому это не подменяет второй независимый egress. Публичный клиентский контракт при этом остаётся тем же VLESS/Reality URI; для client-to-RU дополнительно выпускаются mux-free VLESS JSON и стандартный `hysteria2://` URI.
 
 Системные DNS-запросы серверов проходят через локальный cache `systemd-resolved` с независимыми Cloudflare, Quad9 и Google upstreams. При кратком отказе upstream известные positive records могут обслуживаться из stale cache до одного часа; этот resolver является частью manifest и откатывается вместе с release.
 

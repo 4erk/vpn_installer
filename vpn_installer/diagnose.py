@@ -164,6 +164,14 @@ def diagnose_server_client_workflow(deployment: str | None, *, source_ip: str, m
         degraded_flows = sum(flow.get("quality") == "degraded" for flow in flows.values())
         loss_observed_flows = sum(flow.get("quality") == "loss_observed" for flow in flows.values())
         print(f"active flows: total={len(flows)}, degraded={degraded_flows}, lifetime_loss={loss_observed_flows}")
+    client_transport = payload.get("client_transport", {})
+    if client_transport:
+        multiplex = "detected" if client_transport.get("multiplex_detected") else "not_detected"
+        print(
+            "client transport: "
+            f"multiplex={multiplex}, flows={client_transport.get('multiplexed_flow_count', 0)}, "
+            f"risk={client_transport.get('risk', 'none')}"
+        )
     recent_interval = payload.get("front", {}).get("recent_interval", {})
     if recent_interval:
         print(

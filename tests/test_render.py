@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from vpn_installer.config import generate_default_env
 from vpn_installer import render
-from vpn_installer.public_transport import PUBLIC_HY2_OUTBOUND_TAG
+from vpn_installer.client_artifacts import PUBLIC_VLESS_OUTBOUND_TAG
 import json
 
 
@@ -81,7 +81,15 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(set(servers), {"dns-remote"})
         self.assertNotIn("reverse_mapping", payload["dns"])
         self.assertEqual(payload["dns"]["rules"], [{"query_type": ["AAAA"], "action": "reject"}])
-        self.assertEqual(payload["route"]["final"], PUBLIC_HY2_OUTBOUND_TAG)
+        self.assertEqual(payload["route"]["final"], PUBLIC_VLESS_OUTBOUND_TAG)
+        outbound = payload["outbounds"][0]
+        self.assertEqual(outbound["type"], "vless")
+        self.assertEqual(outbound["tag"], PUBLIC_VLESS_OUTBOUND_TAG)
+        self.assertEqual(outbound["server"], env["RU_PUBLIC_IP"])
+        self.assertEqual(outbound["server_port"], int(env["RU_LISTEN_PORT"]))
+        self.assertEqual(outbound["multiplex"], {"enabled": False})
+        self.assertNotIn("network", outbound)
+        self.assertEqual(servers["dns-remote"]["detour"], PUBLIC_VLESS_OUTBOUND_TAG)
         self.assertEqual(payload["route"]["default_domain_resolver"]["server"], "dns-remote")
         self.assertEqual(payload["route"]["rules"][0], {"inbound": ["tun-in"], "action": "sniff", "timeout": "1s"})
         self.assertEqual(payload["route"]["rules"][1]["ip_version"], 6)
@@ -100,7 +108,7 @@ class RenderTests(unittest.TestCase):
         payload = json.loads(render.render_client_profile(env, auto_redirect=False, android_safe=True))
         self.assertEqual(payload["inbounds"][0]["address"], [env["CLIENT_TUN_ADDRESS_V4"]])
         self.assertTrue(payload["route"]["override_android_vpn"])
-        self.assertEqual(payload["route"]["final"], PUBLIC_HY2_OUTBOUND_TAG)
+        self.assertEqual(payload["route"]["final"], PUBLIC_VLESS_OUTBOUND_TAG)
         self.assertEqual(
             payload["inbounds"][0]["route_exclude_address"][:2],
             [f"{env['RU_PUBLIC_IP']}/32", f"{env['FOREIGN_PUBLIC_IP']}/32"],
@@ -351,7 +359,7 @@ class RenderTests(unittest.TestCase):
         self.assertIn("VLESS URI", text)
         self.assertIn("Основной простой VLESS URI", text)
         self.assertIn("android-v2rayng-xray.json", text)
-        self.assertIn("fallback", text)
+        self.assertIn("multiplex", text)
         self.assertIn("fake IP", text)
         self.assertIn("v2rayNG", text)
         self.assertIn("Hiddify", text)

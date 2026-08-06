@@ -537,6 +537,25 @@ def endpoint_key(source: str, port: int | None) -> str:
     return f"{host}:{port}" if port is not None else host
 
 
+def client_transport_observation(tcp_events: dict[str, Counter[str]]) -> dict[str, Any]:
+    multiplexed_flows = {
+        key: {
+            "accepted_tcp_requests": sum(destinations.values()),
+            "destinations": dict(destinations.most_common(10)),
+        }
+        for key, destinations in tcp_events.items()
+        if sum(destinations.values()) > 1
+    }
+    detected = bool(multiplexed_flows)
+    return {
+        "multiplex_detected": detected,
+        "multiplexed_flow_count": len(multiplexed_flows),
+        "risk": "tcp_head_of_line" if detected else "none",
+        "basis": "multiple_xray_tcp_accepts_on_one_active_outer_socket" if detected else "none",
+        "flows": multiplexed_flows,
+    }
+
+
 def empty_tcp_metrics() -> dict[str, Any]:
     return {
         "connections": 0,
@@ -1539,9 +1558,10 @@ def public_front_snapshot(minutes: int, source: str | None = None, *, live_probe
     active_flow_keys = {
         key
         for key, metrics in front.get("flows", {}).items()
-        if metrics.get("source") == source
+        if metrics.get("source") == source and metrics.get("phase", "active") == "active"
     }
     flow_events: dict[str, Counter[str]] = {}
+    tcp_flow_events: dict[str, Counter[str]] = {}
     for line in xray_lines:
         event_source, event_port = source_endpoint_from_line(line)
         destination = accepted_destination_from_line(line)
@@ -1550,6 +1570,9 @@ def public_front_snapshot(minutes: int, source: str | None = None, *, live_probe
         key = endpoint_key(event_source, event_port)
         if key in active_flow_keys:
             flow_events.setdefault(key, Counter())[destination] += 1
+            if "accepted tcp:" in line:
+                tcp_flow_events.setdefault(key, Counter())[destination] += 1
+    client_transport = client_transport_observation(tcp_flow_events)
     source_flows = {
         key: {**metrics, "accepted_destinations": dict(flow_events.get(key, Counter()).most_common(10))}
         for key, metrics in front.get("flows", {}).items()
@@ -1592,6 +1615,7 @@ def public_front_snapshot(minutes: int, source: str | None = None, *, live_probe
             "source_flows": source_flows,
             "source_interval": source_interval,
             "source_flow_events": {key: dict(counter.most_common(10)) for key, counter in flow_events.items()},
+            "source_client_transport": client_transport,
             "source_verdict": source_verdict,
         }
     )
@@ -1615,6 +1639,7 @@ def front_client_snapshot(source: str, minutes: int) -> dict[str, Any]:
         },
         "events": payload["source_events"],
         "flow_events": payload["source_flow_events"],
+        "client_transport": payload["source_client_transport"],
         "transport": payload["transport"],
         "verdict": payload["source_verdict"],
     }

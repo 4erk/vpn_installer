@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -44,6 +45,9 @@ class ClientArtifactTests(unittest.TestCase):
             )
             self.assertTrue((client_dir / "android-v2rayng-xray.json").is_file())
             self.assertTrue((client_dir / "hiddify-cross-platform.json").is_file())
+            hiddify = json.loads((client_dir / "hiddify-cross-platform.json").read_text(encoding="utf-8"))
+            self.assertEqual(hiddify["route"]["final"], client_artifacts.PUBLIC_VLESS_OUTBOUND_TAG)
+            self.assertEqual(hiddify["outbounds"][0]["multiplex"], {"enabled": False})
             self.assertTrue((client_dir / "hysteria2-uri.txt").read_text(encoding="utf-8").startswith("hysteria2://"))
             self.assertEqual(
                 (client_dir / "android-v2rayng-xray.json").read_text(encoding="utf-8"),

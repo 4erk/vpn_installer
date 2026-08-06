@@ -4,12 +4,9 @@ import json
 import unittest
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from vpn_installer.client_artifacts import render_client_profile, render_hysteria2_uri, render_vless_uri
+from vpn_installer.client_artifacts import PUBLIC_VLESS_OUTBOUND_TAG, render_client_profile, render_hysteria2_uri, render_vless_uri
 from vpn_installer.config import generate_default_env
-from vpn_installer.public_transport import (
-    PUBLIC_HY2_OUTBOUND_TAG,
-    derive_public_hy2_password,
-)
+from vpn_installer.public_transport import derive_public_hy2_password
 from vpn_installer.render import render_ru_firewall_nftables, render_ru_singbox
 
 
@@ -41,16 +38,16 @@ class PublicTransportTests(unittest.TestCase):
         self.assertIn("udp sport 443 counter notrack", firewall)
         self.assertIn("udp dport 443 counter accept", firewall)
 
-    def test_managed_profile_uses_deterministic_quic_transport(self) -> None:
+    def test_managed_profile_uses_mux_free_vless_transport(self) -> None:
         env = self.make_env()
         profile = json.loads(render_client_profile(env, auto_redirect=False))
         outbounds = {item["tag"]: item for item in profile["outbounds"]}
-        self.assertNotIn("up_mbps", outbounds[PUBLIC_HY2_OUTBOUND_TAG])
-        self.assertNotIn("down_mbps", outbounds[PUBLIC_HY2_OUTBOUND_TAG])
-        self.assertEqual({item["type"] for item in profile["outbounds"]}, {"hysteria2", "direct", "block"})
+        self.assertEqual(outbounds[PUBLIC_VLESS_OUTBOUND_TAG]["multiplex"], {"enabled": False})
+        self.assertNotIn("network", outbounds[PUBLIC_VLESS_OUTBOUND_TAG])
+        self.assertEqual({item["type"] for item in profile["outbounds"]}, {"vless", "direct", "block"})
         self.assertFalse(any(item["type"] == "urltest" for item in profile["outbounds"]))
-        self.assertEqual(profile["route"]["final"], PUBLIC_HY2_OUTBOUND_TAG)
-        self.assertEqual(profile["dns"]["servers"][0]["detour"], PUBLIC_HY2_OUTBOUND_TAG)
+        self.assertEqual(profile["route"]["final"], PUBLIC_VLESS_OUTBOUND_TAG)
+        self.assertEqual(profile["dns"]["servers"][0]["detour"], PUBLIC_VLESS_OUTBOUND_TAG)
 
     def test_primary_vless_uri_contract_remains_tcp_reality(self) -> None:
         env = self.make_env()

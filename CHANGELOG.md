@@ -6,6 +6,17 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.15.2] - 2026-08-06
+
+### Fixed
+
+- Существующие `hiddify-cross-platform.json`, `hiddify-android.json` и `linux-sing-box.json` теперь используют основной VLESS/Reality transport с явно выключенным multiplex. Это не даёт нескольким загрузкам делить один внешний TCP congestion window и одновременно сохраняет UDP/XUDP для DNS; дополнительные файлы и timeout-параметры не добавлены.
+- `vpn diagnose client` определяет multiplex по нескольким Xray TCP accept-событиям на одном активном outer socket и отдельно выводит риск `tcp_head_of_line`. UDP-события и закрытые сокеты в этот признак не попадают.
+
+### Changed
+
+- Основной `vless-uri.txt` и серверный dataplane не изменены. Отдельный `hysteria2-uri.txt` сохранён как явный дополнительный QUIC transport; web-admin сохранён.
+
 ## [0.15.1] - 2026-08-06
 
 ### Fixed

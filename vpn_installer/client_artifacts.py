@@ -12,11 +12,11 @@ from .config import require_env
 from .interserver_transport import HY2_SERVER_NAME
 from .models import REQUIRED_ENV_VARS
 from .public_transport import (
-    PUBLIC_HY2_OUTBOUND_TAG,
     derive_public_hy2_password,
     public_hy2_certificate_fingerprint,
-    render_public_hy2_outbound,
 )
+
+PUBLIC_VLESS_OUTBOUND_TAG = "ru-gateway-vless"
 
 
 def _env_int(env: dict[str, str], key: str) -> int:
@@ -45,6 +45,29 @@ def client_route_excludes(env: dict[str, str]) -> list[str]:
     return route_excludes
 
 
+def render_vless_client_outbound(env: dict[str, str]) -> dict[str, Any]:
+    return {
+        "type": "vless",
+        "tag": PUBLIC_VLESS_OUTBOUND_TAG,
+        "server": env["RU_PUBLIC_IP"],
+        "server_port": _env_int(env, "RU_LISTEN_PORT"),
+        "uuid": env["CLIENT_UUID"],
+        "flow": env["CLIENT_FLOW"],
+        "packet_encoding": "xudp",
+        "multiplex": {"enabled": False},
+        "tls": {
+            "enabled": True,
+            "server_name": env["RU_REALITY_SERVER_NAME"],
+            "utls": {"enabled": True, "fingerprint": env["UTLS_FINGERPRINT"]},
+            "reality": {
+                "enabled": True,
+                "public_key": env["RU_REALITY_PUBLIC_KEY"],
+                "short_id": env["RU_REALITY_SHORT_ID"],
+            },
+        },
+    }
+
+
 def render_client_profile(env: dict[str, str], auto_redirect: bool, *, android_safe: bool = False) -> str:
     tun_addresses = [env["CLIENT_TUN_ADDRESS_V4"]]
     enable_ipv6 = env.get("CLIENT_ENABLE_IPV6", "0").strip().lower() in {"1", "true", "yes", "on"}
@@ -62,7 +85,7 @@ def render_client_profile(env: dict[str, str], auto_redirect: bool, *, android_s
                     "server": env["GLOBAL_DOH_SERVER"],
                     "server_port": 443,
                     "path": env["GLOBAL_DOH_PATH"],
-                    "detour": PUBLIC_HY2_OUTBOUND_TAG,
+                    "detour": PUBLIC_VLESS_OUTBOUND_TAG,
                     "tls": {"enabled": True, "server_name": env["GLOBAL_DOH_SERVER_NAME"]},
                 },
             ],
@@ -82,7 +105,7 @@ def render_client_profile(env: dict[str, str], auto_redirect: bool, *, android_s
             }
         ],
         "outbounds": [
-            render_public_hy2_outbound(env),
+            render_vless_client_outbound(env),
             {"type": "direct", "tag": "direct"},
             {"type": "block", "tag": "block"},
         ],
@@ -96,7 +119,7 @@ def render_client_profile(env: dict[str, str], auto_redirect: bool, *, android_s
                 {"ip_is_private": True, "action": "route", "outbound": "direct"},
                 {"domain_suffix": ["local"], "action": "route", "outbound": "direct"},
             ],
-            "final": PUBLIC_HY2_OUTBOUND_TAG,
+            "final": PUBLIC_VLESS_OUTBOUND_TAG,
         },
     }
     if android_safe:
@@ -318,17 +341,17 @@ def render_next_steps(env: dict[str, str], *, out_dir: Path | None = None) -> st
             f"- Дополнительный стандартный Hysteria2 URI для Hiddify/v2rayN: {paths['hysteria2_uri']}",
             f"- Дополнительный Windows/v2rayN Xray JSON: {paths['windows_xray_json']}",
             f"- Дополнительный Android/v2rayNG Xray JSON: {paths['android_xray_json']}",
-            f"- Устойчивый QUIC профиль для Hiddify: {paths['hiddify_json']}",
-            f"- Устойчивый Android QUIC профиль для Hiddify: {paths['android_hiddify_json']}",
+            f"- Route-safe VLESS профиль без multiplex для Hiddify: {paths['hiddify_json']}",
+            f"- Route-safe Android VLESS профиль без multiplex для Hiddify: {paths['android_hiddify_json']}",
             f"- Windows route bypass helper: {paths['windows_route_bypass']}",
             f"- JSON backup для Linux sing-box: {paths['linux_json']}",
             "",
             "Что делать дальше:",
             f"1. Сначала импортируй простой {paths['vless_uri'].name}. Это основной контракт: клиент делает обычный VLESS/Reality tunnel, а маршрутизация остаётся на сервере.",
             f"2. Для v2rayN скопируй строку из {paths['v2rayn_uri'].name} и выбери импорт share link из буфера; это тот же канонический VLESS URI без custom-config слоя.",
-            f"3. Если клиенту нужен JSON-импорт, используй {paths['windows_xray_json'].name} или {paths['android_xray_json'].name} как compatibility fallback, а не как обязательный путь.",
+            f"3. Если клиенту нужен JSON-импорт, используй {paths['hiddify_json'].name}, {paths['windows_xray_json'].name} или {paths['android_xray_json'].name}. В них multiplex явно выключен: большие загрузки не делят один outer TCP stream.",
             f"4. Если клиентский JSON/TUN начинает отправлять на сервер private/fake IP вместо домена, `vpn status` покажет это в отдельном bucket `blocked_private_fake`.",
-            f"5. Если путь TCP до RU теряет пакеты, используй QUIC профиль {paths['hiddify_json'].name} или {paths['android_hiddify_json'].name}. В нём нет latency-selector: каждый запрос сразу идёт по одному детерминированному transport.",
+            f"5. Если импортированный URI переиспользует один TCP socket для разных сайтов, `vpn diagnose client` покажет multiplex. Для VLESS используй mux-free JSON; не включай Mux в глобальных настройках клиента.",
             f"6. Для импорта QUIC как обычного узла в Hiddify/v2rayN используй {paths['hysteria2_uri'].name}; VLESS URI остаётся основным вариантом для сетей без UDP.",
             f"7. Переключение transport применяется к новым соединениям: уже оборванный TCP/QUIC поток клиент автоматически перенести на другой transport не может.",
             f"8. Если сайты висят, сначала смотри серверные группы ошибок: vpn status --deployment {env['DEPLOY_NAME']} --role ru-gateway",

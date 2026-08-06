@@ -1268,6 +1268,47 @@ class ServerAgentTests(unittest.TestCase):
 
         self.assertEqual(payload["verdict"], "degraded")
         self.assertEqual(payload["flow_events"], {"203.0.113.20:50123": {"current.example:443": 1}})
+        self.assertFalse(payload["client_transport"]["multiplex_detected"])
+
+    def test_client_snapshot_detects_tcp_multiplex_on_active_outer_flow(self) -> None:
+        front = {
+            "listening": True,
+            "clients": {"203.0.113.20": {"connections": 1, "quality": "observed"}},
+            "flows": {
+                "203.0.113.20:50123": {
+                    "source": "203.0.113.20",
+                    "source_port": 50123,
+                    "phase": "active",
+                    "quality": "observed",
+                }
+            },
+            "top_sources": {"203.0.113.20": 1},
+        }
+        lines = [
+            "from 203.0.113.20:50123 accepted tcp:first.example:443",
+            "from 203.0.113.20:50123 accepted udp:1.1.1.1:53",
+            "from 203.0.113.20:50123 accepted tcp:second.example:443",
+        ]
+        with (
+            patch.object(server_agent, "parse_env", return_value={"RU_LISTEN_PORT": "443"}),
+            patch.object(server_agent, "journal_filtered_lines", return_value=lines),
+            patch.object(server_agent, "tcp_front_snapshot", return_value=front),
+            patch.object(server_agent, "service_state", return_value="active"),
+            patch.object(server_agent, "udp_443_policy", return_value="routed"),
+        ):
+            payload = server_agent.front_client_snapshot("203.0.113.20", 15)
+
+        transport = payload["client_transport"]
+        self.assertTrue(transport["multiplex_detected"])
+        self.assertEqual(transport["multiplexed_flow_count"], 1)
+        self.assertEqual(transport["risk"], "tcp_head_of_line")
+        self.assertEqual(
+            transport["flows"]["203.0.113.20:50123"],
+            {
+                "accepted_tcp_requests": 2,
+                "destinations": {"first.example:443": 1, "second.example:443": 1},
+            },
+        )
 
     def test_udp_443_policy_rejects_only_global_transport_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

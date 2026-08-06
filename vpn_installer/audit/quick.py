@@ -12,10 +12,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from ..common import OUT_DIR, ROOT_DIR, RUNTIME_SITE_PACKAGES
+from ..client_artifacts import PUBLIC_VLESS_OUTBOUND_TAG
 from ..config import load_env_file
 from ..dns_policy import GLOBAL_FOREIGN_DOMAINS, GLOBAL_FOREIGN_DOMAIN_SUFFIXES
 from ..manifest import XRAY_VERSION
-from ..public_transport import PUBLIC_HY2_OUTBOUND_TAG
 from ..render import find_cached_asset, render_all_artifacts
 from ..runtime_deps import ensure_python_package
 from ..targets import build_target
@@ -391,16 +391,16 @@ def test_user_artifacts(out_dir: Path) -> dict[str, str]:
     if hiddify_payload.get("inbounds", [{}])[0].get("auto_redirect") is not False:
         raise AuditFailure("Hiddify profile должен отключать auto_redirect")
     hiddify_outbounds = {item.get("tag"): item for item in hiddify_payload.get("outbounds", []) if isinstance(item, dict)}
-    public_transport = hiddify_outbounds.get(PUBLIC_HY2_OUTBOUND_TAG, {})
-    if public_transport.get("type") != "hysteria2":
-        raise AuditFailure("Hiddify profile не содержит ожидаемый QUIC transport")
+    public_transport = hiddify_outbounds.get(PUBLIC_VLESS_OUTBOUND_TAG, {})
+    if public_transport.get("type") != "vless" or public_transport.get("multiplex") != {"enabled": False}:
+        raise AuditFailure("Hiddify profile не содержит mux-free VLESS transport")
     if any(item.get("type") == "urltest" for item in hiddify_payload.get("outbounds", []) if isinstance(item, dict)):
         raise AuditFailure("Hiddify profile не должен использовать latency-based urltest как failover")
-    if hiddify_payload.get("route", {}).get("final") != PUBLIC_HY2_OUTBOUND_TAG:
-        raise AuditFailure("Hiddify profile не закрепляет default route за QUIC transport")
+    if hiddify_payload.get("route", {}).get("final") != PUBLIC_VLESS_OUTBOUND_TAG:
+        raise AuditFailure("Hiddify profile не закрепляет default route за VLESS transport")
     dns_servers = hiddify_payload.get("dns", {}).get("servers", [])
-    if not dns_servers or dns_servers[0].get("detour") != PUBLIC_HY2_OUTBOUND_TAG:
-        raise AuditFailure("Hiddify profile не закрепляет remote DNS за QUIC transport")
+    if not dns_servers or dns_servers[0].get("detour") != PUBLIC_VLESS_OUTBOUND_TAG:
+        raise AuditFailure("Hiddify profile не закрепляет remote DNS за VLESS transport")
     if not hysteria2_uri_payload.startswith("hysteria2://") or "pinSHA256=" not in hysteria2_uri_payload:
         raise AuditFailure("Hysteria2 URI не содержит стандартную схему и certificate pin")
     if linux_payload.get("inbounds", [{}])[0].get("auto_redirect") is not True:

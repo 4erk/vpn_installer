@@ -110,6 +110,7 @@ class DiagnoseTests(unittest.TestCase):
             "services": {"xray": "active", "nftables": "active"},
             "events": {"accepted": 2, "invalid_reality": 0, "disabled_invalid": 0},
             "front": {"client": {"quality": "loss_observed"}, "flows": {}},
+            "client_transport": {"multiplex_detected": True, "multiplexed_flow_count": 1, "risk": "tcp_head_of_line"},
             "verdict": "loss_observed",
         }
         with tempfile.TemporaryDirectory() as tmp:
@@ -123,6 +124,7 @@ class DiagnoseTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertIn("verdict: loss_observed", stream.getvalue())
+        self.assertIn("client transport: multiplex=detected, flows=1, risk=tcp_head_of_line", stream.getvalue())
         self.assertIn("no fresh degraded interval is available", stream.getvalue())
 
     def test_diagnose_front_uses_structured_agent_snapshot(self) -> None:
