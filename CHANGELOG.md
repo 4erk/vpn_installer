@@ -6,6 +6,23 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.17.0] - 2026-08-06
+
+### Fixed
+
+- Устранён архитектурный дефект межсерверного failover: native sing-box selector менял outbound только для новых соединений, а активная UDP-association внутреннего relay оставалась закреплена за отказавшим transport. Поэтому уже открытые загрузки зависали даже после формально успешного переключения.
+- Foreign-трафик теперь всегда идёт внутри одного kernel WireGuard overlay. Его локальный endpoint переключается между двумя статическими relay: userspace WireGuard и Hysteria2. Перед переключением закрывается только старая локальная UDP-association; Xray, sing-box router, kernel WG interface и пользовательские TCP-соединения не перезапускаются.
+- Failure-injection lab запускает production-команду agent и обрывает прямой underlay во время единственного 5 MiB HTTP-потока. Поток завершился за `10.277s`, размер совпал побайтно, foreign получил ровно один запрос: повторной загрузки application payload и разрыва overlay не было.
+- Внутренний `PersistentKeepalive=1` создаёт исходящий overlay-пакет не реже раза в секунду при простое, поэтому roaming не зависит только от новых application ACK. Он применяется только к сервер-сервер overlay и не меняет клиентские профили.
+- Ошибки обоих underlay теперь классифицируются как `transport_unavailable`; они не смешиваются с DNS, domain/IP timeout и общим `unclassified_error`.
+
+### Changed
+
+- `vpn-stack-agent` проверяет оба underlay параллельно каждые две секунды bounded-probe с budget `1200ms`. Отказ переключает endpoint после двух подтверждений; преимущество задержки должно сохраниться три цикла и превышать `30ms`.
+- RU получает управляемый `vpn-stack-transport.service`. Его `ExecStartPre` синхронно создаёт первый transport-state до acceptance, затем watcher поддерживает состояние без shell parsing и без route/env-ручек.
+- Outer WireGuard identity детерминированно выводится из deployment secret; foreign получает отдельного peer на том же закрытом WG listener. Новых публичных портов и env-параметров нет.
+- Основной `vless-uri.txt`, Xray/Reality front, web-admin, operator rules и локальный VPN-клиент не изменены. Оба transport по-прежнему заканчиваются на одном foreign egress и не считаются egress redundancy.
+
 ## [0.16.2] - 2026-08-06
 
 ### Fixed

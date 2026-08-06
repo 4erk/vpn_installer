@@ -602,30 +602,21 @@ def test_interserver_hysteria_runtime(runner: AuditRunner, out_dir: Path) -> dic
     server_config_path = out_dir / "preview" / "foreign" / "sing-box.json"
 
     ru_config = json.loads((out_dir / "preview" / "ru" / "sing-box.json").read_text(encoding="utf-8"))
-    hysteria_fallback = next(
-        (item for item in ru_config.get("outbounds", []) if item.get("tag") == "to-foreign-hy2"),
+    hysteria_candidate = next(
+        (item for item in ru_config.get("outbounds", []) if item.get("tag") == "interserver-underlay-hy2"),
         None,
     )
-    if not isinstance(hysteria_fallback, dict) or hysteria_fallback.get("type") != "hysteria2":
+    if not isinstance(hysteria_candidate, dict) or hysteria_candidate.get("type") != "hysteria2":
         raise AuditFailure("RU config не содержит Hysteria2 transport candidate")
-    if hysteria_fallback.get("obfs", {}).get("type") != "salamander":
+    if hysteria_candidate.get("obfs", {}).get("type") != "salamander":
         raise AuditFailure("Interserver Hysteria2 candidate не содержит Salamander obfs")
-    hysteria_fallback = dict(hysteria_fallback)
-    hysteria_fallback["server"] = server_ip
-    urltest_group = {
-        "type": "urltest",
-        "tag": "to-foreign",
-        "outbounds": ["to-foreign-hy2"],
-        "url": "http://127.0.0.1:18080/",
-        "interval": "10s",
-        "tolerance": 30,
-        "interrupt_exist_connections": False,
-    }
+    hysteria_candidate = dict(hysteria_candidate)
+    hysteria_candidate["server"] = server_ip
     client_config = {
         "log": {"level": "info", "timestamp": True},
         "inbounds": [{"type": "mixed", "tag": "probe-in", "listen": "0.0.0.0", "listen_port": 1080}],
-        "outbounds": [hysteria_fallback, urltest_group],
-        "route": {"final": "to-foreign"},
+        "outbounds": [hysteria_candidate],
+        "route": {"final": "interserver-underlay-hy2"},
         "experimental": ru_config["experimental"],
     }
     write_bytes(client_config_path, json.dumps(client_config, ensure_ascii=False, indent=2).encode("utf-8") + b"\n")
@@ -657,7 +648,7 @@ def test_interserver_hysteria_runtime(runner: AuditRunner, out_dir: Path) -> dic
                     raise AuditFailure("Hysteria2 runtime не вернул payload с foreign endpoint")
                 runner.docker_exec(
                     client,
-                    "curl --silent --show-error --fail http://127.0.0.1:19090/proxies/to-foreign | jq -e '.now == \"to-foreign-hy2\"'",
+                    "curl --silent --show-error --fail http://127.0.0.1:19090/proxies/interserver-underlay-hy2 | jq -e '.type == \"Hysteria2\"'",
                 )
     return {"server_config": str(server_config_path), "client_config": str(client_config_path), "result": "handshake-and-http-ok"}
 

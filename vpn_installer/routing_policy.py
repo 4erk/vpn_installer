@@ -5,22 +5,9 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable
 
 from .dns_policy import GLOBAL_FOREIGN_DOMAINS, GLOBAL_FOREIGN_DOMAIN_SUFFIXES, CONNECTIVITY_CHECK_IPV6_ONLY_DOMAINS
-from .interserver_transport import (
-    HY2_PORT,
-    HY2_SERVER_NAME,
-    TRANSPORT_CANDIDATE_TAGS,
-    TRANSPORT_HEALTHCHECK_URL,
-    TRANSPORT_HY2_TAG,
-    TRANSPORT_SELECTOR_TAG,
-    TRANSPORT_URLTEST_IDLE_TIMEOUT,
-    TRANSPORT_URLTEST_INTERVAL,
-    TRANSPORT_URLTEST_TOLERANCE_MS,
-    TRANSPORT_WG_TAG,
-    derive_transport_obfs_password,
-    derive_transport_password,
-)
+from .interserver_transport import TRANSPORT_OVERLAY_TAG
 
-POLICY_VERSION = "0.16.0"
+POLICY_VERSION = "0.17.0"
 
 TRAFFIC_CLASSES = (
     "ru_direct_domain",
@@ -239,41 +226,16 @@ def build_ru_routing_policy(env: dict[str, str]) -> RoutingPolicy:
             routes=({"ip_cidr": ["0.0.0.0/0"], "action": "route", "outbound": "to-foreign"},),
         ),
     )
-    wireguard = {
+    stable_overlay = {
         "type": "direct",
-        "tag": TRANSPORT_WG_TAG,
+        "tag": TRANSPORT_OVERLAY_TAG,
         "bind_interface": env["WG_INTERFACE"],
         "routing_mark": int(env["APP_ROUTE_MARK"]),
         "domain_resolver": {"server": "dns-ru-direct", "strategy": "ipv4_only"},
     }
-    hysteria = {
-        "type": "hysteria2",
-        "tag": TRANSPORT_HY2_TAG,
-        "server": env["FOREIGN_PUBLIC_IP"],
-        "server_port": HY2_PORT,
-        "obfs": {"type": "salamander", "password": derive_transport_obfs_password(env["WG_PRESHARED_KEY"])},
-        "password": derive_transport_password(env["WG_PRESHARED_KEY"]),
-        "tls": {
-            "enabled": True,
-            "server_name": HY2_SERVER_NAME,
-            "certificate_public_key_sha256": [env["INTERSERVER_HY2_PUBLIC_KEY_SHA256"]],
-        },
-    }
-    adaptive_foreign = {
-        "type": "urltest",
-        "tag": TRANSPORT_SELECTOR_TAG,
-        "outbounds": list(TRANSPORT_CANDIDATE_TAGS),
-        "url": TRANSPORT_HEALTHCHECK_URL,
-        "interval": TRANSPORT_URLTEST_INTERVAL,
-        "tolerance": TRANSPORT_URLTEST_TOLERANCE_MS,
-        "idle_timeout": TRANSPORT_URLTEST_IDLE_TIMEOUT,
-        "interrupt_exist_connections": False,
-    }
     outbounds = (
         {"type": "direct", "tag": "direct-ru", "domain_resolver": {"server": "dns-ru-direct", "strategy": "ipv4_only"}},
-        wireguard,
-        hysteria,
-        adaptive_foreign,
+        stable_overlay,
     )
     deprecated = tuple(
         key

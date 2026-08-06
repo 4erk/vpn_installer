@@ -353,7 +353,7 @@ def render_next_steps(env: dict[str, str], *, out_dir: Path | None = None) -> st
             f"4. Если клиентский JSON/TUN начинает отправлять на сервер private/fake IP вместо домена, `vpn status` покажет это в отдельном bucket `blocked_private_fake`.",
             f"5. Если импортированный URI переиспользует один TCP socket для разных сайтов, `vpn diagnose client` покажет multiplex. Для VLESS используй mux-free JSON; не включай Mux в глобальных настройках клиента.",
             f"6. Для импорта QUIC как обычного узла в Hiddify/v2rayN используй {paths['hysteria2_uri'].name}; VLESS URI остаётся основным вариантом для сетей без UDP.",
-            f"7. Переключение transport применяется к новым соединениям: уже оборванный TCP/QUIC поток клиент автоматически перенести на другой transport не может.",
+            f"7. Ручная смена клиентского VLESS/Hysteria2 узла действует только на новые соединения. Серверный underlay failover сохраняет открытые потоки внутри WireGuard overlay, но не может восстановить уже оборванный участок клиент -> RU.",
             f"8. Если сайты висят, сначала смотри серверные группы ошибок: vpn status --deployment {env['DEPLOY_NAME']} --role ru-gateway",
             f"9. Если включён TUN/full VPN и client-check показывает self-tunnel, запусти PowerShell от администратора: .\\{paths['windows_route_bypass'].name}",
             f"10. После install/reinstall запусти live-приёмку: vpn verify live --deployment {env['DEPLOY_NAME']}",

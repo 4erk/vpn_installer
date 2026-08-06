@@ -3,12 +3,15 @@ from __future__ import annotations
 import json
 import shutil
 import textwrap
+import time
 
 from ..common import OUT_DIR
 from ..config import load_env_file
+from ..interserver_transport import TRANSPORT_HY2_TAG
 from ..render import (
     render_all_artifacts,
     render_foreign_nftables,
+    render_foreign_singbox,
     render_foreign_wg,
     render_ru_firewall_nftables,
     render_ru_singbox,
@@ -71,15 +74,6 @@ def build_lab_ru_config(env: dict[str, str]) -> str:
     payload["dns"]["final"] = "dns-global"
     payload["inbounds"][0]["listen"] = "0.0.0.0"
     payload["inbounds"][0]["listen_port"] = int(env.get("RU_ROUTER_LISTEN_PORT", "2080"))
-    payload["outbounds"] = [
-        {"type": "direct", "tag": "direct-ru", "domain_resolver": {"server": "dns-ru-direct", "strategy": "ipv4_only"}},
-        {
-            "type": "direct",
-            "tag": "to-foreign",
-            "bind_interface": env["WG_INTERFACE"],
-            "domain_resolver": {"server": "dns-global", "strategy": "ipv4_only"},
-        },
-    ]
     for rule_set in payload["route"]["rule_set"]:
         if rule_set.get("tag") == "ru-geoip":
             rule_set.update({"format": "source", "path": "/opt/geoip-ru.json"})
@@ -91,9 +85,24 @@ def build_lab_web_server(name: str) -> str:
         f"""\
         import http.server
         import socketserver
+        import time
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
+                with open("/opt/requests.log", "a", encoding="utf-8") as log:
+                    log.write(f"{{self.path}}\\n")
+                if self.path == "/stream":
+                    chunk = b"x" * 65536
+                    chunks = 80
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/octet-stream")
+                    self.send_header("Content-Length", str(len(chunk) * chunks))
+                    self.end_headers()
+                    for _ in range(chunks):
+                        self.wfile.write(chunk)
+                        self.wfile.flush()
+                        time.sleep(0.05)
+                    return
                 body = f"server={name}\\nsource={{self.client_address[0]}}\\npath={{self.path}}\\n".encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/plain; charset=utf-8")
@@ -160,12 +169,14 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
             ru_nft = lab_dir / "ru.nft"
             foreign_nft = lab_dir / "foreign.nft"
             ru_cfg = lab_dir / "ru-singbox.json"
+            foreign_cfg = lab_dir / "foreign-singbox.json"
             client_cfg = lab_dir / "client-singbox.json"
             ru_assets = lab_dir / "ru-assets"
             dns_conf = lab_dir / "dnsmasq.conf"
             ru_web = lab_dir / "ru-web.py"
             global_web = lab_dir / "global-web.py"
             geoip_source = lab_dir / "geoip-ru.json"
+            agent_dir = out_dir / "bundle" / "ru-gateway" / "rendered"
             ru_assets.mkdir(parents=True, exist_ok=True)
             shutil.copy2(out_dir / "assets" / "geosite-ru.srs", ru_assets / "geosite-ru.srs")
             shutil.copy2(out_dir / "assets" / "geoip-ru.srs", ru_assets / "geoip-ru.srs")
@@ -174,25 +185,33 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
             write_text(ru_nft, render_ru_firewall_nftables(env))
             write_text(foreign_nft, render_foreign_nftables(env, "eth1"))
             write_text(ru_cfg, build_lab_ru_config(env))
+            write_text(foreign_cfg, render_foreign_singbox(env))
             write_text(client_cfg, build_lab_client_config(env))
             write_text(dns_conf, build_lab_dnsmasq())
             write_text(ru_web, build_lab_web_server("ru-web"))
             write_text(global_web, build_lab_web_server("global-web"))
             write_text(geoip_source, json.dumps({"version": 3, "rules": [{"ip_cidr": [LAB_RU_SUBNET]}]}, indent=2) + "\n")
 
+            runner.docker_exec(ru_container, "mkdir -p /opt/agent /etc/vpn-stack /etc/sing-box /var/lib/vpn-stack")
             for container, local, remote in [
                 (ru_container, ru_wg, "/opt/wg0.conf"),
                 (foreign_container, foreign_wg, "/opt/wg0.conf"),
                 (ru_container, ru_nft, "/opt/nftables.conf"),
                 (foreign_container, foreign_nft, "/opt/nftables.conf"),
                 (ru_container, ru_cfg, "/opt/ru-singbox.json"),
+                (ru_container, ru_cfg, "/etc/sing-box/config.json"),
+                (foreign_container, foreign_cfg, "/opt/foreign-singbox.json"),
                 (client_container, client_cfg, "/opt/client-singbox.json"),
                 (dns_container, dns_conf, "/opt/dnsmasq.conf"),
                 (ru_web_container, ru_web, "/opt/web.py"),
                 (global_web_container, global_web, "/opt/web.py"),
                 (ru_container, geoip_source, "/opt/geoip-ru.json"),
+                (ru_container, env_path, "/etc/vpn-stack/deployment.env"),
             ]:
                 runner.docker_copy(container, local, remote)
+
+            for name in ("vpn-stack-agent.py", "log_classifier.py", "interserver_transport.py", "network_profile.py"):
+                runner.docker_copy(ru_container, agent_dir / name, f"/opt/agent/{name}")
 
             runner.docker_exec(ru_container, "mkdir -p /var/lib/vpn-stack/rules")
             for asset_name in ("geosite-ru.srs", "geoip-ru.srs"):
@@ -205,6 +224,7 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
             runner.docker_exec(ru_container, "sysctl -w net.ipv4.conf.all.src_valid_mark=1 >/dev/null")
             runner.docker_exec(ru_container, "ip address add 10.0.0.20/32 dev lo && nohup python3 -m http.server 80 --bind 10.0.0.20 >/opt/private-direct-web.log 2>&1 &")
             runner.docker_exec(foreign_container, "wg-quick up /opt/wg0.conf")
+            runner.docker_exec(foreign_container, "nohup sing-box run -c /opt/foreign-singbox.json >/opt/foreign-singbox.log 2>&1 &")
             runner.docker_exec(ru_container, "wg-quick up /opt/wg0.conf")
             runner.docker_exec(foreign_container, "ip address add 10.0.0.20/32 dev lo && nohup python3 -m http.server 80 --bind 10.0.0.20 >/opt/private-web.log 2>&1 &")
             runner.docker_exec(foreign_container, "nft -f /opt/nftables.conf && nft add element inet vpnstack ru_ipv4 { 203.0.113.0/24 }")
@@ -229,6 +249,59 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
             raw_global_resp = runner.lab_curl(client_container, f"http://{LAB_IPS['global_web']}/").stdout
             if "server=global-web" not in raw_global_resp or f"source={LAB_IPS['foreign_wan']}" not in raw_global_resp:
                 raise AuditFailure(f"Raw global IP ушёл не через foreign:\n{raw_global_resp}")
+
+            runner.docker_exec(
+                client_container,
+                "rm -f /opt/stream.out /opt/stream.rc /opt/stream.time; "
+                "(curl --silent --show-error --fail --socks5-hostname 127.0.0.1:1080 "
+                "--write-out '%{time_total}' --output /opt/stream.out http://example.com/stream "
+                ">/opt/stream.time; echo $? >/opt/stream.rc) &",
+            )
+            time.sleep(1)
+            runner.docker_exec(
+                ru_container,
+                f"nft add table inet underlay_fault; nft 'add chain inet underlay_fault output {{ type filter hook output priority -10; policy accept; }}'; nft add rule inet underlay_fault output ip daddr {LAB_IPS['foreign']} udp dport {env['WG_PORT']} drop",
+            )
+            transition = json.loads(
+                runner.docker_exec(ru_container, "python3 /opt/agent/vpn-stack-agent.py transport-reconcile").stdout
+            )
+            if not (
+                transition.get("changed") is True
+                and transition.get("selected") == TRANSPORT_HY2_TAG
+                and transition.get("closed_associations", 0) >= 1
+            ):
+                raise AuditFailure(f"Transport agent did not perform the expected failover: {transition}")
+            runner.docker_exec(
+                client_container,
+                "for i in $(seq 1 200); do test -s /opt/stream.rc && exit 0; sleep 0.1; done; exit 1",
+            )
+            stream_result = runner.docker_exec(
+                client_container,
+                'test "$(cat /opt/stream.rc)" = 0 && test "$(stat -c %s /opt/stream.out)" = 5242880',
+            )
+            if stream_result.returncode != 0:
+                raise AuditFailure("Existing TCP stream did not survive the underlay switch")
+            stream_seconds = float(runner.docker_exec(client_container, "cat /opt/stream.time").stdout.strip())
+            if stream_seconds > 12.0:
+                raise AuditFailure(f"Underlay switch stalled an existing TCP stream for too long: {stream_seconds:.3f}s")
+            request_count = runner.docker_exec(global_web_container, "grep -Fxc /stream /opt/requests.log")
+            if request_count.stdout.strip() != "1":
+                raise AuditFailure("Continuity check retried HTTP instead of preserving one TCP stream")
+            continuity_report = lab_dir / "transport-continuity.json"
+            write_text(
+                continuity_report,
+                json.dumps(
+                    {
+                        "transition": transition,
+                        "stream_bytes": 5242880,
+                        "stream_seconds": stream_seconds,
+                        "server_request_count": 1,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                ) + "\n",
+            )
+            runner.docker_exec(ru_container, "nft delete table inet underlay_fault")
 
             private_dns = runner.lab_curl(client_container, "http://private.invalid/", expect_codes={5, 7, 22, 28, 52, 56, 97})
             if private_dns.returncode == 0:
@@ -255,4 +328,4 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
             raw_ru_after = runner.lab_curl(client_container, f"http://{LAB_IPS['ru_web']}/").stdout
             if "server=ru-web" not in raw_ru_after or f"source={LAB_IPS['ru_lan']}" not in raw_ru_after:
                 raise AuditFailure("После падения foreign raw RU GeoIP не остался на direct-ru")
-    return {"lab_env": str(env_path)}
+    return {"lab_env": str(env_path), "transport_continuity": str(continuity_report)}

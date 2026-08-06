@@ -87,15 +87,14 @@ class StatusOutputTests(unittest.TestCase):
                 },
                 transport={
                     "interserver": {
-                        "mode": "urltest-hysteria2-wireguard",
+                        "mode": "stable-wireguard-overlay",
                         "hysteria_session_active": True,
-                        "adaptive_state": {"state": "healthy", "reason": "native URLTest is healthy"},
+                        "adaptive_state": {"state": "healthy", "reason": "selected underlay is healthy"},
                         "selection": {
-                            "selected": "to-foreign-wg",
-                            "selection_pending": False,
+                            "selected": "interserver-underlay-wg",
                             "candidates": {
-                                "to-foreign-hy2": {"delay_ms": 23},
-                                "to-foreign-wg": {"delay_ms": 74},
+                                "interserver-underlay-hy2": {"delay_ms": 23},
+                                "interserver-underlay-wg": {"delay_ms": 74},
                             },
                         },
                     }
@@ -135,9 +134,9 @@ class StatusOutputTests(unittest.TestCase):
         self.assertIn("tcp recovery deltas: TcpExtTCPSACKReorder=+20, TcpExtTCPDSACKRecv=+7, TcpExtTCPTimeouts=+2", rendered)
         self.assertIn("last front degradation: at=2026-07-20T07:58:00+00:00, sources=203.0.113.20", rendered)
         self.assertIn(
-            "interserver transport: mode=urltest-hysteria2-wireguard, selected=to-foreign-wg, "
-            "candidates=to-foreign-hy2=23ms,to-foreign-wg=74ms, adaptation=healthy, hy2_session=active, "
-            "reason=native URLTest is healthy",
+            "interserver transport: mode=stable-wireguard-overlay, selected=interserver-underlay-wg, "
+            "candidates=interserver-underlay-hy2=23ms,interserver-underlay-wg=74ms, adaptation=healthy, "
+            "hy2_session=active, reason=selected underlay is healthy",
             rendered,
         )
 
@@ -169,17 +168,20 @@ class StatusOutputTests(unittest.TestCase):
                     role="ru-gateway",
                     transport={
                         "interserver": {
-                            "mode": "urltest-hysteria2-wireguard",
-                            "selection": {"selected": "to-foreign-wg", "candidates": {"to-foreign-hy2": {"delay_ms": None}}},
+                            "mode": "stable-wireguard-overlay",
+                            "selection": {
+                                "selected": "interserver-underlay-wg",
+                                "candidates": {"interserver-underlay-hy2": {"delay_ms": None}},
+                            },
                         }
                     },
                 )
             )
         )
-        self.assertIn("to-foreign-hy2=not-probed", rendered)
+        self.assertIn("interserver-underlay-hy2=not-probed", rendered)
         self.assertNotIn("Nonems", rendered)
 
-    def test_formats_stale_urltest_history_and_fresh_front_interval(self) -> None:
+    def test_formats_stale_transport_probe_and_fresh_front_interval(self) -> None:
         rendered = "\n".join(
             format_snapshot_summary(
                 DiagnosticsSnapshot(
@@ -199,12 +201,12 @@ class StatusOutputTests(unittest.TestCase):
                     },
                     transport={
                         "interserver": {
-                            "mode": "urltest-hysteria2-wireguard",
+                            "mode": "stable-wireguard-overlay",
                             "adaptive_state": {"state": "healthy"},
                             "selection": {
-                                "selected": "to-foreign-hy2",
+                                "selected": "interserver-underlay-hy2",
                                 "candidates": {
-                                    "to-foreign-hy2": {
+                                    "interserver-underlay-hy2": {
                                         "delay_ms": 62,
                                         "fresh": False,
                                         "age_seconds": 120.0,
@@ -216,7 +218,7 @@ class StatusOutputTests(unittest.TestCase):
                 )
             )
         )
-        self.assertIn("to-foreign-hy2=stale(62ms,age=120.0s)", rendered)
+        self.assertIn("interserver-underlay-hy2=stale(62ms,age=120.0s)", rendered)
         self.assertIn("adaptation=healthy", rendered)
         self.assertIn(
             "front interval: at=2026-07-30T20:02:00+00:00, observation=client_specific, "

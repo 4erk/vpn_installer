@@ -26,15 +26,17 @@ try:
         HY2_CLASH_API_LISTEN,
         HY2_PORT,
         TRANSPORT_CANDIDATE_TAGS,
+        TRANSPORT_FAILURE_CONFIRMATIONS,
         TRANSPORT_HEALTHCHECK_URL,
         TRANSPORT_HY2_TAG,
+        TRANSPORT_PROBE_INTERVAL_SECONDS,
         TRANSPORT_PROBE_TIMEOUT_MS,
-        TRANSPORT_SELECTOR_TAG,
-        TRANSPORT_URLTEST_IDLE_TIMEOUT,
-        TRANSPORT_URLTEST_INTERVAL,
-        TRANSPORT_URLTEST_INTERVAL_SECONDS,
-        TRANSPORT_URLTEST_TOLERANCE_MS,
+        TRANSPORT_RELAY_INBOUND_TAGS,
+        TRANSPORT_RELAY_PORTS,
+        TRANSPORT_STATE_SCHEMA_VERSION,
         TRANSPORT_WG_TAG,
+        evaluate_transport_policy,
+        transport_topology_configured,
     )
 except ImportError:  # Installed agent runs as a standalone script.
     sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -43,15 +45,17 @@ except ImportError:  # Installed agent runs as a standalone script.
         HY2_CLASH_API_LISTEN,
         HY2_PORT,
         TRANSPORT_CANDIDATE_TAGS,
+        TRANSPORT_FAILURE_CONFIRMATIONS,
         TRANSPORT_HEALTHCHECK_URL,
         TRANSPORT_HY2_TAG,
+        TRANSPORT_PROBE_INTERVAL_SECONDS,
         TRANSPORT_PROBE_TIMEOUT_MS,
-        TRANSPORT_SELECTOR_TAG,
-        TRANSPORT_URLTEST_IDLE_TIMEOUT,
-        TRANSPORT_URLTEST_INTERVAL,
-        TRANSPORT_URLTEST_INTERVAL_SECONDS,
-        TRANSPORT_URLTEST_TOLERANCE_MS,
+        TRANSPORT_RELAY_INBOUND_TAGS,
+        TRANSPORT_RELAY_PORTS,
+        TRANSPORT_STATE_SCHEMA_VERSION,
         TRANSPORT_WG_TAG,
+        evaluate_transport_policy,
+        transport_topology_configured,
     )
 
 try:
@@ -108,7 +112,9 @@ MANIFEST_PATH = ROOT / "render-manifest.json"
 ENV_PATH = ROOT / "deployment.env"
 STATE_DIR = Path("/var/lib/vpn-stack")
 HEALTH_STATE_PATH = STATE_DIR / "health-state.json"
+TRANSPORT_STATE_PATH = STATE_DIR / "transport-state.json"
 LOCK_PATH = Path("/run/vpn-stack-agent.lock")
+TRANSPORT_LOCK_PATH = Path("/run/vpn-stack-transport.lock")
 SINGBOX_CONFIG_PATH = Path("/etc/sing-box/config.json")
 XRAY_CONFIG_PATH = Path("/etc/xray/config.json")
 SYSCTL_PATH = Path("/etc/sysctl.d/90-vpn-stack.conf")
@@ -1220,9 +1226,14 @@ def clash_api_json(
     controller: str,
     path: str,
     *,
+    method: str = "GET",
     timeout: float = 3,
 ) -> dict[str, Any]:
-    request = urllib.request.Request(f"http://{controller}{path}", headers={"Accept": "application/json"})
+    request = urllib.request.Request(
+        f"http://{controller}{path}",
+        method=method,
+        headers={"Accept": "application/json"},
+    )
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     with opener.open(request, timeout=timeout) as response:
         body = response.read()
@@ -1234,23 +1245,48 @@ def clash_api_json(
     return decoded
 
 
-def urltest_selection_snapshot(config: dict[str, Any]) -> dict[str, Any]:
+def wireguard_overlay_selection(env: dict[str, str]) -> dict[str, Any]:
+    interface = env.get("WG_INTERFACE", "wg0")
+    peer = env.get("WG_FOREIGN_PUBLIC_KEY", "")
+    if not peer:
+        return {"available": False, "selected": "", "endpoint": "", "reason": "WireGuard peer is not configured"}
+    result = run(["wg", "show", interface, "endpoints"], timeout=3)
+    if result.returncode != 0:
+        return {
+            "available": False,
+            "selected": "",
+            "endpoint": "",
+            "reason": (result.stderr.strip() or "WireGuard endpoint is unavailable")[:240],
+        }
+    endpoint = ""
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if len(fields) >= 2 and fields[0] == peer:
+            endpoint = fields[1]
+            break
+    host, port = split_endpoint(endpoint)
+    selected = next((tag for tag, relay_port in TRANSPORT_RELAY_PORTS.items() if relay_port == port), "")
+    available = normalize_source(host) in {"127.0.0.1", "::1"} and bool(selected)
+    return {
+        "available": available,
+        "selected": selected,
+        "endpoint": endpoint,
+        "reason": "" if available else "WireGuard overlay endpoint is not a managed relay",
+    }
+
+
+def transport_selection_snapshot(config: dict[str, Any], env: dict[str, str]) -> dict[str, Any]:
     clash_api = config.get("experimental", {}).get("clash_api", {})
     controller = str(clash_api.get("external_controller", "")).strip() if isinstance(clash_api, dict) else ""
     if not controller:
-        return {"available": False, "selected": "", "candidates": {}, "reason": "local URLTest API is not configured"}
+        return {"available": False, "selected": "", "candidates": {}, "reason": "local transport API is not configured"}
     try:
         payload = clash_api_json(controller, "/proxies", timeout=2)
     except (OSError, UnicodeDecodeError, ValueError, urllib.error.URLError) as exc:
         return {"available": False, "selected": "", "candidates": {}, "reason": str(exc)[:240]}
     proxies = payload.get("proxies", {}) if isinstance(payload, dict) else {}
-    group = proxies.get(TRANSPORT_SELECTOR_TAG, {}) if isinstance(proxies, dict) else {}
-    if not isinstance(group, dict):
-        return {"available": False, "selected": "", "candidates": {}, "reason": "to-foreign URLTest group is absent"}
-    candidate_tags = group.get("all", []) if isinstance(group.get("all"), list) else []
     candidates: dict[str, dict[str, Any]] = {}
-    for tag_value in candidate_tags:
-        tag = str(tag_value)
+    for tag in TRANSPORT_CANDIDATE_TAGS:
         candidate = proxies.get(tag, {}) if isinstance(proxies, dict) else {}
         history = candidate.get("history", []) if isinstance(candidate, dict) else []
         latest = history[-1] if isinstance(history, list) and history and isinstance(history[-1], dict) else {}
@@ -1260,14 +1296,18 @@ def urltest_selection_snapshot(config: dict[str, Any]) -> dict[str, Any]:
             "delay_ms": latest.get("delay"),
             "tested_at": tested_at,
             "age_seconds": round(age_seconds, 1) if age_seconds is not None else None,
-            "fresh": age_seconds is not None and age_seconds <= TRANSPORT_URLTEST_INTERVAL_SECONDS * 6,
+            "fresh": age_seconds is not None and age_seconds <= TRANSPORT_PROBE_INTERVAL_SECONDS * 6,
+            "available": bool(candidate),
         }
-    selected = str(group.get("now", ""))
+    overlay = wireguard_overlay_selection(env)
+    selected = str(overlay.get("selected", ""))
+    available = overlay.get("available") is True and all(item["available"] for item in candidates.values())
     return {
-        "available": bool(selected and selected in candidates),
+        "available": available,
         "selected": selected,
+        "endpoint": overlay.get("endpoint", ""),
         "candidates": candidates,
-        "reason": "" if selected and selected in candidates else "URLTest state is incomplete",
+        "reason": "" if available else str(overlay.get("reason") or "transport candidate state is incomplete"),
     }
 
 
@@ -1292,6 +1332,189 @@ def transport_candidate_probe(controller: str, tag: str) -> dict[str, Any]:
         }
 
 
+def probe_transport_candidates(controller: str) -> dict[str, dict[str, Any]]:
+    with ThreadPoolExecutor(max_workers=len(TRANSPORT_CANDIDATE_TAGS)) as executor:
+        results = executor.map(lambda tag: transport_candidate_probe(controller, tag), TRANSPORT_CANDIDATE_TAGS)
+    return dict(zip(TRANSPORT_CANDIDATE_TAGS, results))
+
+
+def merge_probe_attempts(*attempts: dict[str, Any]) -> dict[str, Any]:
+    successful = next((probe for probe in reversed(attempts) if probe.get("ok") is True), None)
+    latest = successful or attempts[-1]
+    return {
+        "checked": any(probe.get("checked") is True for probe in attempts),
+        "ok": successful is not None,
+        "attempts": sum(int(probe.get("attempts", 0) or 0) for probe in attempts),
+        "delay_ms": int(latest.get("delay_ms", 0) or 0),
+        "error": "" if successful is not None else str(latest.get("error", ""))[:240],
+    }
+
+
+def collect_transport_probes(controller: str, selected: str) -> dict[str, dict[str, Any]]:
+    probes = probe_transport_candidates(controller)
+    selected_probe = probes.get(selected, {})
+    if selected in TRANSPORT_CANDIDATE_TAGS and selected_probe.get("ok") is not True:
+        confirmation = transport_candidate_probe(controller, selected)
+        probes[selected] = merge_probe_attempts(selected_probe, confirmation)
+    return probes
+
+
+def close_transport_associations(controller: str, tag: str) -> int:
+    payload = clash_api_json(controller, "/connections", timeout=2)
+    connections = payload.get("connections", [])
+    expected_type = f"direct/{TRANSPORT_RELAY_INBOUND_TAGS[tag]}"
+    closed = 0
+    for connection in connections if isinstance(connections, list) else []:
+        if not isinstance(connection, dict):
+            continue
+        chains = connection.get("chains", [])
+        metadata = connection.get("metadata", {})
+        connection_id = str(connection.get("id", ""))
+        if (
+            not isinstance(chains, list)
+            or tag not in chains
+            or not isinstance(metadata, dict)
+            or metadata.get("network") != "udp"
+            or metadata.get("type") != expected_type
+            or not connection_id
+        ):
+            continue
+        clash_api_json(
+            controller,
+            f"/connections/{urllib.parse.quote(connection_id, safe='')}",
+            method="DELETE",
+            timeout=2,
+        )
+        closed += 1
+    return closed
+
+
+def select_transport(env: dict[str, str], controller: str, tag: str) -> int:
+    if tag not in TRANSPORT_RELAY_PORTS:
+        raise ValueError(f"unknown transport candidate: {tag}")
+    interface = env.get("WG_INTERFACE", "wg0")
+    peer = env.get("WG_FOREIGN_PUBLIC_KEY", "")
+    endpoint = f"127.0.0.1:{TRANSPORT_RELAY_PORTS[tag]}"
+    current = wireguard_overlay_selection(env)
+    old_tag = str(current.get("selected", ""))
+    if old_tag == tag:
+        return 0
+    closed = 0
+    for _attempt in range(2):
+        if old_tag in TRANSPORT_CANDIDATE_TAGS:
+            closed += close_transport_associations(controller, old_tag)
+        result = run(["wg", "set", interface, "peer", peer, "endpoint", endpoint], timeout=3)
+        if result.returncode != 0:
+            raise RuntimeError((result.stderr.strip() or "WireGuard endpoint update failed")[:240])
+        time.sleep(0.1)
+        if wireguard_overlay_selection(env).get("selected") == tag:
+            return closed
+    raise RuntimeError("WireGuard endpoint update was reverted by a stale relay")
+
+
+def reconcile_interserver_transport() -> dict[str, Any]:
+    TRANSPORT_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with TRANSPORT_LOCK_PATH.open("w", encoding="utf-8") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        config = read_json(SINGBOX_CONFIG_PATH, {})
+        env = parse_env()
+        controller = str(config.get("experimental", {}).get("clash_api", {}).get("external_controller", "")) if isinstance(config, dict) else ""
+        previous = read_json(TRANSPORT_STATE_PATH, {})
+        if not isinstance(config, dict) or not transport_topology_configured(config, env) or not controller:
+            payload = {
+                "schema_version": TRANSPORT_STATE_SCHEMA_VERSION,
+                "updated_at": utc_now(),
+                "state": "failed",
+                "selected": "",
+                "recommended": "",
+                "would_switch": False,
+                "reason": "stable WireGuard overlay relays are not configured",
+            }
+            write_json_atomic(TRANSPORT_STATE_PATH, payload)
+            return payload
+
+        selection = transport_selection_snapshot(config, env)
+        selected = str(selection.get("selected", ""))
+        if not selection.get("available"):
+            payload = {
+                "schema_version": TRANSPORT_STATE_SCHEMA_VERSION,
+                "updated_at": utc_now(),
+                "state": "failed",
+                "selected": selected,
+                "recommended": selected,
+                "would_switch": False,
+                "reason": str(selection.get("reason", "transport endpoint state is unavailable")),
+            }
+            write_json_atomic(TRANSPORT_STATE_PATH, payload)
+            return payload
+
+        probes = collect_transport_probes(controller, selected)
+        payload = evaluate_transport_policy(
+            selected=selected,
+            probes=probes,
+            previous=previous,
+            observed_at=utc_now(),
+        )
+        if payload.get("would_switch"):
+            target = str(payload.get("recommended", ""))
+            try:
+                closed_associations = select_transport(env, controller, target)
+            except (OSError, RuntimeError, ValueError) as exc:
+                payload.update({"state": "failed", "reason": f"WireGuard endpoint update failed: {str(exc)[:180]}"})
+            else:
+                payload.update(
+                    {
+                        "changed": True,
+                        "closed_associations": closed_associations,
+                        "selected": target,
+                        "would_switch": False,
+                        "state": "degraded" if payload.get("hard_failure_evidence") else "healthy",
+                        "reason": f"{payload.get('reason', '')}; WireGuard endpoint updated",
+                    }
+                )
+        write_json_atomic(TRANSPORT_STATE_PATH, payload)
+        return payload
+
+
+def watch_interserver_transport() -> None:
+    previous_signature: tuple[str, str, str] | None = None
+    while True:
+        started = time.monotonic()
+        try:
+            payload = reconcile_interserver_transport()
+        except Exception as exc:  # noqa: BLE001
+            payload = {
+                "schema_version": TRANSPORT_STATE_SCHEMA_VERSION,
+                "updated_at": utc_now(),
+                "state": "failed",
+                "selected": "",
+                "recommended": "",
+                "reason": str(exc)[:240],
+            }
+            write_json_atomic(TRANSPORT_STATE_PATH, payload)
+        signature = (
+            str(payload.get("state", "")),
+            str(payload.get("selected", "")),
+            str(payload.get("reason", "")),
+        )
+        if signature != previous_signature:
+            print(json.dumps(payload, ensure_ascii=False, sort_keys=True), flush=True)
+            previous_signature = signature
+        time.sleep(max(0.25, TRANSPORT_PROBE_INTERVAL_SECONDS - (time.monotonic() - started)))
+
+
+def transport_state_snapshot(path: Path = TRANSPORT_STATE_PATH) -> dict[str, Any]:
+    state = read_json(path, {})
+    if not isinstance(state, dict) or not state:
+        return {}
+    age_seconds = iso_age_seconds(str(state.get("updated_at", "")))
+    return {
+        **state,
+        "age_seconds": round(age_seconds, 1) if age_seconds is not None else None,
+        "fresh": age_seconds is not None and age_seconds <= TRANSPORT_PROBE_INTERVAL_SECONDS * 6,
+    }
+
+
 def interserver_transport_snapshot(role: str, env: dict[str, str]) -> dict[str, Any]:
     config = read_json(SINGBOX_CONFIG_PATH, {})
     if not isinstance(config, dict):
@@ -1302,10 +1525,7 @@ def interserver_transport_snapshot(role: str, env: dict[str, str]) -> dict[str, 
             for item in config.get("outbounds", [])
             if isinstance(item, dict) and item.get("tag")
         }
-        group = outbounds.get(TRANSPORT_SELECTOR_TAG, {})
-        wireguard = outbounds.get(TRANSPORT_WG_TAG, {})
         hysteria = outbounds.get(TRANSPORT_HY2_TAG, {})
-        candidates = group.get("outbounds", []) if isinstance(group, dict) else []
         server = str(hysteria.get("server", "")) if isinstance(hysteria, dict) else ""
         try:
             port = int(hysteria.get("server_port", 0)) if isinstance(hysteria, dict) else 0
@@ -1322,35 +1542,18 @@ def interserver_transport_snapshot(role: str, env: dict[str, str]) -> dict[str, 
                 if normalize_source(host) == normalize_source(server) and remote_port == port:
                     session_active = True
                     break
-        configured = (
-            group.get("type") == "urltest"
-            and candidates == list(TRANSPORT_CANDIDATE_TAGS)
-            and group.get("url") == TRANSPORT_HEALTHCHECK_URL
-            and group.get("interval") == TRANSPORT_URLTEST_INTERVAL
-            and group.get("tolerance") == TRANSPORT_URLTEST_TOLERANCE_MS
-            and group.get("idle_timeout") == TRANSPORT_URLTEST_IDLE_TIMEOUT
-            and group.get("interrupt_exist_connections") is False
-            and wireguard.get("type") == "direct"
-            and hysteria.get("type") == "hysteria2"
-            and hysteria.get("obfs", {}).get("type") == "salamander"
-            and bool(hysteria.get("tls", {}).get("certificate_public_key_sha256"))
-        )
-        selection = urltest_selection_snapshot(config)
-        adaptive_state = {
-            "source": "sing-box-urltest",
-            "state": "healthy" if configured and selection.get("available") else "failed",
-            "reason": (
-                "native URLTest selects a healthy preferred transport within the configured tolerance"
-                if configured and selection.get("available")
-                else selection.get("reason") or "URLTest policy is not configured"
-            ),
-        }
+        configured = transport_topology_configured(config, env)
+        selection = transport_selection_snapshot(config, env)
+        adaptive_state = transport_state_snapshot()
+        if not adaptive_state:
+            adaptive_state = {"state": "failed", "fresh": False, "reason": "transport watcher has not reported"}
         return {
             "configured": configured,
-            "mode": "urltest-hysteria2-wireguard",
+            "mode": "stable-wireguard-overlay",
             "candidates": list(TRANSPORT_CANDIDATE_TAGS),
             "server": server,
             "port": port,
+            "relay_ports": dict(TRANSPORT_RELAY_PORTS),
             "hysteria_session_active": session_active,
             "selection": selection,
             "adaptive_state": adaptive_state,
@@ -2039,6 +2242,7 @@ def snapshot(*, live_probes: bool = False, profile: str = "light", full_logs: bo
         "xray": service_state("vpn-stack-xray.service"),
         "admin": service_state("vpn-stack-admin.service"),
         "health_timer": service_state("vpn-stack-health.timer"),
+        "transport": service_state("vpn-stack-transport.service"),
     }
     fresh_since, fresh_window_minutes = fresh_log_since()
     if not full_logs and fresh_window_minutes > 5:
@@ -2067,7 +2271,7 @@ def snapshot(*, live_probes: bool = False, profile: str = "light", full_logs: bo
     )
     if front and recent_front_interval:
         front["recent_interval"] = recent_front_interval
-    required = ["wireguard", "nftables", "sing-box", "resolver"] + (["xray"] if role == "ru-gateway" else [])
+    required = ["wireguard", "nftables", "sing-box", "resolver"] + (["xray", "transport"] if role == "ru-gateway" else [])
     reasons = [f"{name}={services[name]}" for name in required if services.get(name) != "active"]
     if manifest_data["drift"] != "none":
         reasons.append(f"drift={manifest_data['drift']}")
@@ -2093,9 +2297,9 @@ def snapshot(*, live_probes: bool = False, profile: str = "light", full_logs: bo
     if role == "foreign-exit" and not interserver.get("listening"):
         reasons.append("interserver_transport=not-listening")
     if role == "ru-gateway" and not interserver.get("selection", {}).get("available"):
-        reasons.append("interserver_urltest=unavailable")
+        reasons.append("interserver_overlay_endpoint=unavailable")
     adaptive_state = interserver.get("adaptive_state", {})
-    if role == "ru-gateway" and adaptive_state.get("state") == "failed":
+    if role == "ru-gateway" and (adaptive_state.get("state") == "failed" or adaptive_state.get("fresh") is not True):
         reasons.append(f"interserver_adaptation={adaptive_state.get('reason') or 'failed'}")
     capability_failures = [name for name in failed_requirements(probes) if name in EXTERNAL_CAPABILITY_REQUIREMENTS] if live_probes else []
     transport_failures = [name for name in failed_requirements(probes) if name in OPTIONAL_TRANSPORT_REQUIREMENTS] if live_probes else []
@@ -2114,6 +2318,8 @@ def snapshot(*, live_probes: bool = False, profile: str = "light", full_logs: bo
         degradations.append(f"public_front={client_observation}")
     if transport_failures:
         degradations.append(f"transport_capability_failed:{','.join(transport_failures)}")
+    if role == "ru-gateway" and adaptive_state.get("state") in {"degraded", "recovering", "suspect"}:
+        degradations.append(f"interserver_adaptation={adaptive_state.get('state')}")
     if host_integrity in {"degraded", "inconclusive"}:
         degradations.append(f"host_integrity={host_integrity}:{root_filesystem.get('reason') or 'unknown'}")
     selected_transport = str(interserver.get("selection", {}).get("selected", ""))
@@ -2434,6 +2640,8 @@ def build_parser() -> argparse.ArgumentParser:
     front.add_argument("--since", type=int, default=30)
     front.add_argument("--live-probes", action="store_true")
     sub.add_parser("health")
+    sub.add_parser("transport-reconcile")
+    sub.add_parser("transport-watch")
     sub.add_parser("network-apply")
     routes = sub.add_parser("routes")
     route_sub = routes.add_subparsers(dest="routes_action", required=True)
@@ -2468,6 +2676,11 @@ def main(argv: list[str] | None = None) -> int:
         payload = public_front_snapshot(args.since, live_probes=args.live_probes)
     elif args.command == "health":
         payload = health()
+    elif args.command == "transport-reconcile":
+        payload = reconcile_interserver_transport()
+    elif args.command == "transport-watch":
+        watch_interserver_transport()
+        return 0
     elif args.command == "network-apply":
         payload = apply_qdisc_profile()
     elif args.command == "routes":

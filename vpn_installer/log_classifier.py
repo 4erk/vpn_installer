@@ -173,7 +173,13 @@ def classify_line(line: str) -> ClassifiedLogLine | None:
         return ClassifiedLogLine("client_reset_eof", destination, source, event_id)
     if "using outbound/vless[" in line and any(token in line for token in ("dial tcp", "wsarecv", "connected host has failed to respond")):
         return ClassifiedLogLine("client_front_connect_failed", destination, source, event_id)
-    if "quic: transport closed" in lower_line:
+    if "quic: transport closed" in lower_line or (
+        "interserver-underlay-" in line
+        and any(
+            token in lower_line
+            for token in ("failed", "timeout", "closed", "unavailable", "operation not permitted", "network is unreachable", "no route to host")
+        )
+    ):
         return ClassifiedLogLine("transport_unavailable", destination, source, event_id)
     dns_failure = any(token in line for token in ("dns: exchange failed", "exchange failed for ", "dns: lookup failed", "lookup failed for ", "router: lookup "))
     if dns_failure and any(token in line for token in ("context deadline exceeded", "i/o timeout")):

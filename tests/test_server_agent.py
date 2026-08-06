@@ -10,7 +10,9 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from vpn_installer import server_agent
+from vpn_installer.config import generate_default_env
 from vpn_installer.log_classifier import classify_line
+from vpn_installer.render import render_ru_singbox
 
 
 class ServerAgentTests(unittest.TestCase):
@@ -1417,60 +1419,99 @@ class ServerAgentTests(unittest.TestCase):
             with patch.object(server_agent, "SINGBOX_CONFIG_PATH", config_path):
                 self.assertEqual(server_agent.udp_443_policy(), "routed")
 
-    def test_interserver_transport_snapshot_reports_native_urltest(self) -> None:
-        config = {
-            "outbounds": [
-                {"type": "direct", "tag": "to-foreign-wg"},
-                {"type": "hysteria2", "tag": "to-foreign-hy2", "server": "132.243.21.108", "server_port": 18443, "obfs": {"type": "salamander", "password": "secret"}, "tls": {"certificate_public_key_sha256": ["pin"]}},
-                {
-                    "type": "urltest",
-                    "tag": "to-foreign",
-                    "outbounds": ["to-foreign-hy2", "to-foreign-wg"],
-                    "url": "https://1.1.1.1/cdn-cgi/trace",
-                    "interval": "10s",
-                    "tolerance": 30,
-                    "idle_timeout": "30m",
-                    "interrupt_exist_connections": False,
-                },
-            ]
-        }
+    def test_interserver_transport_snapshot_reports_stable_wireguard_overlay(self) -> None:
+        env = generate_default_env("demo")
+        env["FOREIGN_PUBLIC_IP"] = "132.243.21.108"
+        config = json.loads(render_ru_singbox(env))
         sockets = subprocess.CompletedProcess(
             ["ss"],
             0,
             "ESTAB 0 0 94.232.248.35:45678 132.243.21.108:18443\n",
             "",
         )
-        selection = {"available": True, "selected": "to-foreign-wg", "candidates": {"to-foreign-wg": {"delay_ms": 42}}}
+        selection = {
+            "available": True,
+            "selected": "interserver-underlay-wg",
+            "endpoint": "127.0.0.1:19091",
+            "candidates": {"interserver-underlay-wg": {"delay_ms": 42}},
+        }
         with (
             patch.object(server_agent, "read_json", return_value=config),
             patch.object(server_agent, "run", return_value=sockets),
-            patch.object(server_agent, "urltest_selection_snapshot", return_value=selection),
+            patch.object(server_agent, "transport_selection_snapshot", return_value=selection),
+            patch.object(server_agent, "transport_state_snapshot", return_value={"state": "healthy", "fresh": True}),
         ):
-            transport = server_agent.interserver_transport_snapshot("ru-gateway", {})
+            transport = server_agent.interserver_transport_snapshot("ru-gateway", env)
 
         self.assertTrue(transport["configured"])
         self.assertTrue(transport["hysteria_session_active"])
-        self.assertEqual(transport["selection"]["selected"], "to-foreign-wg")
-        self.assertEqual(transport["adaptive_state"]["source"], "sing-box-urltest")
+        self.assertEqual(transport["selection"]["selected"], "interserver-underlay-wg")
         self.assertEqual(transport["adaptive_state"]["state"], "healthy")
 
-    def test_urltest_selection_snapshot_reads_selected_transport_and_delays(self) -> None:
+    def test_transport_selection_snapshot_reads_wireguard_endpoint_and_delays(self) -> None:
         payload = {
             "proxies": {
-                "to-foreign": {"now": "to-foreign-hy2", "all": ["to-foreign-hy2", "to-foreign-wg"]},
-                "to-foreign-hy2": {"history": [{"delay": 42, "time": "2026-07-22T12:00:00Z"}]},
-                "to-foreign-wg": {"history": [{"delay": 310, "time": "2026-07-22T12:00:00Z"}]},
+                "interserver-underlay-hy2": {"history": [{"delay": 42, "time": "2026-07-22T12:00:00Z"}]},
+                "interserver-underlay-wg": {"history": [{"delay": 310, "time": "2026-07-22T12:00:00Z"}]},
             }
         }
 
         config = {"experimental": {"clash_api": {"external_controller": "127.0.0.1:19090"}}}
-        with patch.object(server_agent, "clash_api_json", return_value=payload):
-            selection = server_agent.urltest_selection_snapshot(config)
+        overlay = {"available": True, "selected": "interserver-underlay-hy2", "endpoint": "127.0.0.1:19092"}
+        with (
+            patch.object(server_agent, "clash_api_json", return_value=payload),
+            patch.object(server_agent, "wireguard_overlay_selection", return_value=overlay),
+        ):
+            selection = server_agent.transport_selection_snapshot(config, {})
 
         self.assertTrue(selection["available"])
-        self.assertEqual(selection["selected"], "to-foreign-hy2")
-        self.assertEqual(selection["candidates"]["to-foreign-wg"]["delay_ms"], 310)
-        self.assertFalse(selection["candidates"]["to-foreign-wg"]["fresh"])
+        self.assertEqual(selection["selected"], "interserver-underlay-hy2")
+        self.assertEqual(selection["candidates"]["interserver-underlay-wg"]["delay_ms"], 310)
+        self.assertFalse(selection["candidates"]["interserver-underlay-wg"]["fresh"])
+
+    def test_close_transport_associations_does_not_touch_application_flows(self) -> None:
+        payload = {
+            "connections": [
+                {
+                    "id": "relay-id",
+                    "chains": ["interserver-underlay-wg"],
+                    "metadata": {"network": "udp", "type": "direct/interserver-overlay-wg-in"},
+                },
+                {
+                    "id": "app-id",
+                    "chains": ["to-foreign"],
+                    "metadata": {"network": "tcp", "type": "mixed/router-in"},
+                },
+            ]
+        }
+        with patch.object(server_agent, "clash_api_json", side_effect=[payload, {}]) as api:
+            closed = server_agent.close_transport_associations("127.0.0.1:19090", "interserver-underlay-wg")
+
+        self.assertEqual(closed, 1)
+        self.assertEqual(api.call_args_list[1].args[1], "/connections/relay-id")
+        self.assertEqual(api.call_args_list[1].kwargs["method"], "DELETE")
+
+    def test_select_transport_changes_only_the_overlay_peer_endpoint(self) -> None:
+        env = {"WG_INTERFACE": "wg0", "WG_FOREIGN_PUBLIC_KEY": "peer-key"}
+        completed = subprocess.CompletedProcess(["wg"], 0, "", "")
+        selections = [
+            {"available": True, "selected": "interserver-underlay-wg"},
+            {"available": True, "selected": "interserver-underlay-hy2"},
+        ]
+        with (
+            patch.object(server_agent, "wireguard_overlay_selection", side_effect=selections),
+            patch.object(server_agent, "close_transport_associations", return_value=1) as close,
+            patch.object(server_agent, "run", return_value=completed) as command,
+            patch.object(server_agent.time, "sleep"),
+        ):
+            closed = server_agent.select_transport(env, "127.0.0.1:19090", "interserver-underlay-hy2")
+
+        self.assertEqual(closed, 1)
+        close.assert_called_once_with("127.0.0.1:19090", "interserver-underlay-wg")
+        self.assertEqual(
+            command.call_args.args[0],
+            ["wg", "set", "wg0", "peer", "peer-key", "endpoint", "127.0.0.1:19092"],
+        )
 
     def test_interserver_transport_snapshot_reports_foreign_listener(self) -> None:
         config = {

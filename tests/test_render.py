@@ -160,10 +160,13 @@ class RenderTests(unittest.TestCase):
         env = self.make_env()
         router_payload = json.loads(render.render_ru_singbox(env))
         xray_payload = json.loads(render.render_ru_xray(env))
-        self.assertEqual([inbound["listen_port"] for inbound in router_payload["inbounds"]], [2080, 443])
-        self.assertEqual([inbound["tag"] for inbound in router_payload["inbounds"]], ["router-in", "public-hy2-in"])
+        self.assertEqual([inbound["listen_port"] for inbound in router_payload["inbounds"]], [2080, 443, 19091, 19092])
+        self.assertEqual(
+            [inbound["tag"] for inbound in router_payload["inbounds"]],
+            ["router-in", "public-hy2-in", "interserver-overlay-wg-in", "interserver-overlay-hy2-in"],
+        )
         inbound_rules = [rule for rule in router_payload["route"]["rules"] if rule.get("inbound")]
-        self.assertEqual(inbound_rules, [{"inbound": ["router-in"], "action": "sniff", "timeout": "250ms"}])
+        self.assertEqual(inbound_rules[-1], {"inbound": ["router-in"], "action": "sniff", "timeout": "250ms"})
         self.assertEqual(xray_payload["inbounds"][0]["port"], 443)
         self.assertEqual(xray_payload["outbounds"][0]["protocol"], "socks")
         self.assertEqual(xray_payload["outbounds"][0]["settings"]["servers"][0], {"address": "127.0.0.1", "port": 2080})
@@ -210,7 +213,13 @@ class RenderTests(unittest.TestCase):
         self.assertIn("ExecStart=/usr/bin/python3 /usr/local/lib/vpn-stack/vpn-stack-agent.py health", service)
         self.assertNotIn("sync-state.sh", service)
 
-    def test_ru_server_uses_one_adaptive_foreign_policy_for_domains_and_literals(self) -> None:
+    def test_transport_service_reconciles_before_starting_the_watcher(self) -> None:
+        service = render.render_transport_service(self.make_env())
+        self.assertIn("ExecStartPre=/usr/bin/python3 /usr/local/lib/vpn-stack/vpn-stack-agent.py transport-reconcile", service)
+        self.assertIn("ExecStart=/usr/bin/python3 /usr/local/lib/vpn-stack/vpn-stack-agent.py transport-watch", service)
+        self.assertIn("AF_NETLINK", service)
+
+    def test_ru_server_uses_one_stable_overlay_for_domains_and_literals(self) -> None:
         env = self.make_env()
         payload = json.loads(render.render_ru_singbox(env))
         route_rules = payload["route"]["rules"]
@@ -225,18 +234,20 @@ class RenderTests(unittest.TestCase):
         ipv6_index = next(index for index, rule in enumerate(route_rules) if rule.get("ip_version") == 6)
         ipv4_literal_index = next(index for index, rule in enumerate(route_rules) if rule.get("ip_cidr") == ["0.0.0.0/0"])
         raw_ru_geoip_index = next(index for index, rule in enumerate(route_rules) if rule.get("rule_set") == ["ru-geoip"])
-        self.assertEqual(set(outbounds), {"direct-ru", "to-foreign-hy2", "to-foreign-wg", "to-foreign"})
-        self.assertEqual(outbounds["to-foreign"]["outbounds"], ["to-foreign-hy2", "to-foreign-wg"])
-        self.assertEqual(outbounds["to-foreign"]["type"], "urltest")
-        self.assertEqual(outbounds["to-foreign"]["interval"], "10s")
-        self.assertEqual(outbounds["to-foreign"]["tolerance"], 30)
-        self.assertEqual(outbounds["to-foreign"]["idle_timeout"], "30m")
-        self.assertFalse(outbounds["to-foreign"]["interrupt_exist_connections"])
-        self.assertEqual(outbounds["to-foreign-hy2"]["server"], env["FOREIGN_PUBLIC_IP"])
-        self.assertEqual(outbounds["to-foreign-hy2"]["obfs"]["type"], "salamander")
-        self.assertNotIn("up_mbps", outbounds["to-foreign-hy2"])
-        self.assertNotIn("down_mbps", outbounds["to-foreign-hy2"])
-        self.assertEqual(outbounds["to-foreign-wg"]["domain_resolver"]["server"], "dns-ru-direct")
+        self.assertEqual(set(outbounds), {"direct-ru", "to-foreign", "interserver-underlay-hy2"})
+        self.assertEqual(outbounds["to-foreign"]["type"], "direct")
+        self.assertEqual(outbounds["to-foreign"]["bind_interface"], env["WG_INTERFACE"])
+        self.assertEqual(outbounds["interserver-underlay-hy2"]["server"], env["FOREIGN_PUBLIC_IP"])
+        self.assertEqual(outbounds["interserver-underlay-hy2"]["obfs"]["type"], "salamander")
+        self.assertNotIn("up_mbps", outbounds["interserver-underlay-hy2"])
+        self.assertNotIn("down_mbps", outbounds["interserver-underlay-hy2"])
+        endpoints = {endpoint["tag"]: endpoint for endpoint in payload["endpoints"]}
+        self.assertEqual(endpoints["interserver-underlay-wg"]["type"], "wireguard")
+        relay_routes = route_rules[:2]
+        self.assertEqual(
+            [rule["outbound"] for rule in relay_routes],
+            ["interserver-underlay-wg", "interserver-underlay-hy2"],
+        )
         self.assertEqual(payload["experimental"]["clash_api"]["external_controller"], "127.0.0.1:19090")
         self.assertEqual(route_rules[ipv6_index], {"ip_version": 6, "action": "route", "outbound": "to-foreign"})
         self.assertEqual(route_rules[ipv4_literal_index], {"ip_cidr": ["0.0.0.0/0"], "action": "route", "outbound": "to-foreign"})
@@ -254,7 +265,8 @@ class RenderTests(unittest.TestCase):
         env = self.make_env()
         env["RU_SNIFF_TIMEOUT"] = "1500ms"
         payload = json.loads(render.render_ru_singbox(env))
-        self.assertEqual(payload["route"]["rules"][0]["timeout"], "1500ms")
+        sniff = next(rule for rule in payload["route"]["rules"] if rule.get("action") == "sniff")
+        self.assertEqual(sniff["timeout"], "1500ms")
 
     def test_ru_server_never_globally_blocks_quic_from_legacy_env(self) -> None:
         env = self.make_env()
@@ -268,7 +280,8 @@ class RenderTests(unittest.TestCase):
         route_rules = payload["route"]["rules"]
         self.assertIn({"ip_is_private": True, "action": "reject"}, route_rules)
         self.assertFalse(any(rule.get("port") == 853 for rule in route_rules))
-        self.assertFalse(any("override_address" in rule for rule in route_rules))
+        client_rules = [rule for rule in route_rules if rule.get("inbound") == ["router-in"] or not rule.get("inbound")]
+        self.assertFalse(any("override_address" in rule for rule in client_rules))
 
     def test_ru_server_routes_own_public_ip_direct_before_foreign_catchall(self) -> None:
         env = self.make_env()
@@ -541,7 +554,7 @@ class RenderTests(unittest.TestCase):
         self.assertNotIn("vpn-stack-sync.service", files)
         self.assertIn("vpn-stack-health.service", files)
         self.assertIn("vpn-stack-health.timer", files)
-        self.assertNotIn("vpn-stack-transport.service", files)
+        self.assertIn("vpn-stack-transport.service", files)
         self.assertIn("interserver_transport.py", files)
         self.assertIn("network_profile.py", files)
         self.assertNotIn("vpn-stack-guard.service", files)
@@ -611,7 +624,8 @@ class RenderTests(unittest.TestCase):
         self.assertIn(f"PreDown = ip -4 route del {foreign_wg_host}/32 dev {env['WG_INTERFACE']} 2>/dev/null || true", config)
         self.assertIn(f"PreDown = ip -6 route del {foreign_wg_v6_host}/128 dev {env['WG_INTERFACE']} 2>/dev/null || true", config)
         self.assertIn("AllowedIPs = 0.0.0.0/0, ::/0", config)
-        self.assertNotIn("PersistentKeepalive", config)
+        self.assertIn("Endpoint = 127.0.0.1:19091", config)
+        self.assertIn("PersistentKeepalive = 1", config)
         self.assertNotIn("PostUp = ip -4 route add default", config)
 
     def test_foreign_wireguard_accepts_ru_ipv4_and_ipv6_peer_addresses(self) -> None:

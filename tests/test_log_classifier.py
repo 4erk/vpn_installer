@@ -40,9 +40,9 @@ class LogClassifierTests(unittest.TestCase):
         self.assertEqual(classified.bucket, "client_front_connect_failed")
         self.assertEqual(classified.destination, "94.232.248.35:443")
 
-    def test_hysteria2_foreign_timeout_uses_the_same_destination_buckets(self) -> None:
-        domain = classify_line("ERROR open connection to github.com:443 using outbound/hysteria2[to-foreign-hy2]: i/o timeout")
-        literal = classify_line("ERROR open connection to 91.108.56.103:443 using outbound/hysteria2[to-foreign-hy2]: i/o timeout")
+    def test_stable_foreign_overlay_uses_destination_buckets(self) -> None:
+        domain = classify_line("ERROR open connection to github.com:443 using outbound/direct[to-foreign]: i/o timeout")
+        literal = classify_line("ERROR open connection to 91.108.56.103:443 using outbound/direct[to-foreign]: i/o timeout")
         self.assertEqual(domain.bucket, "domain_to_foreign_timeout")
         self.assertEqual(literal.bucket, "ipv4_literal_timeout")
 
@@ -55,6 +55,14 @@ class LogClassifierTests(unittest.TestCase):
         self.assertIsNotNone(classified)
         self.assertEqual(classified.bucket, "transport_unavailable")
         self.assertEqual(classified.destination, "gateway.discord.gg")
+
+    def test_underlay_wireguard_send_failure_is_a_transport_event(self) -> None:
+        classified = classify_line(
+            "ERROR endpoint/wireguard[interserver-underlay-wg]: peer(abcd) - failed to send data packets: "
+            "write udp 0.0.0.0:32819: sendmmsg: operation not permitted"
+        )
+        self.assertIsNotNone(classified)
+        self.assertEqual(classified.bucket, "transport_unavailable")
 
     def test_remote_endpoint_refusal_has_an_explicit_bucket(self) -> None:
         line = (

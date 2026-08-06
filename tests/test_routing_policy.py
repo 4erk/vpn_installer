@@ -23,23 +23,13 @@ class RoutingPolicyTests(unittest.TestCase):
         self.assertNotIn("resolved_ru_ip", policy.classes)
         self.assertNotIn("client_dns_dot", policy.classes)
 
-    def test_policy_uses_native_urltest_without_artificial_timeouts(self) -> None:
+    def test_policy_uses_one_stable_wireguard_overlay_without_artificial_timeouts(self) -> None:
         parts = build_ru_routing_policy(self.make_env()).singbox_parts()
         outbounds = {outbound["tag"]: outbound for outbound in parts["outbounds"]}
-        self.assertEqual(set(outbounds), {"direct-ru", "to-foreign-hy2", "to-foreign-wg", "to-foreign"})
-        self.assertEqual(outbounds["to-foreign"]["outbounds"], ["to-foreign-hy2", "to-foreign-wg"])
-        self.assertEqual(outbounds["to-foreign"]["type"], "urltest")
-        self.assertEqual(outbounds["to-foreign"]["url"], "https://1.1.1.1/cdn-cgi/trace")
-        self.assertEqual(outbounds["to-foreign"]["interval"], "10s")
-        self.assertEqual(outbounds["to-foreign"]["tolerance"], 30)
-        self.assertEqual(outbounds["to-foreign"]["idle_timeout"], "30m")
-        self.assertFalse(outbounds["to-foreign"]["interrupt_exist_connections"])
-        self.assertEqual(outbounds["to-foreign-hy2"]["type"], "hysteria2")
-        self.assertEqual(outbounds["to-foreign-hy2"]["obfs"]["type"], "salamander")
-        self.assertNotIn("up_mbps", outbounds["to-foreign-hy2"])
-        self.assertNotIn("down_mbps", outbounds["to-foreign-hy2"])
-        self.assertEqual(outbounds["to-foreign-wg"]["bind_interface"], "wg0")
-        self.assertEqual(outbounds["to-foreign-wg"]["domain_resolver"]["server"], "dns-ru-direct")
+        self.assertEqual(set(outbounds), {"direct-ru", "to-foreign"})
+        self.assertEqual(outbounds["to-foreign"]["type"], "direct")
+        self.assertEqual(outbounds["to-foreign"]["bind_interface"], "wg0")
+        self.assertEqual(outbounds["to-foreign"]["domain_resolver"]["server"], "dns-ru-direct")
         self.assertFalse(any("connect_timeout" in outbound for outbound in outbounds.values()))
 
     def test_domain_policy_finishes_before_literal_policy(self) -> None:

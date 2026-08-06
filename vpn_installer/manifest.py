@@ -45,6 +45,7 @@ def installed_artifact_paths(role: str) -> dict[str, str]:
             {
                 "xray.json": "/etc/xray/config.json",
                 "vpn-stack-xray.service": "/etc/systemd/system/vpn-stack-xray.service",
+                "vpn-stack-transport.service": "/etc/systemd/system/vpn-stack-transport.service",
                 "admin_apply.py": "/usr/local/lib/vpn-stack/admin_apply.py",
                 "admin_web.py": "/usr/local/lib/vpn-stack/admin_web.py",
                 "vpn-stack-admin.service": "/etc/systemd/system/vpn-stack-admin.service",

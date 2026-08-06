@@ -133,7 +133,7 @@ $env:VPN_SSH_BIND_ADDRESS="192.168.0.101"
 1. Сначала импортируй простой `vless-uri.txt`
 2. Если клиент поддерживает JSON, `hiddify-cross-platform.json` и `hiddify-android.json` задают тот же VLESS/Reality-контракт, route bypass и `multiplex.enabled=false`; это исключает TCP head-of-line blocking между независимыми загрузками
 3. Для отдельного QUIC-узла в Hiddify/v2rayN используй `hysteria2-uri.txt`; сертификат проверяется SHA-256 pin, а `vless-uri.txt` остаётся основным контрактом
-4. Переключение узла применяется только к новым соединениям: уже переданный TCP/QUIC payload нельзя безопасно повторить через другой transport без поддержки приложения
+4. Ручное переключение клиентского VLESS/Hysteria2 узла применяется только к новым соединениям; серверный межсерверный failover работает ниже TCP внутри стабильного WireGuard overlay и не повторяет application payload
 5. Для v2rayN скопируй URI из `v2rayn-uri.txt` и выбери импорт share link из буфера; отдельный custom-config слой не добавляется
 6. Клиентский multiplex для VLESS должен оставаться выключенным: он сокращает handshakes, но объединяет независимые загрузки в один TCP-поток; `vpn diagnose client` показывает такое объединение по активному outer socket
 7. Если сайты висят, сначала смотри `vpn status --deployment <name> --role ru-gateway`, затем запускай свежую acceptance-проверку `vpn verify live --deployment <name>`
@@ -146,7 +146,7 @@ $env:VPN_SSH_BIND_ADDRESS="192.168.0.101"
 
 Сервер остаётся источником истины для split-маршрутизации: клиенту не нужно знать, что считать российским или зарубежным трафиком. Он просто даёт туннель до `российского сервера`, а сама логика маршрутов живёт на серверной стороне.
 
-Между серверами foreign-трафик имеет два независимых transport до одного foreign egress: Hysteria2/QUIC и WireGuard. Native sing-box URLTest проверяет оба пути раз в `10s` при активном трафике. Hysteria2 имеет приоритет в пределах `30 ms`, чтобы не переключаться от малого RTT jitter; при отказе или устойчивом проигрыше новые соединения получает WireGuard. Живые потоки не прерываются. Оба transport заканчиваются на одном зарубежном VPS, поэтому это не подменяет второй независимый egress. Публичный клиентский контракт при этом остаётся тем же VLESS/Reality URI; для client-to-RU дополнительно выпускаются mux-free VLESS JSON и стандартный `hysteria2://` URI.
+Между серверами foreign-трафик идёт внутри одного стабильного kernel WireGuard overlay. Его локальный endpoint может без перезапуска интерфейса переключаться между userspace WireGuard и Hysteria2/QUIC до того же foreign egress. Agent проверяет оба underlay bounded-probe каждые `2s`, подтверждает отказ дважды и закрывает только старую локальную UDP-association; уже открытые TCP-потоки остаются внутри overlay. Изменение по задержке требует преимущества больше `30 ms` три цикла подряд. Оба underlay заканчиваются на одном зарубежном VPS, поэтому это transport redundancy, а не второй независимый egress. Публичный клиентский контракт остаётся тем же VLESS/Reality URI; дополнительно выпускаются mux-free VLESS JSON и стандартный `hysteria2://` URI.
 
 Системные DNS-запросы серверов проходят через локальный cache `systemd-resolved` с независимыми Cloudflare, Quad9 и Google upstreams. При кратком отказе upstream известные positive records могут обслуживаться из stale cache до одного часа; этот resolver является частью manifest и откатывается вместе с release.
 

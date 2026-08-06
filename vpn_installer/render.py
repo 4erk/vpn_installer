@@ -23,9 +23,15 @@ from .config import apply_ru_direct_overlays, download_asset, parse_env_text, re
 from .interserver_transport import (
     HY2_CLASH_API_LISTEN,
     HY2_PORT,
+    TRANSPORT_RELAY_PORTS,
+    TRANSPORT_WG_TAG,
+    UNDERLAY_WG_FOREIGN_ADDRESS,
+    UNDERLAY_WG_RU_ADDRESS,
+    build_ru_transport_topology,
     decode_transport_pem,
     derive_transport_obfs_password,
     derive_transport_password,
+    foreign_underlay_wireguard_peer,
 )
 from .manifest import render_manifest
 from .models import (
@@ -155,6 +161,7 @@ def render_ru_singbox(env: dict[str, str]) -> str:
     log_level = env.get("SING_BOX_LOG_LEVEL", "info").strip() or "info"
     policy = build_ru_routing_policy(env)
     policy_parts = policy.singbox_parts()
+    transport = build_ru_transport_topology(env)
 
     payload = {
         "log": {"level": log_level, "timestamp": True},
@@ -176,8 +183,10 @@ def render_ru_singbox(env: dict[str, str]) -> str:
                 "listen_port": env_int(env, "RU_ROUTER_LISTEN_PORT"),
             },
             render_public_hy2_inbound(env),
+            *transport["inbounds"],
         ],
-        "outbounds": policy_parts["outbounds"],
+        "endpoints": transport["endpoints"],
+        "outbounds": [*policy_parts["outbounds"], *transport["outbounds"]],
         "route": {
             "auto_detect_interface": True,
             "default_domain_resolver": {"server": "dns-ru-direct", "strategy": "ipv4_only"},
@@ -185,7 +194,7 @@ def render_ru_singbox(env: dict[str, str]) -> str:
                 {"tag": "ru-geosite", "type": "local", "format": "binary", "path": f"{env['RULESET_DIR']}/geosite-ru.srs"},
                 {"tag": "ru-geoip", "type": "local", "format": "binary", "path": f"{env['RULESET_DIR']}/geoip-ru.srs"},
             ],
-            "rules": policy_parts["route_rules"],
+            "rules": [*transport["route_rules"], *policy_parts["route_rules"]],
             "final": policy_parts["final_outbound"],
         },
         "experimental": {"clash_api": {"external_controller": HY2_CLASH_API_LISTEN}},
@@ -296,17 +305,19 @@ def render_ru_wg(env: dict[str, str]) -> str:
             f"PublicKey = {env['WG_FOREIGN_PUBLIC_KEY']}",
             f"PresharedKey = {env['WG_PRESHARED_KEY']}",
             "AllowedIPs = 0.0.0.0/0, ::/0",
-            f"Endpoint = {env['FOREIGN_PUBLIC_IP']}:{env['WG_PORT']}",
+            f"Endpoint = 127.0.0.1:{TRANSPORT_RELAY_PORTS[TRANSPORT_WG_TAG]}",
+            "PersistentKeepalive = 1",
             "",
         ]
     )
 
 
 def render_foreign_wg(env: dict[str, str]) -> str:
+    underlay_peer = foreign_underlay_wireguard_peer(env["WG_PRESHARED_KEY"])
     return "\n".join(
         [
             "[Interface]",
-            f"Address = {env['WG_FOREIGN_ADDRESS']}, {env['WG_FOREIGN_ADDRESS_V6']}",
+            f"Address = {env['WG_FOREIGN_ADDRESS']}, {env['WG_FOREIGN_ADDRESS_V6']}, {UNDERLAY_WG_FOREIGN_ADDRESS}",
             f"ListenPort = {env['WG_PORT']}",
             f"PrivateKey = {env['WG_FOREIGN_PRIVATE_KEY']}",
             f"MTU = {env['WG_MTU']}",
@@ -315,6 +326,11 @@ def render_foreign_wg(env: dict[str, str]) -> str:
             f"PublicKey = {env['WG_RU_PUBLIC_KEY']}",
             f"PresharedKey = {env['WG_PRESHARED_KEY']}",
             f"AllowedIPs = {wg_host_address(env['WG_RU_ADDRESS'])}/32, {wg_host_address(env['WG_RU_ADDRESS_V6'])}/128",
+            "",
+            "[Peer]",
+            f"PublicKey = {underlay_peer['public_key']}",
+            f"PresharedKey = {underlay_peer['pre_shared_key']}",
+            f"AllowedIPs = {underlay_peer['allowed_ip']}",
             "",
         ]
     )
@@ -359,6 +375,7 @@ def render_foreign_nftables(env: dict[str, str], wan_iface: str) -> str:
     )
     lines.append(f"    tcp dport {env['SSH_PORT']} counter accept")
     forward_rules = [
+        f'    iifname "{env["WG_INTERFACE"]}" ip saddr {wg_host_address(UNDERLAY_WG_RU_ADDRESS)} udp dport {env["WG_PORT"]} counter accept',
         f"    ip saddr {env['RU_PUBLIC_IP']} udp dport {env['WG_PORT']} counter accept",
         f"    ip saddr {env['RU_PUBLIC_IP']} udp dport {HY2_PORT} counter accept",
         "  }",
@@ -390,7 +407,7 @@ def render_foreign_nftables(env: dict[str, str], wan_iface: str) -> str:
             "table ip nat {",
             "  chain postrouting {",
             "    type nat hook postrouting priority srcnat;",
-            f'    ip saddr {wg_host_address(env["WG_RU_ADDRESS"])} oifname "{wan_iface}" masquerade',
+            f'    ip saddr {{ {wg_host_address(env["WG_RU_ADDRESS"])}, {wg_host_address(UNDERLAY_WG_RU_ADDRESS)} }} oifname "{wan_iface}" masquerade',
             "  }",
             "}",
             "",
@@ -624,6 +641,35 @@ def render_health_timer() -> str:
     )
 
 
+def render_transport_service(env: dict[str, str]) -> str:
+    return "\n".join(
+        [
+            "[Unit]",
+            "Description=Maintain vpn-stack interserver underlay",
+            f"After=network-online.target sing-box.service wg-quick@{env['WG_INTERFACE']}.service",
+            f"Requires=sing-box.service wg-quick@{env['WG_INTERFACE']}.service",
+            "PartOf=sing-box.service",
+            "",
+            "[Service]",
+            "Type=simple",
+            "ExecStartPre=/usr/bin/python3 /usr/local/lib/vpn-stack/vpn-stack-agent.py transport-reconcile",
+            "ExecStart=/usr/bin/python3 /usr/local/lib/vpn-stack/vpn-stack-agent.py transport-watch",
+            "Restart=on-failure",
+            "RestartSec=1s",
+            "NoNewPrivileges=true",
+            "PrivateTmp=true",
+            "ProtectHome=true",
+            "ProtectSystem=strict",
+            "ReadWritePaths=/var/lib/vpn-stack /run",
+            "RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK AF_UNIX",
+            "",
+            "[Install]",
+            "WantedBy=multi-user.target",
+            "",
+        ]
+    )
+
+
 def deployment_out_dir(env: dict[str, str]) -> Path:
     return OUT_DIR / env["DEPLOY_NAME"]
 
@@ -671,6 +717,7 @@ def rendered_files_for_role(env: dict[str, str], role: str, *, assets: dict[str,
             "admin_web.py": server_script_asset("admin_web.py"),
             "vpn-stack-health.service": render_health_service(),
             "vpn-stack-health.timer": render_health_timer(),
+            "vpn-stack-transport.service": render_transport_service(env),
             "vpn-stack-admin.service": render_admin_web_service(),
             "vpn-stack-xray.service": render_xray_service(),
         }

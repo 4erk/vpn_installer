@@ -687,10 +687,10 @@ disable_legacy_proxy_services() {
 
 }
 
-retire_transport_supervisor() {
+prepare_transport_supervisor() {
   systemctl disable --now vpn-stack-transport.service >/dev/null 2>&1 || true
   systemctl reset-failed vpn-stack-transport.service >/dev/null 2>&1 || true
-  rm -f "${TRANSPORT_SERVICE_PATH}" "${TRANSPORT_STATE_PATH}"
+  rm -f "${TRANSPORT_STATE_PATH}"
 }
 
 dpkg_lock_holders() {
@@ -997,7 +997,12 @@ copy_role_artifacts() {
     rm -f "${XRAY_CONFIG_PATH}" "${XRAY_SERVICE_PATH}"
     rm -f "${ADMIN_WEB_SCRIPT_PATH}" "${ADMIN_APPLY_SCRIPT_PATH}" "${ADMIN_WEB_SERVICE_PATH}"
   fi
-  rm -f "${TRANSPORT_SERVICE_PATH}" "${TRANSPORT_STATE_PATH}"
+  if [[ "$ROLE" == "ru-gateway" ]]; then
+    copy_if_present "${source_dir}/vpn-stack-transport.service" "${TRANSPORT_SERVICE_PATH}" || { echo "Missing vpn-stack-transport.service in ${source_dir}" >&2; exit 1; }
+    rm -f "${TRANSPORT_STATE_PATH}"
+  else
+    rm -f "${TRANSPORT_SERVICE_PATH}" "${TRANSPORT_STATE_PATH}"
+  fi
   copy_if_present "${source_dir}/${WG_INTERFACE}.conf" "${WG_CONFIG_PATH}" || { echo "Missing ${WG_INTERFACE}.conf in ${source_dir}" >&2; exit 1; }
   copy_if_present "${source_dir}/nftables.conf" "${NFTABLES_PATH}" || { echo "Missing nftables.conf in ${source_dir}" >&2; exit 1; }
   copy_if_present "${source_dir}/sshd-vpn-stack.conf" "${SSHD_CONFIG_PATH}" || { echo "Missing sshd-vpn-stack.conf in ${source_dir}" >&2; exit 1; }
@@ -1016,7 +1021,7 @@ copy_role_artifacts() {
   rm -rf "${SUBSCRIPTION_ROOT}"
   chmod 0644 "${SSHD_CONFIG_PATH}"
   if [[ "$ROLE" == "ru-gateway" ]]; then
-    chmod 0644 "${XRAY_SERVICE_PATH}"
+    chmod 0644 "${XRAY_SERVICE_PATH}" "${TRANSPORT_SERVICE_PATH}"
     chmod 0644 "${ADMIN_WEB_SERVICE_PATH}"
     chmod 0755 "${ADMIN_WEB_SCRIPT_PATH}" "${ADMIN_APPLY_SCRIPT_PATH}"
   fi
@@ -1134,7 +1139,11 @@ PY
     xray run -test -c "${xray_config}"
   fi
   wg-quick strip "${source_dir}/${WG_INTERFACE}.conf" >/dev/null
-  systemd-analyze verify "${source_dir}/vpn-stack-health.service" "${source_dir}/vpn-stack-health.timer" >/dev/null
+  local systemd_units=("${source_dir}/vpn-stack-health.service" "${source_dir}/vpn-stack-health.timer")
+  if [[ -f "${source_dir}/vpn-stack-transport.service" ]]; then
+    systemd_units+=("${source_dir}/vpn-stack-transport.service")
+  fi
+  systemd-analyze verify "${systemd_units[@]}" >/dev/null
 }
 
 activate_staged_release() {
@@ -1451,7 +1460,7 @@ ROLE_ARTIFACTS_DIR="${PUBLISHED_RELEASE_DIR}"
 if [[ "$ACTION" == "reinstall" ]]; then
   stop_managed_services
 fi
-retire_transport_supervisor
+prepare_transport_supervisor
 reset_install_runtime_state
 activate_staged_release "${ROLE_ARTIFACTS_DIR}"
 
@@ -1482,6 +1491,8 @@ systemctl enable sing-box
 systemctl restart sing-box
 
 if [[ "$ROLE" == "ru-gateway" ]]; then
+  systemctl enable vpn-stack-transport.service
+  systemctl restart vpn-stack-transport.service
   if [[ ! -f "${VPNSTACK_ROOT}/admin-auth.json" || "${ADMIN_WEB_USERNAME}" != "user" || "${ADMIN_WEB_PASSWORD}" != "password" ]]; then
     if [[ "${ADMIN_WEB_USERNAME}" != "user" || "${ADMIN_WEB_PASSWORD}" != "password" ]]; then
       python3 "${ADMIN_WEB_SCRIPT_PATH}" init-auth "${ADMIN_WEB_USERNAME}" "${ADMIN_WEB_PASSWORD}" --force
@@ -1499,6 +1510,8 @@ if [[ "$ROLE" == "ru-gateway" ]]; then
     systemctl disable vpn-stack-admin.service >/dev/null 2>&1 || true
     systemctl stop vpn-stack-admin.service >/dev/null 2>&1 || true
   fi
+else
+  systemctl disable --now vpn-stack-transport.service >/dev/null 2>&1 || true
 fi
 
 verify_active_release
