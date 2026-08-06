@@ -5,11 +5,18 @@ import shutil
 import textwrap
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote, urlencode
 
 from .common import OUT_DIR, write_text
 from .config import require_env
+from .interserver_transport import HY2_SERVER_NAME
 from .models import REQUIRED_ENV_VARS
-from .public_transport import PUBLIC_HY2_OUTBOUND_TAG, render_public_hy2_outbound
+from .public_transport import (
+    PUBLIC_HY2_OUTBOUND_TAG,
+    derive_public_hy2_password,
+    public_hy2_certificate_fingerprint,
+    render_public_hy2_outbound,
+)
 
 
 def _env_int(env: dict[str, str], key: str) -> int:
@@ -235,6 +242,19 @@ def render_vless_uri(env: dict[str, str]) -> str:
     return f"vless://{env['CLIENT_UUID']}@{env['RU_PUBLIC_IP']}:{env['RU_LISTEN_PORT']}?security=reality&sni={env['RU_REALITY_SERVER_NAME']}&pbk={env['RU_REALITY_PUBLIC_KEY']}&sid={env['RU_REALITY_SHORT_ID']}&fp={env['UTLS_FINGERPRINT']}&type=tcp&flow={env['CLIENT_FLOW']}#{env['DEPLOY_NAME']}-ru-gateway\n"
 
 
+def render_hysteria2_uri(env: dict[str, str]) -> str:
+    password = quote(derive_public_hy2_password(env["CLIENT_UUID"]), safe="")
+    query = urlencode(
+        {
+            "sni": HY2_SERVER_NAME,
+            "insecure": "1",
+            "pinSHA256": public_hy2_certificate_fingerprint(env),
+        }
+    )
+    name = quote(f"{env['DEPLOY_NAME']}-ru-gateway-quic", safe="")
+    return f"hysteria2://{password}@{env['RU_PUBLIC_IP']}:{env['RU_LISTEN_PORT']}/?{query}#{name}\n"
+
+
 def client_artifact_paths(env: dict[str, str], *, out_dir: Path | None = None) -> dict[str, Path]:
     deployment_dir = deployment_out_dir(env, out_dir=out_dir)
     client_dir = deployment_dir / "client"
@@ -243,6 +263,7 @@ def client_artifact_paths(env: dict[str, str], *, out_dir: Path | None = None) -
         "vless_uri": client_dir / "vless-uri.txt",
         "hiddify_uri_compat": client_dir / "hiddify-uri.txt",
         "v2rayn_uri": client_dir / "v2rayn-uri.txt",
+        "hysteria2_uri": client_dir / "hysteria2-uri.txt",
         "hiddify_json": client_dir / "hiddify-cross-platform.json",
         "android_hiddify_json": client_dir / "hiddify-android.json",
         "linux_json": client_dir / "linux-sing-box.json",
@@ -264,6 +285,7 @@ GENERATED_CLIENT_FILE_NAMES = (
     "vless-uri.txt",
     "hiddify-uri.txt",
     "v2rayn-uri.txt",
+    "hysteria2-uri.txt",
     "hiddify-cross-platform.json",
     "hiddify-android.json",
     "linux-sing-box.json",
@@ -293,6 +315,7 @@ def render_next_steps(env: dict[str, str], *, out_dir: Path | None = None) -> st
             f"- Основной простой VLESS URI: {paths['vless_uri']}",
             f"- Совместимый Hiddify URI alias: {paths['hiddify_uri_compat']}",
             f"- Нативный v2rayN URI alias: {paths['v2rayn_uri']}",
+            f"- Дополнительный стандартный Hysteria2 URI для Hiddify/v2rayN: {paths['hysteria2_uri']}",
             f"- Дополнительный Windows/v2rayN Xray JSON: {paths['windows_xray_json']}",
             f"- Дополнительный Android/v2rayNG Xray JSON: {paths['android_xray_json']}",
             f"- Устойчивый QUIC профиль для Hiddify: {paths['hiddify_json']}",
@@ -306,9 +329,11 @@ def render_next_steps(env: dict[str, str], *, out_dir: Path | None = None) -> st
             f"3. Если клиенту нужен JSON-импорт, используй {paths['windows_xray_json'].name} или {paths['android_xray_json'].name} как compatibility fallback, а не как обязательный путь.",
             f"4. Если клиентский JSON/TUN начинает отправлять на сервер private/fake IP вместо домена, `vpn status` покажет это в отдельном bucket `blocked_private_fake`.",
             f"5. Если путь TCP до RU теряет пакеты, используй QUIC профиль {paths['hiddify_json'].name} или {paths['android_hiddify_json'].name}. В нём нет latency-selector: каждый запрос сразу идёт по одному детерминированному transport.",
-            f"6. Если сайты висят, сначала смотри серверные группы ошибок: vpn status --deployment {env['DEPLOY_NAME']} --role ru-gateway",
-            f"7. Если включён TUN/full VPN и client-check показывает self-tunnel, запусти PowerShell от администратора: .\\{paths['windows_route_bypass'].name}",
-            f"8. После install/reinstall запусти live-приёмку: vpn verify live --deployment {env['DEPLOY_NAME']}",
+            f"6. Для импорта QUIC как обычного узла в Hiddify/v2rayN используй {paths['hysteria2_uri'].name}; VLESS URI остаётся основным вариантом для сетей без UDP.",
+            f"7. Переключение transport применяется к новым соединениям: уже оборванный TCP/QUIC поток клиент автоматически перенести на другой transport не может.",
+            f"8. Если сайты висят, сначала смотри серверные группы ошибок: vpn status --deployment {env['DEPLOY_NAME']} --role ru-gateway",
+            f"9. Если включён TUN/full VPN и client-check показывает self-tunnel, запусти PowerShell от администратора: .\\{paths['windows_route_bypass'].name}",
+            f"10. После install/reinstall запусти live-приёмку: vpn verify live --deployment {env['DEPLOY_NAME']}",
         ]
     ) + "\n"
 
@@ -328,5 +353,6 @@ def render_client_profiles(env: dict[str, str], *, out_dir: Path | None = None) 
     write_text(paths["vless_uri"], uri_payload)
     write_text(paths["hiddify_uri_compat"], uri_payload)
     write_text(paths["v2rayn_uri"], uri_payload)
+    write_text(paths["hysteria2_uri"], render_hysteria2_uri(env))
     write_text(paths["next_steps"], render_next_steps(env, out_dir=out_dir))
     return paths["client_dir"]

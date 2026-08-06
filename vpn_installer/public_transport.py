@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import ssl
 import uuid
 from typing import Any
 
@@ -21,6 +22,13 @@ def derive_public_hy2_password(client_uuid: str) -> str:
         raise ValueError("invalid client UUID") from exc
     token = hmac.new(root_key, b"vpn-stack/public/hysteria2/auth/v1", hashlib.sha256).digest()
     return base64.urlsafe_b64encode(token).decode("ascii").rstrip("=")
+
+
+def public_hy2_certificate_fingerprint(env: dict[str, str]) -> str:
+    certificate_pem = "\n".join(decode_transport_pem(env["INTERSERVER_HY2_CERTIFICATE_B64"], "certificate")) + "\n"
+    certificate_der = ssl.PEM_cert_to_DER_cert(certificate_pem)
+    digest = hashlib.sha256(certificate_der).hexdigest().upper()
+    return ":".join(digest[index : index + 2] for index in range(0, len(digest), 2))
 
 
 def render_public_hy2_inbound(env: dict[str, str]) -> dict[str, Any]:

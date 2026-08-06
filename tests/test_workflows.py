@@ -89,6 +89,7 @@ class WorkflowTests(unittest.TestCase):
                 "vless_uri": Path(tmp) / "vless-uri.txt",
                 "hiddify_uri_compat": Path(tmp) / "hiddify-uri.txt",
                 "hiddify_json": Path(tmp) / "h.json",
+                "hysteria2_uri": Path(tmp) / "hysteria2-uri.txt",
                 "android_hiddify_json": Path(tmp) / "h-android.json",
                 "linux_json": Path(tmp) / "l.json",
                 "windows_xray_json": Path(tmp) / "xray.json",

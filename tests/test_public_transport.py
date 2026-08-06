@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import unittest
+from urllib.parse import parse_qs, unquote, urlsplit
 
-from vpn_installer.client_artifacts import render_client_profile, render_vless_uri
+from vpn_installer.client_artifacts import render_client_profile, render_hysteria2_uri, render_vless_uri
 from vpn_installer.config import generate_default_env
 from vpn_installer.public_transport import (
     PUBLIC_HY2_OUTBOUND_TAG,
@@ -57,6 +58,19 @@ class PublicTransportTests(unittest.TestCase):
         self.assertIn("security=reality", uri)
         self.assertIn("type=tcp", uri)
         self.assertNotIn("hysteria", uri.lower())
+
+    def test_standard_hysteria2_uri_uses_pinned_certificate(self) -> None:
+        env = self.make_env()
+        parsed = urlsplit(render_hysteria2_uri(env).strip())
+        query = parse_qs(parsed.query)
+
+        self.assertEqual(parsed.scheme, "hysteria2")
+        self.assertEqual(parsed.hostname, env["RU_PUBLIC_IP"])
+        self.assertEqual(parsed.port, int(env["RU_LISTEN_PORT"]))
+        self.assertEqual(unquote(parsed.username or ""), derive_public_hy2_password(env["CLIENT_UUID"]))
+        self.assertEqual(query["sni"], ["vpn-stack.internal"])
+        self.assertEqual(query["insecure"], ["1"])
+        self.assertRegex(query["pinSHA256"][0], r"^(?:[0-9A-F]{2}:){31}[0-9A-F]{2}$")
 
 
 if __name__ == "__main__":

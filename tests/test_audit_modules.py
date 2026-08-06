@@ -109,6 +109,10 @@ class AuditModuleTests(unittest.TestCase):
                 json.dumps({**public_profile, "inbounds": [{"auto_redirect": False}]}) + "\n",
                 encoding="utf-8",
             )
+            (client / "hysteria2-uri.txt").write_text(
+                "hysteria2://secret@203.0.113.10:443/?insecure=1&pinSHA256=AA#demo\n",
+                encoding="utf-8",
+            )
             (client / "linux-sing-box.json").write_text(
                 json.dumps({**public_profile, "inbounds": [{"auto_redirect": True}]}) + "\n",
                 encoding="utf-8",

@@ -464,6 +464,7 @@ def finalize_install_output(env: dict[str, str], deployment_name: str) -> None:
     print(f"Windows/v2rayN Xray JSON fallback: {paths['windows_xray_json']}")
     print(f"Android/v2rayNG Xray JSON fallback: {paths['android_xray_json']}")
     print(f"Устойчивый QUIC профиль для Hiddify: {paths['hiddify_json']}")
+    print(f"Стандартный Hysteria2 URI для Hiddify/v2rayN: {paths['hysteria2_uri']}")
     print(f"Устойчивый Android QUIC профиль для Hiddify: {paths['android_hiddify_json']}")
     print(f"Windows route bypass helper: {paths['windows_route_bypass']}")
     print(f"JSON backup для Linux: {paths['linux_json']}")
@@ -474,9 +475,10 @@ def finalize_install_output(env: dict[str, str], deployment_name: str) -> None:
     print(f"2. JSON-файлы используй только как fallback, если конкретный клиент не умеет нормально импортировать URI.")
     print("3. Если клиент отправляет private/fake IP вместо домена, vpn status покажет это в bucket blocked_private_fake.")
     print(f"4. Если TCP path теряет пакеты, используй детерминированный QUIC профиль {paths['hiddify_json'].name}; URI {paths['hiddify_uri_compat'].name} остаётся основным совместимым TCP-контрактом.")
-    print(f"5. Если сайты висят, сначала проверь серверные группы ошибок: vpn status --deployment {deployment_name} --role ru-gateway")
-    print(f"6. Если включён TUN/full VPN и client-check показывает self-tunnel, запусти PowerShell от администратора: .\\{paths['windows_route_bypass'].name}")
-    print(f"7. После install/reinstall запусти live-приёмку: vpn verify live --deployment {deployment_name}")
+    print(f"5. Для импорта QUIC как отдельного узла в Hiddify/v2rayN используй {paths['hysteria2_uri'].name}.")
+    print(f"6. Если сайты висят, сначала проверь серверные группы ошибок: vpn status --deployment {deployment_name} --role ru-gateway")
+    print(f"7. Если включён TUN/full VPN и client-check показывает self-tunnel, запусти PowerShell от администратора: .\\{paths['windows_route_bypass'].name}")
+    print(f"8. После install/reinstall запусти live-приёмку: vpn verify live --deployment {deployment_name}")
 
 
 def load_env_for_render(env_path: Path) -> dict[str, str]:

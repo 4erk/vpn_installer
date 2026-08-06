@@ -88,13 +88,6 @@ FRONT_RTT_DEGRADED_MS = 250
 FRONT_RTT_INFLATION_FACTOR = 3
 FRONT_RTO_DEGRADED_MS = 1_000
 FRONT_COUNTER_MAX_INTERVAL_SECONDS = 300
-INTERFACE_RX_DROP_MIN_PACKETS = 10_000
-INTERFACE_RX_DROP_MIN_DROPS = 10
-INTERFACE_RX_DROP_DEGRADED_PERCENT = 0.02
-HOST_TCP_MIN_OUT_SEGMENTS = 100
-HOST_TCP_MIN_RETRANSMISSIONS = 3
-HOST_TCP_RETRANSMIT_DEGRADED_PERCENT = 2.0
-HOST_TCP_TIMEOUT_DEGRADED_COUNT = 3
 PROBLEM_LOG_GREP = (
     "ERROR|FATAL|processed invalid connection|accepted tcp:disabled[.]invalid|"
     "connection rejected|mux connection closed|EOF|connection reset|using outbound/vless"
@@ -879,7 +872,7 @@ def front_interval_metrics(counters: dict[str, int]) -> dict[str, Any]:
     return {
         "activity_bytes": activity_bytes,
         "retransmit_ratio_pct": ratio,
-        "quality": "degraded" if degraded else "observed",
+        "quality": "degraded" if degraded else "observed" if activity_bytes >= FRONT_SMALL_FLOW_MIN_BYTES else "insufficient",
     }
 
 
@@ -943,7 +936,15 @@ def front_interval_snapshot(
         if metrics["quality"] == "degraded"
     )
     sources = sorted(degraded_sources)
-    observation = "degraded" if len(sources) >= 3 else "client_specific" if sources else "observed"
+    aggregate_metrics = front_interval_metrics(aggregate)
+    if len(sources) >= 3:
+        observation = "degraded"
+    elif sources:
+        observation = "client_specific"
+    elif aggregate_metrics["quality"] == "insufficient":
+        observation = "insufficient"
+    else:
+        observation = "observed"
     interval = {
         "observed_at": observed_at,
         "baseline": not bool(previous_flows),
@@ -951,7 +952,7 @@ def front_interval_snapshot(
         "sampled_flows": len(interval_flows),
         "observation": observation,
         "degraded_sources": sources,
-        "aggregate": {**aggregate, **front_interval_metrics(aggregate)},
+        "aggregate": {**aggregate, **aggregate_metrics},
         "sources": interval_sources,
         "flows": interval_flows,
     }
@@ -2418,28 +2419,6 @@ def network_soft_reasons(deltas: dict[str, Any]) -> list[str]:
     missed = sum(int(values.get("rx_missed_errors", 0)) for values in deltas.get("interfaces", {}).values())
     if missed:
         reasons.append(f"interface_rx_missed={missed}")
-    for name, counters in sorted(deltas.get("interfaces", {}).items()):
-        packets = int(counters.get("rx_packets", 0))
-        dropped = int(counters.get("rx_dropped", 0))
-        ratio = dropped * 100 / packets if packets else 0.0
-        if (
-            packets >= INTERFACE_RX_DROP_MIN_PACKETS
-            and dropped >= INTERFACE_RX_DROP_MIN_DROPS
-            and ratio >= INTERFACE_RX_DROP_DEGRADED_PERCENT
-        ):
-            reasons.append(f"interface_rx_dropped={name}:{dropped}/{packets}({ratio:.3f}%)")
-    tcp_out = int(protocol.get("TcpOutSegs", 0))
-    tcp_retrans = int(protocol.get("TcpRetransSegs", 0))
-    tcp_retrans_ratio = tcp_retrans * 100 / tcp_out if tcp_out else 0.0
-    if (
-        tcp_out >= HOST_TCP_MIN_OUT_SEGMENTS
-        and tcp_retrans >= HOST_TCP_MIN_RETRANSMISSIONS
-        and tcp_retrans_ratio >= HOST_TCP_RETRANSMIT_DEGRADED_PERCENT
-    ):
-        reasons.append(f"tcp_retransmissions={tcp_retrans}/{tcp_out}({tcp_retrans_ratio:.3f}%)")
-    tcp_timeouts = int(protocol.get("TcpExtTCPTimeouts", 0))
-    if tcp_timeouts >= HOST_TCP_TIMEOUT_DEGRADED_COUNT:
-        reasons.append(f"tcp_timeouts={tcp_timeouts}")
     return reasons
 
 

@@ -24,6 +24,7 @@ class ClientArtifactTests(unittest.TestCase):
         self.assertEqual(paths["vless_uri"].name, "vless-uri.txt")
         self.assertEqual(paths["v2rayn_uri"].name, "v2rayn-uri.txt")
         self.assertEqual(paths["android_xray_json"].name, "android-v2rayng-xray.json")
+        self.assertEqual(paths["hysteria2_uri"].name, "hysteria2-uri.txt")
         self.assertEqual(paths["next_steps"], Path(tmp) / "demo" / "NEXT-STEPS.txt")
 
     def test_render_client_profiles_honors_explicit_out_dir(self) -> None:
@@ -43,6 +44,7 @@ class ClientArtifactTests(unittest.TestCase):
             )
             self.assertTrue((client_dir / "android-v2rayng-xray.json").is_file())
             self.assertTrue((client_dir / "hiddify-cross-platform.json").is_file())
+            self.assertTrue((client_dir / "hysteria2-uri.txt").read_text(encoding="utf-8").startswith("hysteria2://"))
             self.assertEqual(
                 (client_dir / "android-v2rayng-xray.json").read_text(encoding="utf-8"),
                 (client_dir / "windows-xray.json").read_text(encoding="utf-8"),

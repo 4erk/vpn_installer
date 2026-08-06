@@ -6,6 +6,22 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.15.0] - 2026-08-06
+
+### Added
+
+- Добавлен стандартный `hysteria2-uri.txt` для прямого импорта дополнительного QUIC transport в Hiddify/v2rayN. Self-signed TLS не остаётся без проверки: URI содержит certificate SHA-256 pin и SNI; существующие JSON продолжают использовать pinned SPKI.
+
+### Fixed
+
+- Health больше не объявляет generic `/sys/class/net/*/rx_dropped`, host-wide TCP retransmissions или TCP timeouts деградацией VPN. На production foreign эти counters стабильно росли из-за виртуального WAN и посторонних host sockets при нулевых `virtio_net rx_queue drops`, `rx_missed`, softnet drops и исправном dataplane. Сырые дельты остаются в snapshot как явно unscoped informational telemetry; verdict формируют scoped Xray-flow, UDP buffer/softnet/missed, conntrack и route evidence.
+- Fresh TCP-front interval с несколькими служебными байтами теперь помечается `insufficient`, а не показывает высокий процент retransmit как полноценное наблюдение. Порог деградации для реального payload не ослаблен.
+
+### Changed
+
+- `audit quick` проверяет стандартную схему и certificate pin нового Hysteria2 URI. Самописный client selector/controller не добавляется: sing-box selector управляет только новыми соединениями и не может безопасно повторить частично переданный запрос.
+- Основной `vless-uri.txt`, публичные TCP/UDP ingress, server routing, web-admin и локальный VPN-клиент не изменены.
+
 ## [0.14.2] - 2026-08-04
 
 ### Fixed

@@ -149,7 +149,10 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
         if value and counter in {"rx_dropped", "tx_dropped", "rx_errors", "tx_errors", "rx_missed_errors"}
     }
     if interface_drops:
-        lines.append("interface deltas (last health cycle): " + ", ".join(f"{key}=+{value}" for key, value in sorted(interface_drops.items())))
+        lines.append(
+            "interface counters (unscoped, informational; last health cycle): "
+            + ", ".join(f"{key}=+{value}" for key, value in sorted(interface_drops.items()))
+        )
     recent_protocol = recent_deltas.get("protocol", {}) if isinstance(recent_deltas, dict) else {}
     recent_errors = {key: value for key, value in recent_protocol.items() if value and ("Error" in key or "Drop" in key or "Discard" in key)}
     if recent_errors:
@@ -158,9 +161,9 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
     outgoing = int(recent_protocol.get("TcpOutSegs", 0) or 0)
     if outgoing:
         ratio = retrans * 100 / outgoing
-        lines.append(f"host-wide tcp deltas (last health cycle): out={outgoing}, retrans={retrans} ({ratio:.3f}%)")
+        lines.append(f"host-wide tcp counters (informational; last health cycle): out={outgoing}, retrans={retrans} ({ratio:.3f}%)")
     elif retrans:
-        lines.append(f"host-wide tcp deltas (last health cycle): out=unavailable, retrans={retrans}")
+        lines.append(f"host-wide tcp counters (informational; last health cycle): out=unavailable, retrans={retrans}")
     recovery_signals = {
         key: int(recent_protocol.get(key, 0) or 0)
         for key in ("TcpExtTCPSACKReorder", "TcpExtTCPDSACKRecv", "TcpExtTCPTimeouts", "TcpExtTCPSpuriousRTOs")

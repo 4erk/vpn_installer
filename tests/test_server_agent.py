@@ -276,7 +276,7 @@ class ServerAgentTests(unittest.TestCase):
         self.assertEqual(result["soft_reasons"], ["conntrack_table_full_5m=2"])
         recover.assert_not_called()
 
-    def test_network_soft_reasons_report_fresh_interface_and_tcp_loss(self) -> None:
+    def test_network_soft_reasons_do_not_promote_unscoped_host_tcp_or_generic_rx_drops(self) -> None:
         reasons = server_agent.network_soft_reasons(
             {
                 "interfaces": {
@@ -295,14 +295,17 @@ class ServerAgentTests(unittest.TestCase):
             }
         )
 
-        self.assertEqual(
-            reasons,
-            [
-                "interface_rx_dropped=eth0:67/24693(0.271%)",
-                "tcp_retransmissions=26/171(15.205%)",
-                "tcp_timeouts=20",
-            ],
+        self.assertEqual(reasons, [])
+
+    def test_network_soft_reasons_require_specific_interface_loss_evidence(self) -> None:
+        reasons = server_agent.network_soft_reasons(
+            {
+                "interfaces": {"eth0": {"rx_packets": 20_000, "rx_dropped": 200, "rx_missed_errors": 0}},
+                "protocol": {},
+                "softnet": {"dropped": 0},
+            }
         )
+        self.assertEqual(reasons, [])
 
     def test_network_soft_reasons_ignore_low_volume_counter_noise(self) -> None:
         reasons = server_agent.network_soft_reasons(
@@ -830,6 +833,19 @@ class ServerAgentTests(unittest.TestCase):
 
         self.assertEqual(metrics["retransmit_ratio_pct"], 1.2)
         self.assertEqual(metrics["quality"], "degraded")
+
+    def test_front_interval_marks_tiny_samples_insufficient(self) -> None:
+        metrics = server_agent.front_interval_metrics(
+            {
+                "bytes_sent": 183,
+                "bytes_retrans": 122,
+                "retransmissions": 2,
+                "data_segs_out": 3,
+            }
+        )
+
+        self.assertEqual(metrics["retransmit_ratio_pct"], 66.667)
+        self.assertEqual(metrics["quality"], "insufficient")
 
     def test_front_interval_does_not_join_replaced_or_reset_sockets(self) -> None:
         previous = {

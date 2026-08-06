@@ -354,6 +354,7 @@ def test_user_artifacts(out_dir: Path) -> dict[str, str]:
     hiddify_uri_alias_path = out_dir / "client" / "hiddify-uri.txt"
     v2rayn_uri_alias_path = out_dir / "client" / "v2rayn-uri.txt"
     hiddify_json_path = out_dir / "client" / "hiddify-cross-platform.json"
+    hysteria2_uri_path = out_dir / "client" / "hysteria2-uri.txt"
     linux_json_path = out_dir / "client" / "linux-sing-box.json"
     android_hiddify_json_path = out_dir / "client" / "hiddify-android.json"
     android_xray_json_path = out_dir / "client" / "android-v2rayng-xray.json"
@@ -366,6 +367,8 @@ def test_user_artifacts(out_dir: Path) -> dict[str, str]:
         raise AuditFailure(f"Не найден v2rayN URI alias файл: {v2rayn_uri_alias_path}")
     if not hiddify_json_path.is_file():
         raise AuditFailure(f"Не найден Hiddify JSON файл: {hiddify_json_path}")
+    if not hysteria2_uri_path.is_file():
+        raise AuditFailure(f"Не найден Hysteria2 URI файл: {hysteria2_uri_path}")
     if not linux_json_path.is_file():
         raise AuditFailure(f"Не найден Linux sing-box JSON файл: {linux_json_path}")
     if not android_hiddify_json_path.is_file():
@@ -383,6 +386,7 @@ def test_user_artifacts(out_dir: Path) -> dict[str, str]:
     if v2rayn_uri_alias_path.read_text(encoding="utf-8") != vless_uri_payload:
         raise AuditFailure("Совместимый v2rayN URI alias расходится с основным VLESS URI")
     hiddify_payload = json.loads(hiddify_json_path.read_text(encoding="utf-8"))
+    hysteria2_uri_payload = hysteria2_uri_path.read_text(encoding="utf-8").strip()
     linux_payload = json.loads(linux_json_path.read_text(encoding="utf-8"))
     if hiddify_payload.get("inbounds", [{}])[0].get("auto_redirect") is not False:
         raise AuditFailure("Hiddify profile должен отключать auto_redirect")
@@ -397,6 +401,8 @@ def test_user_artifacts(out_dir: Path) -> dict[str, str]:
     dns_servers = hiddify_payload.get("dns", {}).get("servers", [])
     if not dns_servers or dns_servers[0].get("detour") != PUBLIC_HY2_OUTBOUND_TAG:
         raise AuditFailure("Hiddify profile не закрепляет remote DNS за QUIC transport")
+    if not hysteria2_uri_payload.startswith("hysteria2://") or "pinSHA256=" not in hysteria2_uri_payload:
+        raise AuditFailure("Hysteria2 URI не содержит стандартную схему и certificate pin")
     if linux_payload.get("inbounds", [{}])[0].get("auto_redirect") is not True:
         raise AuditFailure("Linux sing-box profile должен включать auto_redirect")
     linux_payload["inbounds"][0]["auto_redirect"] = False
@@ -421,6 +427,7 @@ def test_user_artifacts(out_dir: Path) -> dict[str, str]:
         "hiddify_uri_alias": str(hiddify_uri_alias_path),
         "v2rayn_uri_alias": str(v2rayn_uri_alias_path),
         "hiddify_json": str(hiddify_json_path),
+        "hysteria2_uri": str(hysteria2_uri_path),
         "android_hiddify_json": str(android_hiddify_json_path),
         "android_xray_json": str(android_xray_json_path),
         "next_steps": str(next_steps),
