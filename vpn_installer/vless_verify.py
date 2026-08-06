@@ -29,8 +29,8 @@ RELIABILITY_PROBE_URLS = (
 THROUGHPUT_SOURCE_URLS = (
     "https://fsn1-speed.hetzner.com/100MB.bin",
     "https://nbg1-speed.hetzner.com/100MB.bin",
+    "https://speed.cloudflare.com/__down?bytes=50000000",
 )
-THROUGHPUT_RANGE_END = 1_073_741_823
 THROUGHPUT_ATTEMPT_SECONDS = 10
 THROUGHPUT_MIN_CAPACITY_ATTEMPT_SECONDS = 3
 THROUGHPUT_CAPACITY_SECONDS = 30
@@ -425,7 +425,7 @@ if (( throughput_seconds > 0 )); then
         event "throughput-$phase-attempt-$attempt_index-source-$source_index-remaining-$remaining_seconds"
         attempt_start_ns=$now_ns
         throughput_count_file=$(mktemp)
-        timeout --foreground --signal=TERM --kill-after=__CURL_WATCHDOG_KILL_SECONDS__s "${attempt_seconds}s" curl -4fsS --proxy "$proxy" --connect-timeout 5 "${curl_rate_args[@]}" --range 0-__THROUGHPUT_RANGE_END__ -o - "$throughput_url" 2>>runner-curl.log | wc -c >"$throughput_count_file"
+        timeout --foreground --signal=TERM --kill-after=__CURL_WATCHDOG_KILL_SECONDS__s "${attempt_seconds}s" curl -4fsS --proxy "$proxy" --connect-timeout 5 "${curl_rate_args[@]}" -o - "$throughput_url" 2>>runner-curl.log | wc -c >"$throughput_count_file"
         pipeline_status=("${PIPESTATUS[@]}")
         curl_status=${pipeline_status[0]}
         counter_status=${pipeline_status[1]}
@@ -497,6 +497,7 @@ for url, source_byte_count, elapsed_ns, failure_count in zip(sources, source_byt
         "bytes_per_second": source_byte_count / source_duration if source_duration else 0.0,
         "failures": failure_count,
     })
+successful_sources = sum(item["bytes_downloaded"] > 0 and item["duration_seconds"] > 0 for item in source_metrics)
 throughput = {
     "bytes_per_second": bytes_downloaded / duration_seconds if duration_seconds else 0.0,
     "capacity_bytes_per_second": max((item["bytes_per_second"] for item in source_metrics), default=0.0),
@@ -509,6 +510,8 @@ throughput = {
     "attempts": int(sys.argv[8]),
     "failures": int(sys.argv[9]),
     "source_failures": int(sys.argv[10]),
+    "successful_sources": successful_sources,
+    "required_successful_sources": min(2, len(sources)),
     "sources": sources,
     "source_metrics": source_metrics,
 }
@@ -552,9 +555,7 @@ PY
         "__THROUGHPUT_SOURCES_JSON__", shlex.quote(json.dumps(list(throughput_urls), separators=(",", ":")))
     ).replace("__HTTP_TIMEOUT_SECONDS__", str(RUNNER_HTTP_TIMEOUT_SECONDS)).replace(
         "__STARTUP_SECONDS__", str(RUNNER_STARTUP_SECONDS)
-    ).replace("__THROUGHPUT_RANGE_END__", str(THROUGHPUT_RANGE_END)).replace(
-        "__SHUTDOWN_POLLS__", str(RUNNER_SHUTDOWN_SECONDS * 10)
-    ).replace(
+    ).replace("__SHUTDOWN_POLLS__", str(RUNNER_SHUTDOWN_SECONDS * 10)).replace(
         "__CURL_WATCHDOG_KILL_SECONDS__", str(RUNNER_CURL_WATCHDOG_KILL_SECONDS)
     ).replace(
         "__THROUGHPUT_ATTEMPT_SECONDS__", str(THROUGHPUT_ATTEMPT_SECONDS)

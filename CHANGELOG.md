@@ -6,6 +6,17 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.15.1] - 2026-08-06
+
+### Fixed
+
+- Throughput acceptance больше не зависит от двух endpoint одного Hetzner-контура. Capacity измеряется по Hetzner FSN, Hetzner NBG и независимому Cloudflare payload; для доказательства доступны должны быть минимум два источника.
+- Отказ отдельного speed-source остаётся в `source_metrics`, но не объявляет VPN сломанным, если два независимых источника успешно передают данные. Нулевая передача, недостаточное покрытие источников, обрыв stability-окна и скорость ниже release floor по-прежнему дают `failed`.
+
+### Changed
+
+- Dataplane, `vless-uri.txt`, Hysteria2 URI, server routing и web-admin не изменены. Патч исправляет только ложный release verdict, обнаруженный сравнением `RU direct`, `wg0`, sing-box router и public transport на одинаковом payload.
+
 ## [0.15.0] - 2026-08-06
 
 ### Added

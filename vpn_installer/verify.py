@@ -210,16 +210,27 @@ def _validate_public_transport_result(
             duration = float(measurement.get("duration_seconds", 0) or 0)
             failures = int(measurement.get("failures", 0) or 0)
             source_failures = int(measurement.get("source_failures", 0) or 0)
+            source_metrics = measurement.get("source_metrics", [])
+            if not isinstance(source_metrics, list):
+                source_metrics = []
+            successful_sources = int(
+                measurement.get("successful_sources", int(speed_bps > 0 and source_failures == 0)) or 0
+            )
+            required_successful_sources = int(measurement.get("required_successful_sources", 1) or 1)
             stability_bps = float(measurement.get("stability_bytes_per_second", 0) or 0)
             stability_duration = float(measurement.get("stability_duration_seconds", 0) or 0)
         except (TypeError, ValueError):
             return {"verdict": "failed", "reason": f"{label} throughput measurement is malformed: {measurement}", "result": result}
         if failures:
             return {"verdict": "failed", "reason": f"{label} throughput had {failures} transfer failures", "result": result}
-        if source_failures:
+        if successful_sources < required_successful_sources:
             return {
                 "verdict": "failed",
-                "reason": f"{label} throughput had {source_failures} unexpected source failures: {measurement.get('source_metrics', [])}",
+                "reason": (
+                    f"{label} throughput source coverage is insufficient: "
+                    f"{successful_sources}/{required_successful_sources} successful, "
+                    f"failures={source_failures}, metrics={source_metrics}"
+                ),
                 "result": result,
             }
         if speed_bps < capacity_floor_bytes_per_second:

@@ -291,6 +291,26 @@ class VerifyTests(unittest.TestCase):
         self.assertEqual(_validate_public_vless_result({**result, "throughput": {"bytes_per_second": 5_000_000, "duration_seconds": 60, "failures": 0}}, uri, foreign, throughput_seconds=60)["verdict"], "failed")
         self.assertEqual(_validate_public_vless_result({**result, "throughput": {"bytes_per_second": 7_000_000, "duration_seconds": 60, "failures": 1}}, uri, foreign, throughput_seconds=60)["verdict"], "failed")
         self.assertEqual(_validate_public_vless_result({**result, "throughput": {**result["throughput"], "source_failures": 1}}, uri, foreign, throughput_seconds=60)["verdict"], "failed")
+        source_redundant = {
+            **result,
+            "throughput": {
+                **result["throughput"],
+                "source_failures": 1,
+                "successful_sources": 2,
+                "required_successful_sources": 2,
+                "source_metrics": [
+                    {"url": "https://a.example", "bytes_downloaded": 1, "duration_seconds": 1, "failures": 0},
+                    {"url": "https://b.example", "bytes_downloaded": 1, "duration_seconds": 1, "failures": 0},
+                    {"url": "https://c.example", "bytes_downloaded": 0, "duration_seconds": 0, "failures": 1},
+                ],
+            },
+        }
+        self.assertEqual(_validate_public_vless_result(source_redundant, uri, foreign, throughput_seconds=60)["verdict"], "verified")
+        insufficient_sources = {
+            **source_redundant,
+            "throughput": {**source_redundant["throughput"], "successful_sources": 1},
+        }
+        self.assertEqual(_validate_public_vless_result(insufficient_sources, uri, foreign, throughput_seconds=60)["verdict"], "failed")
         self.assertEqual(_validate_public_vless_result({**result, "throughput": {**result["throughput"], "stability_bytes_per_second": 1_000_000}}, uri, foreign, throughput_seconds=60)["verdict"], "failed")
         self.assertEqual(_vless_runner_timeout(0), 189)
         self.assertEqual(_vless_runner_timeout(600), 794)
