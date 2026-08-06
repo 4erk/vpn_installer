@@ -1269,6 +1269,7 @@ class ServerAgentTests(unittest.TestCase):
         self.assertEqual(payload["verdict"], "degraded")
         self.assertEqual(payload["flow_events"], {"203.0.113.20:50123": {"current.example:443": 1}})
         self.assertFalse(payload["client_transport"]["multiplex_detected"])
+        self.assertEqual(payload["client_transport"]["status"], "not_observed")
 
     def test_client_snapshot_detects_tcp_multiplex_on_active_outer_flow(self) -> None:
         front = {
@@ -1300,6 +1301,7 @@ class ServerAgentTests(unittest.TestCase):
 
         transport = payload["client_transport"]
         self.assertTrue(transport["multiplex_detected"])
+        self.assertEqual(transport["status"], "detected")
         self.assertEqual(transport["multiplexed_flow_count"], 1)
         self.assertEqual(transport["risk"], "tcp_head_of_line")
         self.assertEqual(
@@ -1309,6 +1311,13 @@ class ServerAgentTests(unittest.TestCase):
                 "destinations": {"first.example:443": 1, "second.example:443": 1},
             },
         )
+
+    def test_client_transport_is_inconclusive_without_active_outer_flow(self) -> None:
+        observation = server_agent.client_transport_observation({}, active_outer_flows=0)
+
+        self.assertEqual(observation["status"], "inconclusive")
+        self.assertFalse(observation["multiplex_detected"])
+        self.assertEqual(observation["risk"], "unknown")
 
     def test_udp_443_policy_rejects_only_global_transport_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

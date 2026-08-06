@@ -537,7 +537,7 @@ def endpoint_key(source: str, port: int | None) -> str:
     return f"{host}:{port}" if port is not None else host
 
 
-def client_transport_observation(tcp_events: dict[str, Counter[str]]) -> dict[str, Any]:
+def client_transport_observation(tcp_events: dict[str, Counter[str]], *, active_outer_flows: int) -> dict[str, Any]:
     multiplexed_flows = {
         key: {
             "accepted_tcp_requests": sum(destinations.values()),
@@ -547,11 +547,21 @@ def client_transport_observation(tcp_events: dict[str, Counter[str]]) -> dict[st
         if sum(destinations.values()) > 1
     }
     detected = bool(multiplexed_flows)
+    observed_tcp_requests = sum(sum(destinations.values()) for destinations in tcp_events.values())
+    if detected:
+        status = "detected"
+    elif active_outer_flows and observed_tcp_requests:
+        status = "not_observed"
+    else:
+        status = "inconclusive"
     return {
+        "status": status,
         "multiplex_detected": detected,
         "multiplexed_flow_count": len(multiplexed_flows),
-        "risk": "tcp_head_of_line" if detected else "none",
-        "basis": "multiple_xray_tcp_accepts_on_one_active_outer_socket" if detected else "none",
+        "active_outer_flows": active_outer_flows,
+        "observed_tcp_requests": observed_tcp_requests,
+        "risk": "tcp_head_of_line" if detected else "unknown" if status == "inconclusive" else "none_observed",
+        "basis": "multiple_xray_tcp_accepts_on_one_active_outer_socket" if detected else "active_flow_window" if status == "not_observed" else "no_active_flow_evidence",
         "flows": multiplexed_flows,
     }
 
@@ -1572,7 +1582,7 @@ def public_front_snapshot(minutes: int, source: str | None = None, *, live_probe
             flow_events.setdefault(key, Counter())[destination] += 1
             if "accepted tcp:" in line:
                 tcp_flow_events.setdefault(key, Counter())[destination] += 1
-    client_transport = client_transport_observation(tcp_flow_events)
+    client_transport = client_transport_observation(tcp_flow_events, active_outer_flows=len(active_flow_keys))
     source_flows = {
         key: {**metrics, "accepted_destinations": dict(flow_events.get(key, Counter()).most_common(10))}
         for key, metrics in front.get("flows", {}).items()

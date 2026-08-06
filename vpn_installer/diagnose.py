@@ -166,10 +166,11 @@ def diagnose_server_client_workflow(deployment: str | None, *, source_ip: str, m
         print(f"active flows: total={len(flows)}, degraded={degraded_flows}, lifetime_loss={loss_observed_flows}")
     client_transport = payload.get("client_transport", {})
     if client_transport:
-        multiplex = "detected" if client_transport.get("multiplex_detected") else "not_detected"
         print(
             "client transport: "
-            f"multiplex={multiplex}, flows={client_transport.get('multiplexed_flow_count', 0)}, "
+            f"multiplex={client_transport.get('status', 'inconclusive')}, "
+            f"active_outer_flows={client_transport.get('active_outer_flows', 0)}, "
+            f"multiplexed_flows={client_transport.get('multiplexed_flow_count', 0)}, "
             f"risk={client_transport.get('risk', 'none')}"
         )
     recent_interval = payload.get("front", {}).get("recent_interval", {})
