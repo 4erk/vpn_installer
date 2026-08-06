@@ -4,127 +4,20 @@ import base64
 import hashlib
 import hmac
 from datetime import datetime, timezone
-from typing import Any
 
 HY2_PORT = 18443
 HY2_SERVER_NAME = "vpn-stack.internal"
 HY2_CLASH_API_LISTEN = "127.0.0.1:19090"
 TRANSPORT_SELECTOR_TAG = "to-foreign"
-TRANSPORT_PRIMARY_TAG = "to-foreign-wg"
-TRANSPORT_FALLBACK_TAG = "to-foreign-hy2"
+TRANSPORT_WG_TAG = "to-foreign-wg"
+TRANSPORT_HY2_TAG = "to-foreign-hy2"
+TRANSPORT_CANDIDATE_TAGS = (TRANSPORT_HY2_TAG, TRANSPORT_WG_TAG)
 TRANSPORT_HEALTHCHECK_URL = "https://1.1.1.1/cdn-cgi/trace"
 TRANSPORT_PROBE_TIMEOUT_MS = 1200
-TRANSPORT_PROBE_INTERVAL_SECONDS = 2
-TRANSPORT_FAILURE_CONFIRMATIONS = 2
-TRANSPORT_PRIMARY_RECOVERY_SUCCESSES = 2
-TRANSPORT_STATE_SCHEMA_VERSION = 4
-
-
-def _normalize_probe(probe: dict[str, Any] | None) -> dict[str, Any]:
-    probe = probe or {}
-    checked = probe.get("checked") is True if "checked" in probe else bool(probe)
-    return {
-        "checked": checked,
-        "ok": checked and probe.get("ok") is True,
-        "attempts": max(0, int(probe.get("attempts", 1 if checked else 0) or 0)),
-        "delay_ms": max(0, int(probe.get("delay_ms", 0) or 0)),
-        "error": str(probe.get("error", ""))[:240],
-    }
-
-
-def evaluate_transport_policy(
-    *,
-    selected: str,
-    probes: dict[str, dict[str, Any]],
-    previous: dict[str, Any] | None = None,
-    observed_at: str | None = None,
-) -> dict[str, Any]:
-    """Return a deterministic recommendation without changing the selector."""
-
-    previous = previous or {}
-    observed_at = observed_at or datetime.now(timezone.utc).isoformat()
-    if selected not in {TRANSPORT_PRIMARY_TAG, TRANSPORT_FALLBACK_TAG}:
-        return {
-            "schema_version": TRANSPORT_STATE_SCHEMA_VERSION,
-            "updated_at": observed_at,
-            "state": "failed",
-            "selected": selected,
-            "recommended": selected,
-            "would_switch": False,
-            "primary_recovery_successes": 0,
-            "hard_failure_evidence": False,
-            "probes": {},
-            "reason": "selected transport is invalid",
-        }
-
-    normalized_probes = {
-        tag: _normalize_probe(probes.get(tag))
-        for tag in (TRANSPORT_PRIMARY_TAG, TRANSPORT_FALLBACK_TAG)
-    }
-    primary = normalized_probes[TRANSPORT_PRIMARY_TAG]
-    fallback = normalized_probes[TRANSPORT_FALLBACK_TAG]
-    selected_probe = normalized_probes[selected]
-    alternate = TRANSPORT_FALLBACK_TAG if selected == TRANSPORT_PRIMARY_TAG else TRANSPORT_PRIMARY_TAG
-    alternate_probe = normalized_probes[alternate]
-    recovery_successes = 0
-    recommended = selected
-    state = "healthy" if selected == TRANSPORT_PRIMARY_TAG else "degraded"
-    hard_failure = False
-    evidence = "selected transport is healthy"
-
-    if not selected_probe["checked"]:
-        state = "failed"
-        evidence = "selected transport was not probed"
-    elif selected_probe["ok"]:
-        if selected == TRANSPORT_FALLBACK_TAG:
-            previous_successes = (
-                int(previous.get("primary_recovery_successes", 0) or 0)
-                if previous.get("selected") == selected
-                else 0
-            )
-            if primary["checked"] and primary["ok"]:
-                recovery_successes = previous_successes + 1
-                state = "recovering"
-                evidence = (
-                    "primary recovery confirmed"
-                    if recovery_successes >= TRANSPORT_PRIMARY_RECOVERY_SUCCESSES
-                    else f"primary recovery confirmation {recovery_successes}/{TRANSPORT_PRIMARY_RECOVERY_SUCCESSES}"
-                )
-                if recovery_successes >= TRANSPORT_PRIMARY_RECOVERY_SUCCESSES:
-                    recommended = TRANSPORT_PRIMARY_TAG
-            else:
-                evidence = "fallback transport remains healthy"
-        elif selected_probe["attempts"] > 1:
-            evidence = "primary recovered during immediate confirmation"
-    elif selected_probe["attempts"] < TRANSPORT_FAILURE_CONFIRMATIONS:
-        state = "suspect"
-        evidence = f"{selected} failed once; immediate confirmation is required"
-    elif alternate_probe["checked"] and alternate_probe["ok"]:
-        hard_failure = True
-        recommended = alternate
-        state = "degraded" if alternate == TRANSPORT_FALLBACK_TAG else "recovering"
-        evidence = f"{selected} failed twice while {alternate} is reachable"
-    elif alternate_probe["checked"]:
-        state = "failed"
-        hard_failure = True
-        evidence = "both interserver transports failed"
-    else:
-        state = "failed"
-        hard_failure = True
-        evidence = f"{selected} failed twice and alternate transport was not probed"
-
-    return {
-        "schema_version": TRANSPORT_STATE_SCHEMA_VERSION,
-        "updated_at": observed_at,
-        "state": state,
-        "selected": selected,
-        "recommended": recommended,
-        "would_switch": recommended != selected,
-        "primary_recovery_successes": recovery_successes,
-        "hard_failure_evidence": hard_failure,
-        "probes": normalized_probes,
-        "reason": evidence,
-    }
+TRANSPORT_URLTEST_INTERVAL = "10s"
+TRANSPORT_URLTEST_INTERVAL_SECONDS = 10
+TRANSPORT_URLTEST_TOLERANCE_MS = 30
+TRANSPORT_URLTEST_IDLE_TIMEOUT = "30m"
 
 
 def generate_transport_identity() -> dict[str, str]:

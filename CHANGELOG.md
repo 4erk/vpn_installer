@@ -6,6 +6,18 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.16.0] - 2026-08-06
+
+### Fixed
+
+- Межсерверный route больше не приравнивает доступный WireGuard к оптимальному. Production A/B показал для Hysteria2 меньшую задержку и большую скорость на том же foreign egress; новые соединения теперь идут по лучшему исправному transport.
+- Native sing-box `urltest` использует Hysteria2 как приоритет в пределах `30 ms`, перепроверяет оба пути раз в `10s` при активном трафике и не прерывает существующие соединения. WireGuard автоматически подхватывает только новые потоки, если QUIC недоступен или реально медленнее.
+
+### Changed
+
+- Удалены `vpn-stack-transport.service`, файл mutable transport-state, polling loop, state machine и дублирующие probe/reconcile/watch ветки. Агент только читает структурное состояние native group из локального Clash API; решение о маршруте имеет одну реализацию в sing-box.
+- Основной `vless-uri.txt`, public Xray/Reality front, client profiles, split routing и web-admin не изменены. Транзакционная установка удаляет старый supervisor и восстанавливает его вместе с прежним release при rollback.
+
 ## [0.15.3] - 2026-08-06
 
 ### Fixed

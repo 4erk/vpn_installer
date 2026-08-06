@@ -81,9 +81,9 @@ class StatusOutputTests(unittest.TestCase):
                 },
                 transport={
                     "interserver": {
-                        "mode": "priority-wireguard-hysteria2",
+                        "mode": "urltest-hysteria2-wireguard",
                         "hysteria_session_active": True,
-                        "adaptive_state": {"state": "healthy", "reason": "primary transport is healthy"},
+                        "adaptive_state": {"state": "healthy", "reason": "native URLTest is healthy"},
                         "selection": {
                             "selected": "to-foreign-wg",
                             "selection_pending": False,
@@ -124,9 +124,9 @@ class StatusOutputTests(unittest.TestCase):
         self.assertIn("tcp recovery deltas: TcpExtTCPSACKReorder=+20, TcpExtTCPDSACKRecv=+7, TcpExtTCPTimeouts=+2", rendered)
         self.assertIn("last front degradation: at=2026-07-20T07:58:00+00:00, sources=203.0.113.20", rendered)
         self.assertIn(
-            "interserver transport: mode=priority-wireguard-hysteria2, selected=to-foreign-wg, "
+            "interserver transport: mode=urltest-hysteria2-wireguard, selected=to-foreign-wg, "
             "candidates=to-foreign-hy2=23ms,to-foreign-wg=74ms, adaptation=healthy, hy2_session=active, "
-            "reason=primary transport is healthy",
+            "reason=native URLTest is healthy",
             rendered,
         )
 
@@ -158,7 +158,7 @@ class StatusOutputTests(unittest.TestCase):
                     role="ru-gateway",
                     transport={
                         "interserver": {
-                            "mode": "priority-wireguard-hysteria2",
+                            "mode": "urltest-hysteria2-wireguard",
                             "selection": {"selected": "to-foreign-wg", "candidates": {"to-foreign-hy2": {"delay_ms": None}}},
                         }
                     },
@@ -168,7 +168,7 @@ class StatusOutputTests(unittest.TestCase):
         self.assertIn("to-foreign-hy2=not-probed", rendered)
         self.assertNotIn("Nonems", rendered)
 
-    def test_formats_stale_transport_shadow_and_fresh_front_interval(self) -> None:
+    def test_formats_stale_urltest_history_and_fresh_front_interval(self) -> None:
         rendered = "\n".join(
             format_snapshot_summary(
                 DiagnosticsSnapshot(
@@ -188,12 +188,8 @@ class StatusOutputTests(unittest.TestCase):
                     },
                     transport={
                         "interserver": {
-                            "mode": "priority-wireguard-hysteria2",
-                            "adaptive_state": {
-                                "state": "healthy",
-                                "fresh": False,
-                                "age_seconds": 120.0,
-                            },
+                            "mode": "urltest-hysteria2-wireguard",
+                            "adaptive_state": {"state": "healthy"},
                             "selection": {
                                 "selected": "to-foreign-hy2",
                                 "candidates": {
@@ -210,7 +206,7 @@ class StatusOutputTests(unittest.TestCase):
             )
         )
         self.assertIn("to-foreign-hy2=stale(62ms,age=120.0s)", rendered)
-        self.assertIn("adaptation=stale(healthy,age=120.0s)", rendered)
+        self.assertIn("adaptation=healthy", rendered)
         self.assertIn(
             "front interval: at=2026-07-30T20:02:00+00:00, observation=client_specific, "
             "flows=2, sources=203.0.113.20, retrans=80000/2000000 (4.0%)",

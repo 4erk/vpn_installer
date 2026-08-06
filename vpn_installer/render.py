@@ -618,33 +618,6 @@ def render_health_timer() -> str:
     )
 
 
-def render_transport_service() -> str:
-    return "\n".join(
-        [
-            "[Unit]",
-            "Description=Maintain the preferred vpn-stack interserver transport",
-            "After=network-online.target sing-box.service",
-            "Requires=sing-box.service",
-            "PartOf=sing-box.service",
-            "",
-            "[Service]",
-            "Type=simple",
-            "ExecStart=/usr/bin/python3 /usr/local/lib/vpn-stack/vpn-stack-agent.py transport-watch",
-            "Restart=on-failure",
-            "RestartSec=2s",
-            "NoNewPrivileges=true",
-            "PrivateTmp=true",
-            "ProtectHome=true",
-            "ProtectSystem=strict",
-            "ReadWritePaths=/var/lib/vpn-stack /run",
-            "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX",
-            "",
-            "[Install]",
-            "WantedBy=multi-user.target",
-            "",
-        ]
-    )
-
 def deployment_out_dir(env: dict[str, str]) -> Path:
     return OUT_DIR / env["DEPLOY_NAME"]
 
@@ -691,7 +664,6 @@ def rendered_files_for_role(env: dict[str, str], role: str, *, assets: dict[str,
             "admin_web.py": server_script_asset("admin_web.py"),
             "vpn-stack-health.service": render_health_service(),
             "vpn-stack-health.timer": render_health_timer(),
-            "vpn-stack-transport.service": render_transport_service(),
             "vpn-stack-admin.service": render_admin_web_service(),
             "vpn-stack-xray.service": render_xray_service(),
         }

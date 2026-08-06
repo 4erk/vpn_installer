@@ -376,7 +376,7 @@ class RemoteTests(unittest.TestCase):
                 "role": ROLE_RU,
                 "release": {"release_id": "release-1", "installed_at": "2026-07-15T00:00:00Z", "policy_version": "0.11.0"},
                 "host": {"hostname": "demo", "login_user": "root", "is_root": True, "has_sudo": True, "os_id": "ubuntu", "os_version": "24.04", "default_interface": "eth0"},
-                "services": {"wireguard": "active", "nftables": "active", "sing-box": "active", "xray": "active", "resolver": "active", "transport": "active", "health_timer": "active"},
+                "services": {"wireguard": "active", "nftables": "active", "sing-box": "active", "xray": "active", "resolver": "active", "health_timer": "active"},
                 "artifacts": {"drift": "none", "files": {}},
                 "wireguard": {"peers": []},
                 "network": {
@@ -397,7 +397,6 @@ class RemoteTests(unittest.TestCase):
         self.assertEqual(preflight["installed"], "1")
         self.assertEqual(preflight["default_iface"], "eth0")
         self.assertEqual(preflight["resolver"], "active")
-        self.assertEqual(preflight["transport"], "active")
 
     def test_print_preflight_emits_lifecycle_summary(self) -> None:
         with patch("sys.stdout", new_callable=io.StringIO) as stream:
@@ -418,7 +417,6 @@ class RemoteTests(unittest.TestCase):
                     "sing_box": "active",
                     "xray": "active",
                     "resolver": "active",
-                    "transport": "active",
                     "health_timer": "active",
                     "wg_latest_handshake_age_s": "4",
                     "wg_transfer_rx": "1",
@@ -438,7 +436,7 @@ class RemoteTests(unittest.TestCase):
             )
         output = stream.getvalue()
         self.assertIn("host: demo", output)
-        self.assertIn("services: wg=active, nft=active, sing-box=active, xray=active, resolver=active, transport=active, health=active", output)
+        self.assertIn("services: wg=active, nft=active, sing-box=active, xray=active, resolver=active, health=active", output)
         self.assertIn("wireguard: handshake_age_s=4, transfer_rx_tx=1/2", output)
         self.assertIn("front: rtt_p95_ms=40, retransmissions_lifetime=3, retransmit_ratio_pct=1.2, active=0, closing=0, fin_wait_1=0", output)
         self.assertIn("front retransmission scope: lifetime counters of currently open sockets", output)

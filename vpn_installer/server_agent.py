@@ -25,14 +25,16 @@ try:
     from .interserver_transport import (
         HY2_CLASH_API_LISTEN,
         HY2_PORT,
-        TRANSPORT_FALLBACK_TAG,
+        TRANSPORT_CANDIDATE_TAGS,
         TRANSPORT_HEALTHCHECK_URL,
-        TRANSPORT_PRIMARY_TAG,
-        TRANSPORT_PROBE_INTERVAL_SECONDS,
+        TRANSPORT_HY2_TAG,
         TRANSPORT_PROBE_TIMEOUT_MS,
         TRANSPORT_SELECTOR_TAG,
-        TRANSPORT_STATE_SCHEMA_VERSION,
-        evaluate_transport_policy,
+        TRANSPORT_URLTEST_IDLE_TIMEOUT,
+        TRANSPORT_URLTEST_INTERVAL,
+        TRANSPORT_URLTEST_INTERVAL_SECONDS,
+        TRANSPORT_URLTEST_TOLERANCE_MS,
+        TRANSPORT_WG_TAG,
     )
 except ImportError:  # Installed agent runs as a standalone script.
     sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -40,14 +42,16 @@ except ImportError:  # Installed agent runs as a standalone script.
     from interserver_transport import (  # type: ignore[no-redef]
         HY2_CLASH_API_LISTEN,
         HY2_PORT,
-        TRANSPORT_FALLBACK_TAG,
+        TRANSPORT_CANDIDATE_TAGS,
         TRANSPORT_HEALTHCHECK_URL,
-        TRANSPORT_PRIMARY_TAG,
-        TRANSPORT_PROBE_INTERVAL_SECONDS,
+        TRANSPORT_HY2_TAG,
         TRANSPORT_PROBE_TIMEOUT_MS,
         TRANSPORT_SELECTOR_TAG,
-        TRANSPORT_STATE_SCHEMA_VERSION,
-        evaluate_transport_policy,
+        TRANSPORT_URLTEST_IDLE_TIMEOUT,
+        TRANSPORT_URLTEST_INTERVAL,
+        TRANSPORT_URLTEST_INTERVAL_SECONDS,
+        TRANSPORT_URLTEST_TOLERANCE_MS,
+        TRANSPORT_WG_TAG,
     )
 
 try:
@@ -70,9 +74,9 @@ EXTERNAL_CAPABILITY_REQUIREMENTS = frozenset({"ipv6_literal", "ipv6_literal_via_
 OPTIONAL_TRANSPORT_REQUIREMENTS = frozenset(
     {
         "foreign_domains_via_wg",
-        "wireguard_primary_ipv4",
-        "wireguard_primary_identity",
-        "hysteria_fallback_reachable",
+        "wireguard_candidate_ipv4",
+        "wireguard_candidate_identity",
+        "hysteria_candidate_reachable",
     }
 )
 FRONT_LOSS_MIN_BYTES = 1_000_000
@@ -99,9 +103,7 @@ MANIFEST_PATH = ROOT / "render-manifest.json"
 ENV_PATH = ROOT / "deployment.env"
 STATE_DIR = Path("/var/lib/vpn-stack")
 HEALTH_STATE_PATH = STATE_DIR / "health-state.json"
-TRANSPORT_STATE_PATH = STATE_DIR / "transport-state.json"
 LOCK_PATH = Path("/run/vpn-stack-agent.lock")
-TRANSPORT_LOCK_PATH = Path("/run/vpn-stack-transport.lock")
 SINGBOX_CONFIG_PATH = Path("/etc/sing-box/config.json")
 XRAY_CONFIG_PATH = Path("/etc/xray/config.json")
 SYSCTL_PATH = Path("/etc/sysctl.d/90-vpn-stack.conf")
@@ -1167,15 +1169,9 @@ def clash_api_json(
     controller: str,
     path: str,
     *,
-    method: str = "GET",
-    payload: dict[str, Any] | None = None,
     timeout: float = 3,
 ) -> dict[str, Any]:
-    data = json.dumps(payload).encode("utf-8") if payload is not None else None
-    headers = {"Accept": "application/json"}
-    if data is not None:
-        headers["Content-Type"] = "application/json"
-    request = urllib.request.Request(f"http://{controller}{path}", data=data, headers=headers, method=method)
+    request = urllib.request.Request(f"http://{controller}{path}", headers={"Accept": "application/json"})
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     with opener.open(request, timeout=timeout) as response:
         body = response.read()
@@ -1183,15 +1179,15 @@ def clash_api_json(
         return {}
     decoded = json.loads(body.decode("utf-8"))
     if not isinstance(decoded, dict):
-        raise ValueError("local selector API returned a non-object response")
+        raise ValueError("local Clash API returned a non-object response")
     return decoded
 
 
-def selector_selection_snapshot(config: dict[str, Any]) -> dict[str, Any]:
+def urltest_selection_snapshot(config: dict[str, Any]) -> dict[str, Any]:
     clash_api = config.get("experimental", {}).get("clash_api", {})
     controller = str(clash_api.get("external_controller", "")).strip() if isinstance(clash_api, dict) else ""
     if not controller:
-        return {"available": False, "selected": "", "candidates": {}, "reason": "local selector API is not configured"}
+        return {"available": False, "selected": "", "candidates": {}, "reason": "local URLTest API is not configured"}
     try:
         payload = clash_api_json(controller, "/proxies", timeout=2)
     except (OSError, UnicodeDecodeError, ValueError, urllib.error.URLError) as exc:
@@ -1199,7 +1195,7 @@ def selector_selection_snapshot(config: dict[str, Any]) -> dict[str, Any]:
     proxies = payload.get("proxies", {}) if isinstance(payload, dict) else {}
     group = proxies.get(TRANSPORT_SELECTOR_TAG, {}) if isinstance(proxies, dict) else {}
     if not isinstance(group, dict):
-        return {"available": False, "selected": "", "candidates": {}, "reason": "to-foreign selector is absent"}
+        return {"available": False, "selected": "", "candidates": {}, "reason": "to-foreign URLTest group is absent"}
     candidate_tags = group.get("all", []) if isinstance(group.get("all"), list) else []
     candidates: dict[str, dict[str, Any]] = {}
     for tag_value in candidate_tags:
@@ -1213,14 +1209,14 @@ def selector_selection_snapshot(config: dict[str, Any]) -> dict[str, Any]:
             "delay_ms": latest.get("delay"),
             "tested_at": tested_at,
             "age_seconds": round(age_seconds, 1) if age_seconds is not None else None,
-            "fresh": age_seconds is not None and age_seconds <= TRANSPORT_PROBE_INTERVAL_SECONDS * 6,
+            "fresh": age_seconds is not None and age_seconds <= TRANSPORT_URLTEST_INTERVAL_SECONDS * 6,
         }
     selected = str(group.get("now", ""))
     return {
         "available": bool(selected and selected in candidates),
         "selected": selected,
         "candidates": candidates,
-        "reason": "" if selected and selected in candidates else "selector state is incomplete",
+        "reason": "" if selected and selected in candidates else "URLTest state is incomplete",
     }
 
 
@@ -1245,181 +1241,6 @@ def transport_candidate_probe(controller: str, tag: str) -> dict[str, Any]:
         }
 
 
-def probe_transport_candidates(controller: str, tags: tuple[str, ...]) -> dict[str, dict[str, Any]]:
-    with ThreadPoolExecutor(max_workers=len(tags)) as executor:
-        results = executor.map(lambda tag: transport_candidate_probe(controller, tag), tags)
-    return dict(zip(tags, results))
-
-
-def merge_probe_attempts(*attempts: dict[str, Any]) -> dict[str, Any]:
-    checked = [attempt for attempt in attempts if attempt.get("checked") is True]
-    successful = next((attempt for attempt in reversed(checked) if attempt.get("ok") is True), None)
-    return {
-        "checked": bool(checked),
-        "ok": successful is not None,
-        "attempts": sum(max(1, int(attempt.get("attempts", 1) or 1)) for attempt in checked),
-        "delay_ms": int(successful.get("delay_ms", 0) or 0) if successful else 0,
-        "error": "" if successful else "; ".join(str(attempt.get("error", "")) for attempt in checked)[-240:],
-    }
-
-
-def collect_transport_probes(controller: str, selected: str) -> dict[str, dict[str, Any]]:
-    unchecked = {"checked": False, "ok": False, "attempts": 0, "delay_ms": 0, "error": ""}
-    probes = {
-        TRANSPORT_PRIMARY_TAG: dict(unchecked),
-        TRANSPORT_FALLBACK_TAG: dict(unchecked),
-    }
-    if selected == TRANSPORT_PRIMARY_TAG:
-        first = transport_candidate_probe(controller, selected)
-        probes[selected] = first
-        if first.get("ok") is True:
-            return probes
-        confirmation = probe_transport_candidates(
-            controller,
-            (TRANSPORT_PRIMARY_TAG, TRANSPORT_FALLBACK_TAG),
-        )
-        probes[selected] = merge_probe_attempts(first, confirmation[selected])
-        probes[TRANSPORT_FALLBACK_TAG] = confirmation[TRANSPORT_FALLBACK_TAG]
-        return probes
-
-    first = probe_transport_candidates(
-        controller,
-        (TRANSPORT_FALLBACK_TAG, TRANSPORT_PRIMARY_TAG),
-    )
-    probes.update(first)
-    if first[TRANSPORT_FALLBACK_TAG].get("ok") is True:
-        return probes
-    confirmation = probe_transport_candidates(
-        controller,
-        (TRANSPORT_FALLBACK_TAG, TRANSPORT_PRIMARY_TAG),
-    )
-    for tag in (TRANSPORT_FALLBACK_TAG, TRANSPORT_PRIMARY_TAG):
-        probes[tag] = merge_probe_attempts(first[tag], confirmation[tag])
-    return probes
-
-
-def select_transport(controller: str, tag: str) -> None:
-    clash_api_json(
-        controller,
-        f"/proxies/{urllib.parse.quote(TRANSPORT_SELECTOR_TAG, safe='')}",
-        method="PUT",
-        payload={"name": tag},
-        timeout=2,
-    )
-
-
-def reconcile_interserver_transport() -> dict[str, Any]:
-    TRANSPORT_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with TRANSPORT_LOCK_PATH.open("w", encoding="utf-8") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        config = read_json(SINGBOX_CONFIG_PATH, {})
-        outbounds = {
-            str(item.get("tag", "")): item
-            for item in config.get("outbounds", [])
-            if isinstance(item, dict) and item.get("tag")
-        } if isinstance(config, dict) else {}
-        selector = outbounds.get(TRANSPORT_SELECTOR_TAG, {})
-        controller = str(config.get("experimental", {}).get("clash_api", {}).get("external_controller", "")) if isinstance(config, dict) else ""
-        previous = read_json(TRANSPORT_STATE_PATH, {})
-        payload: dict[str, Any] = {
-            "schema_version": TRANSPORT_STATE_SCHEMA_VERSION,
-            "updated_at": utc_now(),
-            "state": "failed",
-            "selected": "",
-            "recommended": "",
-            "would_switch": False,
-            "probes": {},
-            "reason": "",
-        }
-        if (
-            selector.get("type") != "selector"
-            or selector.get("outbounds") != [TRANSPORT_PRIMARY_TAG, TRANSPORT_FALLBACK_TAG]
-            or selector.get("default") != TRANSPORT_PRIMARY_TAG
-            or not controller
-        ):
-            payload["reason"] = "priority transport selector is not configured"
-            write_json_atomic(TRANSPORT_STATE_PATH, payload)
-            return payload
-        selection = selector_selection_snapshot(config)
-        selected = str(selection.get("selected", ""))
-        if not selection.get("available"):
-            payload["reason"] = str(selection.get("reason", "selector state is unavailable"))
-            write_json_atomic(TRANSPORT_STATE_PATH, payload)
-            return payload
-
-        probes = collect_transport_probes(controller, selected)
-        payload = evaluate_transport_policy(
-            selected=selected,
-            probes=probes,
-            previous=previous,
-            observed_at=utc_now(),
-        )
-        payload["changed"] = False
-        target = str(payload.get("recommended", selected))
-        if target != selected and payload.get("state") != "failed":
-            try:
-                select_transport(controller, target)
-                payload.update(
-                    {
-                        "selected": target,
-                        "recommended": target,
-                        "would_switch": False,
-                        "primary_recovery_successes": 0,
-                        "changed": True,
-                        "state": "healthy" if target == TRANSPORT_PRIMARY_TAG else "degraded",
-                        "reason": f"{payload.get('reason', '')}; selector updated",
-                    }
-                )
-            except (OSError, ValueError, urllib.error.URLError) as exc:
-                payload["state"] = "failed"
-                payload["would_switch"] = False
-                payload["reason"] = f"selector update failed: {str(exc)[:180]}"
-        write_json_atomic(TRANSPORT_STATE_PATH, payload)
-        return payload
-
-
-def watch_interserver_transport() -> None:
-    previous_signature: tuple[str, str, str] | None = None
-    while True:
-        started = time.monotonic()
-        try:
-            payload = reconcile_interserver_transport()
-        except (OSError, RuntimeError, ValueError) as exc:
-            payload = {
-                "schema_version": TRANSPORT_STATE_SCHEMA_VERSION,
-                "updated_at": utc_now(),
-                "state": "failed",
-                "selected": "",
-                "recommended": "",
-                "would_switch": False,
-                "probes": {},
-                "reason": str(exc)[:240],
-            }
-            write_json_atomic(TRANSPORT_STATE_PATH, payload)
-        signature = (
-            str(payload.get("state", "")),
-            str(payload.get("selected", "")),
-            str(payload.get("recommended", "")),
-        )
-        if signature != previous_signature:
-            print(json.dumps(payload, ensure_ascii=False, sort_keys=True), flush=True)
-            previous_signature = signature
-        sleep_seconds = max(1.0, TRANSPORT_PROBE_INTERVAL_SECONDS - (time.monotonic() - started))
-        time.sleep(sleep_seconds)
-
-
-def transport_state_snapshot(path: Path) -> dict[str, Any]:
-    state = read_json(path, {})
-    if not isinstance(state, dict) or not state:
-        return {}
-    age_seconds = iso_age_seconds(str(state.get("updated_at", "")))
-    return {
-        **state,
-        "age_seconds": round(age_seconds, 1) if age_seconds is not None else None,
-        "fresh": age_seconds is not None and age_seconds <= TRANSPORT_PROBE_INTERVAL_SECONDS * 6,
-    }
-
-
 def interserver_transport_snapshot(role: str, env: dict[str, str]) -> dict[str, Any]:
     config = read_json(SINGBOX_CONFIG_PATH, {})
     if not isinstance(config, dict):
@@ -1431,12 +1252,12 @@ def interserver_transport_snapshot(role: str, env: dict[str, str]) -> dict[str, 
             if isinstance(item, dict) and item.get("tag")
         }
         group = outbounds.get(TRANSPORT_SELECTOR_TAG, {})
-        primary = outbounds.get(TRANSPORT_PRIMARY_TAG, {})
-        fallback = outbounds.get(TRANSPORT_FALLBACK_TAG, {})
+        wireguard = outbounds.get(TRANSPORT_WG_TAG, {})
+        hysteria = outbounds.get(TRANSPORT_HY2_TAG, {})
         candidates = group.get("outbounds", []) if isinstance(group, dict) else []
-        server = str(fallback.get("server", "")) if isinstance(fallback, dict) else ""
+        server = str(hysteria.get("server", "")) if isinstance(hysteria, dict) else ""
         try:
-            port = int(fallback.get("server_port", 0)) if isinstance(fallback, dict) else 0
+            port = int(hysteria.get("server_port", 0)) if isinstance(hysteria, dict) else 0
         except (TypeError, ValueError):
             port = 0
         session_active = False
@@ -1451,26 +1272,37 @@ def interserver_transport_snapshot(role: str, env: dict[str, str]) -> dict[str, 
                     session_active = True
                     break
         configured = (
-            group.get("type") == "selector"
-            and candidates == [TRANSPORT_PRIMARY_TAG, TRANSPORT_FALLBACK_TAG]
-            and group.get("default") == TRANSPORT_PRIMARY_TAG
+            group.get("type") == "urltest"
+            and candidates == list(TRANSPORT_CANDIDATE_TAGS)
+            and group.get("url") == TRANSPORT_HEALTHCHECK_URL
+            and group.get("interval") == TRANSPORT_URLTEST_INTERVAL
+            and group.get("tolerance") == TRANSPORT_URLTEST_TOLERANCE_MS
+            and group.get("idle_timeout") == TRANSPORT_URLTEST_IDLE_TIMEOUT
             and group.get("interrupt_exist_connections") is False
-            and primary.get("type") == "direct"
-            and fallback.get("type") == "hysteria2"
-            and fallback.get("obfs", {}).get("type") == "salamander"
-            and bool(fallback.get("tls", {}).get("certificate_public_key_sha256"))
+            and wireguard.get("type") == "direct"
+            and hysteria.get("type") == "hysteria2"
+            and hysteria.get("obfs", {}).get("type") == "salamander"
+            and bool(hysteria.get("tls", {}).get("certificate_public_key_sha256"))
         )
-        selection = selector_selection_snapshot(config)
+        selection = urltest_selection_snapshot(config)
+        adaptive_state = {
+            "source": "sing-box-urltest",
+            "state": "healthy" if configured and selection.get("available") else "failed",
+            "reason": (
+                "native URLTest selects a healthy preferred transport within the configured tolerance"
+                if configured and selection.get("available")
+                else selection.get("reason") or "URLTest policy is not configured"
+            ),
+        }
         return {
             "configured": configured,
-            "mode": "priority-wireguard-hysteria2",
-            "primary": TRANSPORT_PRIMARY_TAG,
-            "fallback": TRANSPORT_FALLBACK_TAG,
+            "mode": "urltest-hysteria2-wireguard",
+            "candidates": list(TRANSPORT_CANDIDATE_TAGS),
             "server": server,
             "port": port,
             "hysteria_session_active": session_active,
             "selection": selection,
-            "adaptive_state": transport_state_snapshot(TRANSPORT_STATE_PATH),
+            "adaptive_state": adaptive_state,
         }
     if role == "foreign-exit":
         inbound = next(
@@ -1889,7 +1721,7 @@ def run_probes(env: dict[str, str], role: str, profile: str) -> dict[str, Any]:
         identities["router"] = probe_identity(proxy="socks5h://127.0.0.1:2080")
     private_reject = probe_private_reject("socks5h://127.0.0.1:2080") if role == "ru-gateway" else {"ok": True, "not_applicable": True}
     if role == "ru-gateway":
-        hysteria_fallback = transport_candidate_probe(HY2_CLASH_API_LISTEN, TRANSPORT_FALLBACK_TAG)
+        hysteria_candidate = transport_candidate_probe(HY2_CLASH_API_LISTEN, TRANSPORT_HY2_TAG)
         required_paths: dict[str, list[dict[str, Any]]] = {
             "ru_direct_identity": [identities["direct"]],
             "foreign_domains_via_wg": required_domain_results(via_wg),
@@ -1897,9 +1729,9 @@ def run_probes(env: dict[str, str], role: str, profile: str) -> dict[str, Any]:
             "ipv4_literal_via_foreign": [literal_router[0]],
             "ipv6_literal_via_router": [literal_router[1]],
             "egress_identities": [identities["router"]],
-            "wireguard_primary_ipv4": [literal_wg[0]],
-            "wireguard_primary_identity": [identities["via_wg"]],
-            "hysteria_fallback_reachable": [hysteria_fallback],
+            "wireguard_candidate_ipv4": [literal_wg[0]],
+            "wireguard_candidate_identity": [identities["via_wg"]],
+            "hysteria_candidate_reachable": [hysteria_candidate],
             "private_fake_reject": [private_reject],
         }
     else:
@@ -2157,8 +1989,6 @@ def snapshot(*, live_probes: bool = False, profile: str = "light", full_logs: bo
         "admin": service_state("vpn-stack-admin.service"),
         "health_timer": service_state("vpn-stack-health.timer"),
     }
-    if role == "ru-gateway":
-        services["transport"] = service_state("vpn-stack-transport.service")
     fresh_since, fresh_window_minutes = fresh_log_since()
     if not full_logs and fresh_window_minutes > 5:
         fresh_since, fresh_window_minutes = "5 minutes ago", 5
@@ -2186,7 +2016,7 @@ def snapshot(*, live_probes: bool = False, profile: str = "light", full_logs: bo
     )
     if front and recent_front_interval:
         front["recent_interval"] = recent_front_interval
-    required = ["wireguard", "nftables", "sing-box", "resolver"] + (["xray", "transport"] if role == "ru-gateway" else [])
+    required = ["wireguard", "nftables", "sing-box", "resolver"] + (["xray"] if role == "ru-gateway" else [])
     reasons = [f"{name}={services[name]}" for name in required if services.get(name) != "active"]
     if manifest_data["drift"] != "none":
         reasons.append(f"drift={manifest_data['drift']}")
@@ -2212,7 +2042,7 @@ def snapshot(*, live_probes: bool = False, profile: str = "light", full_logs: bo
     if role == "foreign-exit" and not interserver.get("listening"):
         reasons.append("interserver_transport=not-listening")
     if role == "ru-gateway" and not interserver.get("selection", {}).get("available"):
-        reasons.append("interserver_selector=unavailable")
+        reasons.append("interserver_urltest=unavailable")
     adaptive_state = interserver.get("adaptive_state", {})
     if role == "ru-gateway" and adaptive_state.get("state") == "failed":
         reasons.append(f"interserver_adaptation={adaptive_state.get('reason') or 'failed'}")
@@ -2236,9 +2066,6 @@ def snapshot(*, live_probes: bool = False, profile: str = "light", full_logs: bo
     if host_integrity in {"degraded", "inconclusive"}:
         degradations.append(f"host_integrity={host_integrity}:{root_filesystem.get('reason') or 'unknown'}")
     selected_transport = str(interserver.get("selection", {}).get("selected", ""))
-    router_path_ok = probe_path_ok(probes, "router", "foreign_domains_via_router")
-    if role == "ru-gateway" and live_probes and router_path_ok and selected_transport == TRANSPORT_FALLBACK_TAG:
-        degradations.append(f"interserver_selected={TRANSPORT_FALLBACK_TAG}")
     recent_conntrack_full = int(conntrack.get("table_full_events", {}).get("5", 0))
     if recent_conntrack_full:
         degradations.append(f"conntrack_table_full_5m={recent_conntrack_full}")
@@ -2290,7 +2117,7 @@ def snapshot(*, live_probes: bool = False, profile: str = "light", full_logs: bo
             "egress": {"available": False, "healthy_exits": healthy_exits, "reason": "single foreign egress configured"},
             "transport": {
                 "available": bool(interserver.get("configured")),
-                "selected": selected_transport or (TRANSPORT_FALLBACK_TAG if interserver.get("listening") else ""),
+                "selected": selected_transport or (TRANSPORT_HY2_TAG if interserver.get("listening") else ""),
             },
         },
         "verdicts": {"server_path": server_path, "public_front": public_front, "public_quic": public_quic, "client_observation": client_observation, "closing_churn": closing_churn, "host_integrity": host_integrity, "external_capabilities": external_capabilities, "overall": overall, "reasons": reasons + degradations + ([f"host_integrity=failed:{root_filesystem.get('reason') or 'unknown'}"] if host_integrity == "failed" else [])},
@@ -2537,8 +2364,6 @@ def build_parser() -> argparse.ArgumentParser:
     front.add_argument("--since", type=int, default=30)
     front.add_argument("--live-probes", action="store_true")
     sub.add_parser("health")
-    sub.add_parser("transport")
-    sub.add_parser("transport-watch")
     routes = sub.add_parser("routes")
     route_sub = routes.add_subparsers(dest="routes_action", required=True)
     route_sub.add_parser("list")
@@ -2572,18 +2397,13 @@ def main(argv: list[str] | None = None) -> int:
         payload = public_front_snapshot(args.since, live_probes=args.live_probes)
     elif args.command == "health":
         payload = health()
-    elif args.command == "transport":
-        payload = reconcile_interserver_transport()
-    elif args.command == "transport-watch":
-        watch_interserver_transport()
-        return 0
     elif args.command == "routes":
         payload = routes_command(args)
     else:
         payload = assets_snapshot()
     output = health_log_summary(payload) if args.command == "health" else payload
     print(json.dumps(output, ensure_ascii=False, sort_keys=True))
-    if args.command in {"health", "transport"} and payload.get("state") in {"failed", "recovering"}:
+    if args.command == "health" and payload.get("state") in {"failed", "recovering"}:
         return 1
     return 0
 

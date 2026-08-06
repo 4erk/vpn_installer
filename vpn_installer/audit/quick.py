@@ -607,22 +607,24 @@ def test_interserver_hysteria_runtime(runner: AuditRunner, out_dir: Path) -> dic
         None,
     )
     if not isinstance(hysteria_fallback, dict) or hysteria_fallback.get("type") != "hysteria2":
-        raise AuditFailure("RU config не содержит Hysteria2 fallback outbound")
+        raise AuditFailure("RU config не содержит Hysteria2 transport candidate")
     if hysteria_fallback.get("obfs", {}).get("type") != "salamander":
-        raise AuditFailure("Interserver Hysteria2 fallback не содержит Salamander obfs")
+        raise AuditFailure("Interserver Hysteria2 candidate не содержит Salamander obfs")
     hysteria_fallback = dict(hysteria_fallback)
     hysteria_fallback["server"] = server_ip
-    selector = {
-        "type": "selector",
+    urltest_group = {
+        "type": "urltest",
         "tag": "to-foreign",
         "outbounds": ["to-foreign-hy2"],
-        "default": "to-foreign-hy2",
+        "url": "http://127.0.0.1:18080/",
+        "interval": "10s",
+        "tolerance": 30,
         "interrupt_exist_connections": False,
     }
     client_config = {
         "log": {"level": "info", "timestamp": True},
         "inbounds": [{"type": "mixed", "tag": "probe-in", "listen": "0.0.0.0", "listen_port": 1080}],
-        "outbounds": [hysteria_fallback, selector],
+        "outbounds": [hysteria_fallback, urltest_group],
         "route": {"final": "to-foreign"},
         "experimental": ru_config["experimental"],
     }

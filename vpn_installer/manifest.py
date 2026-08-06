@@ -47,7 +47,6 @@ def installed_artifact_paths(role: str) -> dict[str, str]:
                 "admin_apply.py": "/usr/local/lib/vpn-stack/admin_apply.py",
                 "admin_web.py": "/usr/local/lib/vpn-stack/admin_web.py",
                 "vpn-stack-admin.service": "/etc/systemd/system/vpn-stack-admin.service",
-                "vpn-stack-transport.service": "/etc/systemd/system/vpn-stack-transport.service",
             }
         )
     return common

@@ -195,14 +195,14 @@ class VerifyTests(unittest.TestCase):
                 "profile": "acceptance",
                 "ok": False,
                 "release_gate_ok": True,
-                "capability_failures": {"external": [], "transport": ["hysteria_fallback_reachable"]},
+                "capability_failures": {"external": [], "transport": ["hysteria_candidate_reachable"]},
             },
         )
         verified = _verify_snapshot(snapshot)
         reconciled = _reconcile_public_capabilities(verified, {"verdict": "verified"})
 
         self.assertEqual(reconciled.verdict, "degraded")
-        self.assertEqual(reconciled.reasons, ["transport capability probe failed: hysteria_fallback_reachable"])
+        self.assertEqual(reconciled.reasons, ["transport capability probe failed: hysteria_candidate_reachable"])
 
     def test_verify_snapshot_requires_foreign_transport_service(self) -> None:
         verified = _verify_snapshot(

@@ -469,7 +469,6 @@ def bootstrap_from_snapshot(snapshot: dict[str, Any]) -> dict[str, str]:
         "wireguard": str(services.get("wireguard", "")),
         "admin": str(services.get("admin", "")),
         "resolver": str(services.get("resolver", "")),
-        "transport": str(services.get("transport", "not-applicable")),
         "health_timer": str(services.get("health_timer", "unknown")),
         "installed_env_sha256": str(artifacts.get("installed_env_sha256", "")),
         "installed_singbox_sha256": str(artifacts.get("files", {}).get("sing-box.json", {}).get("actual_sha256", "")),
@@ -512,8 +511,7 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
         "services: "
         f"wg={preflight.get('wireguard', '-')}, nft={preflight.get('nftables', '-')}, "
         f"sing-box={preflight.get('sing_box', '-')}, xray={preflight.get('xray', '-')}, "
-        f"resolver={preflight.get('resolver', '-')}, transport={preflight.get('transport', '-')}, "
-        f"health={preflight.get('health_timer', '-')}"
+        f"resolver={preflight.get('resolver', '-')}, health={preflight.get('health_timer', '-')}"
     )
     print(
         "wireguard: "

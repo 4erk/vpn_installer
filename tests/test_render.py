@@ -209,12 +209,6 @@ class RenderTests(unittest.TestCase):
         self.assertIn("ExecStart=/usr/bin/python3 /usr/local/lib/vpn-stack/vpn-stack-agent.py health", service)
         self.assertNotIn("sync-state.sh", service)
 
-    def test_transport_service_runs_isolated_priority_supervisor(self) -> None:
-        service = render.render_transport_service()
-        self.assertIn("ExecStart=/usr/bin/python3 /usr/local/lib/vpn-stack/vpn-stack-agent.py transport-watch", service)
-        self.assertIn("PartOf=sing-box.service", service)
-        self.assertIn("ProtectSystem=strict", service)
-
     def test_ru_server_uses_one_adaptive_foreign_policy_for_domains_and_literals(self) -> None:
         env = self.make_env()
         payload = json.loads(render.render_ru_singbox(env))
@@ -231,9 +225,11 @@ class RenderTests(unittest.TestCase):
         ipv4_literal_index = next(index for index, rule in enumerate(route_rules) if rule.get("ip_cidr") == ["0.0.0.0/0"])
         raw_ru_geoip_index = next(index for index, rule in enumerate(route_rules) if rule.get("rule_set") == ["ru-geoip"])
         self.assertEqual(set(outbounds), {"direct-ru", "to-foreign-hy2", "to-foreign-wg", "to-foreign"})
-        self.assertEqual(outbounds["to-foreign"]["outbounds"], ["to-foreign-wg", "to-foreign-hy2"])
-        self.assertEqual(outbounds["to-foreign"]["type"], "selector")
-        self.assertEqual(outbounds["to-foreign"]["default"], "to-foreign-wg")
+        self.assertEqual(outbounds["to-foreign"]["outbounds"], ["to-foreign-hy2", "to-foreign-wg"])
+        self.assertEqual(outbounds["to-foreign"]["type"], "urltest")
+        self.assertEqual(outbounds["to-foreign"]["interval"], "10s")
+        self.assertEqual(outbounds["to-foreign"]["tolerance"], 30)
+        self.assertEqual(outbounds["to-foreign"]["idle_timeout"], "30m")
         self.assertFalse(outbounds["to-foreign"]["interrupt_exist_connections"])
         self.assertEqual(outbounds["to-foreign-hy2"]["server"], env["FOREIGN_PUBLIC_IP"])
         self.assertEqual(outbounds["to-foreign-hy2"]["obfs"]["type"], "salamander")
@@ -544,7 +540,7 @@ class RenderTests(unittest.TestCase):
         self.assertNotIn("vpn-stack-sync.service", files)
         self.assertIn("vpn-stack-health.service", files)
         self.assertIn("vpn-stack-health.timer", files)
-        self.assertIn("vpn-stack-transport.service", files)
+        self.assertNotIn("vpn-stack-transport.service", files)
         self.assertIn("interserver_transport.py", files)
         self.assertNotIn("vpn-stack-guard.service", files)
         self.assertNotIn("vpn-stack-guard.timer", files)
