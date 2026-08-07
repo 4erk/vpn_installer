@@ -1230,13 +1230,22 @@ configure_unattended_security_updates() {
 }
 
 configure_system_resolver() {
+  local attempt=0
+  local stub_listener='127\.0\.0\.53(%[^[:space:]:]+)?:53'
   systemctl enable systemd-resolved.service
   systemctl restart systemd-resolved.service
-  if [[ ! -e "${RESOLVED_STUB_PATH}" ]]; then
-    echo "systemd-resolved did not create ${RESOLVED_STUB_PATH}" >&2
-    return 1
-  fi
-  ln -sfn "../run/systemd/resolve/stub-resolv.conf" "${RESOLV_CONF_PATH}"
+  for ((attempt = 0; attempt < 50; attempt++)); do
+    if [[ -e "${RESOLVED_STUB_PATH}" ]] \
+      && systemctl is-active --quiet systemd-resolved.service \
+      && ss -H -lnt "sport = :53" | grep -Eq "${stub_listener}" \
+      && ss -H -lun "sport = :53" | grep -Eq "${stub_listener}"; then
+      ln -sfn "../run/systemd/resolve/stub-resolv.conf" "${RESOLV_CONF_PATH}"
+      return 0
+    fi
+    sleep 0.1
+  done
+  echo "systemd-resolved stub 127.0.0.53:53 did not become ready." >&2
+  return 1
 }
 
 prepare_role_artifacts() {

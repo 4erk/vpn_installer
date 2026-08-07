@@ -6,6 +6,17 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.19.3] - 2026-08-07
+
+### Fixed
+
+- Installer больше не принимает существование `/run/systemd/resolve/stub-resolv.conf` за готовность DNS после restart. Перед запуском sing-box он bounded-ожидает active `systemd-resolved` и фактические TCP/UDP listeners `127.0.0.53:53`; это устраняет подтверждённый одиночный `connection refused` первого DNS relay request во время cutover.
+- Docker transaction regression выполняет тот же resolver readiness contract вместе с snapshot/rollback, чтобы race не возвращалась при изменениях install order.
+
+### Changed
+
+- Максимальное ожидание resolver readiness ограничено `5s`; при неготовности установка откатывается вместо публикации частично работающего DNS path. Runtime routing, transport adaptation, public ingress, web-admin и основной `vless-uri.txt` не изменены.
+
 ## [0.19.2] - 2026-08-07
 
 ### Fixed

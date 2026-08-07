@@ -174,8 +174,8 @@ def test_install_rollback_state(runner: AuditRunner) -> dict[str, str]:
                 SINGBOX_BASE_CONFIG_PATH="${VPNSTACK_ROOT}/sing-box.base.json"
                 WG_CONFIG_PATH="${test_root}/wireguard/wg-test.conf"
                 RESOLVED_DROPIN_PATH="${test_root}/resolved/90-vpn-stack.conf"
-                RESOLV_CONF_PATH="${test_root}/resolv.conf"
-                RESOLVED_STUB_PATH="${test_root}/run/stub-resolv.conf"
+                RESOLV_CONF_PATH="${VPNSTACK_ROOT}/resolv.conf"
+                RESOLVED_STUB_PATH="${test_root}/run/systemd/resolve/stub-resolv.conf"
                 HEALTH_STATE_PATH="${test_root}/state/health-state.json"
                 LEGACY_ADAPTIVE_ROUTING_RULES_PATH="${test_root}/state/adaptive-routing-rules.json"
                 LEGACY_DATAPLANE_CACHE_PATH="${test_root}/state/dataplane-cache.env"
@@ -195,6 +195,13 @@ def test_install_rollback_state(runner: AuditRunner) -> dict[str, str]:
                     return 1
                   fi
                   return 0
+                }
+                ss() {
+                  if [[ "$*" == *"sport = :53"* ]]; then
+                    printf 'LISTEN 0 4096 127.0.0.53%%lo:53 0.0.0.0:*\n'
+                    return 0
+                  fi
+                  return 1
                 }
                 sysctl() { return 0; }
 
@@ -233,7 +240,9 @@ def test_install_rollback_state(runner: AuditRunner) -> dict[str, str]:
                 printf 'old auth\n' >"${VPNSTACK_ADMIN_AUTH_FILE}"
                 printf 'old rules\n' >"${RULESET_DIR}/rules.srs"
                 printf 'old resolver\n' >"${RESOLVED_STUB_PATH}"
-                ln -s "${RESOLVED_STUB_PATH}" "${RESOLV_CONF_PATH}"
+                configure_system_resolver
+                test -L "${RESOLV_CONF_PATH}"
+                grep -Fxq 'restart systemd-resolved.service' "${SYSTEMCTL_LOG}"
                 ln -s "${VPNSTACK_RELEASES_DIR}/old" "${VPNSTACK_CURRENT_RELEASE}"
 
                 create_revision_snapshot
