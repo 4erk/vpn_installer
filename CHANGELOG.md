@@ -6,6 +6,17 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.19.2] - 2026-08-07
+
+### Fixed
+
+- Release verifier больше не откатывает функционально исправный VLESS-path из-за одного CDN-зависимого peak sample ниже `50 Мбит/с`. Hard gate остаётся строгим по пользовательским свойствам: sustained goodput не ниже `10 Мбит/с`, полный временной интервал, минимум два успешных независимых источника, отсутствие transfer failures и пауз без прогресса длиннее budget. Peak сохраняется в отчёте как диагностическое сравнение с reference.
+- Rollback больше не вызывает `systemctl disable` для static timer services. Раньше этот вызов удалял восстановленный symlink `vpn-stack-health.service`, поэтому файлы и release-tree возвращались точно, но post-rollback drift становился `server-mutated`; Docker failure-injection теперь воспроизводит и запрещает это поведение.
+
+### Changed
+
+- Dataplane, routing policy, transport adaptation, WireGuard MTU, публичные входы, web-admin и основной `vless-uri.txt` не изменены.
+
 ## [0.19.1] - 2026-08-07
 
 ### Fixed

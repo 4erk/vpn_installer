@@ -52,8 +52,8 @@ from .vless_verify import (
 
 
 VLESS_RUNNER_POLL_INTERVAL_SECONDS = 5
-PRIMARY_CAPACITY_FLOOR_BYTES_PER_SECOND = 6_250_000
-FALLBACK_CAPACITY_FLOOR_BYTES_PER_SECOND = 1_250_000
+PRIMARY_CAPACITY_REFERENCE_BYTES_PER_SECOND = 6_250_000
+FALLBACK_CAPACITY_REFERENCE_BYTES_PER_SECOND = 1_250_000
 VLESS_RUNNER_LOCK_PATH = "/run/lock/vpn-stack-vless-verify.lock"
 SNAPSHOT_MAX_AGE_SECONDS = 180
 COMPLETE_LOG_RETENTION_SECONDS = 14 * 24 * 60 * 60
@@ -370,7 +370,7 @@ def _validate_performance_result(
     *,
     label: str,
     throughput_seconds: int,
-    capacity_floor_bytes_per_second: int,
+    capacity_reference_bytes_per_second: int,
 ) -> dict[str, object]:
     if throughput_seconds == 0:
         return _probe_component("inconclusive", f"{label} performance was not measured", measured=False)
@@ -439,35 +439,21 @@ def _validate_performance_result(
             "failed",
             f"{label} transfer stalled for {max_gap:.2f}s (limit {THROUGHPUT_MAX_GAP_SECONDS:.1f}s)",
         )
-    if capacity_bps < capacity_floor_bytes_per_second:
-        performance = _probe_component(
-            "failed",
-            (
-                f"{label} peak capacity below target: "
-                f"{capacity_bps * 8 / 1_000_000:.2f} Mbit/s of "
-                f"{capacity_floor_bytes_per_second * 8 / 1_000_000:.2f} Mbit/s"
-            ),
-        )
-        performance.update(
-            {
-                "sustained_bytes_per_second": sustained_bps,
-                "max_gap_seconds": max_gap,
-                "peak_capacity_bytes_per_second": capacity_bps,
-                "peak_capacity_target_bytes_per_second": capacity_floor_bytes_per_second,
-                "peak_capacity_target_met": False,
-            }
-        )
-        return performance
     performance = _probe_component("verified")
     performance.update(
         {
             "sustained_bytes_per_second": sustained_bps,
             "max_gap_seconds": max_gap,
             "peak_capacity_bytes_per_second": capacity_bps,
-            "peak_capacity_target_bytes_per_second": capacity_floor_bytes_per_second,
-            "peak_capacity_target_met": capacity_bps >= capacity_floor_bytes_per_second,
+            "peak_capacity_reference_bytes_per_second": capacity_reference_bytes_per_second,
+            "peak_capacity_reference_met": capacity_bps >= capacity_reference_bytes_per_second,
         }
     )
+    if capacity_bps < capacity_reference_bytes_per_second:
+        performance["observation"] = (
+            f"{label} peak capacity {capacity_bps * 8 / 1_000_000:.2f} Mbit/s is below "
+            f"the {capacity_reference_bytes_per_second * 8 / 1_000_000:.2f} Mbit/s reference"
+        )
     return performance
 
 
@@ -478,7 +464,7 @@ def _validate_public_transport_result(
     *,
     label: str,
     throughput_seconds: int = 0,
-    capacity_floor_bytes_per_second: int = PRIMARY_CAPACITY_FLOOR_BYTES_PER_SECOND,
+    capacity_reference_bytes_per_second: int = PRIMARY_CAPACITY_REFERENCE_BYTES_PER_SECOND,
 ) -> dict[str, object]:
     expected_foreign_ip = foreign_target.public_ip or foreign_target.ssh_host
     functional = _validate_functional_transport_result(result, expected_ru_ip, expected_foreign_ip, label=label)
@@ -486,7 +472,7 @@ def _validate_public_transport_result(
         result,
         label=label,
         throughput_seconds=throughput_seconds,
-        capacity_floor_bytes_per_second=capacity_floor_bytes_per_second,
+        capacity_reference_bytes_per_second=capacity_reference_bytes_per_second,
     )
     component_verdicts = {str(functional["verdict"])}
     if performance.get("measured") is not False:
@@ -960,7 +946,7 @@ def _verify_public_hysteria2(env: dict[str, str], foreign_target, *, throughput_
         foreign_target,
         label="public Hysteria2",
         throughput_seconds=throughput_seconds,
-        capacity_floor_bytes_per_second=FALLBACK_CAPACITY_FLOOR_BYTES_PER_SECOND,
+        capacity_reference_bytes_per_second=FALLBACK_CAPACITY_REFERENCE_BYTES_PER_SECOND,
     )
 
 

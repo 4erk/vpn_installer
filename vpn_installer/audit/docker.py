@@ -187,7 +187,7 @@ def test_install_rollback_state(runner: AuditRunner) -> dict[str, str]:
                   if [[ "${SYSTEMCTL_FAIL_DAEMON_RELOAD:-0}" == "1" && "$*" == "daemon-reload" ]]; then
                     return 1
                   fi
-                  if [[ "$1" == "is-enabled" && "$*" == *"test-disabled.service"* ]]; then
+                  if [[ "$1" == "is-enabled" && ( "$*" == *"test-disabled.service"* || "$*" == *"vpn-stack-health.service"* ) ]]; then
                     return 1
                   fi
                   if [[ "$1" == "is-active" && "$*" == *"test-disabled.service"* ]]; then
@@ -259,6 +259,9 @@ def test_install_rollback_state(runner: AuditRunner) -> dict[str, str]:
                 test "$(readlink -f "${VPNSTACK_CURRENT_RELEASE}")" = "${VPNSTACK_RELEASES_DIR}/old"
                 grep -Fxq 'daemon-reload' "${SYSTEMCTL_LOG}"
                 grep -Eq '^(start|restart) sing-box$' "${SYSTEMCTL_LOG}"
+                if grep -Fxq 'disable vpn-stack-health.service' "${SYSTEMCTL_LOG}"; then
+                  exit 77
+                fi
                 apply_service_restore_flags test-disabled.service 0 0
                 SYSTEMCTL_FORCE_TEST_ACTIVE=1
                 if apply_service_restore_flags test-disabled.service 0 0; then

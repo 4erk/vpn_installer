@@ -690,6 +690,7 @@ apply_service_restore_flags() {
   local service="$1"
   local enabled_flag="$2"
   local active_flag="$3"
+  local enable_mode="${4:-managed}"
 
   # An active legacy nftables unit without its source file cannot be
   # reproduced after stop. The managed vpn-stack unit is restored separately.
@@ -698,13 +699,15 @@ apply_service_restore_flags() {
     active_flag=0
   fi
 
-  if [[ "${enabled_flag}" == "1" ]]; then
-    systemctl enable "${service}" >/dev/null || return 1
-  else
-    systemctl disable "${service}" >/dev/null 2>&1 || true
-    if systemctl is-enabled --quiet "${service}" >/dev/null 2>&1; then
-      echo "Rollback could not disable ${service}." >&2
-      return 1
+  if [[ "${enable_mode}" != "static" ]]; then
+    if [[ "${enabled_flag}" == "1" ]]; then
+      systemctl enable "${service}" >/dev/null || return 1
+    else
+      systemctl disable "${service}" >/dev/null 2>&1 || true
+      if systemctl is-enabled --quiet "${service}" >/dev/null 2>&1; then
+        echo "Rollback could not disable ${service}." >&2
+        return 1
+      fi
     fi
   fi
 
@@ -735,8 +738,8 @@ restore_service_state() {
     [[ "${state_value}" == "0" || "${state_value}" == "1" ]] || { echo "Invalid service-state value for ${state_key}" >&2; return 1; }
     printf -v "${state_key}" '%s' "${state_value}"
   done <"${state_path}"
-  while IFS='|' read -r service enabled_flag active_flag; do
-    apply_service_restore_flags "${service}" "${enabled_flag}" "${active_flag}" || return 1
+  while IFS='|' read -r service enabled_flag active_flag enable_mode; do
+    apply_service_restore_flags "${service}" "${enabled_flag}" "${active_flag}" "${enable_mode:-managed}" || return 1
   done <<EOF
 nftables|${NFTABLES_ENABLED:-0}|${NFTABLES_ACTIVE:-0}
 vpn-stack-nftables.service|${VPNSTACK_NFTABLES_ENABLED:-0}|${VPNSTACK_NFTABLES_ACTIVE:-0}
@@ -744,10 +747,10 @@ wg-quick@${WG_INTERFACE}|${WIREGUARD_ENABLED:-0}|${WIREGUARD_ACTIVE:-0}
 vpn-stack-sync.timer|${SYNC_TIMER_ENABLED:-0}|${SYNC_TIMER_ACTIVE:-0}
 vpn-stack-health.timer|${HEALTH_TIMER_ENABLED:-0}|${HEALTH_TIMER_ACTIVE:-0}
 vpn-stack-guard.timer|${GUARD_TIMER_ENABLED:-0}|${GUARD_TIMER_ACTIVE:-0}
-vpn-stack-sync.service|${SYNC_SERVICE_ENABLED:-0}|${SYNC_SERVICE_ACTIVE:-0}
-vpn-stack-health.service|${HEALTH_SERVICE_ENABLED:-0}|${HEALTH_SERVICE_ACTIVE:-0}
+vpn-stack-sync.service|${SYNC_SERVICE_ENABLED:-0}|${SYNC_SERVICE_ACTIVE:-0}|static
+vpn-stack-health.service|${HEALTH_SERVICE_ENABLED:-0}|${HEALTH_SERVICE_ACTIVE:-0}|static
 vpn-stack-transport.service|${TRANSPORT_SERVICE_ENABLED:-0}|${TRANSPORT_SERVICE_ACTIVE:-0}
-vpn-stack-guard.service|${GUARD_SERVICE_ENABLED:-0}|${GUARD_SERVICE_ACTIVE:-0}
+vpn-stack-guard.service|${GUARD_SERVICE_ENABLED:-0}|${GUARD_SERVICE_ACTIVE:-0}|static
 vpn-stack-subscription.service|${SUBSCRIPTION_ENABLED:-0}|${SUBSCRIPTION_ACTIVE:-0}
 sing-box|${SINGBOX_ENABLED:-0}|${SINGBOX_ACTIVE:-0}
 vpn-stack-xray.service|${XRAY_ENABLED:-0}|${XRAY_ACTIVE:-0}

@@ -11,7 +11,7 @@ from vpn_installer.diagnostics import COLLECTOR_NAMES, LOG_WINDOW_KEYS, Collecto
 from vpn_installer.log_classifier import BUCKETS
 from vpn_installer.models import ROLE_FOREIGN, ROLE_RU, RemoteTarget
 from vpn_installer.verify import (
-    FALLBACK_CAPACITY_FLOOR_BYTES_PER_SECOND,
+    FALLBACK_CAPACITY_REFERENCE_BYTES_PER_SECOND,
     _apply_private_reject_correlation,
     _reconcile_public_capabilities,
     _validate_front_correlation,
@@ -592,7 +592,7 @@ class VerifyTests(unittest.TestCase):
         self.assertEqual(_vless_runner_timeout(0), 189)
         self.assertEqual(_vless_runner_timeout(600), 794)
 
-    def test_peak_capacity_is_an_acceptance_gate(self) -> None:
+    def test_peak_capacity_is_diagnostic_after_sustained_gate_passes(self) -> None:
         foreign = RemoteTarget(role=ROLE_FOREIGN, public_ip="198.51.100.20", ssh_host="198.51.100.20")
         result = {
             "ru_egress_ip": "203.0.113.10",
@@ -610,7 +610,7 @@ class VerifyTests(unittest.TestCase):
             foreign,
             label="public Hysteria2",
             throughput_seconds=30,
-            capacity_floor_bytes_per_second=FALLBACK_CAPACITY_FLOOR_BYTES_PER_SECOND,
+            capacity_reference_bytes_per_second=FALLBACK_CAPACITY_REFERENCE_BYTES_PER_SECOND,
         )
         primary = _validate_public_transport_result(
             result,
@@ -620,9 +620,10 @@ class VerifyTests(unittest.TestCase):
             throughput_seconds=30,
         )
         self.assertEqual(fallback["verdict"], "verified")
-        self.assertEqual(primary["verdict"], "failed")
-        self.assertTrue(fallback["performance"]["peak_capacity_target_met"])
-        self.assertFalse(primary["performance"]["peak_capacity_target_met"])
+        self.assertEqual(primary["verdict"], "verified")
+        self.assertTrue(fallback["performance"]["peak_capacity_reference_met"])
+        self.assertFalse(primary["performance"]["peak_capacity_reference_met"])
+        self.assertIn("below the 50.00 Mbit/s reference", primary["performance"]["observation"])
 
     def test_front_correlation_uses_accept_event_after_short_flow_closes(self) -> None:
         baseline = {"events": {"accepted_tcp": 4}, "front": {"flows": {}}}
