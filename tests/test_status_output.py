@@ -120,12 +120,29 @@ class StatusOutputTests(unittest.TestCase):
                     "interserver": {
                         "mode": "stable-wireguard-overlay",
                         "hysteria_session_active": True,
-                        "adaptive_state": {"state": "healthy", "reason": "selected underlay is healthy"},
+                        "adaptive_state": {
+                            "state": "healthy",
+                            "reason": "selected underlay is healthy",
+                            "overlay_probe": {
+                                "checked": True,
+                                "ok": True,
+                                "delay_ms": 18,
+                                "target": "10.74.0.2:1053",
+                            },
+                            "probes": {
+                                "interserver-underlay-hy2": {
+                                    "checked": True,
+                                    "ok": True,
+                                    "delay_ms": 23,
+                                    "scope": "raw-underlay",
+                                }
+                            },
+                        },
                         "selection": {
                             "selected": "interserver-underlay-wg",
                             "candidates": {
-                                "interserver-underlay-hy2": {"delay_ms": 23},
-                                "interserver-underlay-wg": {"delay_ms": 74},
+                                "interserver-underlay-hy2": {"configured": True},
+                                "interserver-underlay-wg": {"configured": True},
                             },
                         },
                     }
@@ -171,7 +188,9 @@ class StatusOutputTests(unittest.TestCase):
         self.assertIn("last front degradation: at=2026-07-20T07:58:00+00:00, sources=203.0.113.20", rendered)
         self.assertIn(
             "interserver transport: mode=stable-wireguard-overlay, selected=interserver-underlay-wg, "
-            "candidates=interserver-underlay-hy2=23ms,interserver-underlay-wg=74ms, adaptation=healthy, "
+            "configured_candidates=interserver-underlay-hy2,interserver-underlay-wg, "
+            "overlay_probe=ok(18ms,target=10.74.0.2:1053), "
+            "cold_probe=interserver-underlay-hy2:ok(23ms), adaptation=healthy, "
             "hy2_session=active, reason=selected underlay is healthy",
             rendered,
         )
@@ -192,12 +211,11 @@ class StatusOutputTests(unittest.TestCase):
             )
         )
         self.assertIn(
-            "interserver transport: mode=hysteria2-egress, selected=-, candidates=-, "
-            "listener=active, source=94.232.248.35",
+            "interserver transport: mode=hysteria2-egress, listener=active, source=94.232.248.35",
             rendered,
         )
 
-    def test_formats_unmeasured_transport_without_none_milliseconds(self) -> None:
+    def test_omits_a_probe_that_was_not_executed(self) -> None:
         rendered = "\n".join(
             format_snapshot_summary(
                 DiagnosticsSnapshot(
@@ -205,19 +223,22 @@ class StatusOutputTests(unittest.TestCase):
                     transport={
                         "interserver": {
                             "mode": "stable-wireguard-overlay",
+                            "adaptive_state": {"state": "healthy"},
                             "selection": {
                                 "selected": "interserver-underlay-wg",
-                                "candidates": {"interserver-underlay-hy2": {"delay_ms": None}},
+                                "candidates": {"interserver-underlay-hy2": {"configured": True}},
                             },
                         }
                     },
                 )
             )
         )
-        self.assertIn("interserver-underlay-hy2=not-probed", rendered)
+        self.assertIn("configured_candidates=interserver-underlay-hy2", rendered)
+        self.assertNotIn("probe=", rendered)
+        self.assertNotIn("not-probed", rendered)
         self.assertNotIn("Nonems", rendered)
 
-    def test_formats_stale_transport_probe_and_fresh_front_interval(self) -> None:
+    def test_formats_stale_adaptation_and_fresh_front_interval(self) -> None:
         rendered = "\n".join(
             format_snapshot_summary(
                 DiagnosticsSnapshot(
@@ -238,14 +259,22 @@ class StatusOutputTests(unittest.TestCase):
                     transport={
                         "interserver": {
                             "mode": "stable-wireguard-overlay",
-                            "adaptive_state": {"state": "healthy"},
+                            "adaptive_state": {
+                                "state": "healthy",
+                                "fresh": False,
+                                "age_seconds": 120.0,
+                                "overlay_probe": {
+                                    "checked": True,
+                                    "ok": True,
+                                    "delay_ms": 62,
+                                    "target": "10.74.0.2:1053",
+                                },
+                            },
                             "selection": {
                                 "selected": "interserver-underlay-hy2",
                                 "candidates": {
                                     "interserver-underlay-hy2": {
-                                        "delay_ms": 62,
-                                        "fresh": False,
-                                        "age_seconds": 120.0,
+                                        "configured": True,
                                     }
                                 },
                             },
@@ -254,8 +283,8 @@ class StatusOutputTests(unittest.TestCase):
                 )
             )
         )
-        self.assertIn("interserver-underlay-hy2=stale(62ms,age=120.0s)", rendered)
-        self.assertIn("adaptation=healthy", rendered)
+        self.assertIn("overlay_probe=ok(62ms,target=10.74.0.2:1053)", rendered)
+        self.assertIn("adaptation=stale(healthy,age=120.0s)", rendered)
         self.assertIn(
             "front interval: at=2026-07-30T20:02:00+00:00, observation=client_specific, "
             "flows=2, sources=203.0.113.20, retrans=80000/2000000 (4.0%)",

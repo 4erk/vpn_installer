@@ -60,6 +60,14 @@ _DNS_NODATA_TOKENS = (
     "no addresses",
     "response does not contain an answer",
 )
+_TRANSPORT_PATH_ERROR_TOKENS = (
+    "no such device",
+    "network is unreachable",
+    "network unreachable",
+    "no route to host",
+    "host is unreachable",
+    "cannot assign requested address",
+)
 
 
 @dataclass(frozen=True)
@@ -199,7 +207,14 @@ def classify_line(line: str) -> ClassifiedLogLine | None:
         "interserver-underlay-" in line
         and any(
             token in lower_line
-            for token in ("failed", "timeout", "closed", "unavailable", "operation not permitted", "network is unreachable", "no route to host")
+            for token in (
+                "failed",
+                "timeout",
+                "closed",
+                "unavailable",
+                "operation not permitted",
+                *_TRANSPORT_PATH_ERROR_TOKENS,
+            )
         )
     ):
         return ClassifiedLogLine("transport_unavailable", destination, source, event_id)
@@ -207,6 +222,8 @@ def classify_line(line: str) -> ClassifiedLogLine | None:
         token in lower_line
         for token in ("dns: exchange failed", "exchange failed for ", "dns: lookup failed", "lookup failed for ", "router: lookup ")
     )
+    if dns_failure and any(token in lower_line for token in _TRANSPORT_PATH_ERROR_TOKENS):
+        return ClassifiedLogLine("transport_unavailable", destination, source, event_id)
     if dns_failure and any(token in lower_line for token in ("context deadline exceeded", "i/o timeout")):
         return ClassifiedLogLine("dns_timeout", destination, source, event_id)
     if dns_failure and "nxdomain" in lower_line:

@@ -6,6 +6,17 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.19.1] - 2026-08-07
+
+### Fixed
+
+- `status` больше не выдаёт неиспользуемую историю Clash URLTest за состояние underlay. Он показывает конфигурацию двух relay, фактический DNS-probe стабильного WireGuard overlay и cold probe альтернативы только тогда, когда watcher действительно его выполнял.
+- Ошибка DNS lookup с явной причиной потери kernel path (`no such device`, `network unreachable`, `no route to host` и эквиваленты) классифицируется как `transport_unavailable`, а не `unclassified_error`. Это отделяет краткое переключение интерфейса при установке от отказов DNS upstream.
+
+### Changed
+
+- Dataplane, routing policy, budgets, WireGuard MTU, публичные Xray/Hysteria2 входы, web-admin и основной `vless-uri.txt` не изменены.
+
 ## [0.19.0] - 2026-08-07
 
 ### Fixed

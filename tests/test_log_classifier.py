@@ -118,6 +118,16 @@ class LogClassifierTests(unittest.TestCase):
         self.assertIsNotNone(classified)
         self.assertEqual(classified.bucket, "unclassified_error")
 
+    def test_dns_failure_caused_by_missing_route_is_transport_unavailable(self) -> None:
+        classified = classify_line(
+            "+0300 2026-08-07 12:25:02 ERROR [449403960 8ms] dns: lookup failed for "
+            "youtubei.googleapis.com: exchange4: dial TCP connection: dial tcp 10.74.0.2:1053: "
+            "connect: no such device"
+        )
+        self.assertIsNotNone(classified)
+        self.assertEqual(classified.bucket, "transport_unavailable")
+        self.assertEqual(classified.destination, "youtubei.googleapis.com")
+
     def test_dns_context_cancelled_is_client_noise_not_dns_failure(self) -> None:
         classified = classify_line(
             "+0000 2026-07-18 20:22:04 ERROR [364916214 8.1s] dns: lookup failed for www.google.com: context canceled"

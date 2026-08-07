@@ -136,24 +136,46 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
     if interserver:
         selection = interserver.get("selection", {})
         candidates = selection.get("candidates", {})
-        rendered_delays: list[str] = []
-        for tag, candidate in candidates.items():
-            if not isinstance(candidate, dict) or candidate.get("delay_ms") is None:
-                rendered_delays.append(f"{tag}=not-probed")
-            elif candidate.get("fresh") is False:
-                rendered_delays.append(
-                    f"{tag}=stale({candidate.get('delay_ms')}ms,age={candidate.get('age_seconds', '-')}s)"
-                )
-            else:
-                rendered_delays.append(f"{tag}={candidate.get('delay_ms')}ms")
-        delays = ",".join(rendered_delays) or "-"
-        details = [
-            f"mode={interserver.get('mode', '-')}",
-            f"selected={selection.get('selected') or '-'}",
-            f"candidates={delays}",
+        details = [f"mode={interserver.get('mode', '-')}"]
+        if selection:
+            details.append(f"selected={selection.get('selected') or '-'}")
+        configured_candidates = [
+            str(tag)
+            for tag, candidate in candidates.items()
+            if isinstance(candidate, dict) and candidate.get("configured") is True
         ]
+        if configured_candidates:
+            details.append(f"configured_candidates={','.join(configured_candidates)}")
         if snapshot.role == "ru-gateway":
             adaptive = interserver.get("adaptive_state", {})
+            overlay_probe = adaptive.get("overlay_probe", {})
+            if isinstance(overlay_probe, dict) and overlay_probe.get("checked") is True:
+                if overlay_probe.get("ok") is True:
+                    details.append(
+                        f"overlay_probe=ok({overlay_probe.get('delay_ms', '-')}ms,target={overlay_probe.get('target') or '-'})"
+                    )
+                else:
+                    details.append(f"overlay_probe=failed({overlay_probe.get('error') or 'unknown'})")
+            probes = adaptive.get("probes", {})
+            probes = probes if isinstance(probes, dict) else {}
+            raw_probe = next(
+                (
+                    (tag, probe)
+                    for tag, probe in probes.items()
+                    if isinstance(probe, dict)
+                    and probe.get("checked") is True
+                    and probe.get("scope") == "raw-underlay"
+                ),
+                None,
+            )
+            if raw_probe:
+                tag, probe = raw_probe
+                outcome = (
+                    f"ok({probe.get('delay_ms', '-')}ms)"
+                    if probe.get("ok") is True
+                    else f"failed({probe.get('error') or 'unknown'})"
+                )
+                details.append(f"cold_probe={tag}:{outcome}")
             adaptive_label = adaptive.get("state") or "-"
             if adaptive.get("fresh") is False:
                 adaptive_label = f"stale({adaptive_label},age={adaptive.get('age_seconds', '-')}s)"

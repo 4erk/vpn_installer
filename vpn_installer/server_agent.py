@@ -1713,38 +1713,33 @@ def wireguard_overlay_selection(env: dict[str, str]) -> dict[str, Any]:
 
 
 def transport_selection_snapshot(config: dict[str, Any], env: dict[str, str]) -> dict[str, Any]:
-    clash_api = config.get("experimental", {}).get("clash_api", {})
-    controller = str(clash_api.get("external_controller", "")).strip() if isinstance(clash_api, dict) else ""
-    if not controller:
-        return {"available": False, "selected": "", "candidates": {}, "reason": "local transport API is not configured"}
-    try:
-        payload = clash_api_json(controller, "/proxies", timeout=2)
-    except (OSError, UnicodeDecodeError, ValueError, urllib.error.URLError) as exc:
-        return {"available": False, "selected": "", "candidates": {}, "reason": str(exc)[:240]}
-    proxies = payload.get("proxies", {}) if isinstance(payload, dict) else {}
-    candidates: dict[str, dict[str, Any]] = {}
-    for tag in TRANSPORT_CANDIDATE_TAGS:
-        candidate = proxies.get(tag, {}) if isinstance(proxies, dict) else {}
-        history = candidate.get("history", []) if isinstance(candidate, dict) else []
-        latest = history[-1] if isinstance(history, list) and history and isinstance(history[-1], dict) else {}
-        tested_at = str(latest.get("time", ""))
-        age_seconds = iso_age_seconds(tested_at)
-        candidates[tag] = {
-            "delay_ms": latest.get("delay"),
-            "tested_at": tested_at,
-            "age_seconds": round(age_seconds, 1) if age_seconds is not None else None,
-            "fresh": age_seconds is not None and age_seconds <= TRANSPORT_PROBE_INTERVAL_SECONDS * 6,
-            "available": bool(candidate),
+    def tags(items: Any) -> set[str]:
+        if not isinstance(items, list):
+            return set()
+        return {
+            str(item.get("tag", ""))
+            for item in items
+            if isinstance(item, dict) and item.get("tag")
         }
+
+    outbound_tags = tags(config.get("outbounds", []))
+    endpoint_tags = tags(config.get("endpoints", []))
+    candidates = {
+        TRANSPORT_WG_TAG: {"configured": TRANSPORT_WG_TAG in endpoint_tags},
+        TRANSPORT_HY2_TAG: {"configured": TRANSPORT_HY2_TAG in outbound_tags},
+    }
     overlay = wireguard_overlay_selection(env)
     selected = str(overlay.get("selected", ""))
-    available = overlay.get("available") is True and all(item["available"] for item in candidates.values())
+    topology_configured = transport_topology_configured(config, env)
+    available = overlay.get("available") is True and topology_configured
     return {
         "available": available,
         "selected": selected,
         "endpoint": overlay.get("endpoint", ""),
         "candidates": candidates,
-        "reason": "" if available else str(overlay.get("reason") or "transport candidate state is incomplete"),
+        "reason": "" if available else str(
+            overlay.get("reason") or "transport topology is incomplete"
+        ),
     }
 
 

@@ -1950,26 +1950,37 @@ class ServerAgentTests(unittest.TestCase):
         self.assertEqual(transport["selection"]["selected"], "interserver-underlay-wg")
         self.assertEqual(transport["adaptive_state"]["state"], "healthy")
 
-    def test_transport_selection_snapshot_reads_wireguard_endpoint_and_delays(self) -> None:
-        payload = {
-            "proxies": {
-                "interserver-underlay-hy2": {"history": [{"delay": 42, "time": "2026-07-22T12:00:00Z"}]},
-                "interserver-underlay-wg": {"history": [{"delay": 310, "time": "2026-07-22T12:00:00Z"}]},
-            }
-        }
-
-        config = {"experimental": {"clash_api": {"external_controller": "127.0.0.1:19090"}}}
+    def test_transport_selection_snapshot_reports_configured_topology_without_urltest_history(self) -> None:
+        env = generate_default_env("demo")
+        config = json.loads(render_ru_singbox(env))
         overlay = {"available": True, "selected": "interserver-underlay-hy2", "endpoint": "127.0.0.1:19092"}
         with (
-            patch.object(server_agent, "clash_api_json", return_value=payload),
             patch.object(server_agent, "wireguard_overlay_selection", return_value=overlay),
+            patch.object(server_agent, "clash_api_json") as clash_api,
         ):
-            selection = server_agent.transport_selection_snapshot(config, {})
+            selection = server_agent.transport_selection_snapshot(config, env)
 
         self.assertTrue(selection["available"])
         self.assertEqual(selection["selected"], "interserver-underlay-hy2")
-        self.assertEqual(selection["candidates"]["interserver-underlay-wg"]["delay_ms"], 310)
-        self.assertFalse(selection["candidates"]["interserver-underlay-wg"]["fresh"])
+        self.assertTrue(selection["candidates"]["interserver-underlay-wg"]["configured"])
+        self.assertTrue(selection["candidates"]["interserver-underlay-hy2"]["configured"])
+        clash_api.assert_not_called()
+
+    def test_transport_selection_rejects_an_incomplete_topology(self) -> None:
+        env = generate_default_env("demo")
+        config = json.loads(render_ru_singbox(env))
+        config["outbounds"] = [
+            outbound
+            for outbound in config["outbounds"]
+            if outbound.get("tag") != "interserver-underlay-hy2"
+        ]
+        overlay = {"available": True, "selected": "interserver-underlay-wg", "endpoint": "127.0.0.1:19091"}
+        with patch.object(server_agent, "wireguard_overlay_selection", return_value=overlay):
+            selection = server_agent.transport_selection_snapshot(config, env)
+
+        self.assertFalse(selection["available"])
+        self.assertFalse(selection["candidates"]["interserver-underlay-hy2"]["configured"])
+        self.assertEqual(selection["reason"], "transport topology is incomplete")
 
     def test_transport_cycle_probes_alternate_only_after_overlay_failure(self) -> None:
         failed = {"checked": True, "ok": False, "attempts": 1, "error": "timeout"}
