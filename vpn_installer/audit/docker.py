@@ -5,12 +5,57 @@ import io
 import json
 import shutil
 import textwrap
+from datetime import datetime, timezone
 from pathlib import Path
 
 from ..common import INSTALL_SCRIPT_PATH, ROOT_DIR
+from ..diagnostics import COLLECTOR_NAMES, LOG_WINDOW_KEYS, CollectorState, DiagnosticsSnapshot, LogWindowSnapshot
+from ..log_classifier import BUCKETS
 from ..models import ROLE_FOREIGN, ROLE_RU
 from ..render import render_all_artifacts
-from .runner import AUDIT_COMMAND_TIMEOUT_SECONDS, AUDIT_IMAGE, AuditFailure, AuditRunner, write_text
+from .runner import (
+    AUDIT_COMMAND_TIMEOUT_SECONDS,
+    AUDIT_IMAGE,
+    VALID_GEOIP_SRS,
+    VALID_GEOIP_SRS_BASE64,
+    VALID_GEOSITE_SRS,
+    VALID_GEOSITE_SRS_BASE64,
+    AuditFailure,
+    AuditRunner,
+    write_bytes,
+    write_text,
+)
+
+
+def acceptance_snapshot_fixture(server_path: str, *, role: str = "foreign-exit") -> dict[str, object]:
+    if server_path not in {"verified", "failed"}:
+        raise ValueError(f"unsupported server_path verdict: {server_path}")
+    overall = "verified" if server_path == "verified" else "failed"
+    observed_at = datetime.now(timezone.utc).isoformat()
+    component_verdicts = {
+            "server_path": server_path,
+            "public_front": "verified" if role == "ru-gateway" else "not-applicable",
+            "public_quic": "verified" if role == "ru-gateway" else "not-applicable",
+            "client_observation": "observed" if role == "ru-gateway" else "not-applicable",
+            "host_integrity": "verified",
+        }
+    return DiagnosticsSnapshot(
+        generated_at=observed_at,
+        deployment="audit-install-rollback",
+        role=role,
+        collectors={name: CollectorState.ok(observed_at) for name in COLLECTOR_NAMES},
+        log_windows={
+            name: LogWindowSnapshot.collected({bucket: 0 for bucket in BUCKETS}, observed_at=observed_at)
+            for name in LOG_WINDOW_KEYS
+        },
+        services={"sing-box": "active", "wireguard": "active", "nftables": "active", "resolver": "active", "xray": "active"},
+        artifacts={"drift": "none", "files": {}},
+        drift="none",
+        network={"profile_mismatches": []},
+        route_probes={"profile": "acceptance", "ok": server_path == "verified"},
+        component_verdicts=component_verdicts,
+        verdict=overall,
+    ).to_dict()
 
 
 def run(runner: AuditRunner) -> None:
@@ -32,7 +77,7 @@ def test_unmanaged_remove_purge_render_only(runner: AuditRunner) -> dict[str, st
         runner.docker_exec(
             container,
             textwrap.dedent(
-                """\
+                f"""\
                 set -euo pipefail
                 chmod +x /work/install.sh
                 echo dummy >/etc/nftables.conf
@@ -46,8 +91,8 @@ def test_unmanaged_remove_purge_render_only(runner: AuditRunner) -> dict[str, st
                 fi
                 grep -q "metadata not found" /tmp/purge.err
                 test "$(cat /etc/nftables.conf)" = dummy
-                echo x >/work/assets/geosite-ru.srs
-                echo x >/work/assets/geoip-ru.srs
+                echo {VALID_GEOSITE_SRS_BASE64} | base64 -d >/work/assets/geosite-ru.srs
+                echo {VALID_GEOIP_SRS_BASE64} | base64 -d >/work/assets/geoip-ru.srs
                 echo 203.0.113.0/24 >/work/assets/ru-ipv4.zone
                 echo 2001:db8::/32 >/work/assets/ru-ipv6.zone
                 mkdir -p /work/out
@@ -82,8 +127,8 @@ def test_asset_fail_fast(runner: AuditRunner) -> dict[str, str]:
 
     assets_dir = ROOT_DIR / "out" / env["DEPLOY_NAME"] / "assets"
     assets_dir.mkdir(parents=True, exist_ok=True)
-    write_text(assets_dir / "geosite-ru.srs", "dummy")
-    write_text(assets_dir / "geoip-ru.srs", "dummy")
+    write_bytes(assets_dir / "geosite-ru.srs", VALID_GEOSITE_SRS)
+    write_bytes(assets_dir / "geoip-ru.srs", VALID_GEOIP_SRS)
     write_text(assets_dir / "ru-ipv4.zone", "203.0.113.0/24")
     write_text(assets_dir / "ru-ipv6.zone", "2001:db8::/32")
     with contextlib.redirect_stderr(io.StringIO()):
@@ -94,6 +139,8 @@ def test_asset_fail_fast(runner: AuditRunner) -> dict[str, str]:
 def test_install_rollback_state(runner: AuditRunner) -> dict[str, str]:
     env_path, _env = runner.create_env("install-rollback", {"WG_INTERFACE": "wg-test"})
     container = f"audit-install-rollback-{runner.run_id}"
+    failed_snapshot = repr(json.dumps(acceptance_snapshot_fixture("failed"), separators=(",", ":")))
+    verified_snapshot = repr(json.dumps(acceptance_snapshot_fixture("verified"), separators=(",", ":")))
     with runner.docker_container(container, AUDIT_IMAGE):
         runner.docker_exec(container, "mkdir -p /work")
         runner.docker_copy(container, INSTALL_SCRIPT_PATH, "/work/install.sh")
@@ -134,8 +181,45 @@ def test_install_rollback_state(runner: AuditRunner) -> dict[str, str]:
                 LEGACY_DATAPLANE_CACHE_PATH="${test_root}/state/dataplane-cache.env"
                 RULESET_DIR="${test_root}/state/rules"
 
-                systemctl() { return 1; }
+                SYSTEMCTL_LOG="${test_root}/systemctl.log"
+                systemctl() {
+                  printf '%s\n' "$*" >>"${SYSTEMCTL_LOG}"
+                  if [[ "${SYSTEMCTL_FAIL_DAEMON_RELOAD:-0}" == "1" && "$*" == "daemon-reload" ]]; then
+                    return 1
+                  fi
+                  if [[ "$1" == "is-enabled" && "$*" == *"test-disabled.service"* ]]; then
+                    return 1
+                  fi
+                  if [[ "$1" == "is-active" && "$*" == *"test-disabled.service"* ]]; then
+                    [[ "${SYSTEMCTL_FORCE_TEST_ACTIVE:-0}" == "1" ]] && return 0
+                    return 1
+                  fi
+                  return 0
+                }
                 sysctl() { return 0; }
+
+                mkdir -p "${VPNSTACK_ROOT}"
+                printf 'ru-gateway\n' >"${VPNSTACK_ROLE_FILE}"
+                printf '2026-08-06T00:00:00Z\n' >"${VPNSTACK_INSTALLED_AT_FILE}"
+                printf 'DEPLOY_NAME="install-rollback"\n' >"${VPNSTACK_DEPLOYMENT_FILE}"
+                if (ROLE=foreign-exit; DEPLOY_NAME=install-rollback; require_matching_install_identity) 2>/tmp/role-mismatch.err; then
+                  exit 74
+                fi
+                grep -q 'Installed role mismatch' /tmp/role-mismatch.err
+                : >"${VPNSTACK_ROLE_FILE}"
+                if (ROLE=foreign-exit; DEPLOY_NAME=install-rollback; require_matching_install_identity) 2>/tmp/missing-role.err; then
+                  exit 75
+                fi
+                grep -q 'found missing' /tmp/missing-role.err
+                rm -f "${VPNSTACK_ROLE_FILE}" "${VPNSTACK_INSTALLED_AT_FILE}" "${VPNSTACK_DEPLOYMENT_FILE}"
+
+                WAN_INTERFACE=""
+                detect_primary_interface() { printf 'ens7\n'; }
+                ensure_target_wan_interface
+                grep -Fxq 'WAN_INTERFACE="ens7"' "${NORMALIZED_ENV_FILE}"
+                wan_render="${test_root}/wan-render"
+                render_role_with_python "${wan_render}"
+                grep -Fq 'oifname "ens7"' "${wan_render}/nftables.conf"
 
                 paths="$(managed_paths)"
                 grep -Fxq "${VPNSTACK_RENDER_MANIFEST_FILE}" <<<"${paths}"
@@ -173,11 +257,33 @@ def test_install_rollback_state(runner: AuditRunner) -> dict[str, str]:
                 test -L "${RESOLV_CONF_PATH}"
                 grep -Fxq 'old resolver' "${RESOLV_CONF_PATH}"
                 test "$(readlink -f "${VPNSTACK_CURRENT_RELEASE}")" = "${VPNSTACK_RELEASES_DIR}/old"
+                grep -Fxq 'daemon-reload' "${SYSTEMCTL_LOG}"
+                grep -Eq '^(start|restart) sing-box$' "${SYSTEMCTL_LOG}"
+                apply_service_restore_flags test-disabled.service 0 0
+                SYSTEMCTL_FORCE_TEST_ACTIVE=1
+                if apply_service_restore_flags test-disabled.service 0 0; then
+                  exit 76
+                fi
+                SYSTEMCTL_FORCE_TEST_ACTIVE=0
+
+                SYSTEMCTL_FAIL_DAEMON_RELOAD=1
+                if restore_install_snapshot "${CURRENT_ROLLBACK_DIR}"; then
+                  exit 72
+                fi
+                SYSTEMCTL_FAIL_DAEMON_RELOAD=0
+
+                incomplete_snapshot="${VPNSTACK_SNAPSHOT_DIR}/incomplete"
+                mkdir -p "${incomplete_snapshot}"
+                cp "${CURRENT_ROLLBACK_DIR}/service-state.env" "${incomplete_snapshot}/service-state.env"
+                if restore_install_snapshot "${incomplete_snapshot}"; then
+                  exit 73
+                fi
 
                 rm -rf "${VPNSTACK_SNAPSHOT_DIR}"
                 mkdir -p "${VPNSTACK_SNAPSHOT_DIR}"
                 for i in $(seq 1 12); do
                   mkdir "${VPNSTACK_SNAPSHOT_DIR}/snapshot-${i}"
+                  touch "${VPNSTACK_SNAPSHOT_DIR}/snapshot-${i}/.complete"
                   touch -d "@${i}" "${VPNSTACK_SNAPSHOT_DIR}/snapshot-${i}"
                 done
                 prune_revision_snapshots 3
@@ -203,7 +309,7 @@ def test_install_rollback_state(runner: AuditRunner) -> dict[str, str]:
                 AGENT_SCRIPT_PATH="${test_root}/agent.py"
                 cat >"${AGENT_SCRIPT_PATH}" <<'PY'
                 import json
-                print(json.dumps({"role": "foreign-exit", "verdicts": {"server_path": "failed"}, "artifacts": {"drift": "none"}}))
+                print(__FAILED_ACCEPTANCE_JSON__)
                 PY
                 if verify_active_release; then
                   exit 71
@@ -213,14 +319,16 @@ def test_install_rollback_state(runner: AuditRunner) -> dict[str, str]:
 
                 cat >"${AGENT_SCRIPT_PATH}" <<'PY'
                 import json
-                print(json.dumps({"role": "foreign-exit", "verdicts": {"server_path": "verified"}, "artifacts": {"drift": "none"}}))
+                print(__VERIFIED_ACCEPTANCE_JSON__)
                 PY
                 verify_active_release
                 test -s "${VPNSTACK_ACCEPTANCE_FILE}"
                 test ! -e "${VPNSTACK_FAILED_ACCEPTANCE_FILE}"
                 ! find "${VPNSTACK_ROOT}" -maxdepth 1 -type f -name '.acceptance.*.json' | grep -q .
                 """
-            ),
+            )
+            .replace("__FAILED_ACCEPTANCE_JSON__", failed_snapshot)
+            .replace("__VERIFIED_ACCEPTANCE_JSON__", verified_snapshot),
         )
     return {"container": container}
 
@@ -272,23 +380,18 @@ def prepare_mock_state(runner: AuditRunner, action: str) -> tuple[Path, Path]:
 def write_mock_ssh_scripts(base_dir: Path, *, allow_foreign: bool = False) -> tuple[Path, Path]:
     fakebin = base_dir / "fakebin"
     fakebin.mkdir(parents=True, exist_ok=True)
-    ru_agent_snapshot = json.dumps(
+    ru_payload = acceptance_snapshot_fixture("verified", role="ru-gateway")
+    ru_payload.update(
         {
-            "schema_version": 2,
             "deployment": "mock",
-            "role": "ru-gateway",
-            "release": {"release_id": "mock-release", "policy_version": "0.11.0", "installed_at": "2026-04-11T00:00:00Z"},
+            "release": {"release_id": "mock-release", "policy_version": "0.11.0", "installed_at": datetime.now(timezone.utc).isoformat()},
             "host": {"hostname": "ru-host", "login_user": "root", "is_root": True, "has_sudo": True, "os_id": "ubuntu", "os_version": "24.04", "default_interface": "eth0"},
-            "services": {"sing-box": "active", "xray": "active", "nftables": "active", "wireguard": "active", "resolver": "active", "health_timer": "active", "admin": "active"},
-            "artifacts": {"drift": "none", "files": {}},
-            "wireguard": {"peers": []},
-            "network": {"interfaces": {"eth0": {}}},
+            "wg_state": {"interface": "wg0", "state": "up", "peers": []},
+            "network": {"interfaces": {"eth0": {}}, "tcp_adaptation": {}},
             "front": {"listening": True, "state_counts": {}, "socket_retransmissions": 0, "rtt_ms": {}},
-            "logs": {"fresh": {"window_minutes": 5, "counts": {}, "top_destinations": {}}, "windows_minutes": {"1440": {"counts": {}}}},
-            "verdicts": {"server_path": "verified", "public_front": "verified", "client_observation": "observed", "overall": "verified", "reasons": []},
-        },
-        ensure_ascii=True,
+        }
     )
+    ru_agent_snapshot = json.dumps(ru_payload, ensure_ascii=True)
     ssh_script = textwrap.dedent(
         """\
         #!/usr/bin/env bash
@@ -399,9 +502,32 @@ def test_role_scoped_workflows(runner: AuditRunner) -> dict[str, str]:
     action_rows = [(action, fixtures[action][0].stem) for action in scenarios if action != "status"]
     driver = textwrap.dedent(
         f"""\
+        import json
         from pathlib import Path
 
         import vpn_installer.workflows as wf
+
+        # This scenario validates role scoping with fake ssh/scp commands. Host-key
+        # enrollment is covered independently by remote unit tests.
+        wf.ensure_target_host_key = lambda *args, **kwargs: None
+        wf.verify_postcutover = lambda *args, **kwargs: None
+
+        def accepted_install(target, _wg_interface):
+            role_dir = "ru" if target.role == "ru-gateway" else "foreign"
+            manifests = list(Path("/work/out").glob(f"*/preview/{{role_dir}}/render-manifest.json"))
+            if len(manifests) != 1:
+                raise RuntimeError(f"expected one rendered manifest for {{target.role}}, got {{len(manifests)}}")
+            manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
+            release_id = manifest["release_id"]
+            deployment = manifests[0].parents[2].name
+            return {{
+                "installed": "1", "role": target.role, "deployment_name": deployment,
+                "release_id": release_id, "drift": "none", "acceptance_present": "True",
+                "acceptance_release_id": release_id, "acceptance_role": target.role,
+                "acceptance_deployment": deployment,
+            }}
+
+        wf.wait_for_remote_install_completion = accepted_install
 
         status_env = Path("/work/deployments/{status_env.name}")
         status_state = Path("/work/state/{status_state.name}")
@@ -441,8 +567,8 @@ def test_role_scoped_workflows(runner: AuditRunner) -> dict[str, str]:
             textwrap.dedent(
                 f"""\
                 set -euo pipefail
-                echo geosite >/work/fixtures/geosite-ru.srs
-                echo geoip >/work/fixtures/geoip-ru.srs
+                echo {VALID_GEOSITE_SRS_BASE64} | base64 -d >/work/fixtures/geosite-ru.srs
+                echo {VALID_GEOIP_SRS_BASE64} | base64 -d >/work/fixtures/geoip-ru.srs
                 chmod +x /work/fakebin/ssh /work/fakebin/scp
                 : > /work/calls.log
                 PATH=/work/fakebin:$PATH PYTHONPATH=/work python3 /work/driver.py >/work/driver.out

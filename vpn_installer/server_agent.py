@@ -18,10 +18,23 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
+
+sys.dont_write_bytecode = True
 
 try:
-    from .log_classifier import BUCKETS, accepted_destination_from_line, normalize_source, source_endpoint_from_line, source_from_line, split_endpoint, summarize_lines
+    from .log_classifier import (
+        BUCKETS,
+        accepted_destination_from_line,
+        event_id_from_line,
+        inbound_destination_from_line,
+        inbound_tag_from_line,
+        normalize_source,
+        source_endpoint_from_line,
+        source_from_line,
+        split_endpoint,
+        summarize_lines,
+    )
     from .interserver_transport import (
         HY2_CLASH_API_LISTEN,
         HY2_PORT,
@@ -30,9 +43,11 @@ try:
         TRANSPORT_HEALTHCHECK_URL,
         TRANSPORT_HY2_TAG,
         TRANSPORT_PROBE_INTERVAL_SECONDS,
+        TRANSPORT_PROBE_PORTS,
         TRANSPORT_PROBE_TIMEOUT_MS,
         TRANSPORT_RELAY_INBOUND_TAGS,
         TRANSPORT_RELAY_PORTS,
+        TRANSPORT_SELECTED_PROBE_TIMEOUT_MS,
         TRANSPORT_STATE_SCHEMA_VERSION,
         TRANSPORT_WG_TAG,
         evaluate_transport_policy,
@@ -40,7 +55,18 @@ try:
     )
 except ImportError:  # Installed agent runs as a standalone script.
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from log_classifier import BUCKETS, accepted_destination_from_line, normalize_source, source_endpoint_from_line, source_from_line, split_endpoint, summarize_lines
+    from log_classifier import (  # type: ignore[no-redef]
+        BUCKETS,
+        accepted_destination_from_line,
+        event_id_from_line,
+        inbound_destination_from_line,
+        inbound_tag_from_line,
+        normalize_source,
+        source_endpoint_from_line,
+        source_from_line,
+        split_endpoint,
+        summarize_lines,
+    )
     from interserver_transport import (  # type: ignore[no-redef]
         HY2_CLASH_API_LISTEN,
         HY2_PORT,
@@ -49,9 +75,11 @@ except ImportError:  # Installed agent runs as a standalone script.
         TRANSPORT_HEALTHCHECK_URL,
         TRANSPORT_HY2_TAG,
         TRANSPORT_PROBE_INTERVAL_SECONDS,
+        TRANSPORT_PROBE_PORTS,
         TRANSPORT_PROBE_TIMEOUT_MS,
         TRANSPORT_RELAY_INBOUND_TAGS,
         TRANSPORT_RELAY_PORTS,
+        TRANSPORT_SELECTED_PROBE_TIMEOUT_MS,
         TRANSPORT_STATE_SCHEMA_VERSION,
         TRANSPORT_WG_TAG,
         evaluate_transport_policy,
@@ -64,10 +92,18 @@ except ImportError:  # Installed agent runs as a standalone script.
     from network_profile import FQ_FLOW_LIMIT, FQ_KIND, FQ_PACKET_LIMIT  # type: ignore[no-redef]
 
 try:
+    from .diagnostics import SCHEMA_VERSION as DIAGNOSTICS_SCHEMA_VERSION, COLLECTOR_NAMES, CollectorState, DiagnosticsSnapshot, LogWindowSnapshot, classify_interserver_adaptation
+except ImportError:  # Installed agent runs as a standalone script.
+    from diagnostics import SCHEMA_VERSION as DIAGNOSTICS_SCHEMA_VERSION, COLLECTOR_NAMES, CollectorState, DiagnosticsSnapshot, LogWindowSnapshot, classify_interserver_adaptation  # type: ignore[no-redef]
+
+try:
     import fcntl
 except ImportError:  # pragma: no cover - local Windows tests only
     class _NoopFcntl:
         LOCK_EX = 0
+        LOCK_SH = 0
+        LOCK_NB = 0
+        LOCK_UN = 0
 
         @staticmethod
         def flock(_handle: Any, _operation: int) -> None:
@@ -75,7 +111,7 @@ except ImportError:  # pragma: no cover - local Windows tests only
 
     fcntl = _NoopFcntl()  # type: ignore[assignment]
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = DIAGNOSTICS_SCHEMA_VERSION
 ACCEPTANCE_REQUIRED_TARGETS = ("https://github.com/", "https://www.google.com/generate_204")
 ACCEPTANCE_OBSERVED_TARGETS = ("https://telegram.org/",)
 PROBE_CONFIRMATION_DELAY_SECONDS = 2
@@ -88,6 +124,10 @@ OPTIONAL_TRANSPORT_REQUIREMENTS = frozenset(
         "hysteria_candidate_reachable",
     }
 )
+COMPLETE_LOG_RETENTION_MINUTES = 14 * 24 * 60
+PRIVATE_REJECT_CORRELATION_MAX_AGE_SECONDS = 900
+PRIVATE_REJECT_INBOUND_TAGS = ("router-in", "public-hy2-in")
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 FRONT_LOSS_MIN_BYTES = 1_000_000
 FRONT_LOSS_DEGRADED_PERCENT = 2.0
 FRONT_INTERVAL_LOSS_MIN_BYTES = 256 * 1024
@@ -110,13 +150,20 @@ CONNTRACK_FULL_GREP = "nf_conntrack.*table full"
 ROOT = Path("/etc/vpn-stack")
 MANIFEST_PATH = ROOT / "render-manifest.json"
 ENV_PATH = ROOT / "deployment.env"
+RELEASES_PATH = ROOT / "releases"
+CURRENT_RELEASE_PATH = ROOT / "current"
+OPERATOR_MANIFEST_PATH = ROOT / "operator-state.json"
+ADMIN_RULES_PATH = ROOT / "admin-routing-rules.json"
 STATE_DIR = Path("/var/lib/vpn-stack")
 HEALTH_STATE_PATH = STATE_DIR / "health-state.json"
 TRANSPORT_STATE_PATH = STATE_DIR / "transport-state.json"
 LOCK_PATH = Path("/run/vpn-stack-agent.lock")
 TRANSPORT_LOCK_PATH = Path("/run/vpn-stack-transport.lock")
+INSTALL_LOCK_PATH = Path("/run/lock/vpn-stack-install.lock")
 SINGBOX_CONFIG_PATH = Path("/etc/sing-box/config.json")
 XRAY_CONFIG_PATH = Path("/etc/xray/config.json")
+NFTABLES_CONFIG_PATH = ROOT / "nftables.conf"
+NFTABLES_SERVICE = "vpn-stack-nftables.service"
 SYSCTL_PATH = Path("/etc/sysctl.d/90-vpn-stack.conf")
 RESOLV_CONF_PATH = Path("/etc/resolv.conf")
 RESOLVED_DROPIN_PATH = Path("/etc/systemd/resolved.conf.d/90-vpn-stack.conf")
@@ -128,6 +175,26 @@ SYS_DEV_BLOCK_ROOT = Path("/sys/dev/block")
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def acquire_install_read_lock():
+    if os.name == "nt":  # Unit tests do not share the Linux installer lock.
+        return tempfile.TemporaryFile(mode="w+")
+    INSTALL_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    handle = INSTALL_LOCK_PATH.open("a+", encoding="utf-8")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_SH | fcntl.LOCK_NB)
+    except (BlockingIOError, OSError):
+        handle.close()
+        return None
+    return handle
+
+
+def release_install_read_lock(handle: Any) -> None:
+    try:
+        fcntl.flock(handle, fcntl.LOCK_UN)
+    finally:
+        handle.close()
 
 
 def parse_iso_datetime(value: str) -> datetime | None:
@@ -200,6 +267,70 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def release_tree_digest(path: Path) -> str:
+    """Match install.sh's digest while excluding derived Python bytecode."""
+    try:
+        files = sorted(
+            (
+                entry
+                for entry in path.rglob("*")
+                if entry.is_file()
+                and not entry.is_symlink()
+                and entry.suffix not in {".pyc", ".pyo"}
+                and "__pycache__" not in entry.parts
+            ),
+            key=lambda entry: entry.relative_to(path).as_posix().encode("utf-8"),
+        )
+    except OSError:
+        return ""
+    digest = hashlib.sha256()
+    for entry in files:
+        file_digest = sha256_file(entry)
+        if not file_digest:
+            return ""
+        relative = entry.relative_to(path).as_posix()
+        digest.update(f"{file_digest}  ./{relative}\n".encode("utf-8"))
+    return digest.hexdigest()
+
+
+def release_tree_snapshot(
+    current_path: Path | None = None,
+    releases_path: Path | None = None,
+    *,
+    require_symlink: bool = True,
+) -> dict[str, str]:
+    current = current_path or CURRENT_RELEASE_PATH
+    releases = releases_path or RELEASES_PATH
+    result = {
+        "path": str(current),
+        "resolved_path": "",
+        "digest": "",
+        "expected_suffix": "",
+        "state": "missing",
+    }
+    if require_symlink and not current.is_symlink():
+        result["state"] = "not-symlink" if current.exists() else "missing"
+        return result
+    try:
+        resolved = current.resolve(strict=True)
+        releases_resolved = releases.resolve(strict=True)
+    except OSError:
+        return result
+    result["resolved_path"] = str(resolved)
+    if not resolved.is_dir() or resolved.parent != releases_resolved:
+        result["state"] = "outside-releases"
+        return result
+    tree_digest = release_tree_digest(resolved)
+    if not tree_digest:
+        result["state"] = "unreadable"
+        return result
+    expected_suffix = f"-{tree_digest[:12]}"
+    result["digest"] = tree_digest
+    result["expected_suffix"] = expected_suffix
+    result["state"] = "ok" if resolved.name.endswith(expected_suffix) else "mutated"
+    return result
+
+
 def parse_env(path: Path = ENV_PATH) -> dict[str, str]:
     values: dict[str, str] = {}
     try:
@@ -240,7 +371,27 @@ def journal_filtered_lines(unit: str, minutes: int, pattern: str) -> list[str]:
     return result.stdout.splitlines() if result.returncode == 0 else []
 
 
-def journal_problem_events(minutes: int) -> list[tuple[float, str]]:
+def journal_record_message(record: Mapping[str, Any]) -> str:
+    raw_message = record.get("MESSAGE", "")
+    if isinstance(raw_message, str):
+        message = raw_message
+    elif isinstance(raw_message, list):
+        try:
+            message = bytes(raw_message).decode("utf-8", errors="replace")
+        except (TypeError, ValueError):
+            return ""
+    else:
+        return ""
+    return ANSI_ESCAPE_RE.sub("", message)
+
+
+def journal_command_error(result: subprocess.CompletedProcess[str]) -> str:
+    if result.returncode == 0 or (result.returncode == 1 and not result.stdout.strip() and not result.stderr.strip()):
+        return ""
+    return (result.stderr.strip() or f"journalctl exited with {result.returncode}")[:240]
+
+
+def journal_problem_events(minutes: int) -> tuple[list[tuple[float, str]], str]:
     result = run(
         [
             "journalctl",
@@ -251,38 +402,202 @@ def journal_problem_events(minutes: int) -> list[tuple[float, str]]:
             "--since",
             f"{minutes} minutes ago",
             "--no-pager",
-            "-o",
-            "short-unix",
+            "--output=json",
             f"--grep={PROBLEM_LOG_GREP}",
         ],
         timeout=30,
     )
+    command_error = journal_command_error(result)
+    if command_error:
+        return [], command_error
     events: list[tuple[float, str]] = []
+    malformed = 0
     for raw_line in result.stdout.splitlines():
-        timestamp, separator, message = raw_line.partition(" ")
-        if not separator:
+        try:
+            record = json.loads(raw_line)
+            timestamp = float(record["__REALTIME_TIMESTAMP"]) / 1_000_000
+            message = journal_record_message(record)
+            unit = str(record.get("_SYSTEMD_UNIT") or record.get("SYSLOG_IDENTIFIER") or "unknown")
+            if not message:
+                raise ValueError("journal message is empty or malformed")
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            malformed += 1
+            continue
+        events.append((timestamp, f"[unit={unit}] {message}"))
+    if malformed:
+        return events, f"journalctl returned {malformed} malformed JSON record(s)"
+    return events, ""
+
+
+def _private_reject_policy(config: Any, manifest: dict[str, Any]) -> dict[str, Any]:
+    rules = config.get("route", {}).get("rules", []) if isinstance(config, dict) else []
+    if not isinstance(rules, list):
+        rules = []
+    catchall_index = next(
+        (
+            index
+            for index, rule in enumerate(rules)
+            if isinstance(rule, dict)
+            and isinstance(rule.get("ip_cidr"), list)
+            and "0.0.0.0/0" in rule["ip_cidr"]
+        ),
+        len(rules),
+    )
+    guard_indexes = [
+        index
+        for index, rule in enumerate(rules)
+        if isinstance(rule, dict)
+        and rule.get("ip_is_private") is True
+        and rule.get("action") == "reject"
+        and rule.get("method") == "default"
+        and rule.get("no_drop") is True
+    ]
+    role = str(manifest.get("manifest", {}).get("role", ""))
+    drift = str(manifest.get("drift", "unknown"))
+    ordered = any(index < catchall_index for index in guard_indexes)
+    verified = role == "ru-gateway" and drift == "none" and ordered
+    reason = ""
+    if role != "ru-gateway":
+        reason = f"installed role is {role or 'unknown'}"
+    elif drift != "none":
+        reason = f"installed drift is {drift}"
+    elif not ordered:
+        reason = "private/fake reject guard is missing or ordered after the IPv4 catch-all"
+    return {
+        "verified": verified,
+        "reason": reason,
+        "drift": drift,
+        "config_sha256": sha256_file(SINGBOX_CONFIG_PATH),
+        "guard_indexes": guard_indexes,
+        "ipv4_catchall_index": catchall_index if catchall_index < len(rules) else None,
+    }
+
+
+def private_reject_correlations(since: str, inbound: str, targets: Iterable[str]) -> dict[str, Any]:
+    if inbound not in PRIVATE_REJECT_INBOUND_TAGS:
+        raise ValueError(f"unsupported private reject inbound: {inbound}")
+    marker = parse_iso_datetime(since)
+    if marker is None:
+        raise ValueError("private reject correlation marker is invalid")
+    age_seconds = (datetime.now(timezone.utc) - marker).total_seconds()
+    if age_seconds < -30 or age_seconds > PRIVATE_REJECT_CORRELATION_MAX_AGE_SECONDS:
+        raise ValueError(f"private reject correlation marker age is out of range: {age_seconds:.1f}s")
+
+    normalized_targets: list[str] = []
+    for target in targets:
+        host, port = split_endpoint(target)
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError as exc:
+            raise ValueError(f"private reject target is not an IP literal: {target}") from exc
+        if port is None or not 1 <= port <= 65535 or not address.is_private:
+            raise ValueError(f"private reject target is outside the guarded private address space: {target}")
+        endpoint = f"[{address}]:{port}" if address.version == 6 else f"{address}:{port}"
+        if endpoint not in normalized_targets:
+            normalized_targets.append(endpoint)
+    if not normalized_targets:
+        raise ValueError("at least one private reject target is required")
+
+    manifest = manifest_snapshot()
+    policy = _private_reject_policy(read_json(SINGBOX_CONFIG_PATH, {}), manifest)
+    evidence = {
+        target: {"target": target, "correlated": False, "correlation_id": ""}
+        for target in normalized_targets
+    }
+    response: dict[str, Any] = {
+        "schema_version": 1,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "since": marker.isoformat(),
+        "inbound": inbound,
+        "policy": policy,
+        "targets": list(evidence.values()),
+        "verdict": "failed" if not policy["verified"] else "inconclusive",
+    }
+    if not policy["verified"]:
+        response["reason"] = policy["reason"]
+        return response
+
+    journal = run(
+        [
+            "journalctl",
+            "-u",
+            "sing-box.service",
+            "--since",
+            marker.isoformat(),
+            "--no-pager",
+            "--output=json",
+            "--grep=inbound connection to",
+        ],
+        timeout=20,
+    )
+    command_error = journal_command_error(journal)
+    if command_error:
+        response["verdict"] = "failed"
+        response["reason"] = command_error
+        return response
+
+    marker_epoch = marker.timestamp()
+    latest: dict[str, tuple[float, str, str]] = {}
+    for raw_line in journal.stdout.splitlines():
+        try:
+            record = json.loads(raw_line)
+            timestamp = float(record["__REALTIME_TIMESTAMP"]) / 1_000_000
+            message = journal_record_message(record)
+            if not message:
+                raise ValueError("journal message is empty or malformed")
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            continue
+        destination = inbound_destination_from_line(message)
+        event_id = event_id_from_line(message)
+        if timestamp < marker_epoch or inbound_tag_from_line(message) != inbound or not event_id:
+            continue
+        host, port = split_endpoint(destination)
+        if port is None:
             continue
         try:
-            events.append((float(timestamp), message))
+            address = ipaddress.ip_address(host)
         except ValueError:
             continue
-    return events
+        endpoint = f"[{address}]:{port}" if address.version == 6 else f"{address}:{port}"
+        if endpoint in evidence and (endpoint not in latest or timestamp > latest[endpoint][0]):
+            latest[endpoint] = (timestamp, event_id, str(record.get("__CURSOR", "")))
+
+    for target, (timestamp, event_id, cursor) in latest.items():
+        item = evidence[target]
+        item.update(
+            {
+                "correlated": True,
+                "correlation_id": f"sing-box:{event_id}:{int(timestamp * 1_000_000)}",
+                "event_id": event_id,
+                "journal_cursor": cursor,
+            }
+        )
+    response["targets"] = list(evidence.values())
+    if all(item["correlated"] for item in evidence.values()):
+        response["verdict"] = "verified"
+    else:
+        response["reason"] = "one or more private/fake probe events were not observed after the marker"
+    return response
 
 
-def summarize_problem_windows(*, full_logs: bool, fresh_since: str) -> tuple[dict[str, Any], dict[str, Any]]:
+def summarize_problem_windows(*, full_logs: bool, fresh_since: str) -> tuple[dict[str, Any], dict[str, Any], str]:
     windows = (5, 30, 1440) if full_logs else (5,)
     now = time.time()
-    events = journal_problem_events(max(windows))
-    summaries = {
-        str(minutes): summarize_lines(line for timestamp, line in events if timestamp >= now - minutes * 60)
-        for minutes in windows
-    }
     try:
         fresh_epoch = datetime.fromisoformat(fresh_since.replace("Z", "+00:00")).timestamp()
     except ValueError:
         fresh_epoch = now - 300
+    fresh_age_minutes = max(0, int((now - fresh_epoch + 59) // 60))
+    query_minutes = max(windows)
+    if fresh_age_minutes <= COMPLETE_LOG_RETENTION_MINUTES:
+        query_minutes = max(query_minutes, fresh_age_minutes)
+    events, collector_error = journal_problem_events(query_minutes)
+    summaries = {
+        str(minutes): summarize_lines(line for timestamp, line in events if timestamp >= now - minutes * 60)
+        for minutes in windows
+    }
     fresh = summarize_lines(line for timestamp, line in events if timestamp >= fresh_epoch)
-    return summaries, fresh
+    return summaries, fresh, collector_error
 
 
 def fresh_log_since() -> tuple[str, int]:
@@ -290,7 +605,7 @@ def fresh_log_since() -> tuple[str, int]:
     try:
         timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
         age_minutes = max(0, int((datetime.now(timezone.utc) - timestamp).total_seconds() / 60))
-        if age_minutes <= 24 * 60:
+        if age_minutes <= COMPLETE_LOG_RETENTION_MINUTES:
             return value, age_minutes
     except (OSError, TypeError, ValueError):
         pass
@@ -302,6 +617,14 @@ def installed_at_value() -> str:
         return (ROOT / "installed_at").read_text(encoding="utf-8").strip()
     except OSError:
         return ""
+
+
+def service_exec_path(service: str) -> str:
+    result = run(["systemctl", "show", service, "--property=ExecStart", "--value"], timeout=5)
+    if result.returncode != 0:
+        return ""
+    match = re.search(r"(?:^|[ {;])path=([^ ;}]+)", result.stdout)
+    return match.group(1) if match else ""
 
 
 def manifest_snapshot() -> dict[str, Any]:
@@ -344,18 +667,72 @@ def manifest_snapshot() -> dict[str, Any]:
         actual_path = Path(str(raw_entry.get("path", "")))
         actual = sha256_file(actual_path) if expected and actual_path else ""
         state = "ok" if actual and actual == expected else "missing" if not actual else "mutated"
+        service = str(raw_entry.get("service", ""))
+        runtime_exec_path = service_exec_path(service) if service else ""
+        if state == "ok" and service and runtime_exec_path != str(actual_path):
+            state = "wrong-exec"
         if state != "ok":
             mismatches.append(f"binary:{name}")
-        checked_binaries[name] = {"expected_sha256": expected, "actual_sha256": actual, "path": str(actual_path), "state": state}
+        checked_binaries[name] = {
+            "expected_sha256": expected,
+            "actual_sha256": actual,
+            "path": str(actual_path),
+            "service": service,
+            "runtime_exec_path": runtime_exec_path,
+            "state": state,
+        }
+    installed_env_sha256 = sha256_file(ENV_PATH)
+    expected_env_sha256 = str(manifest.get("env_sha256", "")) if isinstance(manifest, dict) else ""
+    if not installed_env_sha256 or installed_env_sha256 != expected_env_sha256:
+        mismatches.append("deployment.env")
+
+    release_tree = release_tree_snapshot()
+    if release_tree["state"] != "ok":
+        mismatches.append("release-tree")
+
+    role = str(manifest.get("role", "")) if isinstance(manifest, dict) else ""
+    operator: dict[str, Any] = {"state": "not-applicable"}
+    if role == "ru-gateway":
+        operator_manifest = read_json(OPERATOR_MANIFEST_PATH, {})
+        actual_hashes = {
+            "base_sha256": sha256_file(ROOT / "sing-box.base.json"),
+            "rules_sha256": sha256_file(ADMIN_RULES_PATH),
+            "effective_config_sha256": sha256_file(SINGBOX_CONFIG_PATH),
+        }
+        operator_mismatches = [
+            name
+            for name, actual in actual_hashes.items()
+            if not actual or actual != str(operator_manifest.get(name, ""))
+        ]
+        operator = {
+            "state": "ok" if operator_manifest and not operator_mismatches else "mutated" if operator_manifest else "missing",
+            "generation": str(operator_manifest.get("generation", "")),
+            "mismatches": operator_mismatches,
+            "actual": actual_hashes,
+        }
+        if operator["state"] != "ok":
+            mismatches.append("operator-state")
+    elif role == "foreign-exit":
+        expected_config = str(manifest.get("config_sha256", ""))
+        active_config = sha256_file(SINGBOX_CONFIG_PATH)
+        operator = {
+            "state": "ok" if expected_config and active_config == expected_config else "mutated",
+            "effective_config_sha256": active_config,
+        }
+        if operator["state"] != "ok":
+            mismatches.append("effective-config")
     manifest_valid = bool(manifest) and int(manifest.get("schema_version", 0)) >= 2
     return {
         "manifest": manifest,
         "files": checked,
         "assets": checked_assets,
         "binaries": checked_binaries,
+        "release_tree": release_tree,
+        "operator": operator,
         "mismatches": mismatches,
         "drift": "none" if manifest_valid and not mismatches else "server-mutated" if mismatches else "unknown",
-        "installed_env_sha256": sha256_file(ENV_PATH),
+        "installed_env_sha256": installed_env_sha256,
+        "expected_env_sha256": expected_env_sha256,
     }
 
 
@@ -1311,51 +1688,54 @@ def transport_selection_snapshot(config: dict[str, Any], env: dict[str, str]) ->
     }
 
 
-def transport_candidate_probe(controller: str, tag: str) -> dict[str, Any]:
-    query = urllib.parse.urlencode({"url": TRANSPORT_HEALTHCHECK_URL, "timeout": TRANSPORT_PROBE_TIMEOUT_MS})
-    path = f"/proxies/{urllib.parse.quote(tag, safe='')}/delay?{query}"
+def transport_candidate_probe(_controller: str, tag: str, *, timeout_ms: int = TRANSPORT_PROBE_TIMEOUT_MS) -> dict[str, Any]:
     started = time.monotonic()
-    try:
-        payload = clash_api_json(controller, path, timeout=TRANSPORT_PROBE_TIMEOUT_MS / 1000 + 1)
-        delay = int(payload.get("delay", 0) or 0)
-        if delay <= 0:
-            raise ValueError("delay result is missing")
-        return {"checked": True, "ok": True, "attempts": 1, "delay_ms": delay, "error": ""}
-    except (OSError, ValueError, urllib.error.URLError) as exc:
+    port = TRANSPORT_PROBE_PORTS.get(tag)
+    if port is None:
+        return {"checked": True, "ok": False, "attempts": 1, "delay_ms": 0, "error": "unknown transport candidate"}
+    timeout_seconds = timeout_ms / 1000
+    result = run(
+        [
+            "curl",
+            "-4fsS",
+            "--proxy",
+            f"socks5://127.0.0.1:{port}",
+            "--connect-timeout",
+            str(timeout_seconds),
+            "--max-time",
+            str(timeout_seconds),
+            "--output",
+            os.devnull,
+            "--write-out",
+            "%{time_total}",
+            TRANSPORT_HEALTHCHECK_URL,
+        ],
+        timeout=2,
+    )
+    if result.returncode != 0:
         return {
             "checked": True,
             "ok": False,
             "attempts": 1,
             "delay_ms": 0,
             "elapsed_ms": round((time.monotonic() - started) * 1000),
-            "error": str(exc)[:240],
+            "error": (result.stderr.strip() or f"curl exit {result.returncode}")[:240],
         }
-
-
-def probe_transport_candidates(controller: str) -> dict[str, dict[str, Any]]:
-    with ThreadPoolExecutor(max_workers=len(TRANSPORT_CANDIDATE_TAGS)) as executor:
-        results = executor.map(lambda tag: transport_candidate_probe(controller, tag), TRANSPORT_CANDIDATE_TAGS)
-    return dict(zip(TRANSPORT_CANDIDATE_TAGS, results))
-
-
-def merge_probe_attempts(*attempts: dict[str, Any]) -> dict[str, Any]:
-    successful = next((probe for probe in reversed(attempts) if probe.get("ok") is True), None)
-    latest = successful or attempts[-1]
-    return {
-        "checked": any(probe.get("checked") is True for probe in attempts),
-        "ok": successful is not None,
-        "attempts": sum(int(probe.get("attempts", 0) or 0) for probe in attempts),
-        "delay_ms": int(latest.get("delay_ms", 0) or 0),
-        "error": "" if successful is not None else str(latest.get("error", ""))[:240],
-    }
+    try:
+        delay_ms = max(1, round(float(result.stdout.strip()) * 1000))
+    except ValueError:
+        return {"checked": True, "ok": False, "attempts": 1, "delay_ms": 0, "error": "curl timing is invalid"}
+    return {"checked": True, "ok": True, "attempts": 1, "delay_ms": delay_ms, "error": ""}
 
 
 def collect_transport_probes(controller: str, selected: str) -> dict[str, dict[str, Any]]:
-    probes = probe_transport_candidates(controller)
-    selected_probe = probes.get(selected, {})
-    if selected in TRANSPORT_CANDIDATE_TAGS and selected_probe.get("ok") is not True:
-        confirmation = transport_candidate_probe(controller, selected)
-        probes[selected] = merge_probe_attempts(selected_probe, confirmation)
+    probes = {tag: {"checked": False, "ok": False, "attempts": 0} for tag in TRANSPORT_CANDIDATE_TAGS}
+    if selected not in probes:
+        return probes
+    probes[selected] = transport_candidate_probe(controller, selected, timeout_ms=TRANSPORT_SELECTED_PROBE_TIMEOUT_MS)
+    if probes[selected].get("ok") is not True:
+        alternate = next(tag for tag in TRANSPORT_CANDIDATE_TAGS if tag != selected)
+        probes[alternate] = transport_candidate_probe(controller, alternate, timeout_ms=TRANSPORT_PROBE_TIMEOUT_MS)
     return probes
 
 
@@ -1389,6 +1769,49 @@ def close_transport_associations(controller: str, tag: str) -> int:
     return closed
 
 
+def prove_wireguard_overlay(env: dict[str, str]) -> None:
+    interface = env.get("WG_INTERFACE", "wg0")
+    peer = env.get("WG_FOREIGN_PUBLIC_KEY", "")
+    target = str(env.get("WG_FOREIGN_ADDRESS", "")).split("/", 1)[0]
+    if not target or not peer:
+        raise RuntimeError("foreign WireGuard proof identity is missing")
+
+    def transfer() -> tuple[int, int]:
+        result = run(["wg", "show", interface, "transfer"], timeout=3)
+        if result.returncode != 0:
+            raise RuntimeError((result.stderr.strip() or "WireGuard transfer counters are unavailable")[:240])
+        for line in result.stdout.splitlines():
+            fields = line.split()
+            if len(fields) >= 3 and fields[0] == peer:
+                return int(fields[1]), int(fields[2])
+        raise RuntimeError("WireGuard peer transfer counters are missing")
+
+    before_rx, before_tx = transfer()
+    result = run(["ping", "-n", "-M", "do", "-s", "1280", "-I", interface, "-c", "2", "-W", "2", target], timeout=5)
+    if result.returncode != 0:
+        raise RuntimeError((result.stderr.strip() or "new WireGuard overlay path failed its MTU proof")[:240])
+    after_rx, after_tx = transfer()
+    if after_rx <= before_rx or after_tx <= before_tx:
+        raise RuntimeError("new WireGuard overlay path produced no bidirectional transfer delta")
+    router_port = str(env.get("RU_ROUTER_LISTEN_PORT", "2080"))
+    http = run(
+        [
+            "curl",
+            "-4fsS",
+            "--proxy",
+            f"socks5h://127.0.0.1:{router_port}",
+            "--connect-timeout",
+            "2",
+            "--max-time",
+            "5",
+            TRANSPORT_HEALTHCHECK_URL,
+        ],
+        timeout=6,
+    )
+    if http.returncode != 0 or "ip=" not in http.stdout:
+        raise RuntimeError((http.stderr.strip() or "new WireGuard overlay path failed the router HTTP proof")[:240])
+
+
 def select_transport(env: dict[str, str], controller: str, tag: str) -> int:
     if tag not in TRANSPORT_RELAY_PORTS:
         raise ValueError(f"unknown transport candidate: {tag}")
@@ -1399,20 +1822,70 @@ def select_transport(env: dict[str, str], controller: str, tag: str) -> int:
     old_tag = str(current.get("selected", ""))
     if old_tag == tag:
         return 0
-    closed = 0
-    for _attempt in range(2):
-        if old_tag in TRANSPORT_CANDIDATE_TAGS:
-            closed += close_transport_associations(controller, old_tag)
-        result = run(["wg", "set", interface, "peer", peer, "endpoint", endpoint], timeout=3)
+    old_endpoint = str(current.get("endpoint", ""))
+    if old_tag not in TRANSPORT_CANDIDATE_TAGS or not old_endpoint:
+        raise RuntimeError("current WireGuard overlay endpoint is not recoverable")
+
+    def set_endpoint(value: str) -> None:
+        result = run(["wg", "set", interface, "peer", peer, "endpoint", value], timeout=3)
         if result.returncode != 0:
             raise RuntimeError((result.stderr.strip() or "WireGuard endpoint update failed")[:240])
+
+    closed = 0
+    try:
+        closed = close_transport_associations(controller, old_tag)
+        set_endpoint(endpoint)
         time.sleep(0.1)
-        if wireguard_overlay_selection(env).get("selected") == tag:
-            return closed
-    raise RuntimeError("WireGuard endpoint update was reverted by a stale relay")
+        if wireguard_overlay_selection(env).get("selected") != tag:
+            raise RuntimeError("new WireGuard endpoint did not become active")
+        prove_wireguard_overlay(env)
+        return closed
+    except (OSError, RuntimeError, ValueError, urllib.error.URLError) as exc:
+        rollback_errors: list[str] = []
+        try:
+            close_transport_associations(controller, tag)
+        except (OSError, RuntimeError, ValueError, urllib.error.URLError) as rollback_exc:
+            rollback_errors.append(f"target association cleanup failed: {rollback_exc}")
+        try:
+            set_endpoint(old_endpoint)
+        except (OSError, RuntimeError) as rollback_exc:
+            rollback_errors.append(f"endpoint restore failed: {rollback_exc}")
+        else:
+            time.sleep(0.1)
+            try:
+                if wireguard_overlay_selection(env).get("selected") != old_tag:
+                    rollback_errors.append("previous endpoint did not become active")
+                else:
+                    prove_wireguard_overlay(env)
+            except (OSError, RuntimeError, ValueError, urllib.error.URLError) as rollback_exc:
+                rollback_errors.append(f"restored overlay proof failed: {rollback_exc}")
+        if rollback_errors:
+            raise RuntimeError(f"{exc}; rollback failed: {'; '.join(rollback_errors)}") from exc
+        raise RuntimeError(f"{exc}; previous WireGuard endpoint restored and verified") from exc
 
 
 def reconcile_interserver_transport() -> dict[str, Any]:
+    install_lock = acquire_install_read_lock()
+    if install_lock is None:
+        previous = read_json(TRANSPORT_STATE_PATH, {})
+        payload = {
+            **(previous if isinstance(previous, dict) else {}),
+            "schema_version": TRANSPORT_STATE_SCHEMA_VERSION,
+            "updated_at": utc_now(),
+            "state": "maintenance",
+            "changed": False,
+            "would_switch": False,
+            "reason": "install transaction is active",
+        }
+        write_json_atomic(TRANSPORT_STATE_PATH, payload)
+        return payload
+    try:
+        return _reconcile_interserver_transport_unlocked()
+    finally:
+        release_install_read_lock(install_lock)
+
+
+def _reconcile_interserver_transport_unlocked() -> dict[str, Any]:
     TRANSPORT_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
     with TRANSPORT_LOCK_PATH.open("w", encoding="utf-8") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -1500,7 +1973,8 @@ def watch_interserver_transport() -> None:
         if signature != previous_signature:
             print(json.dumps(payload, ensure_ascii=False, sort_keys=True), flush=True)
             previous_signature = signature
-        time.sleep(max(0.25, TRANSPORT_PROBE_INTERVAL_SECONDS - (time.monotonic() - started)))
+        interval = 0.25 if payload.get("state") == "suspect" else TRANSPORT_PROBE_INTERVAL_SECONDS
+        time.sleep(max(0.1, interval - (time.monotonic() - started)))
 
 
 def transport_state_snapshot(path: Path = TRANSPORT_STATE_PATH) -> dict[str, Any]:
@@ -1613,7 +2087,7 @@ def public_front_snapshot(minutes: int, source: str | None = None, *, live_probe
             if origin:
                 source_counts[origin] += 1
     front = tcp_front_snapshot(port)
-    services = {"xray": service_state("vpn-stack-xray.service"), "nftables": service_state("nftables.service")}
+    services = {"xray": service_state("vpn-stack-xray.service"), "nftables": service_state(NFTABLES_SERVICE)}
     observation = front_observation(front)
     front_verdict = public_front_verdict(services["xray"], front)
     probes = run_probes(env, "ru-gateway", "light") if live_probes else {"profile": "none", "ok": None, "requirements": {}}
@@ -1901,8 +2375,7 @@ def failed_requirements(probes: dict[str, Any]) -> list[str]:
 
 
 def release_gate_requirements(requirements: dict[str, bool]) -> dict[str, bool]:
-    optional = EXTERNAL_CAPABILITY_REQUIREMENTS | OPTIONAL_TRANSPORT_REQUIREMENTS
-    return {name: passed for name, passed in requirements.items() if name not in optional}
+    return {name: passed for name, passed in requirements.items() if name not in OPTIONAL_TRANSPORT_REQUIREMENTS}
 
 
 def release_gate_ok(probes: dict[str, Any]) -> bool:
@@ -1952,9 +2425,19 @@ def run_probes(env: dict[str, str], role: str, profile: str) -> dict[str, Any]:
         "router": router,
     }
     if profile != "acceptance":
-        required_paths = {"foreign_direct": direct} if role != "ru-gateway" else {"ru_direct": direct, "router": router}
+        if role == "ru-gateway":
+            required_paths = {"foreign_domains_via_router": router}
+            if not all(item["ok"] for item in router):
+                via_wg = probe_url_matrix(
+                    [(url, {}) for url in required_targets],
+                    {"via_wg": {"interface": wg_interface}},
+                )["via_wg"]
+                result["via_wg"] = via_wg
+                required_paths["foreign_domains_via_wg"] = via_wg
+        else:
+            required_paths = {"foreign_direct": direct}
         result["requirements"] = {name: all(item["ok"] for item in items) for name, items in required_paths.items()}
-        required_names = {"foreign_direct"} if role != "ru-gateway" else {"ru_direct", "router"}
+        required_names = {"foreign_direct"} if role != "ru-gateway" else {"foreign_domains_via_router"}
         result["ok"] = all(result["requirements"].get(name) is True for name in required_names)
         return result
     ipv4_literal_url = "https://1.1.1.1/cdn-cgi/trace"
@@ -1969,10 +2452,17 @@ def run_probes(env: dict[str, str], role: str, profile: str) -> dict[str, Any]:
     literal_direct = literal_matrix["direct"]
     literal_wg = literal_matrix.get("via_wg", [])
     literal_router = literal_matrix.get("router", [])
-    identities: dict[str, dict[str, Any]] = {"direct": probe_identity()}
+    def expected_identity(probe: dict[str, Any], expected_ip: str) -> dict[str, Any]:
+        observed_ip = str(probe.get("egress_ip", "")).strip()
+        matches = bool(expected_ip) and observed_ip == expected_ip
+        return {**probe, "expected_ip": expected_ip, "identity_match": matches, "ok": probe.get("ok") is True and matches}
+
+    direct_expected = env.get("RU_PUBLIC_IP", "") if role == "ru-gateway" else env.get("FOREIGN_PUBLIC_IP", "")
+    identities: dict[str, dict[str, Any]] = {"direct": expected_identity(probe_identity(), direct_expected)}
     if role == "ru-gateway":
-        identities["via_wg"] = probe_identity(interface=wg_interface)
-        identities["router"] = probe_identity(proxy="socks5h://127.0.0.1:2080")
+        foreign_ip = env.get("FOREIGN_PUBLIC_IP", "")
+        identities["via_wg"] = expected_identity(probe_identity(interface=wg_interface), foreign_ip)
+        identities["router"] = expected_identity(probe_identity(proxy="socks5h://127.0.0.1:2080"), foreign_ip)
     private_reject = probe_private_reject("socks5h://127.0.0.1:2080") if role == "ru-gateway" else {"ok": True, "not_applicable": True}
     if role == "ru-gateway":
         hysteria_candidate = transport_candidate_probe(HY2_CLASH_API_LISTEN, TRANSPORT_HY2_TAG)
@@ -2039,6 +2529,8 @@ def run_confirmed_probes(env: dict[str, str], role: str, profile: str) -> dict[s
 
 def maintenance_snapshot() -> dict[str, Any]:
     result = run(["apt", "list", "--upgradable"], timeout=20)
+    if result.returncode != 0:
+        return {"collector_error": (result.stderr.strip() or "apt list failed")[:240]}
     lines = [line for line in result.stdout.splitlines() if "/" in line and not line.startswith("Listing")]
     security = [line for line in lines if "security" in line.lower()]
     os_release = os_release_fields()
@@ -2226,7 +2718,7 @@ def probe_path_ok(probes: dict[str, Any], *requirement_names: str) -> bool:
     return any(probe_requirement(probes, name) for name in requirement_names)
 
 
-def snapshot(*, live_probes: bool = False, profile: str = "light", full_logs: bool = True, include_maintenance: bool = True) -> dict[str, Any]:
+def collect_runtime_facts(*, live_probes: bool = False, profile: str = "light", full_logs: bool = True, include_maintenance: bool = True) -> dict[str, Any]:
     env = parse_env()
     manifest_data = manifest_snapshot()
     manifest = manifest_data.get("manifest", {})
@@ -2236,7 +2728,7 @@ def snapshot(*, live_probes: bool = False, profile: str = "light", full_logs: bo
     port = int(env.get("RU_LISTEN_PORT", "443") or 443)
     services = {
         "wireguard": service_state(f"wg-quick@{wg_interface}.service"),
-        "nftables": service_state("nftables.service"),
+        "nftables": service_state(NFTABLES_SERVICE),
         "sing-box": service_state("sing-box.service"),
         "resolver": service_state("systemd-resolved.service"),
         "xray": service_state("vpn-stack-xray.service"),
@@ -2248,7 +2740,7 @@ def snapshot(*, live_probes: bool = False, profile: str = "light", full_logs: bo
     if not full_logs and fresh_window_minutes > 5:
         fresh_since, fresh_window_minutes = "5 minutes ago", 5
     maintenance = maintenance_snapshot() if include_maintenance else {}
-    logs, fresh_logs = summarize_problem_windows(full_logs=full_logs, fresh_since=fresh_since)
+    logs, fresh_logs, logs_collector_error = summarize_problem_windows(full_logs=full_logs, fresh_since=fresh_since)
     front = tcp_front_snapshot(port) if role == "ru-gateway" else {}
     probes = run_confirmed_probes(env, role, profile) if live_probes else {"profile": "none", "ok": None}
     transport = {"interserver": interserver_transport_snapshot(role, env)}
@@ -2299,8 +2791,9 @@ def snapshot(*, live_probes: bool = False, profile: str = "light", full_logs: bo
     if role == "ru-gateway" and not interserver.get("selection", {}).get("available"):
         reasons.append("interserver_overlay_endpoint=unavailable")
     adaptive_state = interserver.get("adaptive_state", {})
-    if role == "ru-gateway" and (adaptive_state.get("state") == "failed" or adaptive_state.get("fresh") is not True):
-        reasons.append(f"interserver_adaptation={adaptive_state.get('reason') or 'failed'}")
+    adaptation_failure, adaptation_degradation = classify_interserver_adaptation(adaptive_state)
+    if role == "ru-gateway" and adaptation_failure:
+        reasons.append(adaptation_failure)
     capability_failures = [name for name in failed_requirements(probes) if name in EXTERNAL_CAPABILITY_REQUIREMENTS] if live_probes else []
     transport_failures = [name for name in failed_requirements(probes) if name in OPTIONAL_TRANSPORT_REQUIREMENTS] if live_probes else []
     server_path = "failed" if reasons else "verified" if live_probes else "inconclusive"
@@ -2318,8 +2811,8 @@ def snapshot(*, live_probes: bool = False, profile: str = "light", full_logs: bo
         degradations.append(f"public_front={client_observation}")
     if transport_failures:
         degradations.append(f"transport_capability_failed:{','.join(transport_failures)}")
-    if role == "ru-gateway" and adaptive_state.get("state") in {"degraded", "recovering", "suspect"}:
-        degradations.append(f"interserver_adaptation={adaptive_state.get('state')}")
+    if role == "ru-gateway" and adaptation_degradation:
+        degradations.append(adaptation_degradation)
     if host_integrity in {"degraded", "inconclusive"}:
         degradations.append(f"host_integrity={host_integrity}:{root_filesystem.get('reason') or 'unknown'}")
     selected_transport = str(interserver.get("selection", {}).get("selected", ""))
@@ -2368,7 +2861,11 @@ def snapshot(*, live_probes: bool = False, profile: str = "light", full_logs: bo
         "front": front,
         "transport": transport,
         "probes": probes,
-        "logs": {"fresh": {"since": fresh_since, "window_minutes": fresh_window_minutes, **fresh_logs}, "windows_minutes": logs},
+        "logs": {
+            "collector_error": logs_collector_error,
+            "fresh": {"since": fresh_since, "window_minutes": fresh_window_minutes, **fresh_logs},
+            "windows_minutes": logs,
+        },
         "maintenance": maintenance,
         "redundancy": {
             "egress": {"available": False, "healthy_exits": healthy_exits, "reason": "single foreign egress configured"},
@@ -2381,11 +2878,152 @@ def snapshot(*, live_probes: bool = False, profile: str = "light", full_logs: bo
     }
 
 
+def _diagnostics_log_window(raw: object, *, generated_at: str, since: str) -> LogWindowSnapshot:
+    if not isinstance(raw, Mapping) or not isinstance(raw.get("counts"), Mapping):
+        return LogWindowSnapshot.unavailable("log window was not collected")
+    return LogWindowSnapshot.collected(
+        raw["counts"],
+        observed_at=generated_at,
+        since=since,
+        until=generated_at,
+        top_destinations=raw.get("top_destinations") if isinstance(raw.get("top_destinations"), Mapping) else None,
+        top_sources=raw.get("top_sources") if isinstance(raw.get("top_sources"), Mapping) else None,
+        samples=raw.get("samples") if isinstance(raw.get("samples"), Mapping) else None,
+    )
+
+
+def _collector_state(condition: bool, generated_at: str, message: str) -> CollectorState:
+    return CollectorState.ok(generated_at) if condition else CollectorState.error(message)
+
+
+def diagnostics_snapshot(**snapshot_options: Any) -> dict[str, Any]:
+    facts = collect_runtime_facts(**snapshot_options)
+    generated_at = str(facts["generated_at"])
+    role = str(facts.get("role", ""))
+    live_probes = bool(snapshot_options.get("live_probes", False))
+    full_logs = bool(snapshot_options.get("full_logs", True))
+    include_maintenance = bool(snapshot_options.get("include_maintenance", True))
+    logs = facts.get("logs", {})
+    minute_windows = logs.get("windows_minutes", {}) if isinstance(logs, Mapping) else {}
+    fresh = logs.get("fresh", {}) if isinstance(logs, Mapping) else {}
+    log_error = str(logs.get("collector_error", "")) if isinstance(logs, Mapping) else "invalid logs section"
+    services = facts.get("services", {}) if isinstance(facts.get("services"), Mapping) else {}
+    artifacts = facts.get("artifacts", {}) if isinstance(facts.get("artifacts"), Mapping) else {}
+    wireguard = facts.get("wireguard", {}) if isinstance(facts.get("wireguard"), Mapping) else {}
+    probes = facts.get("probes", {}) if isinstance(facts.get("probes"), Mapping) else {}
+    storage = facts.get("storage", {}) if isinstance(facts.get("storage"), Mapping) else {}
+    network = facts.get("network", {}) if isinstance(facts.get("network"), Mapping) else {}
+    front = facts.get("front", {}) if isinstance(facts.get("front"), Mapping) else {}
+    transport = facts.get("transport", {}) if isinstance(facts.get("transport"), Mapping) else {}
+    maintenance = facts.get("maintenance", {}) if isinstance(facts.get("maintenance"), Mapping) else {}
+    collectors = {
+        "services": _collector_state(bool(services) and "unknown" not in services.values(), generated_at, "service state is unavailable"),
+        "artifacts": _collector_state(
+            isinstance(artifacts.get("manifest"), Mapping) and bool(artifacts.get("manifest")),
+            generated_at,
+            "render manifest is unavailable",
+        ),
+        "wireguard": _collector_state(bool(wireguard.get("interface")) and wireguard.get("state") in {"up", "down"}, generated_at, "WireGuard state is unavailable"),
+        "route_probes": (
+            _collector_state(probes.get("profile") not in {None, "none"}, generated_at, "live route probes were not collected")
+            if live_probes
+            else CollectorState.skipped("live route probes were not requested")
+        ),
+        "logs": _collector_state(not log_error, generated_at, log_error or "journal collection failed"),
+        "storage": _collector_state(isinstance(storage.get("root_filesystem"), Mapping) and bool(storage.get("root_filesystem")), generated_at, "root filesystem state is unavailable"),
+        "network": _collector_state(
+            all(isinstance(network.get(key), Mapping) and bool(network.get(key)) for key in ("tcp_adaptation", "resolver", "conntrack")),
+            generated_at,
+            "network state is incomplete",
+        ),
+        "front": _collector_state(role != "ru-gateway" or "listening" in front, generated_at, "public front state is unavailable"),
+        "transport": _collector_state(isinstance(transport.get("interserver"), Mapping) and bool(transport.get("interserver")), generated_at, "interserver transport state is unavailable"),
+        "maintenance": (
+            _collector_state(bool(maintenance) and not maintenance.get("collector_error"), generated_at, str(maintenance.get("collector_error") or "maintenance state was not collected"))
+            if include_maintenance
+            else CollectorState.skipped("maintenance state was not requested")
+        ),
+    }
+    if set(collectors) != set(COLLECTOR_NAMES):
+        raise RuntimeError("diagnostics collectors do not match the schema")
+    if log_error:
+        log_windows = {
+            name: LogWindowSnapshot.unavailable(log_error)
+            for name in ("5m", "30m", "24h", "since_release")
+        }
+    else:
+        release = facts.get("release", {}) if isinstance(facts.get("release"), Mapping) else {}
+        release_installed_at = str(release.get("installed_at", ""))
+        since_release = (
+            _diagnostics_log_window(fresh, generated_at=generated_at, since=release_installed_at)
+            if release_installed_at and str(fresh.get("since", "")) == release_installed_at
+            else LogWindowSnapshot.skipped("complete since-release log window was not requested")
+            if not full_logs
+            else LogWindowSnapshot.unavailable("complete since-release log window is unavailable")
+        )
+        log_windows = {
+            "5m": _diagnostics_log_window(minute_windows.get("5"), generated_at=generated_at, since="5 minutes ago"),
+            "30m": _diagnostics_log_window(minute_windows.get("30"), generated_at=generated_at, since="30 minutes ago") if full_logs else LogWindowSnapshot.skipped("30m window was not requested"),
+            "24h": _diagnostics_log_window(minute_windows.get("1440"), generated_at=generated_at, since="1440 minutes ago") if full_logs else LogWindowSnapshot.skipped("24h window was not requested"),
+            "since_release": since_release,
+        }
+    artifact_files = artifacts.get("files", {}) if isinstance(artifacts, Mapping) else {}
+    sing_box = artifact_files.get("sing-box.json", {}) if isinstance(artifact_files, Mapping) else {}
+    verdicts = facts.get("verdicts", {}) if isinstance(facts.get("verdicts"), Mapping) else {}
+    reasons = verdicts.get("reasons", []) if isinstance(verdicts, Mapping) else []
+    payload = DiagnosticsSnapshot(
+        generated_at=generated_at,
+        deployment=str(facts.get("deployment", "")),
+        role=role,
+        host=dict(facts.get("host", {})),
+        collectors=collectors,
+        log_windows=log_windows,
+        services={str(key): str(value) for key, value in services.items()},
+        installed_env_hash=str(artifacts.get("installed_env_sha256", "")),
+        installed_config_hash=str(sing_box.get("actual_sha256", "")),
+        rendered_config_hash=str(sing_box.get("expected_sha256", "")),
+        render_manifest=dict(artifacts.get("manifest", {})),
+        drift=str(artifacts.get("drift", "unknown")),
+        wg_state=dict(wireguard),
+        route_probes=dict(probes),
+        verdict=str(verdicts.get("overall", "inconclusive")),
+        reasons=[str(reason) for reason in reasons],
+        release=dict(facts.get("release", {})),
+        artifacts=dict(artifacts),
+        storage=dict(storage),
+        network=dict(network),
+        front=dict(front),
+        transport=dict(transport),
+        maintenance=dict(maintenance),
+        redundancy=dict(facts.get("redundancy", {})),
+        component_verdicts={str(key): str(value) for key, value in verdicts.items() if key not in {"overall", "reasons"}},
+    )
+    return payload.to_dict()
+
+
 def health() -> dict[str, Any]:
+    install_lock = acquire_install_read_lock()
+    if install_lock is None:
+        previous = read_json(HEALTH_STATE_PATH, {})
+        return {
+            **(previous if isinstance(previous, dict) else {}),
+            "schema_version": SCHEMA_VERSION,
+            "updated_at": utc_now(),
+            "state": "maintenance",
+            "last_action": "none",
+            "maintenance_reason": "install transaction is active",
+        }
+    try:
+        return _health_unlocked()
+    finally:
+        release_install_read_lock(install_lock)
+
+
+def _health_unlocked() -> dict[str, Any]:
     LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
     with LOCK_PATH.open("w", encoding="utf-8") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        current = snapshot(live_probes=True, profile="light", full_logs=False, include_maintenance=False)
+        current = collect_runtime_facts(live_probes=True, profile="light", full_logs=False, include_maintenance=False)
         previous = read_json(HEALTH_STATE_PATH, {})
         observed_at = current.get("generated_at") or utc_now()
         front_interval, front_counters = front_interval_snapshot(
@@ -2408,7 +3046,17 @@ def health() -> dict[str, Any]:
         host_integrity = current["verdicts"].get("host_integrity", "verified")
         host_integrity_failure = host_integrity == "failed"
         hard_failure = server_path_failure or host_integrity_failure
-        failures = int(previous.get("consecutive_failures", 0)) + 1 if hard_failure else 0
+        hard_reasons = [
+            reason
+            for reason, failed in (
+                ("server_path", server_path_failure),
+                ("host_integrity", host_integrity_failure),
+            )
+            if failed
+        ]
+        previous_hard_reasons = previous.get("hard_reasons", [])
+        same_failure = hard_failure and hard_reasons == previous_hard_reasons
+        failures = (int(previous.get("consecutive_failures", 0)) + 1 if same_failure else 1) if hard_failure else 0
         network_counters = {
             "interfaces": current.get("network", {}).get("interfaces", {}),
             "protocol": current.get("network", {}).get("protocol_counters", {}),
@@ -2439,24 +3087,33 @@ def health() -> dict[str, Any]:
         last_front_degradation = front_evidence or previous.get("last_front_degradation", {})
         state = "degraded" if soft_reasons else "healthy"
         action = "none"
-        service_recovery = False
+        recovery_succeeded = False
         postcheck: dict[str, Any] | None = None
+        last_actions = previous.get("last_actions", {})
+        if not isinstance(last_actions, dict):
+            last_actions = {}
         if hard_failure and failures == 1:
             state = "suspect"
         elif hard_failure:
             state = "failed"
-            last_action = int(previous.get("last_action_epoch", 0))
-            if server_path_failure and now_epoch - last_action >= 900:
+            failure_key = ",".join(hard_reasons)
+            last_action = int((last_actions.get(failure_key, {}) or {}).get("epoch", previous.get("last_action_epoch", 0)) or 0)
+            if server_path_failure and not host_integrity_failure and now_epoch - last_action >= 900:
                 action = recover(current)
-                if action != "none":
-                    service_recovery = True
+                recovery_succeeded = recovery_action_succeeded(action)
+                if recovery_succeeded:
                     time.sleep(2)
-                    postcheck = snapshot(live_probes=True, profile="light", full_logs=False, include_maintenance=False)
-                    if postcheck["verdicts"]["server_path"] == "verified":
+                    postcheck = collect_runtime_facts(live_probes=True, profile="light", full_logs=False, include_maintenance=False)
+                    postcheck_hard_reasons = hard_failure_reasons(postcheck)
+                    if not postcheck_hard_reasons:
                         state = "healthy"
                         failures = 0
                     else:
                         state = "recovering"
+                    last_actions = dict(last_actions)
+                    last_actions[failure_key] = {"epoch": now_epoch, "action": action}
+                elif action != "none":
+                    state = "failed"
         if postcheck is not None:
             current["post_recovery"] = postcheck["verdicts"]
         payload = {
@@ -2465,15 +3122,9 @@ def health() -> dict[str, Any]:
             "state": state,
             "consecutive_failures": failures,
             "last_action": action,
-            "last_action_epoch": now_epoch if service_recovery else int(previous.get("last_action_epoch", 0)),
-            "hard_reasons": [
-                reason
-                for reason, failed in (
-                    ("server_path", server_path_failure),
-                    ("host_integrity", host_integrity_failure),
-                )
-                if failed
-            ],
+            "last_action_epoch": now_epoch if recovery_succeeded else int(previous.get("last_action_epoch", 0)),
+            "last_actions": last_actions,
+            "hard_reasons": hard_reasons,
             "probe_failures": failed_requirements((postcheck or current).get("probes", {})),
             "probes": (postcheck or current).get("probes", {}),
             "network_counters": network_counters,
@@ -2500,6 +3151,7 @@ def health_log_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "state": payload.get("state"),
         "consecutive_failures": payload.get("consecutive_failures", 0),
         "last_action": payload.get("last_action", "none"),
+        "maintenance_reason": payload.get("maintenance_reason", ""),
         "hard_reasons": payload.get("hard_reasons", []),
         "probe_failures": payload.get("probe_failures", []),
         "soft_reasons": payload.get("soft_reasons", []),
@@ -2553,22 +3205,45 @@ def network_soft_reasons(deltas: dict[str, Any]) -> list[str]:
     return reasons
 
 
+def hard_failure_reasons(current: dict[str, Any]) -> list[str]:
+    verdicts = current.get("verdicts", {})
+    return [
+        reason
+        for reason, failed in (
+            ("server_path", verdicts.get("server_path") == "failed"),
+            ("host_integrity", verdicts.get("host_integrity") == "failed"),
+        )
+        if failed
+    ]
+
+
+def recovery_action_succeeded(action: str) -> bool:
+    if not action or action == "none":
+        return False
+    results = action.split(";")
+    return all(not result.endswith((":failed", ":invalid-config")) for result in results)
+
+
 def recover(current: dict[str, Any]) -> str:
     services = current.get("services", {})
     interface = str(current.get("wireguard", {}).get("interface", "wg0"))
+    actions: list[str] = []
     for key, unit in (
         ("wireguard", f"wg-quick@{interface}.service"),
-        ("nftables", "nftables.service"),
+        ("nftables", NFTABLES_SERVICE),
         ("resolver", "systemd-resolved.service"),
         ("sing-box", "sing-box.service"),
         ("xray", "vpn-stack-xray.service"),
+        ("transport", "vpn-stack-transport.service"),
     ):
         allowed = {None, "active"}
-        if key == "xray" and current.get("role") == "foreign-exit":
+        if key in {"xray", "transport"} and current.get("role") == "foreign-exit":
             allowed.add("inactive")
         if services.get(key) not in allowed:
             result = run(["systemctl", "restart", unit], timeout=30)
-            return f"restart:{unit}:{'ok' if result.returncode == 0 else 'failed'}"
+            actions.append(f"restart:{unit}:{'ok' if result.returncode == 0 else 'failed'}")
+    if actions:
+        return ";".join(actions)
     artifacts_clean = current.get("artifacts", {}).get("drift") == "none"
     network = current.get("network", {})
     profile_mismatches = set(network.get("profile_mismatches", []))
@@ -2583,11 +3258,10 @@ def recover(current: dict[str, Any]) -> str:
         return f"reload:sysctl:{'ok' if result.returncode == 0 else 'failed'}"
     bypass = network.get("conntrack", {}).get("front_bypass", {})
     if artifacts_clean and current.get("role") == "ru-gateway" and not bypass.get("active"):
-        check = run(["nft", "--check", "--file", "/etc/nftables.conf"], timeout=15)
-        if check.returncode != 0:
-            return "reload:nftables:invalid-config"
-        result = run(["nft", "--file", "/etc/nftables.conf"], timeout=30)
-        return f"reload:nftables:{'ok' if result.returncode == 0 else 'failed'}"
+        if not NFTABLES_CONFIG_PATH.is_file():
+            return "reload:vpn-stack-nftables.service:invalid-config"
+        result = run(["systemctl", "reload", NFTABLES_SERVICE], timeout=30)
+        return f"reload:{NFTABLES_SERVICE}:{'ok' if result.returncode == 0 else 'failed'}"
     if current.get("role") == "ru-gateway":
         probes = current.get("probes", {})
         wireguard_path_ok = probe_path_ok(probes, "via_wg", "foreign_domains_via_wg")
@@ -2613,9 +3287,8 @@ def routes_command(args: argparse.Namespace) -> dict[str, Any]:
         rules = [rule for rule in rules if rule["id"] != args.id]
         if len(rules) == before:
             raise ValueError(f"route id not found: {args.id}")
-    admin_apply.write_json_atomic(admin_apply.RULES_PATH, {"schema_version": 1, "rules": rules})
-    admin_apply.apply_rules()
-    return {"rules": rules, "applied": True}
+    applied = admin_apply.commit_rules(rules)
+    return {"rules": applied, "applied": True}
 
 
 def assets_snapshot() -> dict[str, Any]:
@@ -2639,9 +3312,15 @@ def build_parser() -> argparse.ArgumentParser:
     front = sub.add_parser("front")
     front.add_argument("--since", type=int, default=30)
     front.add_argument("--live-probes", action="store_true")
+    private_reject = sub.add_parser("private-reject-correlate")
+    private_reject.add_argument("--since", required=True)
+    private_reject.add_argument("--inbound", choices=PRIVATE_REJECT_INBOUND_TAGS, required=True)
+    private_reject.add_argument("--target", action="append", required=True)
     sub.add_parser("health")
     sub.add_parser("transport-reconcile")
     sub.add_parser("transport-watch")
+    transport_select = sub.add_parser("transport-select")
+    transport_select.add_argument("--tag", choices=TRANSPORT_CANDIDATE_TAGS, required=True)
     sub.add_parser("network-apply")
     routes = sub.add_parser("routes")
     route_sub = routes.add_subparsers(dest="routes_action", required=True)
@@ -2660,7 +3339,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "snapshot":
-        payload = snapshot(
+        payload = diagnostics_snapshot(
             live_probes=args.live_probes,
             profile=args.profile,
             full_logs=not args.compact,
@@ -2674,6 +3353,8 @@ def main(argv: list[str] | None = None) -> int:
         payload = front_client_snapshot(args.source, args.since)
     elif args.command == "front":
         payload = public_front_snapshot(args.since, live_probes=args.live_probes)
+    elif args.command == "private-reject-correlate":
+        payload = private_reject_correlations(args.since, args.inbound, args.target)
     elif args.command == "health":
         payload = health()
     elif args.command == "transport-reconcile":
@@ -2681,6 +3362,13 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "transport-watch":
         watch_interserver_transport()
         return 0
+    elif args.command == "transport-select":
+        env = parse_env()
+        config = read_json(SINGBOX_CONFIG_PATH, {})
+        controller = str(config.get("experimental", {}).get("clash_api", {}).get("external_controller", ""))
+        if not controller:
+            raise RuntimeError("transport controller is unavailable")
+        payload = {"selected": args.tag, "closed_associations": select_transport(env, controller, args.tag)}
     elif args.command == "network-apply":
         payload = apply_qdisc_profile()
     elif args.command == "routes":

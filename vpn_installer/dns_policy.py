@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+FOREIGN_DNS_RELAY_PORT = 1053
+
 GLOBAL_FOREIGN_DOMAINS = (
     "www.msftconnecttest.com",
     "www.msftncsi.com",

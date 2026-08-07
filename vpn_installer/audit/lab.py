@@ -36,6 +36,9 @@ LAB_IPS = {
     "foreign_wan": "198.51.100.20",
     "ru_lan": "203.0.113.10",
 }
+LAB_STREAM_CHUNK_BYTES = 65_536
+LAB_STREAM_CHUNKS = 120
+LAB_STREAM_BYTES = LAB_STREAM_CHUNK_BYTES * LAB_STREAM_CHUNKS
 
 
 def run(runner: AuditRunner) -> None:
@@ -92,8 +95,8 @@ def build_lab_web_server(name: str) -> str:
                 with open("/opt/requests.log", "a", encoding="utf-8") as log:
                     log.write(f"{{self.path}}\\n")
                 if self.path == "/stream":
-                    chunk = b"x" * 65536
-                    chunks = 80
+                    chunk = b"x" * {LAB_STREAM_CHUNK_BYTES}
+                    chunks = {LAB_STREAM_CHUNKS}
                     self.send_response(200)
                     self.send_header("Content-Type", "application/octet-stream")
                     self.send_header("Content-Length", str(len(chunk) * chunks))
@@ -103,7 +106,7 @@ def build_lab_web_server(name: str) -> str:
                         self.wfile.flush()
                         time.sleep(0.05)
                     return
-                body = f"server={name}\\nsource={{self.client_address[0]}}\\npath={{self.path}}\\n".encode("utf-8")
+                body = f"server={name}\\nsource={{self.client_address[0]}}\\nip={LAB_IPS['foreign_wan']}\\npath={{self.path}}\\n".encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/plain; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
@@ -113,7 +116,8 @@ def build_lab_web_server(name: str) -> str:
             def log_message(self, fmt, *args):
                 return
 
-        with socketserver.TCPServer(("0.0.0.0", 80), Handler) as server:
+        with socketserver.ThreadingTCPServer(("0.0.0.0", 80), Handler) as server:
+            server.daemon_threads = True
             server.serve_forever()
         """
     )
@@ -162,6 +166,7 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
         with runner.docker_container(f"ru-{runner.run_id}", AUDIT_IMAGE, privileged=True, network=front, ip=LAB_IPS["ru"]) as ru_container, runner.docker_container(f"foreign-{runner.run_id}", AUDIT_IMAGE, privileged=True, network=front, ip=LAB_IPS["foreign"]) as foreign_container, runner.docker_container(f"client-{runner.run_id}", AUDIT_IMAGE, privileged=True, network=front, ip=LAB_IPS["client"]) as client_container, runner.docker_container(f"dns-{runner.run_id}", AUDIT_IMAGE, privileged=True, network=front, ip=LAB_IPS["dns"]) as dns_container, runner.docker_container(f"ruweb-{runner.run_id}", AUDIT_IMAGE, privileged=True, network=ru_lan, ip=LAB_IPS["ru_web"]) as ru_web_container, runner.docker_container(f"globalweb-{runner.run_id}", AUDIT_IMAGE, privileged=True, network=global_lan, ip=LAB_IPS["global_web"]) as global_web_container:
             runner.docker_network_connect(ru_lan, ru_container, LAB_IPS["ru_lan"])
             runner.docker_network_connect(global_lan, foreign_container, LAB_IPS["foreign_wan"])
+            runner.docker_exec(foreign_container, f"ip route replace default via {LAB_GLOBAL_GATEWAY} dev eth1")
 
             lab_dir = runner.work_dir / "lab"
             ru_wg = lab_dir / "wg0-ru.conf"
@@ -176,7 +181,8 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
             ru_web = lab_dir / "ru-web.py"
             global_web = lab_dir / "global-web.py"
             geoip_source = lab_dir / "geoip-ru.json"
-            agent_dir = out_dir / "bundle" / "ru-gateway" / "rendered"
+            lab_transport_policy = lab_dir / "interserver_transport.py"
+            agent_dir = out_dir / "preview" / "ru"
             ru_assets.mkdir(parents=True, exist_ok=True)
             shutil.copy2(out_dir / "assets" / "geosite-ru.srs", ru_assets / "geosite-ru.srs")
             shutil.copy2(out_dir / "assets" / "geoip-ru.srs", ru_assets / "geoip-ru.srs")
@@ -191,6 +197,12 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
             write_text(ru_web, build_lab_web_server("ru-web"))
             write_text(global_web, build_lab_web_server("global-web"))
             write_text(geoip_source, json.dumps({"version": 3, "rules": [{"ip_cidr": [LAB_RU_SUBNET]}]}, indent=2) + "\n")
+            transport_source = (agent_dir / "interserver_transport.py").read_text(encoding="utf-8")
+            transport_source = transport_source.replace(
+                'TRANSPORT_HEALTHCHECK_URL = "https://1.1.1.1/cdn-cgi/trace"',
+                f'TRANSPORT_HEALTHCHECK_URL = "http://{LAB_IPS["global_web"]}/health"',
+            )
+            write_text(lab_transport_policy, transport_source)
 
             runner.docker_exec(ru_container, "mkdir -p /opt/agent /etc/vpn-stack /etc/sing-box /var/lib/vpn-stack")
             for container, local, remote in [
@@ -210,8 +222,9 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
             ]:
                 runner.docker_copy(container, local, remote)
 
-            for name in ("vpn-stack-agent.py", "log_classifier.py", "interserver_transport.py", "network_profile.py"):
-                runner.docker_copy(ru_container, agent_dir / name, f"/opt/agent/{name}")
+            for name in ("vpn-stack-agent.py", "diagnostics.py", "log_classifier.py", "interserver_transport.py", "network_profile.py"):
+                source = lab_transport_policy if name == "interserver_transport.py" else agent_dir / name
+                runner.docker_copy(ru_container, source, f"/opt/agent/{name}")
 
             runner.docker_exec(ru_container, "mkdir -p /var/lib/vpn-stack/rules")
             for asset_name in ("geosite-ru.srs", "geoip-ru.srs"):
@@ -220,6 +233,15 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
             runner.docker_exec(dns_container, "nohup dnsmasq --conf-file=/opt/dnsmasq.conf >/opt/dns.log 2>&1 &")
             runner.docker_exec(ru_web_container, "nohup python3 /opt/web.py >/opt/web.log 2>&1 &")
             runner.docker_exec(global_web_container, "nohup python3 /opt/web.py >/opt/web.log 2>&1 &")
+            runner.docker_exec(
+                dns_container,
+                "for i in $(seq 1 50); do grep -q 'started, version' /opt/dns.log && exit 0; sleep 0.1; done; cat /opt/dns.log; exit 1",
+            )
+            for web_container in (ru_web_container, global_web_container):
+                runner.docker_exec(
+                    web_container,
+                    "for i in $(seq 1 50); do curl -fsS --max-time 1 http://127.0.0.1/ready >/dev/null && exit 0; sleep 0.1; done; cat /opt/web.log; exit 1",
+                )
             runner.docker_exec(foreign_container, "sysctl -w net.ipv4.ip_forward=1 net.ipv6.conf.all.forwarding=1 >/dev/null")
             runner.docker_exec(ru_container, "sysctl -w net.ipv4.conf.all.src_valid_mark=1 >/dev/null")
             runner.docker_exec(ru_container, "ip address add 10.0.0.20/32 dev lo && nohup python3 -m http.server 80 --bind 10.0.0.20 >/opt/private-direct-web.log 2>&1 &")
@@ -262,6 +284,16 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
                 ru_container,
                 f"nft add table inet underlay_fault; nft 'add chain inet underlay_fault output {{ type filter hook output priority -10; policy accept; }}'; nft add rule inet underlay_fault output ip daddr {LAB_IPS['foreign']} udp dport {env['WG_PORT']} drop",
             )
+            switch_started = time.monotonic()
+            suspicion = json.loads(
+                runner.docker_exec(ru_container, "python3 /opt/agent/vpn-stack-agent.py transport-reconcile").stdout
+            )
+            if not (
+                suspicion.get("changed") is not True
+                and suspicion.get("selected") != TRANSPORT_HY2_TAG
+                and suspicion.get("state") == "suspect"
+            ):
+                raise AuditFailure(f"Transport agent did not retain the selected path for the first failure cycle: {suspicion}")
             transition = json.loads(
                 runner.docker_exec(ru_container, "python3 /opt/agent/vpn-stack-agent.py transport-reconcile").stdout
             )
@@ -271,18 +303,21 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
                 and transition.get("closed_associations", 0) >= 1
             ):
                 raise AuditFailure(f"Transport agent did not perform the expected failover: {transition}")
+            switch_seconds = time.monotonic() - switch_started
+            if switch_seconds > 4.0:
+                raise AuditFailure(f"Confirmed underlay failover exceeded 4 seconds: {switch_seconds:.3f}s")
             runner.docker_exec(
                 client_container,
                 "for i in $(seq 1 200); do test -s /opt/stream.rc && exit 0; sleep 0.1; done; exit 1",
             )
             stream_result = runner.docker_exec(
                 client_container,
-                'test "$(cat /opt/stream.rc)" = 0 && test "$(stat -c %s /opt/stream.out)" = 5242880',
+                f'test "$(cat /opt/stream.rc)" = 0 && test "$(stat -c %s /opt/stream.out)" = {LAB_STREAM_BYTES}',
             )
             if stream_result.returncode != 0:
                 raise AuditFailure("Existing TCP stream did not survive the underlay switch")
             stream_seconds = float(runner.docker_exec(client_container, "cat /opt/stream.time").stdout.strip())
-            if stream_seconds > 12.0:
+            if stream_seconds > 14.0:
                 raise AuditFailure(f"Underlay switch stalled an existing TCP stream for too long: {stream_seconds:.3f}s")
             request_count = runner.docker_exec(global_web_container, "grep -Fxc /stream /opt/requests.log")
             if request_count.stdout.strip() != "1":
@@ -292,8 +327,10 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
                 continuity_report,
                 json.dumps(
                     {
+                        "suspicion": suspicion,
                         "transition": transition,
-                        "stream_bytes": 5242880,
+                        "switch_seconds": switch_seconds,
+                        "stream_bytes": LAB_STREAM_BYTES,
                         "stream_seconds": stream_seconds,
                         "server_request_count": 1,
                     },

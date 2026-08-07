@@ -23,25 +23,12 @@ class AuditQuickTests(unittest.TestCase):
         self.assertIn("unittest.defaultTestLoader.discover", driver)
         self.assertIn('pattern="test_*.py"', driver)
 
-    def test_quick_render_uses_local_assets_without_network_refresh(self) -> None:
+    def test_quick_render_uses_deterministic_assets_without_network_refresh(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            cache = root / "cache"
             out_dir = root / "out" / "demo"
-            cache.mkdir()
-            cached = {}
-            for name in ("geosite-ru.srs", "geoip-ru.srs"):
-                path = cache / name
-                path.write_bytes(name.encode("ascii"))
-                cached[name] = path
 
-            with (
-                patch(
-                    "vpn_installer.audit.quick.find_cached_asset",
-                    side_effect=lambda name, _target: cached.get(name),
-                ),
-                patch("vpn_installer.audit.quick.render_all_artifacts") as render_all,
-            ):
+            with patch("vpn_installer.audit.quick.render_all_artifacts") as render_all:
                 quick.test_render_all(
                     root / "demo.env",
                     {"FOREIGN_BLOCK_RU": "0"},
@@ -51,7 +38,7 @@ class AuditQuickTests(unittest.TestCase):
 
             self.assertEqual(
                 (out_dir / "assets" / "geosite-ru.srs").read_bytes(),
-                b"geosite-ru.srs",
+                quick.QUICK_ASSET_FIXTURES["geosite-ru.srs"],
             )
             render_all.assert_called_once_with(
                 root / "demo.env",
@@ -59,7 +46,7 @@ class AuditQuickTests(unittest.TestCase):
                 fetch_assets_first=False,
             )
 
-    def test_quick_run_skips_docker_and_bash_dependent_checks_when_missing(self) -> None:
+    def test_quick_run_has_deterministic_non_docker_contract(self) -> None:
         class FakeRunner:
             def __init__(self) -> None:
                 self.records: list[str] = []
@@ -83,12 +70,20 @@ class AuditQuickTests(unittest.TestCase):
                 self.skips.append(name)
 
         fake_runner = FakeRunner()
-        with patch("vpn_installer.audit.quick.shutil.which", side_effect=lambda name: None if name in {"docker", "bash"} else "found"), patch("vpn_installer.audit.quick.load_env_file", return_value={"DEPLOY_NAME": "demo"}):
+        with patch("vpn_installer.audit.quick.docker_readiness", side_effect=AssertionError("quick must not inspect Docker")), patch("vpn_installer.audit.quick.shutil.which", side_effect=AssertionError("quick must not depend on host tools")), patch("vpn_installer.audit.quick.load_env_file", return_value={"DEPLOY_NAME": "demo"}):
             quick.run(fake_runner)
-        self.assertIn("quick-unittest", fake_runner.skips)
-        self.assertIn("quick-coverage", fake_runner.skips)
-        self.assertIn("quick-bash-syntax", fake_runner.skips)
-        self.assertIn("quick-linux-launcher-python", fake_runner.skips)
+        self.assertEqual(
+            fake_runner.records,
+            [
+                "quick-py-compile",
+                "quick-install-ux",
+                "quick-render-all",
+                "quick-validate-json",
+                "quick-user-artifacts",
+                "quick-validate-bundle",
+            ],
+        )
+        self.assertEqual(fake_runner.skips, [])
 
     def test_all_mode_keeps_dev_only_checks_enabled(self) -> None:
         class FakeRunner:
@@ -120,10 +115,10 @@ class AuditQuickTests(unittest.TestCase):
         with patch("vpn_installer.audit.quick.shutil.which", return_value="found"), patch("vpn_installer.audit.quick.subprocess.run", return_value=docker_info), patch("vpn_installer.audit.quick.load_env_file", return_value={"DEPLOY_NAME": "demo"}), patch("vpn_installer.audit.quick.test_render_all", return_value={"out_dir": "out/demo"}) as render:
             quick.run(fake_runner)
             self.assertEqual(fake_runner.actions["quick-render-all"](), {"out_dir": "out/demo"})
-        self.assertIn("quick-unittest", fake_runner.skips)
         self.assertIn("quick-coverage", fake_runner.records)
         self.assertIn("quick-xray-reality-interop", fake_runner.records)
         self.assertIn("ensure-audit-image", fake_runner.records)
+        self.assertNotIn("quick-unittest", fake_runner.skips)
         render.assert_called_once_with(
             Path("demo.env"),
             {"DEPLOY_NAME": "demo"},
@@ -174,13 +169,13 @@ class AuditQuickTests(unittest.TestCase):
         self.assertEqual(fake_runner.skips, [])
         render_mock.assert_called_once()
 
-    def test_reality_interop_uses_domain_probe_not_ipv6_connect_to(self) -> None:
+    def test_reality_interop_uses_domain_probe_without_connect_to_override(self) -> None:
         source = inspect.getsource(quick.test_xray_reality_interop)
         self.assertIn('"https://example.com/"', source)
-        self.assertIn('"predefined": {"example.com": ["127.0.0.1"]}', source)
-        self.assertIn('router_config["route"]["default_domain_resolver"] = "interop-hosts"', source)
+        self.assertIn('"predefined": {"example.com": ["127.0.0.1", "::1"]}', source)
+        self.assertIn('router_config["route"]["default_domain_resolver"] = {"server": "interop-hosts"}', source)
+        self.assertIn("2606:2800:220:1:248:1893:25c8:1946", source)
         self.assertNotIn("--connect-to", source)
-        self.assertNotIn("2606:2800:220:1:248:1893:25c8:1946", source)
 
 
 if __name__ == "__main__":

@@ -6,16 +6,167 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
 
 from vpn_installer import server_agent
 from vpn_installer.config import generate_default_env
+from vpn_installer.diagnostics import DiagnosticsSnapshot
 from vpn_installer.log_classifier import classify_line
 from vpn_installer.render import render_ru_singbox
 
 
 class ServerAgentTests(unittest.TestCase):
+    def test_agent_emits_native_diagnostics_v3_end_to_end(self) -> None:
+        generated_at = "2026-08-06T18:00:00+00:00"
+        installed_at = "2026-08-06T17:59:00+00:00"
+        empty_logs = server_agent.summarize_lines([])
+        facts = {
+            "generated_at": generated_at,
+            "deployment": "demo",
+            "role": "ru-gateway",
+            "host": {"hostname": "ru", "login_user": "root", "is_root": True},
+            "release": {"release_id": "release-1", "installed_at": installed_at},
+            "services": {name: "active" for name in ("wireguard", "nftables", "sing-box", "resolver", "xray", "admin", "health_timer", "transport")},
+            "artifacts": {"manifest": {"schema_version": 2, "release_id": "release-1"}, "drift": "none", "files": {"sing-box.json": {"actual_sha256": "a", "expected_sha256": "a"}}},
+            "wireguard": {"interface": "wg0", "state": "up", "peers": []},
+            "probes": {"profile": "acceptance", "ok": True},
+            "storage": {"root_filesystem": {"source": "/dev/vda1", "verdict": "verified"}},
+            "network": {"tcp_adaptation": {"qdisc": "fq"}, "resolver": {"managed_stub": True}, "conntrack": {"count": 1}},
+            "front": {"listening": True},
+            "transport": {"interserver": {"configured": True}},
+            "maintenance": {"upgradable": 0, "security_upgradable": 0, "reboot_required": False},
+            "redundancy": {"egress": {"available": False}},
+            "logs": {
+                "collector_error": "",
+                "windows_minutes": {key: dict(empty_logs) for key in ("5", "30", "1440")},
+                "fresh": {"since": installed_at, "window_minutes": 1, **empty_logs},
+            },
+            "verdicts": {"overall": "verified", "server_path": "verified", "reasons": []},
+        }
+        with patch.object(server_agent, "collect_runtime_facts", return_value=facts):
+            payload = server_agent.diagnostics_snapshot(live_probes=True, full_logs=True, include_maintenance=True)
+
+        snapshot = DiagnosticsSnapshot.from_agent(payload)
+        self.assertEqual(snapshot.schema_version, 3)
+        self.assertEqual(snapshot.collector_status, "ok")
+        self.assertEqual(snapshot.host["login_user"], "root")
+        self.assertEqual(snapshot.log_windows["since_release"].counts["dns_timeout"], 0)
+
+    def test_compact_snapshot_marks_intentional_omissions_as_skipped(self) -> None:
+        generated_at = "2026-08-06T18:00:00+00:00"
+        empty_logs = server_agent.summarize_lines([])
+        facts = {
+            "generated_at": generated_at,
+            "deployment": "demo",
+            "role": "ru-gateway",
+            "host": {},
+            "release": {"installed_at": generated_at},
+            "services": {name: "active" for name in ("wireguard", "nftables", "sing-box", "resolver", "xray")},
+            "artifacts": {"manifest": {"schema_version": 2}, "drift": "none", "files": {}},
+            "wireguard": {"interface": "wg0", "state": "up"},
+            "probes": {"profile": "none", "ok": None},
+            "storage": {"root_filesystem": {"verdict": "verified"}},
+            "network": {"tcp_adaptation": {"qdisc": "fq"}, "resolver": {"managed_stub": True}, "conntrack": {"count": 1}},
+            "front": {"listening": True},
+            "transport": {"interserver": {"configured": True}},
+            "maintenance": {},
+            "redundancy": {},
+            "logs": {
+                "collector_error": "",
+                "windows_minutes": {"5": dict(empty_logs)},
+                "fresh": {"since": generated_at, **empty_logs},
+            },
+            "verdicts": {"overall": "inconclusive", "reasons": []},
+        }
+        with patch.object(server_agent, "collect_runtime_facts", return_value=facts):
+            snapshot = DiagnosticsSnapshot.from_agent(
+                server_agent.diagnostics_snapshot(
+                    live_probes=False,
+                    full_logs=False,
+                    include_maintenance=False,
+                )
+            )
+
+        self.assertEqual(snapshot.collector_status, "skipped")
+        self.assertEqual(snapshot.collectors["route_probes"].status, "skipped")
+        self.assertEqual(snapshot.collectors["maintenance"].status, "skipped")
+        self.assertEqual(snapshot.log_windows["30m"].collector.status, "skipped")
+        self.assertEqual(snapshot.log_windows["24h"].collector.status, "skipped")
+
+    def test_journal_failure_is_not_reported_as_zero_events(self) -> None:
+        failure = subprocess.CompletedProcess(["journalctl"], 1, "", "journal unavailable")
+        with patch.object(server_agent, "run", return_value=failure):
+            windows, fresh, error = server_agent.summarize_problem_windows(full_logs=True, fresh_since="5 minutes ago")
+        self.assertEqual(error, "journal unavailable")
+        self.assertEqual(windows["5"]["counts"]["dns_timeout"], 0)
+        self.assertEqual(fresh["counts"]["dns_timeout"], 0)
+
+        facts = {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "role": "foreign-exit",
+            "release": {},
+            "logs": {"collector_error": error, "windows_minutes": windows, "fresh": fresh},
+        }
+        with patch.object(server_agent, "collect_runtime_facts", return_value=facts):
+            snapshot = DiagnosticsSnapshot.from_agent(server_agent.diagnostics_snapshot())
+        self.assertEqual(snapshot.collectors["logs"].status, "error")
+        self.assertTrue(all(window.counts is None for window in snapshot.log_windows.values()))
+
+    def test_journal_no_matches_is_a_collected_zero_window(self) -> None:
+        no_matches = subprocess.CompletedProcess(["journalctl"], 1, "", "")
+        with patch.object(server_agent, "run", return_value=no_matches):
+            windows, fresh, error = server_agent.summarize_problem_windows(
+                full_logs=True,
+                fresh_since="5 minutes ago",
+            )
+
+        self.assertEqual(error, "")
+        self.assertTrue(all(count == 0 for count in windows["5"]["counts"].values()))
+        self.assertTrue(all(count == 0 for count in fresh["counts"].values()))
+
+    def test_log_collection_covers_release_within_journal_retention(self) -> None:
+        now = 1_786_040_000.0
+        installed_at = datetime.fromtimestamp(now - 7 * 24 * 60 * 60, timezone.utc).isoformat()
+        with patch.object(server_agent.time, "time", return_value=now), patch.object(
+            server_agent, "journal_problem_events", return_value=([], "")
+        ) as journal:
+            server_agent.summarize_problem_windows(full_logs=True, fresh_since=installed_at)
+        journal.assert_called_once_with(7 * 24 * 60)
+
+    def test_journal_json_preserves_unit_identity(self) -> None:
+        records = [
+            {"__REALTIME_TIMESTAMP": "1786040000000000", "_SYSTEMD_UNIT": "sing-box.service", "MESSAGE": "ERROR [42 1s] dns: exchange failed for a.example. IN A: context deadline exceeded"},
+            {"__REALTIME_TIMESTAMP": "1786040001000000", "_SYSTEMD_UNIT": "vpn-stack-xray.service", "MESSAGE": "ERROR [42 1s] connection reset"},
+        ]
+        completed = subprocess.CompletedProcess(["journalctl"], 0, "\n".join(json.dumps(item) for item in records), "")
+        with patch.object(server_agent, "run", return_value=completed):
+            events, error = server_agent.journal_problem_events(5)
+        self.assertEqual(error, "")
+        self.assertIn("[unit=sing-box.service]", events[0][1])
+        summary = server_agent.summarize_lines(message for _timestamp, message in events)
+        self.assertEqual(summary["counts"]["dns_timeout"], 1)
+        self.assertEqual(summary["counts"]["client_reset_eof"], 1)
+
+    def test_journal_json_decodes_binary_ansi_messages(self) -> None:
+        message = (
+            "+0000 2026-08-07 04:13:07 \x1b[36mERROR\x1b[0m "
+            "[\x1b[38;5;51m4252783395\x1b[0m 10s] dns: exchange failed for example.com. IN A: context deadline exceeded"
+        )
+        record = {
+            "__REALTIME_TIMESTAMP": "1786075987103741",
+            "_SYSTEMD_UNIT": "sing-box.service",
+            "MESSAGE": list(message.encode("utf-8")),
+        }
+        completed = subprocess.CompletedProcess(["journalctl"], 0, json.dumps(record), "")
+        with patch.object(server_agent, "run", return_value=completed):
+            events, error = server_agent.journal_problem_events(5)
+
+        self.assertEqual(error, "")
+        self.assertNotIn("\x1b", events[0][1])
+        self.assertEqual(server_agent.summarize_lines(line for _timestamp, line in events)["counts"]["dns_timeout"], 1)
+
     def test_classifier_assigns_timeout_to_one_bucket(self) -> None:
         line = "ERROR dns: exchange failed for www.msftconnecttest.com. IN A: context deadline exceeded"
         classified = classify_line(line)
@@ -49,14 +200,147 @@ class ServerAgentTests(unittest.TestCase):
 
         self.assertFalse(result["ok"])
 
+    def test_private_reject_correlation_requires_clean_ordered_policy_and_exact_events(self) -> None:
+        marker = datetime.now(timezone.utc) - timedelta(seconds=1)
+        event_time = datetime.now(timezone.utc)
+        records = [
+            {
+                "__REALTIME_TIMESTAMP": str(int(event_time.timestamp() * 1_000_000)),
+                "__CURSOR": "cursor-1",
+                "MESSAGE": list(
+                    (
+                        "+0000 2026-08-07 03:54:45 \x1b[36mINFO\x1b[0m "
+                        "[\x1b[38;5;218m3039373591\x1b[0m 0ms] inbound/mixed[router-in]: inbound connection to 10.0.0.1:80"
+                    ).encode("utf-8")
+                ),
+            },
+            {
+                "__REALTIME_TIMESTAMP": str(int(event_time.timestamp() * 1_000_000)),
+                "__CURSOR": "cursor-2",
+                "MESSAGE": list(
+                    (
+                        "+0000 2026-08-07 03:54:46 \x1b[36mINFO\x1b[0m "
+                        "[\x1b[38;5;71m3886298263\x1b[0m 0ms] inbound/mixed[router-in]: inbound connection to 172.19.0.2:853"
+                    ).encode("utf-8")
+                ),
+            },
+            {
+                "__REALTIME_TIMESTAMP": str(int(event_time.timestamp() * 1_000_000)),
+                "__CURSOR": "wrong-inbound",
+                "MESSAGE": "+0000 2026-08-07 03:54:47 INFO [999999999 0ms] inbound/hysteria2[public-hy2-in]: inbound connection to 10.0.0.1:80",
+            },
+        ]
+        journal = subprocess.CompletedProcess(
+            ["journalctl"],
+            0,
+            "\n".join(json.dumps(record) for record in records),
+            "",
+        )
+        config = {
+            "route": {
+                "rules": [
+                    {"ip_is_private": True, "action": "reject", "method": "default", "no_drop": True},
+                    {"ip_cidr": ["0.0.0.0/0"], "action": "route", "outbound": "to-foreign"},
+                ]
+            }
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "sing-box.json"
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            with (
+                patch.object(server_agent, "SINGBOX_CONFIG_PATH", config_path),
+                patch.object(
+                    server_agent,
+                    "manifest_snapshot",
+                    return_value={"drift": "none", "manifest": {"role": "ru-gateway"}},
+                ),
+                patch.object(server_agent, "run", return_value=journal) as run,
+            ):
+                result = server_agent.private_reject_correlations(
+                    marker.isoformat(),
+                    "router-in",
+                    ["10.0.0.1:80", "172.19.0.2:853"],
+                )
+
+        self.assertEqual(result["verdict"], "verified")
+        self.assertTrue(result["policy"]["verified"])
+        self.assertEqual([item["event_id"] for item in result["targets"]], ["3039373591", "3886298263"])
+        self.assertIn(marker.isoformat(), run.call_args.args[0])
+
+    def test_private_reject_correlation_refuses_dirty_or_unordered_config(self) -> None:
+        marker = datetime.now(timezone.utc).isoformat()
+        config = {
+            "route": {
+                "rules": [
+                    {"ip_cidr": ["0.0.0.0/0"], "action": "route", "outbound": "to-foreign"},
+                    {"ip_is_private": True, "action": "reject", "method": "default", "no_drop": True},
+                ]
+            }
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "sing-box.json"
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            with (
+                patch.object(server_agent, "SINGBOX_CONFIG_PATH", config_path),
+                patch.object(
+                    server_agent,
+                    "manifest_snapshot",
+                    return_value={"drift": "none", "manifest": {"role": "ru-gateway"}},
+                ),
+                patch.object(server_agent, "run") as run,
+            ):
+                result = server_agent.private_reject_correlations(marker, "router-in", ["10.0.0.1:80"])
+
+        self.assertEqual(result["verdict"], "failed")
+        self.assertFalse(result["policy"]["verified"])
+        run.assert_not_called()
+
+    def test_private_reject_correlation_treats_empty_journal_as_inconclusive(self) -> None:
+        config = {
+            "route": {
+                "rules": [
+                    {"ip_is_private": True, "action": "reject", "method": "default", "no_drop": True},
+                    {"ip_cidr": ["0.0.0.0/0"], "action": "route", "outbound": "to-foreign"},
+                ]
+            }
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "sing-box.json"
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            with (
+                patch.object(server_agent, "SINGBOX_CONFIG_PATH", config_path),
+                patch.object(
+                    server_agent,
+                    "manifest_snapshot",
+                    return_value={"drift": "none", "manifest": {"role": "ru-gateway"}},
+                ),
+                patch.object(
+                    server_agent,
+                    "run",
+                    return_value=subprocess.CompletedProcess(["journalctl"], 1, "", ""),
+                ),
+            ):
+                result = server_agent.private_reject_correlations(
+                    datetime.now(timezone.utc).isoformat(),
+                    "router-in",
+                    ["10.0.0.1:80"],
+                )
+
+        self.assertEqual(result["verdict"], "inconclusive")
+        self.assertIn("not observed", result["reason"])
+
     def test_manifest_snapshot_detects_asset_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             asset = root / "geosite-ru.srs"
             asset.write_bytes(b"good")
+            env_path = root / "env"
+            env_path.write_text("DEPLOY_NAME=demo\n", encoding="utf-8")
             manifest = root / "manifest.json"
-            manifest.write_text(json.dumps({"schema_version": 2, "assets": {"geosite-ru.srs": {"sha256": server_agent.sha256_file(asset), "install_path": str(asset)}}}), encoding="utf-8")
-            with patch.object(server_agent, "MANIFEST_PATH", manifest), patch.object(server_agent, "ENV_PATH", root / "env"):
+            manifest.write_text(json.dumps({"schema_version": 2, "env_sha256": server_agent.sha256_file(env_path), "assets": {"geosite-ru.srs": {"sha256": server_agent.sha256_file(asset), "install_path": str(asset)}}}), encoding="utf-8")
+            with patch.object(server_agent, "MANIFEST_PATH", manifest), patch.object(
+                server_agent, "ENV_PATH", env_path
+            ), patch.object(server_agent, "release_tree_snapshot", return_value={"state": "ok"}):
                 self.assertEqual(server_agent.manifest_snapshot()["drift"], "none")
                 asset.write_bytes(b"changed")
                 self.assertEqual(server_agent.manifest_snapshot()["drift"], "server-mutated")
@@ -76,12 +360,92 @@ class ServerAgentTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            with patch.object(server_agent, "MANIFEST_PATH", manifest), patch.object(server_agent, "ENV_PATH", root / "env"):
+            with patch.object(server_agent, "MANIFEST_PATH", manifest), patch.object(
+                server_agent, "ENV_PATH", root / "env"
+            ), patch.object(server_agent, "release_tree_snapshot", return_value={"state": "ok"}):
                 self.assertEqual(server_agent.manifest_snapshot()["binaries"]["sing-box"]["state"], "ok")
                 binary.write_bytes(b"mutated-binary")
                 snapshot = server_agent.manifest_snapshot()
         self.assertEqual(snapshot["drift"], "server-mutated")
         self.assertEqual(snapshot["binaries"]["sing-box"]["state"], "mutated")
+
+    def test_manifest_snapshot_rejects_binary_not_used_by_service(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            binary = root / "sing-box"
+            binary.write_bytes(b"known-binary")
+            manifest = root / "manifest.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 2,
+                        "binaries": {
+                            "sing-box": {
+                                "path": str(binary),
+                                "sha256": server_agent.sha256_file(binary),
+                                "service": "sing-box.service",
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            service = subprocess.CompletedProcess(
+                ["systemctl"],
+                0,
+                "{ path=/usr/bin/sing-box ; argv[]=/usr/bin/sing-box run ; }\n",
+                "",
+            )
+            with patch.object(server_agent, "MANIFEST_PATH", manifest), patch.object(
+                server_agent, "ENV_PATH", root / "env"
+            ), patch.object(server_agent, "run", return_value=service), patch.object(
+                server_agent, "release_tree_snapshot", return_value={"state": "ok"}
+            ):
+                snapshot = server_agent.manifest_snapshot()
+        self.assertEqual(snapshot["drift"], "server-mutated")
+        self.assertEqual(snapshot["binaries"]["sing-box"]["state"], "wrong-exec")
+
+    def test_release_tree_snapshot_detects_content_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            releases = root / "releases"
+            candidate = releases / "candidate"
+            candidate.mkdir(parents=True)
+            (candidate / "render-manifest.json").write_text('{"schema_version": 2}\n', encoding="utf-8")
+            (candidate / "agent.py").write_text("print('ok')\n", encoding="utf-8")
+            digest = server_agent.release_tree_digest(candidate)
+            release = releases / f"0.18.0-test-{digest[:12]}"
+            candidate.rename(release)
+
+            clean = server_agent.release_tree_snapshot(release, releases, require_symlink=False)
+            cache = release / "__pycache__"
+            cache.mkdir()
+            (cache / "agent.cpython-312.pyc").write_bytes(b"derived-bytecode")
+            cached = server_agent.release_tree_snapshot(release, releases, require_symlink=False)
+            (release / "agent.py").write_text("print('mutated')\n", encoding="utf-8")
+            mutated = server_agent.release_tree_snapshot(release, releases, require_symlink=False)
+
+        self.assertEqual(clean["state"], "ok")
+        self.assertEqual(cached["state"], "ok")
+        self.assertEqual(mutated["state"], "mutated")
+
+    def test_manifest_snapshot_rejects_release_tree_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env_path = root / "env"
+            env_path.write_text("DEPLOY_NAME=demo\n", encoding="utf-8")
+            manifest = root / "manifest.json"
+            manifest.write_text(
+                json.dumps({"schema_version": 2, "env_sha256": server_agent.sha256_file(env_path)}),
+                encoding="utf-8",
+            )
+            with patch.object(server_agent, "MANIFEST_PATH", manifest), patch.object(
+                server_agent, "ENV_PATH", env_path
+            ), patch.object(server_agent, "release_tree_snapshot", return_value={"state": "mutated"}):
+                snapshot = server_agent.manifest_snapshot()
+
+        self.assertEqual(snapshot["drift"], "server-mutated")
+        self.assertIn("release-tree", snapshot["mismatches"])
 
     def test_assets_command_only_reports_manifest_bound_state(self) -> None:
         with patch.object(server_agent, "manifest_snapshot", return_value={"drift": "none", "assets": {"geoip-ru.srs": {"state": "ok"}}}):
@@ -181,7 +545,7 @@ class ServerAgentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             state = Path(tmp) / "health.json"
             lock = Path(tmp) / "lock"
-            with patch.object(server_agent, "HEALTH_STATE_PATH", state), patch.object(server_agent, "LOCK_PATH", lock), patch.object(server_agent, "snapshot", return_value=failed) as snapshot_mock, patch.object(server_agent, "recover", return_value="restart:sing-box.service:ok") as recover, patch.object(server_agent.time, "sleep"):
+            with patch.object(server_agent, "HEALTH_STATE_PATH", state), patch.object(server_agent, "LOCK_PATH", lock), patch.object(server_agent, "collect_runtime_facts", return_value=failed) as snapshot_mock, patch.object(server_agent, "recover", return_value="restart:sing-box.service:ok") as recover, patch.object(server_agent.time, "sleep"):
                 first = server_agent.health()
                 second = server_agent.health()
         self.assertEqual(first["state"], "suspect")
@@ -189,6 +553,57 @@ class ServerAgentTests(unittest.TestCase):
         recover.assert_called_once()
         self.assertFalse(snapshot_mock.call_args_list[0].kwargs["full_logs"])
         self.assertFalse(snapshot_mock.call_args_list[0].kwargs["include_maintenance"])
+
+    def test_health_does_not_probe_or_recover_during_install_transaction(self) -> None:
+        previous = {"consecutive_failures": 1, "hard_reasons": ["server_path"]}
+        with (
+            patch.object(server_agent, "acquire_install_read_lock", return_value=None),
+            patch.object(server_agent, "read_json", return_value=previous),
+            patch.object(server_agent, "collect_runtime_facts") as collect,
+            patch.object(server_agent, "recover") as recover,
+        ):
+            result = server_agent.health()
+
+        self.assertEqual(result["state"], "maintenance")
+        self.assertEqual(result["consecutive_failures"], 1)
+        collect.assert_not_called()
+        recover.assert_not_called()
+
+    def test_health_does_not_combine_different_hard_failures(self) -> None:
+        server_failed = {"verdicts": {"server_path": "failed", "host_integrity": "verified"}, "services": {}, "role": "ru-gateway"}
+        host_failed = {"verdicts": {"server_path": "verified", "host_integrity": "failed"}, "services": {}, "role": "ru-gateway"}
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch.object(server_agent, "HEALTH_STATE_PATH", Path(tmp) / "health.json"),
+                patch.object(server_agent, "LOCK_PATH", Path(tmp) / "lock"),
+                patch.object(server_agent, "collect_runtime_facts", side_effect=[server_failed, host_failed]),
+                patch.object(server_agent, "recover") as recover,
+            ):
+                first = server_agent.health()
+                second = server_agent.health()
+
+        self.assertEqual(first["state"], "suspect")
+        self.assertEqual(second["state"], "suspect")
+        self.assertEqual(second["consecutive_failures"], 1)
+        recover.assert_not_called()
+
+    def test_failed_recovery_does_not_start_cooldown(self) -> None:
+        failed = {"verdicts": {"server_path": "failed", "host_integrity": "verified"}, "services": {}, "role": "ru-gateway"}
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch.object(server_agent, "HEALTH_STATE_PATH", Path(tmp) / "health.json"),
+                patch.object(server_agent, "LOCK_PATH", Path(tmp) / "lock"),
+                patch.object(server_agent, "collect_runtime_facts", return_value=failed),
+                patch.object(server_agent, "recover", return_value="restart:sing-box.service:failed") as recover,
+            ):
+                server_agent.health()
+                second = server_agent.health()
+                third = server_agent.health()
+
+        self.assertEqual(second["state"], "failed")
+        self.assertEqual(second["last_action_epoch"], 0)
+        self.assertEqual(third["last_action_epoch"], 0)
+        self.assertEqual(recover.call_count, 2)
 
     def test_health_never_restarts_services_for_filesystem_corruption(self) -> None:
         failed = {
@@ -207,7 +622,7 @@ class ServerAgentTests(unittest.TestCase):
             with (
                 patch.object(server_agent, "HEALTH_STATE_PATH", Path(tmp) / "health.json"),
                 patch.object(server_agent, "LOCK_PATH", Path(tmp) / "lock"),
-                patch.object(server_agent, "snapshot", return_value=failed),
+                patch.object(server_agent, "collect_runtime_facts", return_value=failed),
                 patch.object(server_agent, "recover") as recover,
             ):
                 first = server_agent.health()
@@ -239,7 +654,7 @@ class ServerAgentTests(unittest.TestCase):
             with (
                 patch.object(server_agent, "HEALTH_STATE_PATH", state),
                 patch.object(server_agent, "LOCK_PATH", lock),
-                patch.object(server_agent, "snapshot", side_effect=[healthy(10), healthy(13)]),
+                patch.object(server_agent, "collect_runtime_facts", side_effect=[healthy(10), healthy(13)]),
                 patch.object(server_agent, "recover") as recover,
             ):
                 first = server_agent.health()
@@ -269,7 +684,7 @@ class ServerAgentTests(unittest.TestCase):
             with (
                 patch.object(server_agent, "HEALTH_STATE_PATH", state),
                 patch.object(server_agent, "LOCK_PATH", lock),
-                patch.object(server_agent, "snapshot", return_value=current),
+                patch.object(server_agent, "collect_runtime_facts", return_value=current),
                 patch.object(server_agent, "recover") as recover,
             ):
                 result = server_agent.health()
@@ -394,7 +809,7 @@ class ServerAgentTests(unittest.TestCase):
             with (
                 patch.object(server_agent, "HEALTH_STATE_PATH", Path(tmp) / "health.json"),
                 patch.object(server_agent, "LOCK_PATH", Path(tmp) / "lock"),
-                patch.object(server_agent, "snapshot", return_value=current),
+                patch.object(server_agent, "collect_runtime_facts", return_value=current),
                 patch.object(server_agent, "recover") as recover,
             ):
                 result = server_agent.health()
@@ -458,6 +873,29 @@ class ServerAgentTests(unittest.TestCase):
         self.assertEqual(action, "restart:sing-box.service:ok")
         run_mock.assert_called_once_with(["systemctl", "restart", "sing-box.service"], timeout=30)
 
+    def test_recovery_restarts_all_failed_required_services_including_transport(self) -> None:
+        current = {
+            "role": "ru-gateway",
+            "services": {
+                "wireguard": "inactive",
+                "nftables": "inactive",
+                "resolver": "active",
+                "sing-box": "active",
+                "xray": "active",
+                "transport": "failed",
+            },
+            "wireguard": {"interface": "wg0"},
+        }
+        completed = subprocess.CompletedProcess(["systemctl"], 0, "", "")
+        with patch.object(server_agent, "run", return_value=completed) as run_mock:
+            action = server_agent.recover(current)
+
+        self.assertEqual(
+            action,
+            "restart:wg-quick@wg0.service:ok;restart:vpn-stack-nftables.service:ok;restart:vpn-stack-transport.service:ok",
+        )
+        self.assertEqual(run_mock.call_count, 3)
+
     def test_recovery_reapplies_clean_managed_network_profile(self) -> None:
         current = {
             "role": "ru-gateway",
@@ -492,12 +930,17 @@ class ServerAgentTests(unittest.TestCase):
             "artifacts": {"drift": "none"},
             "network": {"profile_mismatches": [], "conntrack": {"front_bypass": {"active": False}}},
         }
-        completed = subprocess.CompletedProcess(["nft"], 0, "", "")
-        with patch.object(server_agent, "run", side_effect=[completed, completed]) as run_mock:
-            action = server_agent.recover(current)
-        self.assertEqual(action, "reload:nftables:ok")
-        self.assertEqual(run_mock.call_args_list[0].args[0], ["nft", "--check", "--file", "/etc/nftables.conf"])
-        self.assertEqual(run_mock.call_args_list[1].args[0], ["nft", "--file", "/etc/nftables.conf"])
+        completed = subprocess.CompletedProcess(["systemctl"], 0, "", "")
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "nftables.conf"
+            config_path.write_text("table inet vpnstack {}\n", encoding="utf-8")
+            with (
+                patch.object(server_agent, "NFTABLES_CONFIG_PATH", config_path),
+                patch.object(server_agent, "run", return_value=completed) as run_mock,
+            ):
+                action = server_agent.recover(current)
+        self.assertEqual(action, "reload:vpn-stack-nftables.service:ok")
+        run_mock.assert_called_once_with(["systemctl", "reload", "vpn-stack-nftables.service"], timeout=30)
 
     def test_recovery_never_applies_mutated_managed_artifacts(self) -> None:
         current = {
@@ -557,7 +1000,7 @@ class ServerAgentTests(unittest.TestCase):
             patch.object(server_agent, "host_snapshot", return_value={"hostname": "ru-host", "login_user": "root", "is_root": True, "has_sudo": True, "os_id": "ubuntu", "os_version": "24.04", "default_interface": "ens3"}) as host_snapshot,
             patch.object(server_agent, "installed_at_value", return_value="2026-07-15T00:00:00Z"),
         ):
-            snapshot = server_agent.snapshot()
+            snapshot = server_agent.collect_runtime_facts()
         self.assertEqual(snapshot["host"]["login_user"], "root")
         self.assertTrue(snapshot["host"]["is_root"])
         host_snapshot.assert_called_once_with("ens3")
@@ -1469,6 +1912,52 @@ class ServerAgentTests(unittest.TestCase):
         self.assertEqual(selection["candidates"]["interserver-underlay-wg"]["delay_ms"], 310)
         self.assertFalse(selection["candidates"]["interserver-underlay-wg"]["fresh"])
 
+    def test_transport_cycle_probes_alternate_only_after_selected_failure(self) -> None:
+        failed = {"checked": True, "ok": False, "attempts": 1, "error": "timeout"}
+        healthy = {"checked": True, "ok": True, "attempts": 1, "delay_ms": 50}
+        with patch.object(server_agent, "transport_candidate_probe", side_effect=[failed, healthy]) as probe:
+            result = server_agent.collect_transport_probes("127.0.0.1:19090", "interserver-underlay-wg")
+
+        self.assertEqual(probe.call_count, 2)
+        self.assertEqual(result["interserver-underlay-wg"], failed)
+        self.assertEqual(result["interserver-underlay-hy2"], healthy)
+
+        with patch.object(server_agent, "transport_candidate_probe", return_value=healthy) as probe:
+            result = server_agent.collect_transport_probes("127.0.0.1:19090", "interserver-underlay-hy2")
+
+        probe.assert_called_once_with(
+            "127.0.0.1:19090",
+            "interserver-underlay-hy2",
+            timeout_ms=server_agent.TRANSPORT_SELECTED_PROBE_TIMEOUT_MS,
+        )
+        self.assertFalse(result["interserver-underlay-wg"]["checked"])
+
+    def test_transport_reconcile_does_not_switch_during_install_transaction(self) -> None:
+        previous = {"selected": "interserver-underlay-wg", "state": "healthy"}
+        with (
+            patch.object(server_agent, "acquire_install_read_lock", return_value=None),
+            patch.object(server_agent, "read_json", return_value=previous),
+            patch.object(server_agent, "collect_transport_probes") as probes,
+            patch.object(server_agent, "select_transport") as select,
+        ):
+            result = server_agent.reconcile_interserver_transport()
+
+        self.assertEqual(result["state"], "maintenance")
+        self.assertEqual(result["selected"], "interserver-underlay-wg")
+        probes.assert_not_called()
+        select.assert_not_called()
+
+    def test_transport_candidate_probe_uses_path_specific_local_proxy(self) -> None:
+        completed = subprocess.CompletedProcess(["curl"], 0, "0.042", "")
+        with patch.object(server_agent, "run", return_value=completed) as command:
+            result = server_agent.transport_candidate_probe("127.0.0.1:19090", "interserver-underlay-hy2")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["delay_ms"], 42)
+        args = command.call_args.args[0]
+        self.assertIn("socks5://127.0.0.1:19094", args)
+        self.assertIn(server_agent.TRANSPORT_HEALTHCHECK_URL, args)
+
     def test_close_transport_associations_does_not_touch_application_flows(self) -> None:
         payload = {
             "connections": [
@@ -1492,15 +1981,17 @@ class ServerAgentTests(unittest.TestCase):
         self.assertEqual(api.call_args_list[1].kwargs["method"], "DELETE")
 
     def test_select_transport_changes_only_the_overlay_peer_endpoint(self) -> None:
-        env = {"WG_INTERFACE": "wg0", "WG_FOREIGN_PUBLIC_KEY": "peer-key"}
+        env = {"WG_INTERFACE": "wg0", "WG_FOREIGN_PUBLIC_KEY": "peer-key", "WG_FOREIGN_ADDRESS": "10.74.0.2/24"}
         completed = subprocess.CompletedProcess(["wg"], 0, "", "")
         selections = [
-            {"available": True, "selected": "interserver-underlay-wg"},
+            {"available": True, "selected": "interserver-underlay-wg", "endpoint": "127.0.0.1:19091"},
+            {"available": True, "selected": "interserver-underlay-hy2", "endpoint": "127.0.0.1:19092"},
             {"available": True, "selected": "interserver-underlay-hy2"},
         ]
         with (
             patch.object(server_agent, "wireguard_overlay_selection", side_effect=selections),
             patch.object(server_agent, "close_transport_associations", return_value=1) as close,
+            patch.object(server_agent, "prove_wireguard_overlay") as proof,
             patch.object(server_agent, "run", return_value=completed) as command,
             patch.object(server_agent.time, "sleep"),
         ):
@@ -1508,10 +1999,91 @@ class ServerAgentTests(unittest.TestCase):
 
         self.assertEqual(closed, 1)
         close.assert_called_once_with("127.0.0.1:19090", "interserver-underlay-wg")
+        proof.assert_called_once_with(env)
+        self.assertEqual(command.call_count, 1)
         self.assertEqual(
-            command.call_args.args[0],
+            command.call_args_list[-1].args[0],
             ["wg", "set", "wg0", "peer", "peer-key", "endpoint", "127.0.0.1:19092"],
         )
+
+    def test_select_transport_restores_previous_endpoint_on_failed_activation(self) -> None:
+        env = {"WG_INTERFACE": "wg0", "WG_FOREIGN_PUBLIC_KEY": "peer-key", "WG_FOREIGN_ADDRESS": "10.74.0.2/24"}
+        completed = subprocess.CompletedProcess(["wg"], 0, "", "")
+        selections = [
+            {"available": True, "selected": "interserver-underlay-wg", "endpoint": "127.0.0.1:19091"},
+            {"available": True, "selected": "interserver-underlay-wg", "endpoint": "127.0.0.1:19091"},
+            {"available": True, "selected": "interserver-underlay-wg", "endpoint": "127.0.0.1:19091"},
+        ]
+        with (
+            patch.object(server_agent, "wireguard_overlay_selection", side_effect=selections),
+            patch.object(server_agent, "close_transport_associations") as close,
+            patch.object(server_agent, "prove_wireguard_overlay") as proof,
+            patch.object(server_agent, "run", return_value=completed) as command,
+            patch.object(server_agent.time, "sleep"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "previous WireGuard endpoint restored and verified"):
+                server_agent.select_transport(env, "127.0.0.1:19090", "interserver-underlay-hy2")
+
+        self.assertEqual(
+            [call.args[1] for call in close.call_args_list],
+            ["interserver-underlay-wg", "interserver-underlay-hy2"],
+        )
+        proof.assert_called_once_with(env)
+        self.assertEqual(command.call_count, 2)
+        self.assertEqual(command.call_args_list[-1].args[0][-1], "127.0.0.1:19091")
+
+    def test_select_transport_restores_previous_endpoint_when_overlay_proof_fails(self) -> None:
+        env = {"WG_INTERFACE": "wg0", "WG_FOREIGN_PUBLIC_KEY": "peer-key", "WG_FOREIGN_ADDRESS": "10.74.0.2/24"}
+        completed = subprocess.CompletedProcess(["wg"], 0, "", "")
+        selections = [
+            {"available": True, "selected": "interserver-underlay-wg", "endpoint": "127.0.0.1:19091"},
+            {"available": True, "selected": "interserver-underlay-hy2", "endpoint": "127.0.0.1:19092"},
+            {"available": True, "selected": "interserver-underlay-wg", "endpoint": "127.0.0.1:19091"},
+        ]
+        with patch.object(server_agent, "wireguard_overlay_selection", side_effect=selections), patch.object(
+            server_agent, "prove_wireguard_overlay", side_effect=[RuntimeError("proof failed"), None]
+        ), patch.object(server_agent, "close_transport_associations") as close, patch.object(
+            server_agent, "run", return_value=completed
+        ) as command, patch.object(server_agent.time, "sleep"):
+            with self.assertRaisesRegex(RuntimeError, "previous WireGuard endpoint restored and verified"):
+                server_agent.select_transport(env, "127.0.0.1:19090", "interserver-underlay-hy2")
+        self.assertEqual(
+            [call.args[1] for call in close.call_args_list],
+            ["interserver-underlay-wg", "interserver-underlay-hy2"],
+        )
+        self.assertEqual(command.call_args_list[-1].args[0][-1], "127.0.0.1:19091")
+
+    def test_transport_reconcile_persists_maintenance_during_install(self) -> None:
+        previous = {
+            "schema_version": server_agent.TRANSPORT_STATE_SCHEMA_VERSION,
+            "state": "failed",
+            "selected": "interserver-underlay-hy2",
+            "reason": "old transient failure",
+        }
+        with (
+            patch.object(server_agent, "acquire_install_read_lock", return_value=None),
+            patch.object(server_agent, "read_json", return_value=previous),
+            patch.object(server_agent, "write_json_atomic") as write,
+        ):
+            payload = server_agent.reconcile_interserver_transport()
+
+        self.assertEqual(payload["state"], "maintenance")
+        self.assertFalse(payload["would_switch"])
+        write.assert_called_once_with(server_agent.TRANSPORT_STATE_PATH, payload)
+
+    def test_overlay_proof_reuses_dns_independent_transport_target(self) -> None:
+        env = {"WG_INTERFACE": "wg0", "WG_FOREIGN_PUBLIC_KEY": "peer-key", "WG_FOREIGN_ADDRESS": "10.74.0.2/24", "RU_ROUTER_LISTEN_PORT": "2080"}
+        results = [
+            subprocess.CompletedProcess(["wg"], 0, "peer-key 10 20\n", ""),
+            subprocess.CompletedProcess(["ping"], 0, "", ""),
+            subprocess.CompletedProcess(["wg"], 0, "peer-key 30 40\n", ""),
+            subprocess.CompletedProcess(["curl"], 0, "ip=198.51.100.20\n", ""),
+        ]
+        with patch.object(server_agent, "run", side_effect=results) as command:
+            server_agent.prove_wireguard_overlay(env)
+
+        self.assertIn(server_agent.TRANSPORT_HEALTHCHECK_URL, command.call_args_list[-1].args[0])
+        self.assertNotIn("https://www.cloudflare.com/cdn-cgi/trace", command.call_args_list[-1].args[0])
 
     def test_interserver_transport_snapshot_reports_foreign_listener(self) -> None:
         config = {
@@ -1540,6 +2112,7 @@ class ServerAgentTests(unittest.TestCase):
             target = Path(tmp)
             agent = target / "vpn-stack-agent.py"
             shutil.copy2(source_root / "server_agent.py", agent)
+            shutil.copy2(source_root / "diagnostics.py", target / "diagnostics.py")
             shutil.copy2(source_root / "log_classifier.py", target / "log_classifier.py")
             shutil.copy2(source_root / "interserver_transport.py", target / "interserver_transport.py")
             shutil.copy2(source_root / "network_profile.py", target / "network_profile.py")
@@ -1577,13 +2150,16 @@ class ServerAgentTests(unittest.TestCase):
             unavailable_wg_ipv6 = "2606:4700:4700::1111" in url and interface == "wg0"
             return {"target": url, "ok": not (blocked_telegram or unavailable_wg_ipv6)}
 
+        def identity(*, interface: str = "", proxy: str = "") -> dict[str, object]:
+            return {"ok": True, "egress_ip": "198.51.100.20" if interface or proxy else "203.0.113.10"}
+
         with (
             patch.object(server_agent, "probe_url", side_effect=probe),
-            patch.object(server_agent, "probe_identity", return_value={"ok": True}),
+            patch.object(server_agent, "probe_identity", side_effect=identity),
             patch.object(server_agent, "probe_private_reject", return_value={"ok": True}),
             patch.object(server_agent, "transport_candidate_probe", return_value={"ok": True}),
         ):
-            result = server_agent.run_probes({"WG_INTERFACE": "wg0"}, "ru-gateway", "acceptance")
+            result = server_agent.run_probes({"WG_INTERFACE": "wg0", "RU_PUBLIC_IP": "203.0.113.10", "FOREIGN_PUBLIC_IP": "198.51.100.20"}, "ru-gateway", "acceptance")
 
         telegram = next(item for item in result["direct"] if item["target"] == "https://telegram.org/")
         self.assertFalse(telegram["ok"])
@@ -1612,35 +2188,44 @@ class ServerAgentTests(unittest.TestCase):
         self.assertNotIn("via_wg", result["requirements"])
         self.assertFalse(any(call.get("interface") == "wg0" for call in calls))
 
-    def test_external_ipv6_failure_degrades_acceptance_without_rejecting_release(self) -> None:
+    def test_external_ipv6_failure_rejects_release_acceptance(self) -> None:
         def probe(url: str, **_kwargs: object) -> dict[str, object]:
             return {"target": url, "ok": "2606:4700:4700::1111" not in url}
 
+        def identity(*, interface: str = "", proxy: str = "") -> dict[str, object]:
+            return {"ok": True, "egress_ip": "198.51.100.20" if interface or proxy else "203.0.113.10"}
+
         with (
             patch.object(server_agent, "probe_url", side_effect=probe),
-            patch.object(server_agent, "probe_identity", return_value={"ok": True}),
+            patch.object(server_agent, "probe_identity", side_effect=identity),
             patch.object(server_agent, "probe_private_reject", return_value={"ok": True}),
             patch.object(server_agent, "transport_candidate_probe", return_value={"ok": True}),
         ):
-            result = server_agent.run_probes({"WG_INTERFACE": "wg0"}, "ru-gateway", "acceptance")
+            result = server_agent.run_probes({"WG_INTERFACE": "wg0", "RU_PUBLIC_IP": "203.0.113.10", "FOREIGN_PUBLIC_IP": "198.51.100.20"}, "ru-gateway", "acceptance")
 
         self.assertFalse(result["requirements"]["ipv6_literal_via_router"])
         self.assertFalse(result["ok"])
-        self.assertTrue(result["release_gate_ok"])
-        self.assertNotIn("ipv6_literal_via_router", result["release_gate_requirements"])
-        self.assertTrue(server_agent.release_gate_ok(result))
+        self.assertFalse(result["release_gate_ok"])
+        self.assertFalse(result["release_gate_requirements"]["ipv6_literal_via_router"])
+        self.assertFalse(server_agent.release_gate_ok(result))
 
     def test_wireguard_candidate_failure_is_degraded_when_router_path_is_healthy(self) -> None:
         def probe(url: str, *, interface: str = "", proxy: str = "", **_kwargs: object) -> dict[str, object]:
             return {"target": url, "ok": not bool(interface)}
 
+        def identity(*, interface: str = "", proxy: str = "") -> dict[str, object]:
+            return {
+                "ok": not bool(interface),
+                "egress_ip": "198.51.100.20" if interface or proxy else "203.0.113.10",
+            }
+
         with (
             patch.object(server_agent, "probe_url", side_effect=probe),
-            patch.object(server_agent, "probe_identity", side_effect=lambda **kwargs: {"ok": not bool(kwargs.get("interface"))}),
+            patch.object(server_agent, "probe_identity", side_effect=identity),
             patch.object(server_agent, "probe_private_reject", return_value={"ok": True}),
             patch.object(server_agent, "transport_candidate_probe", return_value={"ok": True}),
         ):
-            result = server_agent.run_probes({"WG_INTERFACE": "wg0"}, "ru-gateway", "acceptance")
+            result = server_agent.run_probes({"WG_INTERFACE": "wg0", "RU_PUBLIC_IP": "203.0.113.10", "FOREIGN_PUBLIC_IP": "198.51.100.20"}, "ru-gateway", "acceptance")
 
         self.assertFalse(result["requirements"]["foreign_domains_via_wg"])
         self.assertFalse(result["requirements"]["wireguard_candidate_identity"])
@@ -1648,13 +2233,16 @@ class ServerAgentTests(unittest.TestCase):
         self.assertTrue(result["release_gate_ok"])
 
     def test_hysteria_candidate_failure_is_reported_without_rejecting_a_healthy_router(self) -> None:
+        def identity(*, interface: str = "", proxy: str = "") -> dict[str, object]:
+            return {"ok": True, "egress_ip": "198.51.100.20" if interface or proxy else "203.0.113.10"}
+
         with (
             patch.object(server_agent, "probe_url", return_value={"ok": True}),
-            patch.object(server_agent, "probe_identity", return_value={"ok": True}),
+            patch.object(server_agent, "probe_identity", side_effect=identity),
             patch.object(server_agent, "probe_private_reject", return_value={"ok": True}),
             patch.object(server_agent, "transport_candidate_probe", return_value={"ok": False, "error": "timeout"}),
         ):
-            result = server_agent.run_probes({"WG_INTERFACE": "wg0"}, "ru-gateway", "acceptance")
+            result = server_agent.run_probes({"WG_INTERFACE": "wg0", "RU_PUBLIC_IP": "203.0.113.10", "FOREIGN_PUBLIC_IP": "198.51.100.20"}, "ru-gateway", "acceptance")
 
         self.assertFalse(result["requirements"]["hysteria_candidate_reachable"])
         self.assertFalse(result["ok"])

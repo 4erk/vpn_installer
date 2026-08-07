@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shlex
 import shutil
@@ -40,7 +41,7 @@ from .prompts import (
     select_role_for_menu,
     validate_target_settings,
 )
-from .remote import ensure_remote_privilege, fetch_remote_deployment_env, print_preflight, remote_agent_snapshot, remote_preflight, scp_upload, ssh_capture, ssh_stream
+from .remote import ensure_remote_privilege, ensure_target_host_key, fetch_remote_deployment_env, print_preflight, remote_agent_snapshot, remote_preflight, scp_upload, ssh_capture, ssh_stream
 from .roles import execution_roles, requested_roles
 from .client_artifacts import client_artifact_paths
 from .render import deployment_out_dir, package_bundle, render_all_artifacts, render_config_artifacts
@@ -153,6 +154,7 @@ def verify_target_interactively(
         try:
             if enforce_safe_route:
                 assert_server_route_not_self_tunneled(target, env)
+            ensure_target_host_key(target, allow_enroll=True, prompt_yes_no=prompt_yes_no)
             if fresh_since_epoch is None:
                 preflight = remote_preflight(target, wg_interface, run_live_probes=run_live_probes)
             else:
@@ -215,6 +217,7 @@ def verify_target_non_interactively(
     print(f"Проверяю подключение к {target.label}: {target.ssh_user}@{target.ssh_host}:{target.ssh_port}")
     if enforce_safe_route:
         assert_server_route_not_self_tunneled(target, env)
+    ensure_target_host_key(target, allow_enroll=False)
     if fresh_since_epoch is None:
         preflight = remote_preflight(target, wg_interface, run_live_probes=run_live_probes)
     else:
@@ -310,62 +313,6 @@ def prepare_remote_session(
     return deployment_name, env_path, env, state, targets, preflights
 
 
-def postcheck_command(role: str, wg_interface: str) -> str:
-    ru_service_checks = (
-        '\n'.join(
-            [
-                'check_service_active vpn-stack-xray.service vpn-stack-xray',
-                'admin_web_enabled="$(grep -E \'^ADMIN_WEB_ENABLED=\' /etc/vpn-stack/deployment.env 2>/dev/null | head -n1 | cut -d= -f2- | sed \'s/^"//; s/"$//\')"',
-                'admin_web_enabled="${admin_web_enabled:-1}"',
-                'case "${admin_web_enabled,,}" in 0|false|no|off) ;; *) check_service_active vpn-stack-admin.service vpn-stack-admin ;; esac',
-            ]
-        )
-        if role == ROLE_RU
-        else ""
-    )
-    return textwrap.dedent(
-        f"""\
-        set -euo pipefail
-        check_service_active() {{
-          local service="$1"
-          local label="$2"
-          local state=""
-          local attempt
-          for attempt in 1 2 3 4 5 6 7 8 9 10; do
-            state="$(systemctl is-active "$service" 2>/dev/null || true)"
-            if [[ "$state" == "active" ]]; then
-              return 0
-            fi
-            if [[ "$state" != "activating" ]]; then
-              break
-            fi
-            sleep 1
-          done
-          printf 'postcheck_failed_service=%s\\n' "${{label}}"
-          printf 'postcheck_service_state=%s\\n' "${{state:-$(systemctl is-active "$service" 2>/dev/null || true)}}"
-          printf 'postcheck_service_enabled=%s\\n' "$(systemctl is-enabled "$service" 2>/dev/null || true)"
-          systemctl status "$service" --no-pager --full || true
-          journalctl -u "$service" -n 20 --no-pager || true
-          exit 1
-        }}
-        check_service_active nftables nftables
-        check_service_active sing-box sing-box
-        check_service_active systemd-resolved.service systemd-resolved
-        check_service_active vpn-stack-health.timer vpn-stack-health.timer
-        check_service_active wg-quick@{wg_interface} wg-quick@{wg_interface}
-        test "$(readlink -f /etc/resolv.conf)" = /run/systemd/resolve/stub-resolv.conf
-        test -x /usr/local/lib/vpn-stack/vpn-stack-agent.py
-        {ru_service_checks}
-        printf 'role='
-        cat /etc/vpn-stack/role
-        printf 'installed_at='
-        cat /etc/vpn-stack/installed_at
-        deployment_name="$(grep -E '^DEPLOY_NAME=' /etc/vpn-stack/deployment.env | head -n1 | cut -d= -f2- | sed 's/^\"//; s/\"$//')"
-        printf 'deployment=%s\\n' "${{deployment_name}}"
-        """
-    ).strip()
-
-
 def cleanup_remote_workdir(target: RemoteTarget, remote_root: str) -> None:
     try:
         ssh_stream(target, f"rm -rf {shlex.quote(remote_root)}")
@@ -403,6 +350,66 @@ def wait_for_remote_recovery(target: RemoteTarget, wg_interface: str, *, timeout
     raise AppError(f"{target.label}: SSH-сессия оборвалась и сервер не вернулся в доступное состояние за {timeout_sec} секунд.")
 
 
+def remote_install_transaction_state(target: RemoteTarget) -> dict[str, Any]:
+    source = textwrap.dedent(
+        """
+        import json
+        from pathlib import Path
+
+        path = Path("/etc/vpn-stack/acceptance.json")
+        result = {"state": "idle", "acceptance_present": path.is_file()}
+        if path.is_file():
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                release = payload.get("release", {})
+                result.update(
+                    acceptance_release_id=str(release.get("release_id", "")),
+                    acceptance_role=str(payload.get("role", "")),
+                    acceptance_deployment=str(payload.get("deployment", "")),
+                )
+            except (OSError, ValueError, TypeError) as exc:
+                result["acceptance_error"] = str(exc)
+        print(json.dumps(result, separators=(",", ":")))
+        """
+    ).strip()
+    command = (
+        "if ! flock -n /run/lock/vpn-stack-install.lock -c true; then printf busy; "
+        f"else python3 -c {shlex.quote(source)}; fi"
+    )
+    payload = ssh_capture(target, command, as_root=True, command_timeout=20).strip()
+    if payload == "busy":
+        return {"state": "busy"}
+    parsed = json.loads(payload)
+    if not isinstance(parsed, dict) or parsed.get("state") != "idle":
+        raise AppError(f"{target.label}: некорректное состояние install transaction.")
+    return parsed
+
+
+def wait_for_remote_install_completion(
+    target: RemoteTarget,
+    wg_interface: str,
+    *,
+    timeout_sec: int = 180,
+    interval_sec: int = 3,
+) -> dict[str, str]:
+    deadline = time.time() + timeout_sec
+    last_error: Exception | None = None
+    while time.time() < deadline:
+        try:
+            transaction = remote_install_transaction_state(target)
+            if transaction.get("state") == "busy":
+                time.sleep(interval_sec)
+                continue
+            observed = remote_preflight(target, wg_interface)
+            observed.update({str(key): str(value) for key, value in transaction.items()})
+            return observed
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            time.sleep(interval_sec)
+    detail = f": {last_error}" if last_error else ""
+    raise AppError(f"{target.label}: install transaction не завершилась за {timeout_sec} секунд{detail}") from last_error
+
+
 def filter_targets_for_action(
     action: str,
     targets: list[RemoteTarget],
@@ -422,10 +429,11 @@ def filter_targets_for_action(
 
 
 def install_remote_role(target: RemoteTarget, deployment_name: str, env: dict[str, str], action: str) -> None:
-    remote_root = f"vpn-installer/{deployment_name}/{target.role}"
+    remote_parent = f"vpn-installer/{deployment_name}/{target.role}"
+    remote_root = f"{remote_parent}/{time.time_ns()}"
     archive_name = f"{target.role}.tar.gz"
     print_header(f"Подготовка {target.label}")
-    ssh_stream(target, f"rm -rf {shlex.quote(remote_root)} && mkdir -p {shlex.quote(remote_root)}")
+    ssh_stream(target, f"mkdir -p {shlex.quote(remote_root)}")
     try:
         if action in {"install", "reinstall"}:
             bundle_path = deployment_out_dir(env) / "bundle" / f"{target.role}.tar.gz"
@@ -444,13 +452,217 @@ def install_remote_role(target: RemoteTarget, deployment_name: str, env: dict[st
             remote_command = f"cd {shlex.quote(remote_root)} && chmod +x ./install.sh && ./install.sh --role {shlex.quote(target.role)} --action {shlex.quote(action)}"
         print_header(f"Действие {action} для {target.label}")
         ssh_stream(target, remote_command, as_root=True)
-    finally:
+    except Exception as exc:  # noqa: BLE001
+        if is_recoverable_remote_disconnect(exc):
+            setattr(exc, "vpn_remote_root", remote_root)
+            raise
         cleanup_remote_workdir(target, remote_root)
+        raise
+    cleanup_remote_workdir(target, remote_root)
 
 
-def postcheck_remote_role(target: RemoteTarget, wg_interface: str) -> None:
-    print_header(f"Пост-проверка {target.label}")
-    ssh_stream(target, postcheck_command(target.role, wg_interface), as_root=True)
+def expected_release_id_for_role(env: dict[str, str], role: str) -> str:
+    role_dir = "ru" if role == ROLE_RU else "foreign"
+    manifest_path = deployment_out_dir(env) / "preview" / role_dir / "render-manifest.json"
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise AppError(f"Не удалось прочитать release manifest для {role}: {exc}") from exc
+    release_id = str(payload.get("release_id", "")).strip()
+    if not release_id:
+        raise AppError(f"Release manifest для {role} не содержит release_id.")
+    return release_id
+
+
+def install_remote_role_with_recovery(
+    target: RemoteTarget,
+    deployment_name: str,
+    env: dict[str, str],
+    action: str,
+    wg_interface: str,
+) -> None:
+    if action not in {"install", "reinstall"}:
+        install_remote_role(target, deployment_name, env, action)
+        return
+
+    expected_release_id = expected_release_id_for_role(env, target.role)
+    interrupted: Exception | None = None
+    try:
+        install_remote_role(target, deployment_name, env, action)
+    except Exception as exc:  # noqa: BLE001
+        if not is_recoverable_remote_disconnect(exc):
+            raise
+        interrupted = exc
+        warn(f"{target.label}: SSH-сессия оборвалась во время {action}. Проверяю фактически активированный release.")
+    observed = wait_for_remote_install_completion(target, wg_interface)
+    if interrupted is not None:
+        remote_root = str(getattr(interrupted, "vpn_remote_root", ""))
+        if remote_root:
+            cleanup_remote_workdir(target, remote_root)
+    mismatches = []
+    if observed.get("installed") != "1":
+        mismatches.append("stack is not installed")
+    if observed.get("role") != target.role:
+        mismatches.append(f"role={observed.get('role', '') or 'missing'}")
+    if observed.get("deployment_name") != deployment_name:
+        mismatches.append(f"deployment={observed.get('deployment_name', '') or 'missing'}")
+    if observed.get("release_id") != expected_release_id:
+        mismatches.append(f"release_id={observed.get('release_id', '') or 'missing'}")
+    if observed.get("drift") != "none":
+        mismatches.append(f"drift={observed.get('drift', '') or 'missing'}")
+    if observed.get("acceptance_present") != "True":
+        mismatches.append("acceptance marker is missing")
+    if observed.get("acceptance_release_id") != expected_release_id:
+        mismatches.append(f"acceptance_release_id={observed.get('acceptance_release_id', '') or 'missing'}")
+    if observed.get("acceptance_role") != target.role:
+        mismatches.append(f"acceptance_role={observed.get('acceptance_role', '') or 'missing'}")
+    if observed.get("acceptance_deployment") != deployment_name:
+        mismatches.append(f"acceptance_deployment={observed.get('acceptance_deployment', '') or 'missing'}")
+    if mismatches:
+        failure = AppError(
+            f"{target.label}: установка не подтверждена ({', '.join(mismatches)}; expected release_id={expected_release_id})."
+        )
+        setattr(
+            failure,
+            "remote_role_changed",
+            observed.get("release_id") == expected_release_id
+            or observed.get("acceptance_release_id") == expected_release_id
+            or observed.get("drift") not in {"", "none"},
+        )
+        if interrupted is not None:
+            raise failure from interrupted
+        raise failure
+
+
+def wait_for_ru_transport_ready(
+    target: RemoteTarget,
+    *,
+    timeout_sec: int = 20,
+    interval_sec: float = 0.5,
+) -> dict[str, Any]:
+    """Close the foreign maintenance window before starting the RU cutover."""
+
+    deadline = time.monotonic() + timeout_sec
+    last_payload: dict[str, Any] = {}
+    last_error: Exception | None = None
+    command = "/usr/bin/python3 /usr/local/lib/vpn-stack/vpn-stack-agent.py transport-reconcile"
+    while time.monotonic() < deadline:
+        try:
+            payload = json.loads(ssh_capture(target, command, as_root=True, command_timeout=10))
+            if not isinstance(payload, dict):
+                raise ValueError("transport reconciliation returned a non-object response")
+            last_payload = payload
+            if payload.get("state") == "healthy" and payload.get("selected") in {
+                "interserver-underlay-wg",
+                "interserver-underlay-hy2",
+            }:
+                return payload
+        except (AppError, OSError, ValueError) as exc:
+            last_error = exc
+        time.sleep(interval_sec)
+    reason = str(last_payload.get("reason", "")).strip()
+    if not reason and last_error is not None:
+        reason = str(last_error)
+    raise AppError(f"{target.label}: межсерверный transport не стабилизировался после обслуживания foreign: {reason or 'unknown'}")
+
+
+def settle_peer_transport_after_foreign_install(
+    role: str,
+    target_map: dict[str, RemoteTarget],
+    preflights: dict[str, dict[str, str]] | None,
+) -> None:
+    if role != ROLE_FOREIGN or ROLE_RU not in target_map:
+        return
+    if not preflights or preflights.get(ROLE_RU, {}).get("installed") != "1":
+        return
+    wait_for_ru_transport_ready(target_map[ROLE_RU])
+
+
+def verify_rollback_role(
+    target: RemoteTarget,
+    deployment_name: str,
+    wg_interface: str,
+    expected_release_id: str,
+    *,
+    admin_required: bool = False,
+) -> None:
+    observed = remote_preflight(target, wg_interface)
+    mismatches = []
+    expected = {
+        "installed": "1",
+        "role": target.role,
+        "deployment_name": deployment_name,
+        "wireguard": "active",
+        "nftables": "active",
+        "sing_box": "active",
+        "resolver": "active",
+        "drift": "none",
+    }
+    if expected_release_id:
+        expected["release_id"] = expected_release_id
+    if target.role == ROLE_RU:
+        expected["xray"] = "active"
+        if admin_required:
+            expected["admin"] = "active"
+    for key, value in expected.items():
+        if observed.get(key) != value:
+            mismatches.append(f"{key}={observed.get(key, '') or 'missing'}")
+    if mismatches:
+        raise AppError(f"{target.label}: rollback state не подтверждён ({', '.join(mismatches)}).")
+
+
+def verify_postcutover(
+    deployment_name: str,
+    *,
+    throughput_seconds: int = 30,
+    require_native_agent: bool = True,
+) -> None:
+    """Prove the public client contract after every mutating install workflow."""
+
+    from .verify import verify_live_workflow
+
+    if verify_live_workflow(
+        deployment_name,
+        non_interactive=True,
+        throughput_seconds=throughput_seconds,
+        require_native_agent=require_native_agent,
+    ) != 0:
+        raise AppError("Свежая проверка полного VLESS-пути после установки не пройдена.")
+
+
+def rollback_changed_roles(
+    changed_roles: list[str],
+    target_map: dict[str, RemoteTarget],
+    deployment_name: str,
+    env: dict[str, str],
+    previous_release_ids: dict[str, str] | None = None,
+) -> None:
+    """Restore every changed server in reverse cutover order and prove each role."""
+
+    failures: list[str] = []
+    wg_interface = env.get("WG_INTERFACE", "").strip() or "wg0"
+    previous_release_ids = previous_release_ids or {}
+    admin_required = env.get("ADMIN_WEB_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+    for role in reversed(changed_roles):
+        target = target_map[role]
+        try:
+            install_remote_role(target, deployment_name, env, "rollback")
+            verify_rollback_role(
+                target,
+                deployment_name,
+                wg_interface,
+                previous_release_ids.get(role, ""),
+                admin_required=admin_required and role == ROLE_RU,
+            )
+        except Exception as exc:  # noqa: BLE001
+            failures.append(f"{target.label}: {exc}")
+    if not failures:
+        try:
+            verify_postcutover(deployment_name, throughput_seconds=0, require_native_agent=False)
+        except Exception as exc:  # noqa: BLE001
+            failures.append(f"полный VLESS-путь после отката: {exc}")
+    if failures:
+        raise AppError("Откат изменённых ролей не завершён: " + "; ".join(failures))
 
 
 def finalize_install_output(env: dict[str, str], deployment_name: str) -> None:
@@ -497,6 +709,7 @@ def run_selected_remote_action(
     targets: list[RemoteTarget],
     *,
     role_arg: str = "all",
+    preflights: dict[str, dict[str, str]] | None = None,
 ) -> None:
     target_map = {target.role: target for target in targets}
     requested = requested_roles(role_arg)
@@ -505,20 +718,35 @@ def run_selected_remote_action(
     if action in {"install", "reinstall"}:
         print_header("Локальная сборка артефактов")
         render_all_artifacts(env_path, env)
-    for role in execution_roles(action, available_roles):
-        target = target_map[role]
-        try:
-            install_remote_role(target, deployment_name, env, action)
-        except AppError as exc:
-            if action in {"install", "reinstall"} and is_recoverable_remote_disconnect(exc):
-                warn(f"{target.label}: SSH-сессия оборвалась во время {action}. Жду повторной доступности сервера и проверяю итоговое состояние.")
-                wait_for_remote_recovery(target, wg_interface)
-            else:
+    changed_roles: list[str] = []
+    previous_release_ids = {
+        role: str((preflights or {}).get(role, {}).get("release_id", ""))
+        for role in available_roles
+    }
+    try:
+        for role in execution_roles(action, available_roles):
+            target = target_map[role]
+            try:
+                install_remote_role_with_recovery(target, deployment_name, env, action, wg_interface)
+            except Exception as exc:  # noqa: BLE001
+                if getattr(exc, "remote_role_changed", False) and role not in changed_roles:
+                    changed_roles.append(role)
                 raise
-        if action in {"install", "reinstall"}:
-            postcheck_remote_role(target, wg_interface)
-        else:
-            print_preflight(target, remote_preflight(target, wg_interface))
+            if action in {"install", "reinstall"}:
+                changed_roles.append(role)
+                settle_peer_transport_after_foreign_install(role, target_map, preflights)
+            if action not in {"install", "reinstall"}:
+                print_preflight(target, remote_preflight(target, wg_interface))
+        if changed_roles:
+            verify_postcutover(deployment_name)
+    except Exception as exc:  # noqa: BLE001
+        if not changed_roles:
+            raise
+        try:
+            rollback_changed_roles(changed_roles, target_map, deployment_name, env, previous_release_ids)
+        except AppError as rollback_exc:
+            raise AppError(f"{exc} Автоматический откат также завершился ошибкой: {rollback_exc}") from exc
+        raise AppError(f"{exc} Изменённые роли автоматически возвращены к предыдущему релизу.") from exc
 
 
 def install_workflow(deployment: str | None, *, non_interactive: bool = False, yes: bool = False) -> int:
@@ -554,22 +782,47 @@ def install_workflow(deployment: str | None, *, non_interactive: bool = False, y
     if not yes and not prompt_yes_no("Продолжить установку / обновление?", default=True):
         print("Остановлено пользователем.")
         return 0
-    total_steps = 1 + 2 * sum(1 for action in actions.values() if action != "skip")
+    total_steps = 1 + sum(1 for action in actions.values() if action != "skip")
     step = 1
     print_step(step, total_steps, "Локальная сборка артефактов")
     render_all_artifacts(env_path, env)
     step += 1
     target_map = {target.role: target for target in targets}
-    for role in execution_roles("install", roles):
-        action = actions[role]
-        if action == "skip":
-            continue
-        print_step(step, total_steps, f"{ROLE_META[role]['label']}: {action}")
-        install_remote_role(target_map[role], deployment_name, env, action)
-        step += 1
-        print_step(step, total_steps, f"{ROLE_META[role]['label']}: пост-проверка")
-        postcheck_remote_role(target_map[role], (env.get("WG_INTERFACE", "").strip() or "wg0"))
-        step += 1
+    previous_release_ids = {
+        role: str(preflights.get(role, {}).get("release_id", ""))
+        for role in roles
+    }
+    changed_roles: list[str] = []
+    try:
+        for role in execution_roles("install", roles):
+            action = actions[role]
+            if action == "skip":
+                continue
+            print_step(step, total_steps, f"{ROLE_META[role]['label']}: {action}")
+            try:
+                install_remote_role_with_recovery(
+                    target_map[role],
+                    deployment_name,
+                    env,
+                    action,
+                    env.get("WG_INTERFACE", "").strip() or "wg0",
+                )
+            except Exception as exc:  # noqa: BLE001
+                if getattr(exc, "remote_role_changed", False) and role not in changed_roles:
+                    changed_roles.append(role)
+                raise
+            changed_roles.append(role)
+            settle_peer_transport_after_foreign_install(role, target_map, preflights)
+            step += 1
+        verify_postcutover(deployment_name)
+    except Exception as exc:  # noqa: BLE001
+        if not changed_roles:
+            raise
+        try:
+            rollback_changed_roles(changed_roles, target_map, deployment_name, env, previous_release_ids)
+        except AppError as rollback_exc:
+            raise AppError(f"{exc} Автоматический откат также завершился ошибкой: {rollback_exc}") from exc
+        raise AppError(f"{exc} Изменённые роли автоматически возвращены к предыдущему релизу.") from exc
     finalize_install_output(env, deployment_name)
     print(f"Deployment env: {env_path}")
     print(f"Локальное состояние: {state_json_path(deployment_name)}")
@@ -590,19 +843,29 @@ def status_workflow(deployment: str | None, role: str, *, non_interactive: bool 
         enforce_safe_route=False,
     )
     print_summary(deployment_name, env, targets)
-    failures = 0
+    exit_code = 0
     for target in targets:
         try:
             snapshot = DiagnosticsSnapshot.from_agent(remote_agent_snapshot(target, compact=True))
         except Exception as exc:  # noqa: BLE001
             warn(f"{target.label}: structured snapshot unavailable: {exc}")
-            failures += 1
+            exit_code = 1
             continue
         print_header(f"Snapshot {target.label}")
         for line in format_snapshot_summary(snapshot):
             print(line)
+        window_statuses = {window.collector.status for window in snapshot.log_windows.values()}
+        if snapshot.verdict == "failed" or snapshot.collector_status == "error" or "error" in window_statuses:
+            exit_code = 1
+        elif exit_code == 0 and (
+            snapshot.verdict == "degraded"
+            or snapshot.collector_status == "stale"
+            or "stale" in window_statuses
+            or (snapshot.verdict == "inconclusive" and snapshot.collector_status != "skipped")
+        ):
+            exit_code = 2
     print(f"Deployment env: {env_path}")
-    return 1 if failures else 0
+    return exit_code
 
 
 def maintain_workflow(
@@ -633,12 +896,12 @@ def maintain_workflow(
         print_header("Обслуживание серверов")
         for role in execution_roles("install", roles):
             target = target_map[role]
-            snapshot = remote_agent_snapshot(target)
-            maintenance = snapshot.get("maintenance", {})
+            snapshot = DiagnosticsSnapshot.from_agent(remote_agent_snapshot(target))
+            maintenance = snapshot.maintenance
             print(
-                f"{target.label}: updates={maintenance.get('upgradable', 0)}, "
-                f"security={maintenance.get('security_upgradable', 0)}, "
-                f"reboot_required={maintenance.get('reboot_required', False)}"
+                f"{target.label}: updates={maintenance.get('upgradable', 'unknown')}, "
+                f"security={maintenance.get('security_upgradable', 'unknown')}, "
+                f"reboot_required={maintenance.get('reboot_required', 'unknown')}"
             )
         print("Для применения обновлений используй vpn maintain --apply --yes; для rule assets добавь --refresh-assets.")
         return 0
@@ -653,8 +916,13 @@ def maintain_workflow(
         package_bundle(env)
         for role in execution_roles("install", roles):
             target = target_map[role]
-            install_remote_role(target, deployment_name, env, "reinstall")
-            postcheck_remote_role(target, env.get("WG_INTERFACE", "wg0") or "wg0")
+            install_remote_role_with_recovery(
+                target,
+                deployment_name,
+                env,
+                "reinstall",
+                env.get("WG_INTERFACE", "wg0") or "wg0",
+            )
 
     for role in execution_roles("install", roles) if apply_updates else ():
         target = target_map[role]
@@ -665,15 +933,17 @@ def maintain_workflow(
             "DEBIAN_FRONTEND=noninteractive apt-get -y --with-new-pkgs upgrade",
             as_root=True,
         )
-        snapshot = remote_agent_snapshot(target, live_probes=True, profile="acceptance")
-        verdicts = snapshot.get("verdicts", {})
+        snapshot = DiagnosticsSnapshot.from_agent(remote_agent_snapshot(target, live_probes=True, profile="acceptance"))
+        verdicts = snapshot.component_verdicts
         if verdicts.get("server_path") != "verified" or (role == ROLE_RU and verdicts.get("public_front") != "verified"):
-            raise AppError(f"{target.label}: maintenance acceptance failed: {verdicts.get('reasons', [])}")
-        if reboot and snapshot.get("maintenance", {}).get("reboot_required"):
+            raise AppError(f"{target.label}: maintenance acceptance failed: {snapshot.reasons}")
+        if snapshot.migration or snapshot.collector_status != "ok":
+            raise AppError(f"{target.label}: maintenance acceptance evidence is incomplete")
+        if reboot and snapshot.maintenance.get("reboot_required"):
             ssh_stream(target, "systemctl reboot", as_root=True)
             wait_for_remote_recovery(target, env.get("WG_INTERFACE", "wg0") or "wg0", timeout_sec=300)
-            recovered = remote_agent_snapshot(target, live_probes=True, profile="acceptance")
-            if recovered.get("verdicts", {}).get("server_path") != "verified":
+            recovered = DiagnosticsSnapshot.from_agent(remote_agent_snapshot(target, live_probes=True, profile="acceptance"))
+            if recovered.component_verdicts.get("server_path") != "verified" or recovered.collector_status != "ok":
                 raise AppError(f"{target.label}: acceptance after reboot failed")
 
     from .verify import verify_live_workflow
@@ -747,7 +1017,7 @@ def remote_action_workflow(deployment: str | None, role: str, action: str, *, no
     if not yes and not prompt_yes_no(f"Продолжить действие {action}?", default=False):
         print("Остановлено пользователем.")
         return 0
-    run_selected_remote_action(action, deployment_name, env_path, env, targets, role_arg=role)
+    run_selected_remote_action(action, deployment_name, env_path, env, targets, role_arg=role, preflights=preflights)
     if action in {"install", "reinstall"}:
         finalize_install_output(env, deployment_name)
     else:

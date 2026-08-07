@@ -9,9 +9,11 @@ from typing import Any, Iterable
 
 BUCKETS = (
     "client_front_connect_failed",
+    "dns_nodata",
     "dns_timeout",
+    "dns_refused",
     "dns_nxdomain",
-    "dns_failed",
+    "dns_servfail",
     "transport_unavailable",
     "upstream_refused",
     "domain_to_foreign_timeout",
@@ -35,7 +37,9 @@ _ROUTER_LOOKUP_RE = re.compile(r"router: lookup (?P<dst>[^: ]+):")
 _PROXY_DIAL_FAILED_RE = re.compile(r"using outbound/vless\[[^\]]+\]: dial tcp (?P<dst>\[[^\]]+\]:\d+|[^: ]+:\d+): i/o timeout")
 _PROXY_READ_FAILED_RE = re.compile(r"using outbound/vless\[[^\]]+\]: read tcp [^ ]+->(?P<dst>\[[^\]]+\]:\d+|[^: ]+:\d+):")
 _LOG_EVENT_ID_RE = re.compile(r"\b(?:TRACE|DEBUG|INFO|WARN|ERROR|FATAL)\s+\[(?P<event_id>\d+)\b")
-_INBOUND_DESTINATION_RE = re.compile(r"inbound/[^\[]+\[[^\]]+\]: inbound (?:packet )?connection to (?P<dst>\[[^\]]+\]:\d+|[^ ]+)")
+_INBOUND_DESTINATION_RE = re.compile(
+    r"inbound/[^\[]+\[(?P<tag>[^\]]+)\]: inbound (?:packet )?connection to (?P<dst>\[[^\]]+\]:\d+|[^ ]+)"
+)
 _DNS_LOOKUP_SUCCEED_RE = re.compile(r"dns: lookup succeed for (?P<dst>[^: ]+):")
 _CANCELLATION_TOKENS = (
     "context canceled",
@@ -47,6 +51,14 @@ _CANCELLATION_TOKENS = (
     "operation was canceled",
     "operation was cancelled",
     "write on closed stream",
+)
+_DNS_NODATA_TOKENS = (
+    "empty result",
+    "no data",
+    "nodata",
+    "no answer",
+    "no addresses",
+    "response does not contain an answer",
 )
 
 
@@ -97,6 +109,16 @@ def source_from_line(line: str) -> str:
 def accepted_destination_from_line(line: str) -> str:
     match = _ACCEPTED_RE.search(line)
     return match.group("dst") if match else ""
+
+
+def inbound_destination_from_line(line: str) -> str:
+    match = _INBOUND_DESTINATION_RE.search(line)
+    return match.group("dst") if match else ""
+
+
+def inbound_tag_from_line(line: str) -> str:
+    match = _INBOUND_DESTINATION_RE.search(line)
+    return match.group("tag") if match else ""
 
 
 def event_id_from_line(line: str) -> str:
@@ -181,13 +203,22 @@ def classify_line(line: str) -> ClassifiedLogLine | None:
         )
     ):
         return ClassifiedLogLine("transport_unavailable", destination, source, event_id)
-    dns_failure = any(token in line for token in ("dns: exchange failed", "exchange failed for ", "dns: lookup failed", "lookup failed for ", "router: lookup "))
-    if dns_failure and any(token in line for token in ("context deadline exceeded", "i/o timeout")):
+    dns_failure = any(
+        token in lower_line
+        for token in ("dns: exchange failed", "exchange failed for ", "dns: lookup failed", "lookup failed for ", "router: lookup ")
+    )
+    if dns_failure and any(token in lower_line for token in ("context deadline exceeded", "i/o timeout")):
         return ClassifiedLogLine("dns_timeout", destination, source, event_id)
-    if dns_failure and "NXDOMAIN" in line.upper():
+    if dns_failure and "nxdomain" in lower_line:
         return ClassifiedLogLine("dns_nxdomain", destination, source, event_id)
+    if dns_failure and ("refused" in lower_line or "rcode 5" in lower_line):
+        return ClassifiedLogLine("dns_refused", destination, source, event_id)
+    if dns_failure and ("servfail" in lower_line or "server failure" in lower_line or "rcode 2" in lower_line):
+        return ClassifiedLogLine("dns_servfail", destination, source, event_id)
+    if dns_failure and any(token in lower_line for token in _DNS_NODATA_TOKENS):
+        return ClassifiedLogLine("dns_nodata", destination, source, event_id)
     if dns_failure:
-        return ClassifiedLogLine("dns_failed", destination, source, event_id)
+        return ClassifiedLogLine("unclassified_error", destination, source, event_id)
     if any(token in line for token in ("outbound/block[blocked]", "using outbound/block[blocked]", "connection rejected")):
         return ClassifiedLogLine("blocked_private_fake", destination, source, event_id)
     if "i/o timeout" in line or "context deadline exceeded" in line:
@@ -213,7 +244,7 @@ def classify_line(line: str) -> ClassifiedLogLine | None:
 def _event_destinations(lines: Iterable[str]) -> dict[str, str]:
     destinations: dict[str, str] = {}
     for line in lines:
-        event_id = event_id_from_line(line)
+        event_id = _event_key(line, event_id_from_line(line))
         if not event_id:
             continue
         for pattern in (_INBOUND_DESTINATION_RE, _DNS_LOOKUP_SUCCEED_RE):
@@ -227,6 +258,14 @@ def _event_destinations(lines: Iterable[str]) -> dict[str, str]:
     return destinations
 
 
+def _event_key(line: str, event_id: str) -> str:
+    if not event_id:
+        return ""
+    unit_match = re.search(r"\[unit=([^\]]+)\]", line)
+    unit = unit_match.group(1) if unit_match else ""
+    return f"{unit}\x00{event_id}"
+
+
 def summarize_lines(lines: Iterable[str], *, top_n: int = 12) -> dict[str, Any]:
     materialized = list(lines)
     event_destinations = _event_destinations(materialized)
@@ -234,19 +273,21 @@ def summarize_lines(lines: Iterable[str], *, top_n: int = 12) -> dict[str, Any]:
     destinations: dict[str, Counter[str]] = {bucket: Counter() for bucket in BUCKETS}
     sources: dict[str, Counter[str]] = {bucket: Counter() for bucket in BUCKETS}
     samples: dict[str, str] = {}
-    seen_events: set[tuple[str, str]] = set()
+    seen_events: set[tuple[str, str, str]] = set()
     for line in materialized:
         item = classify_line(line)
         if item is None:
             continue
-        event_key = (item.bucket, item.event_id)
-        if item.event_id and event_key in seen_events:
+        event_key = _event_key(line, item.event_id)
+        traced_destination = _trace_destination(event_destinations.get(event_key, ""), item.destination)
+        signature = (event_key, item.bucket, traced_destination)
+        if event_key and signature in seen_events:
             continue
-        if item.event_id:
-            seen_events.add(event_key)
+        if event_key:
+            seen_events.add(signature)
         counts[item.bucket] += 1
         samples.setdefault(item.bucket, line.strip()[:320])
-        destination = _trace_destination(event_destinations.get(item.event_id, ""), item.destination)
+        destination = traced_destination
         if destination:
             destinations[item.bucket][destination] += 1
         if item.source:

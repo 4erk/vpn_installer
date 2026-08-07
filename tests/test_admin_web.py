@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import json
 import http.client
-import subprocess
-import sys
 import threading
 import tempfile
 import unittest
@@ -217,15 +215,10 @@ class AdminWebTests(unittest.TestCase):
         self.assertTrue(admin_web.client_ip_allowed("203.0.113.4", env))
         self.assertFalse(admin_web.client_ip_allowed("203.0.113.5", env))
 
-    def test_load_rules_and_apply_rules_failure_edges(self) -> None:
+    def test_load_rules_propagates_invalid_state(self) -> None:
         with patch("vpn_installer.admin_web.admin_apply.load_rules", side_effect=ValueError("bad rules")):
-            self.assertEqual(admin_web.load_rules(), [])
-        with tempfile.TemporaryDirectory() as tmp:
-            script = Path(tmp) / "admin_apply.py"
-            script.write_text("print('bad')\n", encoding="utf-8")
-            failure = subprocess.CalledProcessError(1, ["python"], output="stdout detail", stderr="")
-            with patch.object(admin_web, "APPLY_SCRIPT", script), patch("vpn_installer.admin_web.subprocess.run", side_effect=failure):
-                self.assertEqual(admin_web.apply_rules(), (False, "stdout detail"))
+            with self.assertRaisesRegex(ValueError, "bad rules"):
+                admin_web.load_rules()
 
     def test_stealth_admin_server_closes_disallowed_sources_before_http(self) -> None:
         class FakeSocket:
@@ -259,36 +252,63 @@ class AdminWebTests(unittest.TestCase):
         self.assertIn("changed &lt;ok&gt;", html)
         self.assertIn("VPN Admin", admin_web.page("T", "routes", admin_web.ROUTES_BODY).decode("utf-8"))
 
-    def test_apply_rules_uses_script_when_available_and_reports_failures(self) -> None:
+    def test_web_commit_delegates_to_transactional_backend(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            script = Path(tmp) / "admin_apply.py"
-            script.write_text("print('ok')\n", encoding="utf-8")
-            with patch.object(admin_web, "APPLY_SCRIPT", script), patch("vpn_installer.admin_web.subprocess.run") as run_mock:
-                self.assertEqual(admin_web.apply_rules(), (True, "Правила проверены и записаны."))
-            run_mock.assert_called_once()
-            self.assertEqual(run_mock.call_args.args[0], [sys.executable, str(script), "--no-restart"])
-            with patch.object(admin_web, "APPLY_SCRIPT", script), patch("vpn_installer.admin_web.subprocess.run", side_effect=Exception("boom")):
-                ok, message = admin_web.apply_rules()
+            rules_path = Path(tmp) / "rules.json"
+            new_rules = [admin_apply.normalize_rule({"id": "1", "value": "new.example", "outbound": "direct-ru"})]
+            with patch.object(admin_web, "RULES_PATH", rules_path), patch("vpn_installer.admin_web.admin_apply.commit_rules") as commit_mock:
+                ok, message = admin_web.commit_rules(new_rules, [])
+            commit_mock.assert_called_once_with(
+                new_rules,
+                rules_path=rules_path,
+                restart=True,
+                expected_generation=admin_apply.rules_generation([]),
+            )
+            self.assertTrue(ok)
+            self.assertIn("применены", message)
+
+            with patch.object(admin_web, "RULES_PATH", rules_path), patch(
+                "vpn_installer.admin_web.admin_apply.commit_rules", side_effect=RuntimeError("boom")
+            ):
+                ok, message = admin_web.commit_rules(new_rules, [])
         self.assertFalse(ok)
         self.assertIn("boom", message)
 
-    def test_apply_rules_falls_back_to_in_process_apply(self) -> None:
+    def test_transactional_commit_restores_rules_and_config_when_restart_fails(self) -> None:
+        env = generate_default_env("demo")
+        env["RU_PUBLIC_IP"] = "203.0.113.10"
+        env["FOREIGN_PUBLIC_IP"] = "198.51.100.20"
         with tempfile.TemporaryDirectory() as tmp:
-            missing = Path(tmp) / "missing.py"
-            with patch.object(admin_web, "APPLY_SCRIPT", missing), patch("vpn_installer.admin_web.admin_apply.apply_rules") as apply_mock:
-                self.assertEqual(admin_web.apply_rules(), (True, "Правила проверены и записаны."))
-            apply_mock.assert_called_once_with(restart=False)
-
-    def test_commit_rules_rolls_back_when_apply_fails(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            rules_path = Path(tmp) / "rules.json"
+            tmp_path = Path(tmp)
+            base_path = tmp_path / "base.json"
+            config_path = tmp_path / "config.json"
+            rules_path = tmp_path / "rules.json"
+            lock_path = tmp_path / "rules.lock"
+            sing_box_binary = tmp_path / "sing-box"
+            sing_box_binary.write_bytes(b"pinned-test-binary")
+            base_path.write_text(render_ru_singbox(env), encoding="utf-8")
+            config_path.write_text(render_ru_singbox(env), encoding="utf-8")
             old_rules = [admin_apply.normalize_rule({"id": "1", "value": "old.example", "outbound": "direct-ru"})]
             new_rules = [admin_apply.normalize_rule({"id": "2", "value": "new.example", "outbound": "direct-ru"})]
-            with patch.object(admin_web, "RULES_PATH", rules_path), patch("vpn_installer.admin_web.apply_rules", return_value=(False, "bad apply")):
-                ok, message = admin_web.commit_rules(new_rules, old_rules)
-                self.assertFalse(ok)
-                self.assertEqual(message, "bad apply")
-                self.assertEqual(admin_web.load_rules(), old_rules)
+            admin_apply.write_json_atomic(rules_path, {"schema_version": 1, "rules": old_rules})
+            old_config = config_path.read_bytes()
+            with patch("vpn_installer.admin_apply.subprocess.run"), patch(
+                "vpn_installer.admin_apply.restart_and_verify_singbox",
+                side_effect=[RuntimeError("bad apply"), None],
+            ) as restart_mock:
+                with self.assertRaisesRegex(RuntimeError, "bad apply"):
+                    admin_apply.commit_rules(
+                        new_rules,
+                        base_path,
+                        config_path,
+                        rules_path,
+                        restart=True,
+                        lock_path=lock_path,
+                        sing_box_binary=sing_box_binary,
+                    )
+            self.assertEqual(admin_apply.load_rules(rules_path), old_rules)
+            self.assertEqual(config_path.read_bytes(), old_config)
+            self.assertEqual(restart_mock.call_count, 2)
 
     def test_routes_payload_reports_foreign_block_flag(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -342,8 +362,16 @@ class AdminWebTests(unittest.TestCase):
             stack.enter_context(patch.object(admin_web, "ENV_PATH", env_path))
             stack.enter_context(patch.object(admin_web, "AUTH_PATH", auth_path))
             stack.enter_context(patch.object(admin_web, "RULES_PATH", rules_path))
-            apply_mock = stack.enter_context(patch.object(admin_web, "apply_rules", return_value=(True, "applied")))
-            restart_mock = stack.enter_context(patch.object(admin_web, "schedule_singbox_restart"))
+            commit_error: dict[str, str | None] = {"message": None}
+
+            def fake_commit(raw_rules: list[dict[str, object]], *args: object, **kwargs: object) -> list[dict[str, object]]:
+                if commit_error["message"]:
+                    raise RuntimeError(commit_error["message"])
+                normalized = admin_apply.normalize_rules(raw_rules)
+                admin_apply.write_json_atomic(rules_path, {"schema_version": 1, "rules": normalized})
+                return normalized
+
+            commit_mock = stack.enter_context(patch("vpn_installer.admin_web.admin_apply.commit_rules", side_effect=fake_commit))
             admin_web.init_auth("user", "password")
             server = ThreadingHTTPServer(("127.0.0.1", 0), admin_web.Handler)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -416,7 +444,7 @@ class AdminWebTests(unittest.TestCase):
                     urllib.request.urlopen(invalid_request, timeout=5)
                 self.assertEqual(invalid_error.exception.code, 400)
 
-                apply_mock.return_value = (False, "apply failed")
+                commit_error["message"] = "apply failed"
                 apply_fail_payload = json.dumps({"value": "fail.example", "outbound": "direct-ru"}).encode("utf-8")
                 apply_fail_request = urllib.request.Request(
                     f"{base_url}/api/routes",
@@ -427,7 +455,7 @@ class AdminWebTests(unittest.TestCase):
                 with self.assertRaises(urllib.error.HTTPError) as apply_error:
                     urllib.request.urlopen(apply_fail_request, timeout=5)
                 self.assertEqual(apply_error.exception.code, 400)
-                apply_mock.return_value = (True, "applied")
+                commit_error["message"] = None
 
                 payload = json.dumps({"value": "*.example.com", "outbound": "to-foreign"}).encode("utf-8")
                 add_request = urllib.request.Request(
@@ -441,7 +469,7 @@ class AdminWebTests(unittest.TestCase):
                 self.assertTrue(add_response["rules"][0]["enabled"])
                 self.assertTrue(add_response["rules"][0]["include_subdomains"])
                 rule_id = add_response["rules"][0]["id"]
-                restart_mock.assert_called()
+                self.assertTrue(commit_mock.called)
 
                 patch_request = urllib.request.Request(
                     f"{base_url}/api/routes/{urllib.parse.quote(rule_id)}",
@@ -508,7 +536,7 @@ class AdminWebTests(unittest.TestCase):
                 )
                 second_response = json.loads(urllib.request.urlopen(second_add, timeout=5).read().decode("utf-8"))
                 second_rule_id = second_response["rules"][0]["id"]
-                apply_mock.return_value = (False, "delete failed")
+                commit_error["message"] = "delete failed"
                 delete_fail = urllib.request.Request(
                     f"{base_url}/api/routes/{urllib.parse.quote(second_rule_id)}",
                     method="DELETE",
@@ -517,7 +545,7 @@ class AdminWebTests(unittest.TestCase):
                 with self.assertRaises(urllib.error.HTTPError) as delete_apply_error:
                     urllib.request.urlopen(delete_fail, timeout=5)
                 self.assertEqual(delete_apply_error.exception.code, 400)
-                apply_mock.return_value = (True, "applied")
+                commit_error["message"] = None
 
                 bad_settings_csrf = urllib.parse.urlencode({"csrf": "bad"}).encode("utf-8")
                 bad_settings_request = urllib.request.Request(
@@ -630,13 +658,16 @@ class AdminWebTests(unittest.TestCase):
             base = tmp_path / "base.json"
             config = tmp_path / "config.json"
             rules = tmp_path / "rules.json"
+            sing_box_binary = tmp_path / "sing-box"
+            sing_box_binary.write_bytes(b"pinned-test-binary")
             base.write_text(render_ru_singbox(env), encoding="utf-8")
             rules.write_text(
                 json.dumps({"rules": [{"id": "1", "value": "*.example.com", "outbound": "direct-ru"}]}),
                 encoding="utf-8",
             )
-            with patch("vpn_installer.admin_apply.shutil.which", return_value=None):
-                admin_apply.apply_rules(base, config, rules, restart=False)
+            with patch("vpn_installer.admin_apply.subprocess.run") as check_mock:
+                admin_apply.apply_rules(base, config, rules, restart=False, sing_box_binary=sing_box_binary)
+            check_mock.assert_called_once()
             payload = json.loads(config.read_text(encoding="utf-8"))
         direct_rule = next(rule for rule in payload["route"]["rules"] if rule.get("outbound") == "direct-ru" and rule.get("domain") == ["example.com"])
         self.assertEqual(direct_rule["domain"], ["example.com"])
@@ -647,6 +678,12 @@ class AdminWebTests(unittest.TestCase):
         self.assertEqual(cidr_rule["value"], "8.8.8.8/32")
         self.assertEqual(admin_apply.rule_domains({"value": "example.com", "include_subdomains": True}), (["example.com"], [".example.com"]))
         self.assertEqual(admin_apply.route_insert_index([]), 0)
+        self.assertEqual(
+            admin_apply.route_insert_index(
+                [{"inbound": ["public-hy2-in"], "port": 53, "action": "route", "outbound": "to-foreign"}]
+            ),
+            1,
+        )
         self.assertEqual(admin_apply.dns_insert_index([]), 0)
 
     def test_admin_cidr_cannot_override_private_guard(self) -> None:

@@ -69,9 +69,31 @@ class AuditModuleTests(unittest.TestCase):
             audit_quick.run(runner)  # type: ignore[arg-type]
         self.assertNotIn("quick-unittest", runner.records)
         self.assertIn("quick-install-ux", runner.records)
-        self.assertIn("quick-interserver-hysteria-runtime", runner.records)
-        self.assertIn("quick-unittest", runner.skips)
-        self.assertIn("quick-linux-launcher-python", runner.skips)
+        self.assertNotIn("quick-interserver-hysteria-runtime", runner.records)
+        self.assertEqual(runner.skips, [])
+
+    def test_transaction_acceptance_fixture_uses_current_snapshot_schema(self) -> None:
+        verified = audit_docker.acceptance_snapshot_fixture("verified")
+        failed = audit_docker.acceptance_snapshot_fixture("failed")
+
+        self.assertEqual(verified["schema_version"], 3)
+        self.assertEqual(verified["role"], "foreign-exit")
+        self.assertEqual(verified["network"], {"profile_mismatches": []})
+        self.assertEqual(verified["artifacts"]["drift"], "none")
+        self.assertEqual(verified["component_verdicts"]["server_path"], "verified")
+        self.assertEqual(verified["component_verdicts"]["host_integrity"], "verified")
+        self.assertEqual(failed["component_verdicts"]["server_path"], "failed")
+        with self.assertRaises(ValueError):
+            audit_docker.acceptance_snapshot_fixture("inconclusive")
+
+    def test_release_workflow_requires_bounded_gates_before_publish(self) -> None:
+        workflow = (Path(__file__).parents[1] / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+        self.assertIn("from vpn_installer import VERSION", workflow)
+        self.assertIn("if tag != VERSION", workflow)
+        self.assertIn("python -m vpn_installer audit all --json", workflow)
+        self.assertNotIn("python -m unittest discover", workflow)
+        self.assertIn("timeout-minutes:", workflow)
+        self.assertIn("needs: gate", workflow)
 
     def test_quick_helper_validations(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

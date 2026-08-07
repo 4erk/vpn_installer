@@ -115,7 +115,7 @@ def render_client_profile(env: dict[str, str], auto_redirect: bool, *, android_s
             "rules": [
                 {"inbound": ["tun-in"], "action": "sniff", "timeout": "1s"},
                 {"ip_version": 6, "action": "route", "outbound": "block"},
-                {"protocol": "dns", "action": "hijack-dns"},
+                {"inbound": ["tun-in"], "port": 53, "action": "hijack-dns"},
                 {"ip_is_private": True, "action": "route", "outbound": "direct"},
                 {"domain_suffix": ["local"], "action": "route", "outbound": "direct"},
             ],

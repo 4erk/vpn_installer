@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export PYTHONDONTWRITEBYTECODE=1
 
 ROLE=""
 ENV_FILE=""
@@ -14,7 +15,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 usage() {
   cat <<'EOF'
 Usage:
-  install.sh --role <ru-gateway|foreign-exit> [--env-file <file>] [--assets-dir <dir>] [--action <install|reinstall|remove|purge|status>] [--render-only --output-dir <dir>]
+  install.sh --role <ru-gateway|foreign-exit> [--env-file <file>] [--assets-dir <dir>] [--action <install|reinstall|rollback|remove|purge|status>] [--render-only --output-dir <dir>]
 
 Examples:
   sudo ./install.sh --role ru-gateway --env-file ./out/my-stack/server/ru.env --assets-dir ./out/my-stack/assets
@@ -73,12 +74,12 @@ if [[ "$ROLE" != "ru-gateway" && "$ROLE" != "foreign-exit" ]]; then
   exit 1
 fi
 
-if [[ "$ACTION" != "install" && "$ACTION" != "reinstall" && "$ACTION" != "remove" && "$ACTION" != "purge" && "$ACTION" != "status" ]]; then
+if [[ "$ACTION" != "install" && "$ACTION" != "reinstall" && "$ACTION" != "rollback" && "$ACTION" != "remove" && "$ACTION" != "purge" && "$ACTION" != "status" ]]; then
   echo "Unsupported action: $ACTION" >&2
   exit 1
 fi
 
-if [[ -z "$ENV_FILE" && ( "$ACTION" == "remove" || "$ACTION" == "purge" || "$ACTION" == "status" ) && -f "${VPNSTACK_ROOT}/deployment.env" ]]; then
+if [[ -z "$ENV_FILE" && ( "$ACTION" == "rollback" || "$ACTION" == "remove" || "$ACTION" == "purge" || "$ACTION" == "status" ) && -f "${VPNSTACK_ROOT}/deployment.env" ]]; then
   ENV_FILE="${VPNSTACK_ROOT}/deployment.env"
 fi
 
@@ -90,13 +91,6 @@ fi
 if [[ -n "$ENV_FILE" && ! -f "$ENV_FILE" ]]; then
   echo "Env file not found: $ENV_FILE" >&2
   exit 1
-fi
-
-if [[ -n "$ENV_FILE" ]]; then
-  set -a
-  # shellcheck disable=SC1090
-  source <(sed 's/\r$//' "$ENV_FILE")
-  set +a
 fi
 
 if [[ -z "$ASSETS_DIR" ]]; then
@@ -111,9 +105,6 @@ fi
 normalize_env_with_python() {
   local candidate=""
   local python_bin=""
-  if [[ "$ACTION" != "install" && "$ACTION" != "reinstall" && "$RENDER_ONLY" != "1" ]]; then
-    return 0
-  fi
   for candidate in "${PYTHON_BIN:-}" python3 python "${SCRIPT_DIR}/.runtime/python/windows/python.exe"; do
     [[ -n "${candidate}" ]] || continue
     if "${candidate}" -c 'import sys; assert sys.version_info >= (3, 9)' >/dev/null 2>&1; then
@@ -121,14 +112,54 @@ normalize_env_with_python() {
       break
     fi
   done
-  [[ -n "${python_bin}" ]] || { echo "Python 3.9+ is required to normalize deployment env." >&2; exit 1; }
-  [[ -f "${SCRIPT_DIR}/vpn_installer/install_support.py" ]] || { echo "Python renderer package not found next to install.sh." >&2; exit 1; }
+  [[ -n "${python_bin}" ]] || { echo "Python 3.9+ is required to parse deployment env." >&2; exit 1; }
+  [[ -n "${ENV_FILE}" ]] || return 0
+
   NORMALIZED_ENV_FILE="$(mktemp)"
-  "${python_bin}" -c 'import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); from vpn_installer.config import render_env_text; from vpn_installer.install_support import load_runtime_env; print(render_env_text(load_runtime_env(Path(sys.argv[2]))), end="")' "${SCRIPT_DIR}" "${ENV_FILE}" >"${NORMALIZED_ENV_FILE}"
-  set -a
-  # shellcheck disable=SC1090
-  source "${NORMALIZED_ENV_FILE}"
-  set +a
+  NORMALIZED_ENV_NUL_FILE="$(mktemp)"
+  if [[ "$ACTION" == "install" || "$ACTION" == "reinstall" || "$RENDER_ONLY" == "1" ]]; then
+    [[ -f "${SCRIPT_DIR}/vpn_installer/install_support.py" ]] || { echo "Python renderer package not found next to install.sh." >&2; exit 1; }
+    "${python_bin}" -c 'import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); from vpn_installer.config import render_env_text; from vpn_installer.install_support import load_runtime_env; Path(sys.argv[3]).write_text(render_env_text(load_runtime_env(Path(sys.argv[2]))), encoding="utf-8", newline="\n")' "${SCRIPT_DIR}" "${ENV_FILE}" "${NORMALIZED_ENV_FILE}"
+  else
+    tr -d '\r' <"${ENV_FILE}" >"${NORMALIZED_ENV_FILE}"
+  fi
+
+  "${python_bin}" -c 'import re, shlex, sys; from pathlib import Path
+path = Path(sys.argv[1])
+out = Path(sys.argv[2])
+items = []
+for number, raw_line in enumerate(path.read_text(encoding="utf-8-sig").splitlines(), 1):
+    line = raw_line.strip()
+    if not line or line.startswith("#"):
+        continue
+    if line.startswith("export "):
+        line = line[7:].lstrip()
+    if "=" not in line:
+        raise SystemExit(f"invalid env line {number}: expected KEY=VALUE")
+    key, raw_value = line.split("=", 1)
+    key = key.strip()
+    if not re.fullmatch(r"[A-Z][A-Z0-9_]*", key):
+        raise SystemExit(f"invalid env key on line {number}: {key!r}")
+    raw_value = raw_value.strip()
+    try:
+        parsed = shlex.split(raw_value, posix=True, comments=False)
+    except ValueError as exc:
+        raise SystemExit(f"invalid env value on line {number}: {exc}") from exc
+    if len(parsed) > 1:
+        raise SystemExit(f"invalid env value on line {number}: unexpected whitespace")
+    value = parsed[0] if parsed else ""
+    if "\x00" in value:
+        raise SystemExit(f"invalid NUL in env value on line {number}")
+    items.append((key, value))
+with out.open("wb") as handle:
+    for key, value in items:
+        handle.write(key.encode("ascii") + b"\0" + value.encode("utf-8") + b"\0")' "${NORMALIZED_ENV_FILE}" "${NORMALIZED_ENV_NUL_FILE}"
+
+  while IFS= read -r -d '' key && IFS= read -r -d '' value; do
+    [[ "${key}" =~ ^[A-Z][A-Z0-9_]*$ ]] || { echo "Invalid normalized env key: ${key}" >&2; exit 1; }
+    printf -v "${key}" '%s' "${value}"
+    export "${key}"
+  done <"${NORMALIZED_ENV_NUL_FILE}"
 }
 
 normalize_env_with_python
@@ -137,15 +168,18 @@ APT_LOCK_TIMEOUT_SECONDS="${APT_LOCK_TIMEOUT_SECONDS:-900}"
 APT_LOCK_RETRY_SECONDS="${APT_LOCK_RETRY_SECONDS:-5}"
 SINGBOX_CONFIG_PATH="/etc/sing-box/config.json"
 SINGBOX_BASE_CONFIG_PATH="${VPNSTACK_ROOT}/sing-box.base.json"
-SINGBOX_REQUIRED_VERSION="1.13.12"
+SINGBOX_SERVICE_PATH="/etc/systemd/system/sing-box.service"
 XRAY_CONFIG_PATH="/etc/xray/config.json"
 XRAY_SERVICE_PATH="/etc/systemd/system/vpn-stack-xray.service"
-XRAY_REQUIRED_VERSION="${XRAY_REQUIRED_VERSION:-26.3.27}"
-XRAY_LINUX_AMD64_SHA256="23cd9af937744d97776ee35ecad4972cf4b2109d1e0fe6be9930467608f7c8ae"
 WG_CONFIG_PATH="/etc/wireguard/${WG_INTERFACE:-wg0}.conf"
-NFTABLES_PATH="/etc/nftables.conf"
+NFTABLES_PATH="${VPNSTACK_ROOT}/nftables.conf"
+NFT_APPLY_SCRIPT_PATH="/usr/local/lib/vpn-stack/nft-apply.sh"
+NFT_SERVICE_PATH="/etc/systemd/system/vpn-stack-nftables.service"
+LEGACY_NFTABLES_PATH="/etc/nftables.conf"
+INSTALL_LOCK_PATH="${VPNSTACK_INSTALL_LOCK_PATH:-/run/lock/vpn-stack-install.lock}"
 SSHD_CONFIG_PATH="/etc/ssh/sshd_config.d/90-vpn-stack.conf"
 AGENT_SCRIPT_PATH="/usr/local/lib/vpn-stack/vpn-stack-agent.py"
+AGENT_DIAGNOSTICS_PATH="/usr/local/lib/vpn-stack/diagnostics.py"
 AGENT_LOG_CLASSIFIER_PATH="/usr/local/lib/vpn-stack/log_classifier.py"
 AGENT_TRANSPORT_POLICY_PATH="/usr/local/lib/vpn-stack/interserver_transport.py"
 AGENT_NETWORK_PROFILE_PATH="/usr/local/lib/vpn-stack/network_profile.py"
@@ -181,6 +215,7 @@ VPNSTACK_INSTALLED_AT_FILE="${VPNSTACK_ROOT}/installed_at"
 VPNSTACK_REMOVED_AT_FILE="${VPNSTACK_ROOT}/removed_at"
 VPNSTACK_RENDER_MANIFEST_FILE="${VPNSTACK_ROOT}/render-manifest.json"
 VPNSTACK_ADMIN_AUTH_FILE="${VPNSTACK_ROOT}/admin-auth.json"
+VPNSTACK_OPERATOR_MANIFEST_FILE="${VPNSTACK_ROOT}/operator-state.json"
 VPNSTACK_BASELINE_DIR="${VPNSTACK_BACKUP_DIR}/baseline"
 VPNSTACK_SNAPSHOT_DIR="${VPNSTACK_BACKUP_DIR}/snapshots"
 VPNSTACK_RELEASES_DIR="${VPNSTACK_ROOT}/releases"
@@ -189,12 +224,17 @@ VPNSTACK_PREVIOUS_RELEASE="${VPNSTACK_ROOT}/previous"
 VPNSTACK_ACCEPTANCE_FILE="${VPNSTACK_ROOT}/acceptance.json"
 VPNSTACK_FAILED_ACCEPTANCE_FILE="${VPNSTACK_ROOT}/last-failed-acceptance.json"
 VPNSTACK_REVISION_SNAPSHOT_RETENTION=10
+VPNSTACK_RELEASE_RETENTION=3
 CURRENT_ROLLBACK_DIR=""
 INSTALL_MUTATION_STARTED=0
 PREPARED_ARTIFACTS_DIR=""
 STAGED_RELEASE_DIR=""
 PUBLISHED_RELEASE_DIR=""
+ACTIVATION_STARTED=0
+ROLLBACK_SUCCEEDED=0
+PRESERVED_TRANSPORT_TAG=""
 NORMALIZED_ENV_FILE="${NORMALIZED_ENV_FILE:-}"
+NORMALIZED_ENV_NUL_FILE="${NORMALIZED_ENV_NUL_FILE:-}"
 
 WG_RU_ADDRESS_HOST="${WG_RU_ADDRESS:-}"
 WG_RU_ADDRESS_HOST="${WG_RU_ADDRESS_HOST%%/*}"
@@ -267,6 +307,19 @@ copy_if_present() {
   return 1
 }
 
+link_release_file() {
+  local source_dir="$1"
+  local source_name="$2"
+  local destination="$3"
+  local link_tmp=""
+  [[ -f "${source_dir}/${source_name}" ]] || return 1
+  mkdir -p "$(dirname "${destination}")"
+  link_tmp="$(dirname "${destination}")/.${destination##*/}.$$.tmp"
+  rm -f "${link_tmp}"
+  ln -s "${VPNSTACK_CURRENT_RELEASE}/${source_name}" "${link_tmp}"
+  mv -Tf "${link_tmp}" "${destination}"
+}
+
 timestamp_utc() {
   date -u +"%Y%m%dT%H%M%SZ"
 }
@@ -279,7 +332,7 @@ current_install_role() {
 
 current_install_deployment() {
   if [[ -f "${VPNSTACK_DEPLOYMENT_FILE}" ]]; then
-    grep -E '^DEPLOY_NAME=' "${VPNSTACK_DEPLOYMENT_FILE}" | head -n1 | cut -d= -f2- | sed 's/^"//; s/"$//'
+    { grep -E '^DEPLOY_NAME=' "${VPNSTACK_DEPLOYMENT_FILE}" || true; } | head -n1 | cut -d= -f2- | sed 's/^"//; s/"$//'
   fi
 }
 
@@ -295,8 +348,26 @@ require_managed_install_for_destructive_action() {
 
   local current_role
   current_role="$(current_install_role)"
-  if [[ -n "${current_role}" && "${current_role}" != "${ROLE}" ]]; then
-    echo "Installed role mismatch: requested ${ROLE}, found ${current_role}." >&2
+  if [[ "${current_role}" != "${ROLE}" ]]; then
+    echo "Installed role mismatch: requested ${ROLE}, found ${current_role:-missing}." >&2
+    exit 1
+  fi
+}
+
+require_matching_install_identity() {
+  local current_role=""
+  local current_deployment=""
+  if ! is_currently_installed; then
+    return 0
+  fi
+  current_role="$(current_install_role)"
+  current_deployment="$(current_install_deployment)"
+  if [[ "${current_role}" != "${ROLE}" ]]; then
+    echo "Installed role mismatch: requested ${ROLE}, found ${current_role:-missing}. Use an explicit remove before changing roles." >&2
+    exit 1
+  fi
+  if [[ "${current_deployment}" != "${DEPLOY_NAME}" ]]; then
+    echo "Installed deployment mismatch: requested ${DEPLOY_NAME}, found ${current_deployment:-missing}. Use an explicit remove before changing deployments." >&2
     exit 1
   fi
 }
@@ -319,12 +390,49 @@ service_enabled_flag() {
   fi
 }
 
+acquire_install_lock() {
+  command -v flock >/dev/null 2>&1 || { echo "flock is required for installation locking." >&2; exit 1; }
+  mkdir -p "$(dirname "${INSTALL_LOCK_PATH}")"
+  exec 8>"${INSTALL_LOCK_PATH}"
+  if ! flock -w 60 8; then
+    echo "Another vpn-stack install or reinstall is already running." >&2
+    exit 75
+  fi
+}
+
+migrate_legacy_global_nftables() {
+  if [[ ! -f "${LEGACY_NFTABLES_PATH}" ]]; then
+    return 0
+  fi
+  if ! grep -q '^flush ruleset$' "${LEGACY_NFTABLES_PATH}" || ! grep -q '^table inet vpnstack {' "${LEGACY_NFTABLES_PATH}"; then
+    return 0
+  fi
+  systemctl disable --now nftables.service >/dev/null 2>&1 || true
+  systemctl reset-failed nftables.service >/dev/null 2>&1 || true
+  rm -f "${LEGACY_NFTABLES_PATH}"
+}
+
+restorable_legacy_nftables_flag() {
+  local state="$1"
+  if [[ ! -s "${LEGACY_NFTABLES_PATH}" ]]; then
+    printf '0'
+    return 0
+  fi
+  if [[ "${state}" == "enabled" ]]; then
+    service_enabled_flag nftables.service
+  else
+    service_active_flag nftables.service
+  fi
+}
+
 write_service_state_file() {
   local path="$1"
-  mkdir -p "$(dirname "$path")"
+  mkdir -p "$(dirname "$path")" || return 1
   cat >"${path}" <<EOF
-NFTABLES_ENABLED=$(service_enabled_flag nftables)
-NFTABLES_ACTIVE=$(service_active_flag nftables)
+NFTABLES_ENABLED=$(restorable_legacy_nftables_flag enabled)
+NFTABLES_ACTIVE=$(restorable_legacy_nftables_flag active)
+VPNSTACK_NFTABLES_ENABLED=$(service_enabled_flag vpn-stack-nftables.service)
+VPNSTACK_NFTABLES_ACTIVE=$(service_active_flag vpn-stack-nftables.service)
 WIREGUARD_ENABLED=$(service_enabled_flag "wg-quick@${WG_INTERFACE}")
 WIREGUARD_ACTIVE=$(service_active_flag "wg-quick@${WG_INTERFACE}")
 SINGBOX_ENABLED=$(service_enabled_flag sing-box)
@@ -374,12 +482,16 @@ managed_paths() {
   printf '%s\n' \
     "${SINGBOX_CONFIG_PATH}" \
     "${SINGBOX_BASE_CONFIG_PATH}" \
+    "${SINGBOX_SERVICE_PATH}" \
     "${XRAY_CONFIG_PATH}" \
     "${XRAY_SERVICE_PATH}" \
     "${WG_CONFIG_PATH}" \
     "${NFTABLES_PATH}" \
+    "${NFT_APPLY_SCRIPT_PATH}" \
+    "${NFT_SERVICE_PATH}" \
     "${SSHD_CONFIG_PATH}" \
     "${AGENT_SCRIPT_PATH}" \
+    "${AGENT_DIAGNOSTICS_PATH}" \
     "${AGENT_LOG_CLASSIFIER_PATH}" \
     "${AGENT_TRANSPORT_POLICY_PATH}" \
     "${AGENT_NETWORK_PROFILE_PATH}" \
@@ -407,6 +519,7 @@ managed_paths() {
     "${VPNSTACK_REMOVED_AT_FILE}" \
     "${VPNSTACK_RENDER_MANIFEST_FILE}" \
     "${VPNSTACK_ADMIN_AUTH_FILE}" \
+    "${VPNSTACK_OPERATOR_MANIFEST_FILE}" \
     "${VPNSTACK_CURRENT_RELEASE}" \
     "${VPNSTACK_PREVIOUS_RELEASE}" \
     "${VPNSTACK_ACCEPTANCE_FILE}"
@@ -414,6 +527,7 @@ managed_paths() {
 
 legacy_paths() {
   printf '%s\n' \
+    "${LEGACY_NFTABLES_PATH}" \
     "${LEGACY_SYNC_SCRIPT_PATH}" \
     "${LEGACY_HEALTH_SCRIPT_PATH}" \
     "${LEGACY_GUARD_SCRIPT_PATH}" \
@@ -440,32 +554,51 @@ backup_path_if_present() {
   if [[ -e "${original_path}" || -L "${original_path}" ]]; then
     local backup_path
     backup_path="$(backup_target_path "${backup_root}" "${original_path}")"
-    mkdir -p "$(dirname "${backup_path}")"
-    cp -a "${original_path}" "${backup_path}"
+    mkdir -p "$(dirname "${backup_path}")" || return 1
+    cp -a "${original_path}" "${backup_path}" || return 1
   fi
 }
 
 extend_baseline_contract() {
   local path=""
   local backup_path=""
-  for path in "${RESOLVED_DROPIN_PATH}" "${RESOLV_CONF_PATH}" "${AGENT_TRANSPORT_POLICY_PATH}" "${AGENT_NETWORK_PROFILE_PATH}" "${TRANSPORT_SERVICE_PATH}" "${TRANSPORT_STATE_PATH}"; do
-    backup_path="$(backup_target_path "${VPNSTACK_BASELINE_DIR}" "${path}")"
+  local staging_dir="${VPNSTACK_BACKUP_DIR}/.baseline-extend-staging-$$"
+  local previous_dir="${VPNSTACK_BACKUP_DIR}/.baseline-extend-previous-$$"
+  [[ -d "${VPNSTACK_BASELINE_DIR}" ]] || { echo "Baseline backup is missing." >&2; return 1; }
+  rm -rf "${staging_dir}" "${previous_dir}" || return 1
+  cp -a "${VPNSTACK_BASELINE_DIR}" "${staging_dir}" || return 1
+  rm -f "${staging_dir}/.complete" || return 1
+  for path in "${RESOLVED_DROPIN_PATH}" "${RESOLV_CONF_PATH}" "${SINGBOX_SERVICE_PATH}" "${AGENT_TRANSPORT_POLICY_PATH}" "${AGENT_NETWORK_PROFILE_PATH}" "${TRANSPORT_SERVICE_PATH}" "${TRANSPORT_STATE_PATH}" "${NFTABLES_PATH}" "${NFT_APPLY_SCRIPT_PATH}" "${NFT_SERVICE_PATH}"; do
+    backup_path="$(backup_target_path "${staging_dir}" "${path}")"
     if [[ ! -e "${backup_path}" && ! -L "${backup_path}" ]]; then
-      backup_path_if_present "${VPNSTACK_BASELINE_DIR}" "${path}"
+      backup_path_if_present "${staging_dir}" "${path}" || return 1
     fi
   done
-  if ! grep -q '^SYSTEMD_RESOLVED_ENABLED=' "${VPNSTACK_BASELINE_DIR}/service-state.env" 2>/dev/null; then
-    cat >>"${VPNSTACK_BASELINE_DIR}/service-state.env" <<EOF
+  if ! grep -q '^SYSTEMD_RESOLVED_ENABLED=' "${staging_dir}/service-state.env" 2>/dev/null; then
+    cat >>"${staging_dir}/service-state.env" <<EOF || return 1
 SYSTEMD_RESOLVED_ENABLED=$(service_enabled_flag systemd-resolved.service)
 SYSTEMD_RESOLVED_ACTIVE=$(service_active_flag systemd-resolved.service)
 EOF
   fi
-  if ! grep -q '^TRANSPORT_SERVICE_ENABLED=' "${VPNSTACK_BASELINE_DIR}/service-state.env" 2>/dev/null; then
-    cat >>"${VPNSTACK_BASELINE_DIR}/service-state.env" <<EOF
+  if ! grep -q '^TRANSPORT_SERVICE_ENABLED=' "${staging_dir}/service-state.env" 2>/dev/null; then
+    cat >>"${staging_dir}/service-state.env" <<EOF || return 1
 TRANSPORT_SERVICE_ENABLED=$(service_enabled_flag vpn-stack-transport.service)
 TRANSPORT_SERVICE_ACTIVE=$(service_active_flag vpn-stack-transport.service)
 EOF
   fi
+  if ! grep -q '^VPNSTACK_NFTABLES_ENABLED=' "${staging_dir}/service-state.env" 2>/dev/null; then
+    cat >>"${staging_dir}/service-state.env" <<EOF || return 1
+VPNSTACK_NFTABLES_ENABLED=$(service_enabled_flag vpn-stack-nftables.service)
+VPNSTACK_NFTABLES_ACTIVE=$(service_active_flag vpn-stack-nftables.service)
+EOF
+  fi
+  : >"${staging_dir}/.complete" || return 1
+  mv "${VPNSTACK_BASELINE_DIR}" "${previous_dir}" || return 1
+  if ! mv "${staging_dir}" "${VPNSTACK_BASELINE_DIR}"; then
+    mv "${previous_dir}" "${VPNSTACK_BASELINE_DIR}" || true
+    return 1
+  fi
+  rm -rf "${previous_dir}" || return 1
 }
 
 backup_rule_directory_if_present() {
@@ -473,20 +606,31 @@ backup_rule_directory_if_present() {
   local backup_path
   if [[ -d "${RULESET_DIR}" ]]; then
     backup_path="$(backup_target_path "${backup_root}" "${RULESET_DIR}")"
-    mkdir -p "$(dirname "${backup_path}")"
-    cp -a "${RULESET_DIR}" "${backup_path}"
+    mkdir -p "$(dirname "${backup_path}")" || return 1
+    cp -a "${RULESET_DIR}" "${backup_path}" || return 1
   fi
 }
 
 create_baseline_backup() {
-  rm -rf "${VPNSTACK_BASELINE_DIR}"
-  mkdir -p "${VPNSTACK_BASELINE_DIR}"
-  CURRENT_ROLLBACK_DIR="${VPNSTACK_BASELINE_DIR}"
-  write_service_state_file "${VPNSTACK_BASELINE_DIR}/service-state.env"
+  local staging_dir="${VPNSTACK_BACKUP_DIR}/.baseline-staging-$$"
+  local previous_dir="${VPNSTACK_BACKUP_DIR}/.baseline-previous-$$"
+  rm -rf "${staging_dir}" "${previous_dir}" || return 1
+  mkdir -p "${staging_dir}" || return 1
+  write_service_state_file "${staging_dir}/service-state.env" || return 1
   while IFS= read -r path; do
-    backup_path_if_present "${VPNSTACK_BASELINE_DIR}" "${path}"
+    backup_path_if_present "${staging_dir}" "${path}" || return 1
   done < <(rollback_paths)
-  backup_rule_directory_if_present "${VPNSTACK_BASELINE_DIR}"
+  backup_rule_directory_if_present "${staging_dir}" || return 1
+  : >"${staging_dir}/.complete" || return 1
+  if [[ -e "${VPNSTACK_BASELINE_DIR}" ]]; then
+    mv "${VPNSTACK_BASELINE_DIR}" "${previous_dir}" || return 1
+  fi
+  if ! mv "${staging_dir}" "${VPNSTACK_BASELINE_DIR}"; then
+    [[ ! -e "${previous_dir}" ]] || mv "${previous_dir}" "${VPNSTACK_BASELINE_DIR}" || true
+    return 1
+  fi
+  rm -rf "${previous_dir}" || return 1
+  CURRENT_ROLLBACK_DIR="${VPNSTACK_BASELINE_DIR}"
 }
 
 prune_revision_snapshots() {
@@ -497,24 +641,36 @@ prune_revision_snapshots() {
   local snapshots=()
   [[ -d "${VPNSTACK_SNAPSHOT_DIR}" ]] || return 0
   while IFS= read -r -d '' entry; do
-    snapshots+=("${entry#* }")
+    snapshot="${entry#* }"
+    if [[ ! -f "${snapshot}/.complete" ]]; then
+      rm -rf -- "${snapshot}" || return 1
+      continue
+    fi
+    snapshots+=("${snapshot}")
   done < <(find "${VPNSTACK_SNAPSHOT_DIR}" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\0' | sort -z -nr)
   for ((index = keep; index < ${#snapshots[@]}; index++)); do
     snapshot="${snapshots[index]}"
-    [[ "${snapshot}" == "${VPNSTACK_SNAPSHOT_DIR}/"* ]] && rm -rf -- "${snapshot}"
+    if [[ "${snapshot}" == "${VPNSTACK_SNAPSHOT_DIR}/"* ]]; then
+      rm -rf -- "${snapshot}" || return 1
+    fi
   done
 }
 
 create_revision_snapshot() {
-  local snapshot_dir="${VPNSTACK_SNAPSHOT_DIR}/$(timestamp_utc)-$$"
-  prune_revision_snapshots "$((VPNSTACK_REVISION_SNAPSHOT_RETENTION - 1))"
-  mkdir -p "${snapshot_dir}"
-  CURRENT_ROLLBACK_DIR="${snapshot_dir}"
-  write_service_state_file "${snapshot_dir}/service-state.env"
+  local snapshot_name="$(timestamp_utc)-$$"
+  local snapshot_dir="${VPNSTACK_SNAPSHOT_DIR}/${snapshot_name}"
+  local staging_dir="${VPNSTACK_SNAPSHOT_DIR}/.staging-${snapshot_name}"
+  prune_revision_snapshots "$((VPNSTACK_REVISION_SNAPSHOT_RETENTION - 1))" || return 1
+  rm -rf "${staging_dir}" || return 1
+  mkdir -p "${staging_dir}" || return 1
+  write_service_state_file "${staging_dir}/service-state.env" || return 1
   while IFS= read -r path; do
-    backup_path_if_present "${snapshot_dir}" "${path}"
+    backup_path_if_present "${staging_dir}" "${path}" || return 1
   done < <(rollback_paths)
-  backup_rule_directory_if_present "${snapshot_dir}"
+  backup_rule_directory_if_present "${staging_dir}" || return 1
+  : >"${staging_dir}/.complete" || return 1
+  mv "${staging_dir}" "${snapshot_dir}" || return 1
+  CURRENT_ROLLBACK_DIR="${snapshot_dir}"
 }
 
 restore_path_from_backup() {
@@ -523,10 +679,10 @@ restore_path_from_backup() {
   local backup_path
   backup_path="$(backup_target_path "${backup_root}" "${original_path}")"
 
-  rm -rf "${original_path}"
+  rm -rf "${original_path}" || return 1
   if [[ -e "${backup_path}" || -L "${backup_path}" ]]; then
-    mkdir -p "$(dirname "${original_path}")"
-    cp -a "${backup_path}" "${original_path}"
+    mkdir -p "$(dirname "${original_path}")" || return 1
+    cp -a "${backup_path}" "${original_path}" || return 1
   fi
 }
 
@@ -535,49 +691,77 @@ apply_service_restore_flags() {
   local enabled_flag="$2"
   local active_flag="$3"
 
+  # An active legacy nftables unit without its source file cannot be
+  # reproduced after stop. The managed vpn-stack unit is restored separately.
+  if [[ "${service}" == "nftables" && ! -s "${LEGACY_NFTABLES_PATH}" ]]; then
+    enabled_flag=0
+    active_flag=0
+  fi
+
   if [[ "${enabled_flag}" == "1" ]]; then
-    systemctl enable "${service}" >/dev/null 2>&1 || true
+    systemctl enable "${service}" >/dev/null || return 1
   else
     systemctl disable "${service}" >/dev/null 2>&1 || true
+    if systemctl is-enabled --quiet "${service}" >/dev/null 2>&1; then
+      echo "Rollback could not disable ${service}." >&2
+      return 1
+    fi
   fi
 
   if [[ "${active_flag}" == "1" ]]; then
-    systemctl restart "${service}" >/dev/null 2>&1 || systemctl start "${service}" >/dev/null 2>&1 || true
+    systemctl reset-failed "${service}" >/dev/null 2>&1 || true
+    systemctl restart "${service}" >/dev/null 2>&1 || systemctl start "${service}" >/dev/null || return 1
+    systemctl is-active --quiet "${service}" || return 1
   else
     systemctl stop "${service}" >/dev/null 2>&1 || true
+    if systemctl is-active --quiet "${service}" >/dev/null 2>&1; then
+      echo "Rollback could not stop ${service}." >&2
+      return 1
+    fi
   fi
 }
 
 restore_service_state() {
   local state_path="$1"
+  local state_key=""
+  local state_value=""
   if [[ ! -f "${state_path}" ]]; then
     return 0
   fi
 
-  # shellcheck disable=SC1090
-  source "${state_path}"
-  apply_service_restore_flags nftables "${NFTABLES_ENABLED:-0}" "${NFTABLES_ACTIVE:-0}"
-  apply_service_restore_flags "wg-quick@${WG_INTERFACE}" "${WIREGUARD_ENABLED:-0}" "${WIREGUARD_ACTIVE:-0}"
-  apply_service_restore_flags vpn-stack-sync.timer "${SYNC_TIMER_ENABLED:-0}" "${SYNC_TIMER_ACTIVE:-0}"
-  apply_service_restore_flags vpn-stack-health.timer "${HEALTH_TIMER_ENABLED:-0}" "${HEALTH_TIMER_ACTIVE:-0}"
-  apply_service_restore_flags vpn-stack-guard.timer "${GUARD_TIMER_ENABLED:-0}" "${GUARD_TIMER_ACTIVE:-0}"
-  apply_service_restore_flags vpn-stack-sync.service "${SYNC_SERVICE_ENABLED:-0}" "${SYNC_SERVICE_ACTIVE:-0}"
-  apply_service_restore_flags vpn-stack-health.service "${HEALTH_SERVICE_ENABLED:-0}" "${HEALTH_SERVICE_ACTIVE:-0}"
-  apply_service_restore_flags vpn-stack-transport.service "${TRANSPORT_SERVICE_ENABLED:-0}" "${TRANSPORT_SERVICE_ACTIVE:-0}"
-  apply_service_restore_flags vpn-stack-guard.service "${GUARD_SERVICE_ENABLED:-0}" "${GUARD_SERVICE_ACTIVE:-0}"
-  apply_service_restore_flags vpn-stack-subscription.service "${SUBSCRIPTION_ENABLED:-0}" "${SUBSCRIPTION_ACTIVE:-0}"
-  apply_service_restore_flags sing-box "${SINGBOX_ENABLED:-0}" "${SINGBOX_ACTIVE:-0}"
-  apply_service_restore_flags vpn-stack-xray.service "${XRAY_ENABLED:-0}" "${XRAY_ACTIVE:-0}"
-  apply_service_restore_flags vpn-stack-admin.service "${ADMIN_WEB_ENABLED_STATE:-0}" "${ADMIN_WEB_ACTIVE_STATE:-0}"
-  apply_service_restore_flags xray-vpnstack.service "${LEGACY_XRAY_VPNSTACK_ENABLED:-0}" "${LEGACY_XRAY_VPNSTACK_ACTIVE:-0}"
-  apply_service_restore_flags xray.service "${LEGACY_XRAY_ENABLED:-0}" "${LEGACY_XRAY_ACTIVE:-0}"
-  apply_service_restore_flags v2ray.service "${LEGACY_V2RAY_ENABLED:-0}" "${LEGACY_V2RAY_ACTIVE:-0}"
-  apply_service_restore_flags apt-daily.timer "${APT_DAILY_TIMER_ENABLED:-0}" "${APT_DAILY_TIMER_ACTIVE:-0}"
-  apply_service_restore_flags apt-daily-upgrade.timer "${APT_UPGRADE_TIMER_ENABLED:-0}" "${APT_UPGRADE_TIMER_ACTIVE:-0}"
-  apply_service_restore_flags unattended-upgrades.service "${UNATTENDED_UPGRADES_ENABLED:-0}" "${UNATTENDED_UPGRADES_ACTIVE:-0}"
-  apply_service_restore_flags systemd-resolved.service "${SYSTEMD_RESOLVED_ENABLED:-0}" "${SYSTEMD_RESOLVED_ACTIVE:-0}"
-  apply_service_restore_flags ssh.service "${SSH_SERVICE_ENABLED:-0}" "${SSH_SERVICE_ACTIVE:-0}"
-  apply_service_restore_flags ssh.socket "${SSH_SOCKET_ENABLED:-0}" "${SSH_SOCKET_ACTIVE:-0}"
+  while IFS='=' read -r state_key state_value; do
+    [[ -z "${state_key}" ]] && continue
+    [[ "${state_key}" =~ ^[A-Z][A-Z0-9_]*$ ]] || { echo "Invalid service-state key: ${state_key}" >&2; return 1; }
+    [[ "${state_value}" == "0" || "${state_value}" == "1" ]] || { echo "Invalid service-state value for ${state_key}" >&2; return 1; }
+    printf -v "${state_key}" '%s' "${state_value}"
+  done <"${state_path}"
+  while IFS='|' read -r service enabled_flag active_flag; do
+    apply_service_restore_flags "${service}" "${enabled_flag}" "${active_flag}" || return 1
+  done <<EOF
+nftables|${NFTABLES_ENABLED:-0}|${NFTABLES_ACTIVE:-0}
+vpn-stack-nftables.service|${VPNSTACK_NFTABLES_ENABLED:-0}|${VPNSTACK_NFTABLES_ACTIVE:-0}
+wg-quick@${WG_INTERFACE}|${WIREGUARD_ENABLED:-0}|${WIREGUARD_ACTIVE:-0}
+vpn-stack-sync.timer|${SYNC_TIMER_ENABLED:-0}|${SYNC_TIMER_ACTIVE:-0}
+vpn-stack-health.timer|${HEALTH_TIMER_ENABLED:-0}|${HEALTH_TIMER_ACTIVE:-0}
+vpn-stack-guard.timer|${GUARD_TIMER_ENABLED:-0}|${GUARD_TIMER_ACTIVE:-0}
+vpn-stack-sync.service|${SYNC_SERVICE_ENABLED:-0}|${SYNC_SERVICE_ACTIVE:-0}
+vpn-stack-health.service|${HEALTH_SERVICE_ENABLED:-0}|${HEALTH_SERVICE_ACTIVE:-0}
+vpn-stack-transport.service|${TRANSPORT_SERVICE_ENABLED:-0}|${TRANSPORT_SERVICE_ACTIVE:-0}
+vpn-stack-guard.service|${GUARD_SERVICE_ENABLED:-0}|${GUARD_SERVICE_ACTIVE:-0}
+vpn-stack-subscription.service|${SUBSCRIPTION_ENABLED:-0}|${SUBSCRIPTION_ACTIVE:-0}
+sing-box|${SINGBOX_ENABLED:-0}|${SINGBOX_ACTIVE:-0}
+vpn-stack-xray.service|${XRAY_ENABLED:-0}|${XRAY_ACTIVE:-0}
+vpn-stack-admin.service|${ADMIN_WEB_ENABLED_STATE:-0}|${ADMIN_WEB_ACTIVE_STATE:-0}
+xray-vpnstack.service|${LEGACY_XRAY_VPNSTACK_ENABLED:-0}|${LEGACY_XRAY_VPNSTACK_ACTIVE:-0}
+xray.service|${LEGACY_XRAY_ENABLED:-0}|${LEGACY_XRAY_ACTIVE:-0}
+v2ray.service|${LEGACY_V2RAY_ENABLED:-0}|${LEGACY_V2RAY_ACTIVE:-0}
+apt-daily.timer|${APT_DAILY_TIMER_ENABLED:-0}|${APT_DAILY_TIMER_ACTIVE:-0}
+apt-daily-upgrade.timer|${APT_UPGRADE_TIMER_ENABLED:-0}|${APT_UPGRADE_TIMER_ACTIVE:-0}
+unattended-upgrades.service|${UNATTENDED_UPGRADES_ENABLED:-0}|${UNATTENDED_UPGRADES_ACTIVE:-0}
+systemd-resolved.service|${SYSTEMD_RESOLVED_ENABLED:-0}|${SYSTEMD_RESOLVED_ACTIVE:-0}
+ssh.service|${SSH_SERVICE_ENABLED:-0}|${SSH_SERVICE_ACTIVE:-0}
+ssh.socket|${SSH_SOCKET_ENABLED:-0}|${SSH_SOCKET_ACTIVE:-0}
+EOF
 }
 
 cleanup_role_artifacts() {
@@ -590,7 +774,10 @@ cleanup_role_artifacts() {
   if [[ -n "${STAGED_RELEASE_DIR:-}" && "${STAGED_RELEASE_DIR}" == "${VPNSTACK_RELEASES_DIR}/.staging-"* ]]; then
     rm -rf "${STAGED_RELEASE_DIR}"
   fi
-  rm -f "${NORMALIZED_ENV_FILE:-}"
+  if [[ "${ACTIVATION_STARTED:-0}" != "1" && -n "${PUBLISHED_RELEASE_DIR:-}" && "${PUBLISHED_RELEASE_DIR}" == "${VPNSTACK_RELEASES_DIR}/"* ]]; then
+    rm -rf -- "${PUBLISHED_RELEASE_DIR}"
+  fi
+  rm -f "${NORMALIZED_ENV_FILE:-}" "${NORMALIZED_ENV_NUL_FILE:-}"
 }
 
 restore_install_state_on_error() {
@@ -600,22 +787,50 @@ restore_install_state_on_error() {
 
   if [[ -z "${CURRENT_ROLLBACK_DIR:-}" || ! -d "${CURRENT_ROLLBACK_DIR}" ]]; then
     echo "Install failed after managed services were stopped; no rollback snapshot is available." >&2
-    return 0
+    return 1
   fi
 
   echo "Install failed after applying changes started; restoring previous files and services." >&2
+  restore_install_snapshot "${CURRENT_ROLLBACK_DIR}" || return 1
+  ROLLBACK_SUCCEEDED=1
+}
+
+restore_install_snapshot() {
+  local snapshot_dir="$1"
+  [[ -d "${snapshot_dir}" ]] || { echo "Rollback snapshot is missing: ${snapshot_dir}" >&2; return 1; }
+  if [[ "${snapshot_dir}" != "${VPNSTACK_BASELINE_DIR}" && ! -f "${snapshot_dir}/.complete" ]]; then
+    echo "Rollback snapshot is incomplete: ${snapshot_dir}" >&2
+    return 1
+  fi
+  [[ -s "${snapshot_dir}/service-state.env" ]] || { echo "Rollback service state is missing: ${snapshot_dir}" >&2; return 1; }
+  stop_managed_services || return 1
   while IFS= read -r path; do
-    restore_path_from_backup "${CURRENT_ROLLBACK_DIR}" "${path}"
+    restore_path_from_backup "${snapshot_dir}" "${path}" || return 1
   done < <(rollback_paths)
-  restore_path_from_backup "${CURRENT_ROLLBACK_DIR}" "${RULESET_DIR}"
+  restore_path_from_backup "${snapshot_dir}" "${RULESET_DIR}" || return 1
+  systemctl daemon-reload || return 1
   sysctl --system >/dev/null 2>&1 || true
-  restore_service_state "${CURRENT_ROLLBACK_DIR}/service-state.env"
+  restore_service_state "${snapshot_dir}/service-state.env" || return 1
+}
+
+latest_revision_snapshot() {
+  local entry=""
+  [[ -d "${VPNSTACK_SNAPSHOT_DIR}" ]] || return 1
+  while IFS= read -r -d '' entry; do
+    entry="${entry#* }"
+    [[ -f "${entry}/.complete" ]] || continue
+    printf '%s' "${entry}"
+    return 0
+  done < <(find "${VPNSTACK_SNAPSHOT_DIR}" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\0' | sort -z -nr)
+  return 1
 }
 
 install_exit_trap() {
   local exit_code="$1"
   if [[ "${exit_code}" -ne 0 ]]; then
-    restore_install_state_on_error || true
+    if ! restore_install_state_on_error; then
+      echo "Rollback failed; the failed release and rollback snapshot were retained for recovery." >&2
+    fi
   fi
   cleanup_role_artifacts
 }
@@ -630,7 +845,7 @@ stop_managed_services() {
   systemctl stop vpn-stack-sync.service vpn-stack-sync.timer vpn-stack-guard.service vpn-stack-guard.timer >/dev/null 2>&1 || true
   systemctl stop vpn-stack-admin.service >/dev/null 2>&1 || true
   systemctl stop vpn-stack-subscription.service >/dev/null 2>&1 || true
-  systemctl stop nftables >/dev/null 2>&1 || true
+  systemctl stop vpn-stack-nftables.service >/dev/null 2>&1 || true
 }
 
 cleanup_wireguard_policy_routes() {
@@ -690,7 +905,29 @@ disable_legacy_proxy_services() {
 prepare_transport_supervisor() {
   systemctl disable --now vpn-stack-transport.service >/dev/null 2>&1 || true
   systemctl reset-failed vpn-stack-transport.service >/dev/null 2>&1 || true
-  rm -f "${TRANSPORT_STATE_PATH}"
+}
+
+capture_preserved_transport_tag() {
+  [[ "${ROLE}" == "ru-gateway" && -s "${TRANSPORT_STATE_PATH}" ]] || return 0
+  python3 - "${TRANSPORT_STATE_PATH}" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+try:
+    state = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+    observed = datetime.fromisoformat(str(state.get("updated_at", "")).replace("Z", "+00:00"))
+    age = (datetime.now(timezone.utc) - observed.astimezone(timezone.utc)).total_seconds()
+except (OSError, TypeError, ValueError):
+    raise SystemExit(0)
+selected = str(state.get("selected", ""))
+if state.get("schema_version") in {6, 7} and age <= 30 and selected in {
+    "interserver-underlay-wg",
+    "interserver-underlay-hy2",
+}:
+    print(selected)
+PY
 }
 
 dpkg_lock_holders() {
@@ -741,8 +978,14 @@ disable_managed_services() {
   systemctl disable vpn-stack-sync.timer vpn-stack-guard.timer >/dev/null 2>&1 || true
   systemctl disable vpn-stack-admin.service >/dev/null 2>&1 || true
   systemctl disable vpn-stack-subscription.service >/dev/null 2>&1 || true
-  systemctl disable nftables >/dev/null 2>&1 || true
+  systemctl disable vpn-stack-nftables.service >/dev/null 2>&1 || true
   systemctl disable systemd-resolved.service >/dev/null 2>&1 || true
+}
+
+remove_owned_nftables() {
+  if [[ -x "${NFT_APPLY_SCRIPT_PATH}" ]]; then
+    "${NFT_APPLY_SCRIPT_PATH}" --delete
+  fi
 }
 
 remove_managed_files() {
@@ -753,8 +996,11 @@ remove_managed_files() {
     "${XRAY_SERVICE_PATH}" \
     "${WG_CONFIG_PATH}" \
     "${NFTABLES_PATH}" \
+    "${NFT_APPLY_SCRIPT_PATH}" \
+    "${NFT_SERVICE_PATH}" \
     "${SSHD_CONFIG_PATH}" \
     "${AGENT_SCRIPT_PATH}" \
+    "${AGENT_DIAGNOSTICS_PATH}" \
     "${AGENT_LOG_CLASSIFIER_PATH}" \
     "${AGENT_TRANSPORT_POLICY_PATH}" \
     "${AGENT_NETWORK_PROFILE_PATH}" \
@@ -786,7 +1032,7 @@ remove_managed_files() {
 }
 
 reset_install_runtime_state() {
-  rm -f "${LEGACY_DATAPLANE_CACHE_PATH}" "${HEALTH_STATE_PATH}" "${TRANSPORT_STATE_PATH}" "/var/lib/vpn-stack/transport-shadow-state.json"
+  rm -f "${LEGACY_DATAPLANE_CACHE_PATH}" "${HEALTH_STATE_PATH}" "/var/lib/vpn-stack/transport-shadow-state.json"
   if [[ "${ROLE}" == "ru-gateway" ]]; then
     rm -f "${LEGACY_ADAPTIVE_ROUTING_RULES_PATH}"
   fi
@@ -809,6 +1055,7 @@ record_install_metadata() {
 restore_baseline_or_cleanup() {
   stop_managed_services
   disable_managed_services
+  remove_owned_nftables
   remove_managed_files
   systemctl daemon-reload
 
@@ -844,7 +1091,7 @@ print_status() {
   printf 'current_role=%s\n' "$(current_install_role)"
   printf 'deployment=%s\n' "$(current_install_deployment)"
   printf 'wireguard=%s\n' "$(service_active_flag "wg-quick@${WG_INTERFACE}")"
-  printf 'nftables=%s\n' "$(service_active_flag nftables)"
+  printf 'nftables=%s\n' "$(service_active_flag vpn-stack-nftables.service)"
   printf 'sing_box=%s\n' "$(service_active_flag sing-box)"
   printf 'xray=%s\n' "$(service_active_flag vpn-stack-xray.service)"
 }
@@ -918,10 +1165,52 @@ detect_primary_interface() {
   ip route show default | awk '/default/ {print $5; exit}'
 }
 
+ensure_target_wan_interface() {
+  local detected=""
+  local python_bin=""
+  if [[ "${ROLE}" != "foreign-exit" || -n "${WAN_INTERFACE:-}" ]]; then
+    return 0
+  fi
+  detected="$(detect_primary_interface)"
+  if [[ -z "${detected}" ]]; then
+    echo "Unable to detect WAN interface. Set WAN_INTERFACE in the env file." >&2
+    return 1
+  fi
+  WAN_INTERFACE="${detected}"
+  export WAN_INTERFACE
+  python_bin="$(python_executable)" || return 1
+  "${python_bin}" -c 'import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); from vpn_installer.config import render_env_text; from vpn_installer.install_support import load_runtime_env; env = load_runtime_env(Path(sys.argv[2]), {"WAN_INTERFACE": sys.argv[4]}); Path(sys.argv[3]).write_text(render_env_text(env), encoding="utf-8", newline="\n")' \
+    "${SCRIPT_DIR}" "${ENV_FILE}" "${NORMALIZED_ENV_FILE}" "${WAN_INTERFACE}"
+}
+
 configure_ssh_daemon_mode() {
-  systemctl disable --now ssh.socket >/dev/null 2>&1 || true
-  systemctl enable ssh.service >/dev/null 2>&1 || true
-  systemctl restart ssh.service >/dev/null 2>&1 || systemctl start ssh.service >/dev/null 2>&1 || true
+  local attempt=0
+  local sshd_bin=""
+  if command -v sshd >/dev/null 2>&1; then
+    sshd_bin="$(command -v sshd)"
+  elif [[ -x /usr/sbin/sshd ]]; then
+    sshd_bin="/usr/sbin/sshd"
+  else
+    echo "OpenSSH server binary is missing." >&2
+    return 1
+  fi
+  "${sshd_bin}" -t
+
+  if systemctl is-active --quiet ssh.service; then
+    systemctl reload-or-restart ssh.service
+  elif systemctl is-active --quiet ssh.socket; then
+    systemctl restart ssh.socket
+  else
+    systemctl enable --now ssh.service
+  fi
+  for ((attempt = 0; attempt < 50; attempt++)); do
+    if ss -H -lnt "sport = :${SSH_PORT}" | grep -q .; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  echo "SSH listener did not become ready on configured port ${SSH_PORT}." >&2
+  return 1
 }
 
 configure_journald_limits() {
@@ -947,28 +1236,8 @@ configure_system_resolver() {
   ln -sfn "../run/systemd/resolve/stub-resolv.conf" "${RESOLV_CONF_PATH}"
 }
 
-find_rendered_role_dir() {
-  local env_dir=""
-  local candidate=""
-  if [[ -n "${ENV_FILE:-}" ]]; then
-    env_dir="$(cd "$(dirname "${ENV_FILE}")" && pwd)"
-  fi
-  for candidate in "${SCRIPT_DIR}/rendered" "${env_dir}/rendered"; do
-    if [[ -n "${candidate}" && -d "${candidate}" && -f "${candidate}/sing-box.json" ]]; then
-      printf '%s' "${candidate}"
-      return 0
-    fi
-  done
-  return 1
-}
-
 prepare_role_artifacts() {
-  local rendered_dir=""
   local temp_dir=""
-  if rendered_dir="$(find_rendered_role_dir)"; then
-    printf '%s' "${rendered_dir}"
-    return 0
-  fi
   temp_dir="$(mktemp -d)"
   if ! render_role_with_python "${temp_dir}"; then
     rm -rf "${temp_dir}"
@@ -979,60 +1248,84 @@ prepare_role_artifacts() {
 
 copy_role_artifacts() {
   local source_dir="$1"
-  copy_if_present "${source_dir}/sing-box.json" "${SINGBOX_CONFIG_PATH}" || { echo "Missing sing-box.json in ${source_dir}" >&2; exit 1; }
-  copy_if_present "${source_dir}/sing-box.json" "${SINGBOX_BASE_CONFIG_PATH}" || { echo "Missing sing-box.json in ${source_dir}" >&2; exit 1; }
-  copy_if_present "${source_dir}/render-manifest.json" "${VPNSTACK_RENDER_MANIFEST_FILE}" || { echo "Missing render-manifest.json in ${source_dir}" >&2; exit 1; }
-  copy_if_present "${source_dir}/vpn-stack-agent.py" "${AGENT_SCRIPT_PATH}" || { echo "Missing vpn-stack-agent.py in ${source_dir}" >&2; exit 1; }
-  copy_if_present "${source_dir}/log_classifier.py" "${AGENT_LOG_CLASSIFIER_PATH}" || { echo "Missing log_classifier.py in ${source_dir}" >&2; exit 1; }
-  copy_if_present "${source_dir}/interserver_transport.py" "${AGENT_TRANSPORT_POLICY_PATH}" || { echo "Missing interserver_transport.py in ${source_dir}" >&2; exit 1; }
-  copy_if_present "${source_dir}/network_profile.py" "${AGENT_NETWORK_PROFILE_PATH}" || { echo "Missing network_profile.py in ${source_dir}" >&2; exit 1; }
+  link_release_file "${source_dir}" "sing-box.json" "${SINGBOX_BASE_CONFIG_PATH}" || { echo "Missing sing-box.json in ${source_dir}" >&2; return 1; }
+  link_release_file "${source_dir}" "sing-box.service" "${SINGBOX_SERVICE_PATH}" || { echo "Missing sing-box.service in ${source_dir}" >&2; return 1; }
+  link_release_file "${source_dir}" "render-manifest.json" "${VPNSTACK_RENDER_MANIFEST_FILE}" || { echo "Missing render-manifest.json in ${source_dir}" >&2; return 1; }
+  link_release_file "${source_dir}" "vpn-stack-agent.py" "${AGENT_SCRIPT_PATH}" || { echo "Missing vpn-stack-agent.py in ${source_dir}" >&2; return 1; }
+  link_release_file "${source_dir}" "diagnostics.py" "${AGENT_DIAGNOSTICS_PATH}" || { echo "Missing diagnostics.py in ${source_dir}" >&2; return 1; }
+  link_release_file "${source_dir}" "log_classifier.py" "${AGENT_LOG_CLASSIFIER_PATH}" || { echo "Missing log_classifier.py in ${source_dir}" >&2; return 1; }
+  link_release_file "${source_dir}" "interserver_transport.py" "${AGENT_TRANSPORT_POLICY_PATH}" || { echo "Missing interserver_transport.py in ${source_dir}" >&2; return 1; }
+  link_release_file "${source_dir}" "network_profile.py" "${AGENT_NETWORK_PROFILE_PATH}" || { echo "Missing network_profile.py in ${source_dir}" >&2; return 1; }
   if [[ "$ROLE" == "ru-gateway" ]]; then
     mkdir -p "$(dirname "${XRAY_CONFIG_PATH}")"
-    copy_if_present "${source_dir}/xray.json" "${XRAY_CONFIG_PATH}" || { echo "Missing xray.json in ${source_dir}" >&2; exit 1; }
-    copy_if_present "${source_dir}/vpn-stack-xray.service" "${XRAY_SERVICE_PATH}" || { echo "Missing vpn-stack-xray.service in ${source_dir}" >&2; exit 1; }
-    copy_if_present "${source_dir}/admin_web.py" "${ADMIN_WEB_SCRIPT_PATH}" || { echo "Missing admin_web.py in ${source_dir}" >&2; exit 1; }
-    copy_if_present "${source_dir}/admin_apply.py" "${ADMIN_APPLY_SCRIPT_PATH}" || { echo "Missing admin_apply.py in ${source_dir}" >&2; exit 1; }
-    copy_if_present "${source_dir}/vpn-stack-admin.service" "${ADMIN_WEB_SERVICE_PATH}" || { echo "Missing vpn-stack-admin.service in ${source_dir}" >&2; exit 1; }
+    link_release_file "${source_dir}" "xray.json" "${XRAY_CONFIG_PATH}" || { echo "Missing xray.json in ${source_dir}" >&2; return 1; }
+    link_release_file "${source_dir}" "vpn-stack-xray.service" "${XRAY_SERVICE_PATH}" || { echo "Missing vpn-stack-xray.service in ${source_dir}" >&2; return 1; }
+    link_release_file "${source_dir}" "admin_web.py" "${ADMIN_WEB_SCRIPT_PATH}" || { echo "Missing admin_web.py in ${source_dir}" >&2; return 1; }
+    link_release_file "${source_dir}" "admin_apply.py" "${ADMIN_APPLY_SCRIPT_PATH}" || { echo "Missing admin_apply.py in ${source_dir}" >&2; return 1; }
+    link_release_file "${source_dir}" "vpn-stack-admin.service" "${ADMIN_WEB_SERVICE_PATH}" || { echo "Missing vpn-stack-admin.service in ${source_dir}" >&2; return 1; }
   else
+    link_release_file "${source_dir}" "sing-box.json" "${SINGBOX_CONFIG_PATH}" || { echo "Missing sing-box.json in ${source_dir}" >&2; return 1; }
     rm -f "${XRAY_CONFIG_PATH}" "${XRAY_SERVICE_PATH}"
     rm -f "${ADMIN_WEB_SCRIPT_PATH}" "${ADMIN_APPLY_SCRIPT_PATH}" "${ADMIN_WEB_SERVICE_PATH}"
   fi
   if [[ "$ROLE" == "ru-gateway" ]]; then
-    copy_if_present "${source_dir}/vpn-stack-transport.service" "${TRANSPORT_SERVICE_PATH}" || { echo "Missing vpn-stack-transport.service in ${source_dir}" >&2; exit 1; }
-    rm -f "${TRANSPORT_STATE_PATH}"
+    link_release_file "${source_dir}" "vpn-stack-transport.service" "${TRANSPORT_SERVICE_PATH}" || { echo "Missing vpn-stack-transport.service in ${source_dir}" >&2; return 1; }
   else
     rm -f "${TRANSPORT_SERVICE_PATH}" "${TRANSPORT_STATE_PATH}"
   fi
-  copy_if_present "${source_dir}/${WG_INTERFACE}.conf" "${WG_CONFIG_PATH}" || { echo "Missing ${WG_INTERFACE}.conf in ${source_dir}" >&2; exit 1; }
-  copy_if_present "${source_dir}/nftables.conf" "${NFTABLES_PATH}" || { echo "Missing nftables.conf in ${source_dir}" >&2; exit 1; }
-  copy_if_present "${source_dir}/sshd-vpn-stack.conf" "${SSHD_CONFIG_PATH}" || { echo "Missing sshd-vpn-stack.conf in ${source_dir}" >&2; exit 1; }
-  copy_if_present "${source_dir}/sysctl-vpn-stack.conf" "${SYSCTL_PATH}" || { echo "Missing sysctl-vpn-stack.conf in ${source_dir}" >&2; exit 1; }
-  copy_if_present "${source_dir}/modules-vpn-stack.conf" "${MODULES_LOAD_PATH}" || { echo "Missing modules-vpn-stack.conf in ${source_dir}" >&2; exit 1; }
-  copy_if_present "${source_dir}/apt-vpn-stack-unattended.conf" "${APT_PERIODIC_DROPIN_PATH}" || { echo "Missing apt-vpn-stack-unattended.conf in ${source_dir}" >&2; exit 1; }
-  copy_if_present "${source_dir}/resolved-vpn-stack.conf" "${RESOLVED_DROPIN_PATH}" || { echo "Missing resolved-vpn-stack.conf in ${source_dir}" >&2; exit 1; }
+  link_release_file "${source_dir}" "${WG_INTERFACE}.conf" "${WG_CONFIG_PATH}" || { echo "Missing ${WG_INTERFACE}.conf in ${source_dir}" >&2; return 1; }
+  link_release_file "${source_dir}" "nftables.conf" "${NFTABLES_PATH}" || { echo "Missing nftables.conf in ${source_dir}" >&2; return 1; }
+  link_release_file "${source_dir}" "vpn-stack-nft-apply.sh" "${NFT_APPLY_SCRIPT_PATH}" || { echo "Missing vpn-stack-nft-apply.sh in ${source_dir}" >&2; return 1; }
+  link_release_file "${source_dir}" "vpn-stack-nftables.service" "${NFT_SERVICE_PATH}" || { echo "Missing vpn-stack-nftables.service in ${source_dir}" >&2; return 1; }
+  link_release_file "${source_dir}" "sshd-vpn-stack.conf" "${SSHD_CONFIG_PATH}" || { echo "Missing sshd-vpn-stack.conf in ${source_dir}" >&2; return 1; }
+  link_release_file "${source_dir}" "sysctl-vpn-stack.conf" "${SYSCTL_PATH}" || { echo "Missing sysctl-vpn-stack.conf in ${source_dir}" >&2; return 1; }
+  link_release_file "${source_dir}" "modules-vpn-stack.conf" "${MODULES_LOAD_PATH}" || { echo "Missing modules-vpn-stack.conf in ${source_dir}" >&2; return 1; }
+  link_release_file "${source_dir}" "apt-vpn-stack-unattended.conf" "${APT_PERIODIC_DROPIN_PATH}" || { echo "Missing apt-vpn-stack-unattended.conf in ${source_dir}" >&2; return 1; }
+  link_release_file "${source_dir}" "resolved-vpn-stack.conf" "${RESOLVED_DROPIN_PATH}" || { echo "Missing resolved-vpn-stack.conf in ${source_dir}" >&2; return 1; }
   if [[ -f "${source_dir}/journald-vpn-stack.conf" ]]; then
-    copy_if_present "${source_dir}/journald-vpn-stack.conf" "${JOURNALD_DROPIN_PATH}"
+    link_release_file "${source_dir}" "journald-vpn-stack.conf" "${JOURNALD_DROPIN_PATH}"
   else
     rm -f "${JOURNALD_DROPIN_PATH}"
   fi
-  copy_if_present "${source_dir}/vpn-stack-health.service" "${HEALTH_SERVICE_PATH}" || { echo "Missing vpn-stack-health.service in ${source_dir}" >&2; exit 1; }
-  copy_if_present "${source_dir}/vpn-stack-health.timer" "${HEALTH_TIMER_PATH}" || { echo "Missing vpn-stack-health.timer in ${source_dir}" >&2; exit 1; }
+  link_release_file "${source_dir}" "vpn-stack-health.service" "${HEALTH_SERVICE_PATH}" || { echo "Missing vpn-stack-health.service in ${source_dir}" >&2; return 1; }
+  link_release_file "${source_dir}" "vpn-stack-health.timer" "${HEALTH_TIMER_PATH}" || { echo "Missing vpn-stack-health.timer in ${source_dir}" >&2; return 1; }
   rm -f "${SUBSCRIPTION_SERVICE_PATH}"
   rm -rf "${SUBSCRIPTION_ROOT}"
-  chmod 0644 "${SSHD_CONFIG_PATH}"
-  if [[ "$ROLE" == "ru-gateway" ]]; then
-    chmod 0644 "${XRAY_SERVICE_PATH}" "${TRANSPORT_SERVICE_PATH}"
-    chmod 0644 "${ADMIN_WEB_SERVICE_PATH}"
-    chmod 0755 "${ADMIN_WEB_SCRIPT_PATH}" "${ADMIN_APPLY_SCRIPT_PATH}"
-  fi
   rm -f "${LEGACY_SYNC_SCRIPT_PATH}" "${LEGACY_HEALTH_SCRIPT_PATH}" "${LEGACY_GUARD_SCRIPT_PATH}" "${LEGACY_SYNC_SERVICE_PATH}" "${LEGACY_SYNC_TIMER_PATH}" "${LEGACY_GUARD_SERVICE_PATH}" "${LEGACY_GUARD_TIMER_PATH}"
-  chmod 0755 "${AGENT_SCRIPT_PATH}"
-  chmod 0644 "${AGENT_LOG_CLASSIFIER_PATH}" "${AGENT_TRANSPORT_POLICY_PATH}" "${AGENT_NETWORK_PROFILE_PATH}"
+}
+
+manifest_value() {
+  local manifest_path="$1"
+  shift
+  python3 - "${manifest_path}" "$@" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+value = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+keys = sys.argv[2:]
+for key in keys:
+    if not isinstance(value, dict) or key not in value:
+        raise SystemExit(f"manifest field is missing: {'.'.join(keys)}")
+    value = value[key]
+if not isinstance(value, str) or not value:
+    raise SystemExit(f"manifest field must be a non-empty string: {'.'.join(keys)}")
+field = keys[-1]
+if field in {"sha256", "archive_sha256"} and not re.fullmatch(r"[0-9a-f]{64}", value):
+    raise SystemExit(f"manifest digest is invalid: {'.'.join(keys)}")
+if field in {"release_id", "version"} and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", value):
+    raise SystemExit(f"manifest identifier is unsafe: {'.'.join(keys)}")
+print(value)
+PY
 }
 
 release_id_from_manifest() {
-  local source_dir="$1"
-  sed -n 's/.*"release_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${source_dir}/render-manifest.json" | head -n1
+  manifest_value "$1/render-manifest.json" release_id
+}
+
+manifest_binary_field() {
+  manifest_value "$1/render-manifest.json" binaries "$2" "$3"
 }
 
 stage_release() {
@@ -1065,7 +1358,8 @@ release_tree_digest() {
   local source_dir="$1"
   (
     cd "${source_dir}"
-    find . -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}'
+    LC_ALL=C find . -type f ! -name '*.pyc' ! -name '*.pyo' ! -path '*/__pycache__/*' -print0 \
+      | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}'
   )
 }
 
@@ -1091,6 +1385,41 @@ publish_staged_release() {
   PUBLISHED_RELEASE_DIR="${release_dir}"
 }
 
+prune_old_releases() {
+  local current_release=""
+  local previous_release=""
+  local entry=""
+  local resolved=""
+  local keep_count=0
+  declare -A keep=()
+
+  current_release="$(readlink -f "${VPNSTACK_CURRENT_RELEASE}" 2>/dev/null || true)"
+  previous_release="$(readlink -f "${VPNSTACK_PREVIOUS_RELEASE}" 2>/dev/null || true)"
+  for resolved in "${current_release}" "${previous_release}"; do
+    if [[ -n "${resolved}" && -d "${resolved}" && -z "${keep[${resolved}]:-}" ]]; then
+      keep["${resolved}"]=1
+      keep_count=$((keep_count + 1))
+    fi
+  done
+
+  while IFS= read -r -d '' entry; do
+    resolved="$(readlink -f "${entry}" 2>/dev/null || true)"
+    case "${resolved}" in
+      "${VPNSTACK_RELEASES_DIR}/"*) ;;
+      *) echo "Refusing to prune unsafe release path: ${entry}" >&2; return 1 ;;
+    esac
+    if [[ -n "${keep[${resolved}]:-}" ]]; then
+      continue
+    fi
+    if (( keep_count < VPNSTACK_RELEASE_RETENTION )); then
+      keep["${resolved}"]=1
+      keep_count=$((keep_count + 1))
+      continue
+    fi
+    rm -rf -- "${resolved}"
+  done < <(find "${VPNSTACK_RELEASES_DIR}" -mindepth 1 -maxdepth 1 -type d ! -name '.staging-*' -printf '%T@ %p\0' | sort -z -nr | cut -z -d ' ' -f 2-)
+}
+
 normalize_staged_release_permissions() {
   local source_dir="$1"
   find "${source_dir}" -type d -exec chmod 0755 {} +
@@ -1107,43 +1436,105 @@ normalize_staged_release_permissions() {
 validate_staged_release() {
   local source_dir="$1"
   local xray_config="${source_dir}/xray.json"
+  local check_config="${source_dir}/.sing-box-check.json"
+  local singbox_required_version=""
+  local xray_required_version=""
   [[ -s "${source_dir}/render-manifest.json" ]] || { echo "missing render manifest" >&2; return 1; }
   [[ -s "${source_dir}/vpn-stack-agent.py" ]] || { echo "missing server agent" >&2; return 1; }
   [[ -s "${source_dir}/log_classifier.py" ]] || { echo "missing log classifier" >&2; return 1; }
+  [[ -s "${source_dir}/diagnostics.py" ]] || { echo "missing diagnostics schema" >&2; return 1; }
   [[ -s "${source_dir}/interserver_transport.py" ]] || { echo "missing interserver transport policy" >&2; return 1; }
   [[ -s "${source_dir}/network_profile.py" ]] || { echo "missing network profile" >&2; return 1; }
-  python3 -m py_compile "${source_dir}/vpn-stack-agent.py" "${source_dir}/log_classifier.py" "${source_dir}/interserver_transport.py" "${source_dir}/network_profile.py"
+  [[ -s "${source_dir}/vpn-stack-nft-apply.sh" ]] || { echo "missing nft apply script" >&2; return 1; }
+  [[ -s "${source_dir}/vpn-stack-nftables.service" ]] || { echo "missing nftables service" >&2; return 1; }
+  python3 -m py_compile "${source_dir}/vpn-stack-agent.py" "${source_dir}/diagnostics.py" "${source_dir}/log_classifier.py" "${source_dir}/interserver_transport.py" "${source_dir}/network_profile.py"
+  sh -n "${source_dir}/vpn-stack-nft-apply.sh"
   PYTHONPATH="${source_dir}${PYTHONPATH:+:${PYTHONPATH}}" python3 "${source_dir}/vpn-stack-agent.py" --help >/dev/null
-  python3 - "${source_dir}" <<'PY'
+  python3 - "${source_dir}" "${ROLE}" "${NORMALIZED_ENV_FILE}" "${check_config}" <<'PY'
 import hashlib
 import json
 import sys
 from pathlib import Path
 
 root = Path(sys.argv[1])
+expected_role = sys.argv[2]
+env_path = Path(sys.argv[3])
+check_config_path = Path(sys.argv[4])
 manifest = json.loads((root / "render-manifest.json").read_text(encoding="utf-8"))
 if int(manifest.get("schema_version", 0)) < 2:
     raise SystemExit("unsupported render manifest")
+if manifest.get("role") != expected_role:
+    raise SystemExit(f"render manifest role mismatch: expected {expected_role}, got {manifest.get('role')}")
+env_digest = hashlib.sha256(env_path.read_bytes()).hexdigest()
+if manifest.get("env_sha256") != env_digest:
+    raise SystemExit("render manifest env hash does not match normalized deployment env")
+for name, entry in manifest.get("artifacts", {}).items():
+    artifact = root / name
+    if entry.get("required") is True and not artifact.is_file():
+        raise SystemExit(f"missing staged artifact: {name}")
+    if artifact.is_file():
+        digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+        if digest != entry.get("sha256"):
+            raise SystemExit(f"staged artifact digest mismatch: {name}")
 for name, entry in manifest.get("assets", {}).items():
     asset = root / "assets" / name
-    if not asset.is_file():
+    if entry.get("required") is True and not asset.is_file():
         raise SystemExit(f"missing staged asset: {name}")
+    if not entry.get("sha256"):
+        raise SystemExit(f"staged asset has no trusted digest: {name}")
     digest = hashlib.sha256(asset.read_bytes()).hexdigest()
     if digest != entry.get("sha256"):
         raise SystemExit(f"staged asset digest mismatch: {name}")
+config = json.loads((root / "sing-box.json").read_text(encoding="utf-8"))
+for rule_set in config.get("route", {}).get("rule_set", []):
+    path = Path(str(rule_set.get("path", "")))
+    staged_asset = root / "assets" / path.name
+    if path.name in manifest.get("assets", {}):
+        rule_set["path"] = str(staged_asset)
+check_config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 PY
-  sing-box check -c "${source_dir}/sing-box.json"
-  nft -c -f "${source_dir}/nftables.conf"
+  singbox_required_version="$(manifest_binary_field "${source_dir}" sing-box version)" || return 1
+  [[ "$("${source_dir}/bin/sing-box" version 2>/dev/null | awk 'NR == 1 {print $3}')" == "${singbox_required_version}" ]] || {
+    echo "staged sing-box version mismatch" >&2
+    return 1
+  }
+  "${source_dir}/bin/sing-box" check -c "${check_config}"
+  rm -f "${check_config}"
+  sh "${source_dir}/vpn-stack-nft-apply.sh" --check "${source_dir}/nftables.conf"
   if [[ "${ROLE}" == "ru-gateway" ]]; then
     [[ -s "${xray_config}" ]] || { echo "missing Xray config" >&2; return 1; }
-    xray run -test -c "${xray_config}"
+    xray_required_version="$(manifest_binary_field "${source_dir}" xray version)" || return 1
+    [[ "$("${source_dir}/bin/xray" version 2>/dev/null | awk 'NR == 1 {print $2}')" == "${xray_required_version}" ]] || {
+      echo "staged Xray version mismatch" >&2
+      return 1
+    }
+    "${source_dir}/bin/xray" run -test -c "${xray_config}"
   fi
   wg-quick strip "${source_dir}/${WG_INTERFACE}.conf" >/dev/null
-  local systemd_units=("${source_dir}/vpn-stack-health.service" "${source_dir}/vpn-stack-health.timer")
+  local systemd_units=("${source_dir}/sing-box.service" "${source_dir}/vpn-stack-health.service" "${source_dir}/vpn-stack-health.timer" "${source_dir}/vpn-stack-nftables.service")
   if [[ -f "${source_dir}/vpn-stack-transport.service" ]]; then
     systemd_units+=("${source_dir}/vpn-stack-transport.service")
   fi
-  systemd-analyze verify "${systemd_units[@]}" >/dev/null
+  if [[ -f "${source_dir}/vpn-stack-xray.service" ]]; then
+    systemd_units+=("${source_dir}/vpn-stack-xray.service")
+  fi
+  python3 - "${systemd_units[@]}" <<'PY'
+import configparser
+import sys
+from pathlib import Path
+
+for raw_path in sys.argv[1:]:
+    path = Path(raw_path)
+    parser = configparser.ConfigParser(interpolation=None, strict=False)
+    parser.optionxform = str
+    parser.read(path, encoding="utf-8")
+    required = {"Unit", "Timer" if path.suffix == ".timer" else "Service"}
+    missing = required - set(parser.sections())
+    if missing:
+        raise SystemExit(f"invalid staged systemd unit {path.name}: missing {sorted(missing)}")
+PY
+  find "${source_dir}" -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
+  find "${source_dir}" -depth -type d -name __pycache__ -empty -delete
 }
 
 activate_staged_release() {
@@ -1154,13 +1545,16 @@ activate_staged_release() {
   if [[ -L "${VPNSTACK_CURRENT_RELEASE}" ]]; then
     previous_release="$(readlink -f "${VPNSTACK_CURRENT_RELEASE}" 2>/dev/null || true)"
   fi
+  # Stable paths point at /etc/vpn-stack/current. Prepare those links while
+  # current still resolves to the old release, then commit with one rename.
+  copy_role_artifacts "${release_dir}"
   if [[ -n "${previous_release}" && -d "${previous_release}" ]]; then
     ln -s "${previous_release}" "${previous_tmp}"
     mv -Tf "${previous_tmp}" "${VPNSTACK_PREVIOUS_RELEASE}"
   fi
+  ACTIVATION_STARTED=1
   ln -s "${release_dir}" "${link_tmp}"
   mv -Tf "${link_tmp}" "${VPNSTACK_CURRENT_RELEASE}"
-  copy_role_artifacts "${release_dir}"
 }
 
 verify_active_release() {
@@ -1173,12 +1567,28 @@ verify_active_release() {
   if ! python3 - "${report_tmp}" <<'PY'
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-verdicts = payload.get("verdicts", {})
+if payload.get("schema_version") != 3:
+    raise SystemExit("post-activation agent did not return diagnostics schema 3")
+try:
+    generated_at = datetime.fromisoformat(str(payload.get("generated_at", "")).replace("Z", "+00:00"))
+    age_seconds = (datetime.now(timezone.utc) - generated_at.astimezone(timezone.utc)).total_seconds()
+except (TypeError, ValueError):
+    raise SystemExit("post-activation snapshot timestamp is invalid")
+if age_seconds < -30 or age_seconds > 180:
+    raise SystemExit(f"post-activation snapshot is stale: age={age_seconds:.1f}s")
+collectors = payload.get("collectors", {})
+if not collectors or any(state.get("status") != "ok" for state in collectors.values()):
+    raise SystemExit(f"post-activation collectors are incomplete: {collectors}")
+windows = payload.get("log_windows", {})
+if not windows or any(window.get("collector", {}).get("status") != "ok" for window in windows.values()):
+    raise SystemExit(f"post-activation log windows are incomplete: {windows}")
+verdicts = payload.get("component_verdicts", {})
 if verdicts.get("server_path") != "verified":
-    raise SystemExit(f"post-activation server path failed: {verdicts.get('reasons', [])}")
+    raise SystemExit(f"post-activation server path failed: {payload.get('reasons', [])}")
 if payload.get("role") == "ru-gateway" and verdicts.get("public_front") != "verified":
     raise SystemExit("post-activation public VLESS front is not verified")
 if verdicts.get("host_integrity") != "verified":
@@ -1204,19 +1614,39 @@ write_preview_files() {
 
 stage_preseed_assets() {
   local source_assets="${1:-${ASSETS_DIR:-}}"
-  if [[ -z "${source_assets}" || ! -d "${source_assets}" ]]; then
-    return 0
-  fi
+  local manifest_path="$(dirname "${source_assets}")/render-manifest.json"
+  python3 - "${source_assets}" "${RULESET_DIR}" "${manifest_path}" <<'PY'
+import hashlib
+import json
+import os
+import shutil
+import sys
+import tempfile
+from pathlib import Path
 
-  mkdir -p "${RULESET_DIR}"
-
-  if [[ "$ROLE" == "ru-gateway" ]]; then
-    copy_if_present "${source_assets}/geosite-ru.srs" "${RULESET_DIR}/geosite-ru.srs" || true
-    copy_if_present "${source_assets}/geoip-ru.srs" "${RULESET_DIR}/geoip-ru.srs" || true
-  else
-    copy_if_present "${source_assets}/ru-ipv4.zone" "${RULESET_DIR}/ru-ipv4.zone" || true
-    copy_if_present "${source_assets}/ru-ipv6.zone" "${RULESET_DIR}/ru-ipv6.zone" || true
-  fi
+source = Path(sys.argv[1])
+destination = Path(sys.argv[2])
+manifest = json.loads(Path(sys.argv[3]).read_text(encoding="utf-8"))
+destination.mkdir(parents=True, exist_ok=True)
+for name, entry in manifest.get("assets", {}).items():
+    asset = source / name
+    if entry.get("required") is True and not asset.is_file():
+        raise SystemExit(f"missing required release asset: {name}")
+    if not asset.is_file():
+        continue
+    digest = hashlib.sha256(asset.read_bytes()).hexdigest()
+    if not entry.get("sha256") or digest != entry.get("sha256"):
+        raise SystemExit(f"release asset digest mismatch: {name}")
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{name}.", dir=str(destination))
+    os.close(fd)
+    tmp = Path(tmp_name)
+    try:
+        shutil.copyfile(asset, tmp)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, destination / name)
+    finally:
+        tmp.unlink(missing_ok=True)
+PY
 }
 
 have_bootstrap_assets() {
@@ -1293,8 +1723,24 @@ if [[ "${ID:-}" != "ubuntu" ]]; then
   exit 1
 fi
 
+if [[ "${ACTION}" != "status" ]]; then
+  acquire_install_lock
+fi
+
 if [[ "$ACTION" == "status" ]]; then
   print_status
+  exit 0
+fi
+
+if [[ "$ACTION" == "rollback" ]]; then
+  require_managed_install_for_destructive_action
+  ROLLBACK_SOURCE="$(latest_revision_snapshot || true)"
+  if [[ -z "${ROLLBACK_SOURCE}" && -d "${VPNSTACK_BASELINE_DIR}" ]]; then
+    ROLLBACK_SOURCE="${VPNSTACK_BASELINE_DIR}"
+  fi
+  [[ -n "${ROLLBACK_SOURCE}" ]] || { echo "No rollback snapshot is available." >&2; exit 1; }
+  restore_install_snapshot "${ROLLBACK_SOURCE}"
+  echo "Completed ${ROLE} rollback from ${ROLLBACK_SOURCE}."
   exit 0
 fi
 
@@ -1311,6 +1757,9 @@ if [[ "$ACTION" == "purge" ]]; then
   echo "Completed ${ROLE} purge."
   exit 0
 fi
+
+require_matching_install_identity
+ensure_target_wan_interface
 
 mkdir -p "${VPNSTACK_ROOT}" "${VPNSTACK_BACKUP_DIR}" "${VPNSTACK_SNAPSHOT_DIR}"
 if ! is_currently_installed; then
@@ -1329,7 +1778,7 @@ trap 'exit_code=$?; install_exit_trap "${exit_code}"; trap - EXIT; exit "${exit_
 INSTALL_MUTATION_STARTED=1
 
 run_apt_get update
-run_apt_get install -y \
+run_apt_get install -y --no-upgrade \
   apt-transport-https \
   ca-certificates \
   curl \
@@ -1343,51 +1792,86 @@ run_apt_get install -y \
   python3 \
   systemd-resolved \
   unzip \
+  tar \
   unattended-upgrades \
   wireguard \
   wireguard-tools
 
-install_sing_box() {
-  curl -fsSL https://sing-box.sagernet.org/installation/tools/install.sh | bash -s -- --version "${SINGBOX_REQUIRED_VERSION}"
-}
-
-current_singbox_version() {
-  if ! command -v sing-box >/dev/null 2>&1; then
+stage_sing_box_binary() {
+  local source_dir="$1"
+  local required_version=""
+  local archive_sha256=""
+  local binary_sha256=""
+  if [[ "$(uname -m)" != "x86_64" ]]; then
+    echo "Pinned sing-box package currently supports x86_64 only." >&2
     return 1
   fi
-  sing-box version 2>/dev/null | awk 'NR == 1 {print $3}'
+  required_version="$(manifest_binary_field "${source_dir}" sing-box version)" || return 1
+  archive_sha256="$(manifest_binary_field "${source_dir}" sing-box archive_sha256)" || return 1
+  binary_sha256="$(manifest_binary_field "${source_dir}" sing-box sha256)" || return 1
+  mkdir -p "${source_dir}/bin"
+  if [[ -x "${VPNSTACK_CURRENT_RELEASE}/bin/sing-box" ]] && \
+      [[ "$("${VPNSTACK_CURRENT_RELEASE}/bin/sing-box" version 2>/dev/null | awk 'NR == 1 {print $3}')" == "${required_version}" ]] && \
+      echo "${binary_sha256}  ${VPNSTACK_CURRENT_RELEASE}/bin/sing-box" | sha256sum -c - >/dev/null 2>&1; then
+    cp -a "${VPNSTACK_CURRENT_RELEASE}/bin/sing-box" "${source_dir}/bin/sing-box"
+    return 0
+  fi
+  (
+    local archive=""
+    local temp_dir=""
+    temp_dir="$(mktemp -d)"
+    trap 'rm -rf "${temp_dir}"' EXIT
+    archive="${temp_dir}/sing-box.tar.gz"
+    curl -fsSL --connect-timeout 10 --max-time 120 \
+      "https://github.com/SagerNet/sing-box/releases/download/v${required_version}/sing-box-${required_version}-linux-amd64.tar.gz" \
+      -o "${archive}"
+    echo "${archive_sha256}  ${archive}" | sha256sum -c -
+    tar -xzf "${archive}" -C "${temp_dir}"
+    install -m 0755 "${temp_dir}/sing-box-${required_version}-linux-amd64/sing-box" "${source_dir}/bin/sing-box"
+    echo "${binary_sha256}  ${source_dir}/bin/sing-box" | sha256sum -c -
+  )
 }
 
-install_xray() {
-  local archive=""
-  local temp_dir=""
+stage_xray_binary() {
+  local source_dir="$1"
+  local required_version=""
+  local archive_sha256=""
+  local binary_sha256=""
   if [[ "$(uname -m)" != "x86_64" ]]; then
     echo "Pinned Xray package currently supports x86_64 only." >&2
     return 1
   fi
-  temp_dir="$(mktemp -d)"
-  archive="${temp_dir}/Xray-linux-64.zip"
-  curl -fsSL --connect-timeout 10 --max-time 120 "https://github.com/XTLS/Xray-core/releases/download/v${XRAY_REQUIRED_VERSION}/Xray-linux-64.zip" -o "${archive}"
-  echo "${XRAY_LINUX_AMD64_SHA256}  ${archive}" | sha256sum -c -
-  unzip -q "${archive}" xray -d "${temp_dir}"
-  install -m 0755 "${temp_dir}/xray" /usr/local/bin/xray
-  rm -rf "${temp_dir}"
-}
-
-current_xray_version() {
-  if ! command -v xray >/dev/null 2>&1; then
-    return 1
+  required_version="$(manifest_binary_field "${source_dir}" xray version)" || return 1
+  archive_sha256="$(manifest_binary_field "${source_dir}" xray archive_sha256)" || return 1
+  binary_sha256="$(manifest_binary_field "${source_dir}" xray sha256)" || return 1
+  mkdir -p "${source_dir}/bin"
+  if [[ -x "${VPNSTACK_CURRENT_RELEASE}/bin/xray" ]] && \
+      [[ "$("${VPNSTACK_CURRENT_RELEASE}/bin/xray" version 2>/dev/null | awk 'NR == 1 {print $2}')" == "${required_version}" ]] && \
+      echo "${binary_sha256}  ${VPNSTACK_CURRENT_RELEASE}/bin/xray" | sha256sum -c - >/dev/null 2>&1; then
+    cp -a "${VPNSTACK_CURRENT_RELEASE}/bin/xray" "${source_dir}/bin/xray"
+    return 0
   fi
-  xray version 2>/dev/null | awk 'NR == 1 {print $2}'
+  (
+    local archive=""
+    local temp_dir=""
+    temp_dir="$(mktemp -d)"
+    trap 'rm -rf "${temp_dir}"' EXIT
+    archive="${temp_dir}/Xray-linux-64.zip"
+    curl -fsSL --connect-timeout 10 --max-time 120 "https://github.com/XTLS/Xray-core/releases/download/v${required_version}/Xray-linux-64.zip" -o "${archive}"
+    echo "${archive_sha256}  ${archive}" | sha256sum -c -
+    unzip -q "${archive}" xray -d "${temp_dir}"
+    install -m 0755 "${temp_dir}/xray" "${source_dir}/bin/xray"
+    echo "${binary_sha256}  ${source_dir}/bin/xray" | sha256sum -c -
+  )
 }
 
 record_binary_digests() {
   local source_dir="$1"
   local singbox_bin=""
   local xray_bin=""
-  singbox_bin="$(command -v sing-box)"
+  singbox_bin="${source_dir}/bin/sing-box"
   if [[ "$ROLE" == "ru-gateway" ]]; then
-    xray_bin="$(command -v xray)"
+    xray_bin="${source_dir}/bin/xray"
   fi
   python3 - "${source_dir}/render-manifest.json" "${singbox_bin}" "${xray_bin}" <<'PY'
 import hashlib
@@ -1411,7 +1895,10 @@ for name, path_text in paths.items():
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     digest = digest.hexdigest()
-    entry.update({"path": str(path), "sha256": digest})
+    if not entry.get("path"):
+        raise SystemExit(f"manifest binary path is missing: {name}")
+    if digest != entry.get("sha256"):
+        raise SystemExit(f"staged binary digest mismatch: {name}")
 os_release = {}
 try:
     for line in Path("/etc/os-release").read_text(encoding="utf-8").splitlines():
@@ -1431,35 +1918,20 @@ os.replace(tmp, manifest_path)
 PY
 }
 
-if [[ "$(current_singbox_version || true)" != "${SINGBOX_REQUIRED_VERSION}" ]]; then
-  install_sing_box
-fi
-if [[ "$ROLE" == "ru-gateway" && "$(current_xray_version || true)" != "${XRAY_REQUIRED_VERSION}" ]]; then
-  install_xray
-fi
-
 mkdir -p "${VPNSTACK_ROOT}" /etc/sing-box /etc/xray /etc/wireguard /etc/ssh/sshd_config.d "${RULESET_DIR}" /usr/local/lib/vpn-stack /etc/systemd/system
-
-PRIMARY_INTERFACE="$(detect_primary_interface)"
-
-if [[ "$ROLE" == "foreign-exit" ]]; then
-  WAN_INTERFACE="${WAN_INTERFACE:-${PRIMARY_INTERFACE}}"
-  if [[ -z "${WAN_INTERFACE:-}" ]]; then
-    echo "Unable to detect WAN interface. Set WAN_INTERFACE in the env file." >&2
-    exit 1
-  fi
-fi
 
 stage_release "${ROLE_ARTIFACTS_DIR}"
 ROLE_ARTIFACTS_DIR="${STAGED_RELEASE_DIR}"
+stage_sing_box_binary "${ROLE_ARTIFACTS_DIR}"
+if [[ "$ROLE" == "ru-gateway" ]]; then
+  stage_xray_binary "${ROLE_ARTIFACTS_DIR}"
+fi
 record_binary_digests "${ROLE_ARTIFACTS_DIR}"
-stage_preseed_assets "${ROLE_ARTIFACTS_DIR}/assets"
 validate_staged_release "${ROLE_ARTIFACTS_DIR}"
 publish_staged_release "${ROLE_ARTIFACTS_DIR}"
 ROLE_ARTIFACTS_DIR="${PUBLISHED_RELEASE_DIR}"
-if [[ "$ACTION" == "reinstall" ]]; then
-  stop_managed_services
-fi
+stage_preseed_assets "${ROLE_ARTIFACTS_DIR}/assets"
+PRESERVED_TRANSPORT_TAG="$(capture_preserved_transport_tag)"
 prepare_transport_supervisor
 reset_install_runtime_state
 activate_staged_release "${ROLE_ARTIFACTS_DIR}"
@@ -1472,11 +1944,16 @@ configure_journald_limits
 configure_unattended_security_updates
 configure_system_resolver
 systemctl daemon-reload
+systemd-analyze verify "${SINGBOX_SERVICE_PATH}" >/dev/null
+if [[ "$ROLE" == "ru-gateway" ]]; then
+  systemd-analyze verify "${XRAY_SERVICE_PATH}" >/dev/null
+fi
 python3 "${AGENT_SCRIPT_PATH}" network-apply >/dev/null
 disable_legacy_proxy_services
 configure_ssh_daemon_mode
-systemctl enable nftables
-systemctl restart nftables
+migrate_legacy_global_nftables
+systemctl enable vpn-stack-nftables.service
+systemctl restart vpn-stack-nftables.service
 if [[ "$ROLE" == "foreign-exit" ]]; then
   apply_foreign_ru_block_from_local_assets
 fi
@@ -1489,6 +1966,10 @@ systemctl reset-failed vpn-stack-health.service >/dev/null 2>&1 || true
 
 systemctl enable sing-box
 systemctl restart sing-box
+
+if [[ "$ROLE" == "ru-gateway" && -n "${PRESERVED_TRANSPORT_TAG}" ]]; then
+  python3 "${AGENT_SCRIPT_PATH}" transport-select --tag "${PRESERVED_TRANSPORT_TAG}" >/dev/null
+fi
 
 if [[ "$ROLE" == "ru-gateway" ]]; then
   systemctl enable vpn-stack-transport.service
@@ -1522,5 +2003,6 @@ if [[ "$ROLE" == "ru-gateway" ]]; then
 fi
 
 systemctl enable unattended-upgrades || true
+prune_old_releases
 
 echo "Completed ${ROLE} installation for ${DEPLOY_NAME}."

@@ -4,10 +4,13 @@ import json
 import shlex
 import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 from . import workflows
 from .common import OUT_DIR, print_header
-from .diagnostics import DiagnosticsSnapshot
+from .client_artifacts import render_vless_uri
+from .diagnostics import DiagnosticsSnapshot, classify_interserver_adaptation
 from .models import (
     ROLE_FOREIGN,
     ROLE_RU,
@@ -39,11 +42,11 @@ from .vless_verify import (
     RUNNER_THROUGHPUT_CLOCK_SKEW_SECONDS,
     RUNNER_TRANSPORT_DRAIN_SECONDS,
     RUNNER_ROUTE_PROBE_TIMEOUT_SECONDS,
-    THROUGHPUT_CAPACITY_SECONDS,
-    THROUGHPUT_STABILITY_FLOOR_BYTES_PER_SECOND,
+    THROUGHPUT_MAX_GAP_SECONDS,
+    THROUGHPUT_SUSTAINED_FLOOR_BYTES_PER_SECOND,
     parse_vless_uri,
     render_ephemeral_singbox_client,
-    render_socks5_udp_dns_probe,
+    render_live_route_probe,
     render_vless_runner,
 )
 
@@ -52,11 +55,59 @@ VLESS_RUNNER_POLL_INTERVAL_SECONDS = 5
 PRIMARY_CAPACITY_FLOOR_BYTES_PER_SECOND = 6_250_000
 FALLBACK_CAPACITY_FLOOR_BYTES_PER_SECOND = 1_250_000
 VLESS_RUNNER_LOCK_PATH = "/run/lock/vpn-stack-vless-verify.lock"
+SNAPSHOT_MAX_AGE_SECONDS = 180
+COMPLETE_LOG_RETENTION_SECONDS = 14 * 24 * 60 * 60
+
+
+def _release_within_complete_log_retention(snapshot: DiagnosticsSnapshot) -> bool:
+    installed_at = str(snapshot.release.get("installed_at", ""))
+    try:
+        timestamp = datetime.fromisoformat(installed_at.replace("Z", "+00:00"))
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        age_seconds = (datetime.now(timezone.utc) - timestamp.astimezone(timezone.utc)).total_seconds()
+    except (TypeError, ValueError):
+        return True
+    return -30 <= age_seconds <= COMPLETE_LOG_RETENTION_SECONDS
 
 
 def _verify_snapshot(snapshot: DiagnosticsSnapshot) -> DiagnosticsSnapshot:
+    if snapshot.migration:
+        snapshot.verdict = "inconclusive"
+        snapshot.reasons = ["native diagnostics schema 3 is required for live verification"]
+        return snapshot
+    try:
+        observed_at = datetime.fromisoformat(snapshot.generated_at.replace("Z", "+00:00"))
+        age_seconds = (datetime.now(timezone.utc) - observed_at.astimezone(timezone.utc)).total_seconds()
+    except (TypeError, ValueError):
+        snapshot.verdict = "inconclusive"
+        snapshot.reasons = ["diagnostics snapshot timestamp is invalid"]
+        return snapshot
+    if age_seconds < -30 or age_seconds > SNAPSHOT_MAX_AGE_SECONDS:
+        snapshot.verdict = "inconclusive"
+        snapshot.reasons = [f"diagnostics snapshot is stale or from the future: age={age_seconds:.1f}s"]
+        return snapshot
+
     hard_failures: list[str] = []
     degradations: list[str] = []
+    required_collectors = {"services", "artifacts", "wireguard", "route_probes", "logs", "storage", "network", "front", "transport", "maintenance"}
+    for name in sorted(required_collectors):
+        state = snapshot.collectors[name]
+        if state.status == "error":
+            hard_failures.append(f"collector {name} failed: {state.message}")
+        elif state.status == "skipped":
+            hard_failures.append(f"collector {name} was skipped: {state.message}")
+        elif state.status == "stale":
+            degradations.append(f"collector {name} is stale")
+    for name, window in snapshot.log_windows.items():
+        if window.collector.status == "error":
+            if name == "since_release" and not _release_within_complete_log_retention(snapshot):
+                continue
+            hard_failures.append(f"log window {name} unavailable: {window.collector.message}")
+        elif window.collector.status == "skipped":
+            hard_failures.append(f"log window {name} was skipped: {window.collector.message}")
+        elif window.collector.status == "stale":
+            degradations.append(f"log window {name} is stale")
     required_services = {"wireguard", "nftables", "sing-box", "resolver"}
     for service_name in sorted(required_services):
         state = snapshot.services.get(service_name)
@@ -69,6 +120,13 @@ def _verify_snapshot(snapshot: DiagnosticsSnapshot) -> DiagnosticsSnapshot:
         or snapshot.front.get("tcp_keepalive_interval_seconds") != 15
     ):
         hard_failures.append("public TCP front keepalive policy is missing")
+    if snapshot.role == ROLE_RU:
+        adaptation = snapshot.transport.get("interserver", {}).get("adaptive_state", {})
+        adaptation_failure, adaptation_degradation = classify_interserver_adaptation(adaptation)
+        if adaptation_failure:
+            hard_failures.append(adaptation_failure)
+        elif adaptation_degradation:
+            degradations.append(adaptation_degradation)
     if snapshot.drift == "server-mutated":
         hard_failures.append("installed config hash differs from render manifest")
     elif snapshot.drift == "unknown":
@@ -171,12 +229,246 @@ def _collect_agent_snapshot(target) -> DiagnosticsSnapshot:
 
 
 def _reconcile_public_capabilities(snapshot: DiagnosticsSnapshot, public_vless: dict[str, object]) -> DiagnosticsSnapshot:
-    if public_vless.get("verdict") != "verified":
+    if snapshot.migration or snapshot.collector_status != "ok":
+        return snapshot
+    functional = public_vless.get("functional", {})
+    functional_verdict = functional.get("verdict") if isinstance(functional, dict) else None
+    if functional_verdict is None:
+        functional_verdict = public_vless.get("verdict")
+    if functional_verdict != "verified":
         return snapshot
     snapshot.reasons = [reason for reason in snapshot.reasons if reason != "external capability probe failed"]
     if snapshot.verdict == "degraded" and not snapshot.reasons:
         snapshot.verdict = "verified"
     return snapshot
+
+
+def _probe_component(verdict: str, reason: str = "", *, measured: bool = True) -> dict[str, object]:
+    component: dict[str, object] = {"verdict": verdict, "measured": measured}
+    if reason:
+        component["reason"] = reason
+    return component
+
+
+def _private_reject_component(private_reject: object, *, label: str) -> dict[str, object]:
+    if not isinstance(private_reject, dict):
+        return _probe_component("failed", f"{label} private/fake reject result is missing")
+    targets = private_reject.get("targets")
+    if not isinstance(targets, list) or not targets:
+        return _probe_component("inconclusive", f"{label} private/fake reject has no correlated evidence")
+    target_verdicts: list[str] = []
+    for target in targets:
+        if not isinstance(target, dict):
+            return _probe_component("failed", f"{label} private/fake reject target result is malformed")
+        explicit_reject = (
+            target.get("evidence") == "socks-reply-reject"
+            and isinstance(target.get("socks_reply_status"), int)
+            and int(target["socks_reply_status"]) == 2
+        )
+        correlated_reject = target.get("correlated") is True and bool(str(target.get("correlation_id", "")).strip())
+        if target.get("verdict") == "verified" and (explicit_reject or correlated_reject):
+            target_verdicts.append("verified")
+        elif target.get("verdict") == "failed":
+            target_verdicts.append("failed")
+        else:
+            target_verdicts.append("inconclusive")
+    computed = "failed" if "failed" in target_verdicts else "inconclusive" if "inconclusive" in target_verdicts else "verified"
+    if private_reject.get("verdict") != computed or private_reject.get("ok") is not (computed == "verified"):
+        return _probe_component("failed", f"{label} private/fake reject aggregate is inconsistent")
+    if computed == "failed":
+        return _probe_component("failed", f"{label} private/fake route accepted or probe failed")
+    if computed == "inconclusive":
+        return _probe_component("inconclusive", f"{label} private/fake reject lacks SOCKS or log correlation")
+    return _probe_component("verified")
+
+
+def _validate_functional_transport_result(
+    result: dict[str, object],
+    expected_ru_ip: str,
+    expected_foreign_ip: str,
+    *,
+    label: str,
+) -> dict[str, object]:
+    statuses = {str(result.get("github_status", "")), str(result.get("google_status", ""))}
+    failures: list[str] = []
+    inconclusive: list[str] = []
+    if result.get("ru_egress_ip") != expected_ru_ip:
+        failures.append(f"{label} direct identity mismatch: expected {expected_ru_ip}, got {result.get('ru_egress_ip', '')}")
+    if result.get("foreign_egress_ip") != expected_foreign_ip:
+        failures.append(f"{label} foreign identity mismatch: expected {expected_foreign_ip}, got {result.get('foreign_egress_ip', '')}")
+    if not statuses.issubset({"200", "204", "301", "302", "403"}):
+        failures.append(f"{label} returned invalid HTTP probes")
+
+    udp_dns = result.get("udp_dns")
+    if not isinstance(udp_dns, dict) or udp_dns.get("ok") is not True:
+        failures.append(f"{label} UDP DNS probe failed")
+    else:
+        dns = udp_dns.get("dns")
+        queries = dns.get("queries") if isinstance(dns, dict) else None
+
+        def valid_dns_query(query: object, expected_type: int) -> bool:
+            if not isinstance(query, dict):
+                return False
+            question = query.get("question")
+            return (
+                query.get("verdict") == "verified"
+                and query.get("qr") is True
+                and query.get("rcode") == 0
+                and isinstance(question, dict)
+                and question.get("name") == "example.com"
+                and question.get("type") == expected_type
+                and question.get("class") == 1
+                and isinstance(query.get("answer_count"), int)
+                and int(query["answer_count"]) > 0
+                and isinstance(query.get("matching_answers"), int)
+                and int(query["matching_answers"]) > 0
+            )
+
+        dns_valid = (
+            isinstance(dns, dict)
+            and dns.get("verdict") == "verified"
+            and isinstance(queries, dict)
+            and valid_dns_query(dns, 1)
+            and valid_dns_query(queries.get("A"), 1)
+            and valid_dns_query(queries.get("AAAA"), 28)
+        )
+        if not dns_valid:
+            failures.append(f"{label} UDP DNS A/AAAA response semantics are invalid")
+        private_component = _private_reject_component(udp_dns.get("private_reject"), label=label)
+        if private_component["verdict"] == "failed":
+            failures.append(str(private_component.get("reason", "private/fake reject failed")))
+        elif private_component["verdict"] == "inconclusive":
+            inconclusive.append(str(private_component.get("reason", "private/fake reject is inconclusive")))
+
+    if str(result.get("ipv6_literal_status", "")) != "200":
+        failures.append(f"{label} IPv6 literal probe failed")
+    reliability = result.get("first_load_reliability")
+    if not isinstance(reliability, dict):
+        failures.append(f"{label} first-load reliability result is missing")
+    else:
+        try:
+            attempts = int(reliability.get("attempts", 0) or 0)
+            successes = int(reliability.get("successes", 0) or 0)
+            failure_count = int(reliability.get("failures", 0) or 0)
+            max_total = float(reliability.get("max_total_seconds", 0) or 0)
+        except (TypeError, ValueError):
+            failures.append(f"{label} first-load reliability result is malformed")
+        else:
+            if attempts != RUNNER_RELIABILITY_ATTEMPTS or successes != attempts or failure_count:
+                failures.append(f"{label} first-load reliability failed")
+            elif max_total <= 0 or max_total > RUNNER_RELIABILITY_MAX_TOTAL_SECONDS:
+                failures.append(f"{label} first-load latency exceeded {RUNNER_RELIABILITY_MAX_TOTAL_SECONDS:.1f}s")
+    if failures:
+        return _probe_component("failed", "; ".join(failures))
+    if inconclusive:
+        return _probe_component("inconclusive", "; ".join(inconclusive))
+    return _probe_component("verified")
+
+
+def _validate_performance_result(
+    result: dict[str, object],
+    *,
+    label: str,
+    throughput_seconds: int,
+    capacity_floor_bytes_per_second: int,
+) -> dict[str, object]:
+    if throughput_seconds == 0:
+        return _probe_component("inconclusive", f"{label} performance was not measured", measured=False)
+    measurement = result.get("throughput")
+    if not isinstance(measurement, dict):
+        return _probe_component("failed", f"{label} throughput measurement is missing")
+    required_fields = {
+        "sustained_bytes_per_second",
+        "capacity_bytes_per_second",
+        "max_gap_seconds",
+        "duration_seconds",
+        "failures",
+        "source_failures",
+        "successful_sources",
+        "required_successful_sources",
+        "source_metrics",
+    }
+    if not required_fields.issubset(measurement):
+        return _probe_component("failed", f"{label} throughput measurement is incomplete")
+    try:
+        sustained_bps = float(measurement.get("sustained_bytes_per_second", 0) or 0)
+        capacity_bps = float(measurement.get("capacity_bytes_per_second", 0) or 0)
+        max_gap = float(measurement.get("max_gap_seconds", -1))
+        duration = float(measurement.get("duration_seconds", 0) or 0)
+        failures = int(measurement.get("failures", 0) or 0)
+        source_failures = int(measurement.get("source_failures", 0) or 0)
+        source_metrics = measurement.get("source_metrics")
+        successful_sources = int(measurement.get("successful_sources", 0) or 0)
+        required_successful_sources = int(measurement.get("required_successful_sources", 0) or 0)
+    except (TypeError, ValueError):
+        return _probe_component("failed", f"{label} throughput measurement is malformed")
+    if (
+        not isinstance(source_metrics, list)
+        or not source_metrics
+        or not all(isinstance(item, dict) for item in source_metrics)
+        or required_successful_sources < 1
+    ):
+        return _probe_component("failed", f"{label} throughput source metrics are incomplete")
+    try:
+        computed_source_failures = sum(int(item["failures"]) for item in source_metrics if isinstance(item, dict))
+        computed_successful_sources = sum(
+            float(item["bytes_downloaded"]) > 0 and float(item["duration_seconds"]) > 0
+            for item in source_metrics
+            if isinstance(item, dict)
+        )
+    except (KeyError, TypeError, ValueError):
+        return _probe_component("failed", f"{label} throughput source metrics are malformed")
+    if computed_source_failures != source_failures or computed_successful_sources != successful_sources:
+        return _probe_component("failed", f"{label} throughput source aggregates are inconsistent")
+    if failures:
+        return _probe_component("failed", f"{label} throughput had {failures} transfer failures")
+    if successful_sources < required_successful_sources:
+        return _probe_component(
+            "failed",
+            f"{label} throughput source coverage is insufficient: {successful_sources}/{required_successful_sources} successful",
+        )
+    if duration + 0.5 < throughput_seconds:
+        return _probe_component("failed", f"{label} throughput window too short: {duration:.1f}s of {throughput_seconds}s")
+    if sustained_bps < THROUGHPUT_SUSTAINED_FLOOR_BYTES_PER_SECOND:
+        return _probe_component(
+            "failed",
+            f"{label} sustained goodput below 10 Mbit/s: {sustained_bps * 8 / 1_000_000:.2f} Mbit/s",
+        )
+    if max_gap < 0 or max_gap > THROUGHPUT_MAX_GAP_SECONDS:
+        return _probe_component(
+            "failed",
+            f"{label} transfer stalled for {max_gap:.2f}s (limit {THROUGHPUT_MAX_GAP_SECONDS:.1f}s)",
+        )
+    if capacity_bps < capacity_floor_bytes_per_second:
+        performance = _probe_component(
+            "failed",
+            (
+                f"{label} peak capacity below target: "
+                f"{capacity_bps * 8 / 1_000_000:.2f} Mbit/s of "
+                f"{capacity_floor_bytes_per_second * 8 / 1_000_000:.2f} Mbit/s"
+            ),
+        )
+        performance.update(
+            {
+                "sustained_bytes_per_second": sustained_bps,
+                "max_gap_seconds": max_gap,
+                "peak_capacity_bytes_per_second": capacity_bps,
+                "peak_capacity_target_bytes_per_second": capacity_floor_bytes_per_second,
+                "peak_capacity_target_met": False,
+            }
+        )
+        return performance
+    performance = _probe_component("verified")
+    performance.update(
+        {
+            "sustained_bytes_per_second": sustained_bps,
+            "max_gap_seconds": max_gap,
+            "peak_capacity_bytes_per_second": capacity_bps,
+            "peak_capacity_target_bytes_per_second": capacity_floor_bytes_per_second,
+            "peak_capacity_target_met": capacity_bps >= capacity_floor_bytes_per_second,
+        }
+    )
+    return performance
 
 
 def _validate_public_transport_result(
@@ -188,89 +480,34 @@ def _validate_public_transport_result(
     throughput_seconds: int = 0,
     capacity_floor_bytes_per_second: int = PRIMARY_CAPACITY_FLOOR_BYTES_PER_SECOND,
 ) -> dict[str, object]:
-    statuses = {str(result.get("github_status", "")), str(result.get("google_status", ""))}
     expected_foreign_ip = foreign_target.public_ip or foreign_target.ssh_host
-    if result.get("ru_egress_ip") != expected_ru_ip:
-        return {"verdict": "failed", "reason": f"{label} direct identity mismatch: expected {expected_ru_ip}, got {result.get('ru_egress_ip', '')}", "result": result}
-    if result.get("foreign_egress_ip") != expected_foreign_ip:
-        return {"verdict": "failed", "reason": f"{label} foreign identity mismatch: expected {expected_foreign_ip}, got {result.get('foreign_egress_ip', '')}", "result": result}
-    if not statuses.issubset({"200", "204", "301", "302", "403"}):
-        return {"verdict": "failed", "reason": f"{label} returned invalid probes: {result}", "result": result}
-    udp_dns = result.get("udp_dns", {})
-    if not isinstance(udp_dns, dict) or udp_dns.get("ok") is not True:
-        return {"verdict": "failed", "reason": f"{label} UDP probe failed: {result}", "result": result}
-    private_reject = udp_dns.get("private_reject", {})
-    if not isinstance(private_reject, dict) or private_reject.get("ok") is not True:
-        return {"verdict": "failed", "reason": f"{label} private/fake reject probe failed: {result}", "result": result}
-    if str(result.get("ipv6_literal_status", "")) != "200":
-        return {"verdict": "failed", "reason": f"{label} IPv6 literal probe failed: {result}", "result": result}
-    reliability = result.get("first_load_reliability", {})
-    if not isinstance(reliability, dict):
-        return {"verdict": "failed", "reason": f"{label} first-load reliability result is missing", "result": result}
-    try:
-        attempts = int(reliability.get("attempts", 0) or 0)
-        successes = int(reliability.get("successes", 0) or 0)
-        failures = int(reliability.get("failures", 0) or 0)
-        max_total = float(reliability.get("max_total_seconds", 0) or 0)
-    except (TypeError, ValueError):
-        return {"verdict": "failed", "reason": f"{label} first-load reliability result is malformed: {reliability}", "result": result}
-    if attempts != RUNNER_RELIABILITY_ATTEMPTS or successes != attempts or failures:
-        return {"verdict": "failed", "reason": f"{label} first-load reliability failed: {reliability}", "result": result}
-    if max_total <= 0 or max_total > RUNNER_RELIABILITY_MAX_TOTAL_SECONDS:
-        return {
-            "verdict": "failed",
-            "reason": f"{label} first-load latency exceeded {RUNNER_RELIABILITY_MAX_TOTAL_SECONDS:.1f}s: {reliability}",
-            "result": result,
-        }
-    if throughput_seconds:
-        measurement = result.get("throughput", {})
-        if not isinstance(measurement, dict):
-            return {"verdict": "failed", "reason": f"{label} throughput measurement is missing", "result": result}
-        try:
-            speed_bps = float(measurement.get("capacity_bytes_per_second", measurement.get("bytes_per_second", 0)) or 0)
-            duration = float(measurement.get("duration_seconds", 0) or 0)
-            failures = int(measurement.get("failures", 0) or 0)
-            source_failures = int(measurement.get("source_failures", 0) or 0)
-            source_metrics = measurement.get("source_metrics", [])
-            if not isinstance(source_metrics, list):
-                source_metrics = []
-            successful_sources = int(
-                measurement.get("successful_sources", int(speed_bps > 0 and source_failures == 0)) or 0
-            )
-            required_successful_sources = int(measurement.get("required_successful_sources", 1) or 1)
-            stability_bps = float(measurement.get("stability_bytes_per_second", 0) or 0)
-            stability_duration = float(measurement.get("stability_duration_seconds", 0) or 0)
-        except (TypeError, ValueError):
-            return {"verdict": "failed", "reason": f"{label} throughput measurement is malformed: {measurement}", "result": result}
-        if failures:
-            return {"verdict": "failed", "reason": f"{label} throughput had {failures} transfer failures", "result": result}
-        if successful_sources < required_successful_sources:
-            return {
-                "verdict": "failed",
-                "reason": (
-                    f"{label} throughput source coverage is insufficient: "
-                    f"{successful_sources}/{required_successful_sources} successful, "
-                    f"failures={source_failures}, metrics={source_metrics}"
-                ),
-                "result": result,
-            }
-        if speed_bps < capacity_floor_bytes_per_second:
-            floor_mbps = capacity_floor_bytes_per_second * 8 / 1_000_000
-            return {"verdict": "failed", "reason": f"{label} capacity below {floor_mbps:g} Mbit/s: {speed_bps * 8 / 1_000_000:.2f} Mbit/s", "result": result}
-        expected_stability_seconds = max(0, throughput_seconds - THROUGHPUT_CAPACITY_SECONDS)
-        if expected_stability_seconds and stability_bps < THROUGHPUT_STABILITY_FLOOR_BYTES_PER_SECOND:
-            return {"verdict": "failed", "reason": f"{label} sustained rate below 10 Mbit/s: {stability_bps * 8 / 1_000_000:.2f} Mbit/s", "result": result}
-        if stability_duration + 0.5 < expected_stability_seconds:
-            return {"verdict": "failed", "reason": f"{label} stability window too short: {stability_duration:.1f}s of {expected_stability_seconds}s", "result": result}
-        if duration + 0.5 < throughput_seconds:
-            return {"verdict": "failed", "reason": f"{label} throughput window too short: {duration:.1f}s of {throughput_seconds}s", "result": result}
-    return {"verdict": "verified", "result": result}
+    functional = _validate_functional_transport_result(result, expected_ru_ip, expected_foreign_ip, label=label)
+    performance = _validate_performance_result(
+        result,
+        label=label,
+        throughput_seconds=throughput_seconds,
+        capacity_floor_bytes_per_second=capacity_floor_bytes_per_second,
+    )
+    component_verdicts = {str(functional["verdict"])}
+    if performance.get("measured") is not False:
+        component_verdicts.add(str(performance["verdict"]))
+    verdict = "failed" if "failed" in component_verdicts else "inconclusive" if "inconclusive" in component_verdicts else "verified"
+    reasons = [str(component["reason"]) for component in (functional, performance) if component.get("reason")]
+    response: dict[str, object] = {
+        "verdict": verdict,
+        "functional": functional,
+        "performance": performance,
+        "result": result,
+    }
+    if reasons:
+        response["reason"] = "; ".join(reasons)
+    return response
 
 
-def _validate_public_vless_result(result: dict[str, object], uri, foreign_target, *, throughput_seconds: int = 0) -> dict[str, object]:
+def _validate_public_vless_result(result: dict[str, object], uri, foreign_target, *, expected_ru_ip: str | None = None, throughput_seconds: int = 0) -> dict[str, object]:
     return _validate_public_transport_result(
         result,
-        uri.host,
+        expected_ru_ip or uri.host,
         foreign_target,
         label="public VLESS",
         throughput_seconds=throughput_seconds,
@@ -375,6 +612,7 @@ def _run_external_public_profile(
     *,
     label: str,
     throughput_seconds: int = 0,
+    on_running: Callable[[], dict[str, object]] | None = None,
 ) -> dict[str, object]:
     if throughput_seconds < 0 or 0 < throughput_seconds < 30:
         return {"verdict": "failed", "reason": "throughput-seconds must be 0 or at least 30"}
@@ -395,7 +633,10 @@ def _run_external_public_profile(
         local_udp_probe = Path(temp_dir) / "udp-probe.py"
         local_runner = Path(temp_dir) / "runner.sh"
         local_config.write_text(config_text, encoding="utf-8")
-        local_udp_probe.write_text(render_socks5_udp_dns_probe(listen_port=listen_port), encoding="utf-8")
+        local_udp_probe.write_text(
+            render_live_route_probe(listen_port=listen_port, dns_listen_port=listen_port + 1),
+            encoding="utf-8",
+        )
         # Bash must retain LF on a Windows control host; write bytes deliberately.
         local_runner.write_bytes(render_vless_runner(listen_port=listen_port).encode("utf-8"))
         remote_config = f"{remote_dir}/sing-box.json"
@@ -420,6 +661,11 @@ def _run_external_public_profile(
                 error_path=remote_error,
                 lease_path=remote_lease,
             )
+            running_observations: list[dict[str, object]] = []
+            if on_running is not None:
+                for _sample in range(3):
+                    time.sleep(1)
+                    running_observations.append(on_running())
             result = _wait_for_vless_runner(
                 foreign_target,
                 runner_pid,
@@ -428,6 +674,8 @@ def _run_external_public_profile(
                 remote_lease,
                 throughput_seconds=throughput_seconds,
             )
+            if running_observations:
+                result["running_observations"] = running_observations
             try:
                 result["runner_log"] = ssh_capture(
                     foreign_target,
@@ -449,36 +697,248 @@ def _run_external_public_profile(
     return {"verdict": "completed", "result": result}
 
 
-def _verify_public_vless_uri(uri_path: Path, foreign_target, *, throughput_seconds: int = 0) -> dict[str, object]:
+def _capture_private_reject_marker(target) -> str:
+    try:
+        return ssh_capture(target, "date -u +%Y-%m-%dT%H:%M:%S.%6NZ", command_timeout=10).strip()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _apply_private_reject_correlation(result: dict[str, object], correlation: dict[str, object]) -> dict[str, object]:
+    udp_dns = result.get("udp_dns")
+    private_reject = udp_dns.get("private_reject") if isinstance(udp_dns, dict) else None
+    targets = private_reject.get("targets") if isinstance(private_reject, dict) else None
+    correlation_targets = correlation.get("targets")
+    if not isinstance(udp_dns, dict) or not isinstance(private_reject, dict) or not isinstance(targets, list):
+        return result
+    policy = correlation.get("policy")
+    correlation_verified = (
+        correlation.get("verdict") == "verified"
+        and isinstance(policy, dict)
+        and policy.get("verified") is True
+        and policy.get("drift") == "none"
+        and bool(str(policy.get("config_sha256", "")).strip())
+    )
+    correlated_by_target = {
+        str(item.get("target", "")): item
+        for item in correlation_targets
+        if isinstance(item, dict)
+        and item.get("correlated") is True
+        and bool(str(item.get("correlation_id", "")).strip())
+    } if isinstance(correlation_targets, list) and correlation_verified else {}
+    merged_targets: list[object] = []
+    for raw_target in targets:
+        if not isinstance(raw_target, dict):
+            merged_targets.append(raw_target)
+            continue
+        target = dict(raw_target)
+        evidence = correlated_by_target.get(str(target.get("target", "")))
+        if (
+            evidence
+            and target.get("verdict") == "inconclusive"
+            and target.get("evidence") == "socks-success-eof"
+            and target.get("correlation_required") is True
+        ):
+            target.update(
+                {
+                    "verdict": "verified",
+                    "ok": True,
+                    "correlated": True,
+                    "correlation_required": False,
+                    "correlation_id": evidence["correlation_id"],
+                    "event_id": evidence.get("event_id", ""),
+                }
+            )
+        merged_targets.append(target)
+    target_verdicts = [
+        str(target.get("verdict", "inconclusive"))
+        for target in merged_targets
+        if isinstance(target, dict)
+    ]
+    aggregate = (
+        "failed"
+        if "failed" in target_verdicts
+        else "inconclusive"
+        if any(verdict != "verified" for verdict in target_verdicts)
+        else "verified"
+    )
+    merged_private = {
+        **private_reject,
+        "verdict": aggregate,
+        "ok": aggregate == "verified",
+        "targets": merged_targets,
+        "correlation": correlation,
+    }
+    return {**result, "udp_dns": {**udp_dns, "private_reject": merged_private}}
+
+
+def _correlate_private_reject(target, result: dict[str, object], *, since: str, inbound: str) -> dict[str, object]:
+    udp_dns = result.get("udp_dns")
+    private_reject = udp_dns.get("private_reject") if isinstance(udp_dns, dict) else None
+    raw_targets = private_reject.get("targets") if isinstance(private_reject, dict) else None
+    targets = [
+        str(item.get("target", ""))
+        for item in raw_targets
+        if isinstance(item, dict)
+        and item.get("verdict") == "inconclusive"
+        and item.get("evidence") == "socks-success-eof"
+        and item.get("correlation_required") is True
+        and str(item.get("target", "")).strip()
+    ] if isinstance(raw_targets, list) else []
+    if not targets:
+        return result
+    if not since:
+        return _apply_private_reject_correlation(
+            result,
+            {"verdict": "failed", "reason": "RU correlation marker is unavailable", "targets": []},
+        )
+    command = (
+        "python3 /usr/local/lib/vpn-stack/vpn-stack-agent.py private-reject-correlate "
+        f"--since {shlex.quote(since)} --inbound {shlex.quote(inbound)} "
+        + " ".join(f"--target {shlex.quote(item)}" for item in targets)
+    )
+    try:
+        payload = ssh_capture(target, command, as_root=True, command_timeout=30)
+        correlation = json.loads(payload)
+        if not isinstance(correlation, dict):
+            raise ValueError("correlation payload is not an object")
+    except Exception as exc:  # noqa: BLE001
+        correlation = {"verdict": "failed", "reason": str(exc)[:240], "targets": []}
+    return _apply_private_reject_correlation(result, correlation)
+
+
+def _verify_public_vless_uri(
+    uri_path: Path,
+    env: dict[str, str],
+    foreign_target,
+    *,
+    throughput_seconds: int = 0,
+    on_running: Callable[[], dict[str, object]] | None = None,
+    reject_target=None,
+) -> dict[str, object]:
     if not uri_path.is_file():
         return {"verdict": "failed", "reason": f"primary VLESS URI is missing: {uri_path}"}
     try:
-        uri = parse_vless_uri(uri_path.read_text(encoding="utf-8").strip())
+        raw_uri = uri_path.read_bytes()
+        expected_uri = render_vless_uri(env).encode("utf-8")
+        if raw_uri != expected_uri:
+            return {"verdict": "failed", "reason": "primary VLESS URI differs from the canonical deployment contract"}
+        uri = parse_vless_uri(raw_uri.decode("utf-8").strip())
     except (OSError, ValueError) as exc:
         return {"verdict": "failed", "reason": f"primary VLESS URI is invalid: {exc}"}
+    reject_marker = _capture_private_reject_marker(reject_target) if reject_target is not None else ""
     run_result = _run_external_public_profile(
         render_ephemeral_singbox_client(uri, listen_port=18080),
         foreign_target,
         label="public VLESS",
         throughput_seconds=throughput_seconds,
+        on_running=on_running,
     )
     if run_result.get("verdict") != "completed":
         return run_result
-    return _validate_public_vless_result(
+    if reject_target is not None:
+        run_result["result"] = _correlate_private_reject(
+            reject_target,
+            run_result["result"],
+            since=reject_marker,
+            inbound="router-in",
+        )
+    validated = _validate_public_vless_result(
         run_result["result"],
         uri,
         foreign_target,
+        expected_ru_ip=env.get("RU_PUBLIC_IP") or uri.host,
         throughput_seconds=throughput_seconds,
     )
+    correlation = _validate_front_correlation(run_result["result"].get("running_observations"))
+    validated["front_correlation"] = correlation
+    if correlation["verdict"] != "verified":
+        current = str(validated.get("verdict", "failed"))
+        if correlation["verdict"] == "failed" or current == "failed":
+            validated["verdict"] = "failed"
+        elif correlation["verdict"] == "degraded" or current == "degraded":
+            validated["verdict"] = "degraded"
+        else:
+            validated["verdict"] = "inconclusive"
+    return validated
 
 
-def _verify_public_hysteria2(env: dict[str, str], foreign_target, *, throughput_seconds: int = 0) -> dict[str, object]:
+def _capture_client_front(target, source: str) -> dict[str, object]:
+    try:
+        payload = ssh_capture(
+            target,
+            f"python3 /usr/local/lib/vpn-stack/vpn-stack-agent.py client --source {shlex.quote(source)} --since 5",
+            command_timeout=20,
+        )
+        parsed = json.loads(payload)
+        return parsed if isinstance(parsed, dict) else {"error": "client-front payload is not an object"}
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc)[:240]}
+
+
+def _validate_front_correlation(observation: object) -> dict[str, object]:
+    if isinstance(observation, dict):
+        observations = [observation]
+    elif isinstance(observation, list) and observation:
+        observations = observation
+    else:
+        return _probe_component("inconclusive", "public VLESS front was not observed while the runner was active")
+    best: tuple[int, dict[str, object]] | None = None
+    errors: list[str] = []
+    for item in observations:
+        if not isinstance(item, dict):
+            continue
+        baseline = item.get("baseline")
+        during = item.get("during")
+        if not isinstance(baseline, dict) or not isinstance(during, dict):
+            continue
+        if baseline.get("error") or during.get("error"):
+            errors.append(str(during.get("error") or baseline.get("error")))
+            continue
+        baseline_events = baseline.get("events", {})
+        during_events = during.get("events", {})
+        try:
+            accepted_delta = int(during_events.get("accepted_tcp", 0)) - int(baseline_events.get("accepted_tcp", 0))
+        except (AttributeError, TypeError, ValueError):
+            return _probe_component("failed", "public VLESS front correlation counters are malformed")
+        flows = during.get("front", {}).get("flows", {}) if isinstance(during.get("front"), dict) else {}
+        if not isinstance(flows, dict):
+            flows = {}
+        candidate = (accepted_delta, flows)
+        if best is None or (accepted_delta, len(flows)) > (best[0], len(best[1])):
+            best = candidate
+    if best is None:
+        detail = f": {errors[-1]}" if errors else ""
+        return _probe_component("inconclusive", f"public VLESS front correlation snapshots are incomplete{detail}")
+    accepted_delta, flows = best
+    if accepted_delta < 1:
+        return _probe_component("inconclusive", "public VLESS runner produced no correlated Xray TCP accept event")
+    qualities = {str(metrics.get("quality", "")) for metrics in flows.values() if isinstance(metrics, dict)}
+    verdict = "degraded" if "degraded" in qualities else "verified"
+    result = _probe_component(verdict)
+    result.update({"accepted_delta": accepted_delta, "flow_count": len(flows), "qualities": sorted(qualities)})
+    return result
+
+
+def _verify_public_hysteria2(env: dict[str, str], foreign_target, *, throughput_seconds: int = 0, reject_target=None) -> dict[str, object]:
     payload = {
         "log": {"level": "warn", "timestamp": True},
-        "inbounds": [{"type": "mixed", "listen": "127.0.0.1", "listen_port": 18080, "tag": "verify-in"}],
+        "inbounds": [
+            {"type": "mixed", "listen": "127.0.0.1", "listen_port": 18080, "tag": "verify-in"},
+            {
+                "type": "direct",
+                "tag": "verify-dns-in",
+                "listen": "127.0.0.1",
+                "listen_port": 18081,
+                "network": "udp",
+                "override_address": "1.1.1.1",
+                "override_port": 53,
+            },
+        ],
         "outbounds": [render_public_hy2_outbound(env)],
         "route": {"final": PUBLIC_HY2_OUTBOUND_TAG},
     }
+    reject_marker = _capture_private_reject_marker(reject_target) if reject_target is not None else ""
     run_result = _run_external_public_profile(
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
         foreign_target,
@@ -487,6 +947,13 @@ def _verify_public_hysteria2(env: dict[str, str], foreign_target, *, throughput_
     )
     if run_result.get("verdict") != "completed":
         return run_result
+    if reject_target is not None:
+        run_result["result"] = _correlate_private_reject(
+            reject_target,
+            run_result["result"],
+            since=reject_marker,
+            inbound="public-hy2-in",
+        )
     return _validate_public_transport_result(
         run_result["result"],
         env["RU_PUBLIC_IP"],
@@ -497,7 +964,13 @@ def _verify_public_hysteria2(env: dict[str, str], foreign_target, *, throughput_
     )
 
 
-def verify_live_workflow(deployment: str | None, *, non_interactive: bool = False, throughput_seconds: int = 0) -> int:
+def verify_live_workflow(
+    deployment: str | None,
+    *,
+    non_interactive: bool = False,
+    throughput_seconds: int = 30,
+    require_native_agent: bool = True,
+) -> int:
     print_header("Live verification")
     roles = requested_roles("all")
     deployment_name, env_path, env, _state, targets, _preflights_by_role = workflows.prepare_remote_session(
@@ -516,21 +989,41 @@ def verify_live_workflow(deployment: str | None, *, non_interactive: bool = Fals
     worst = "verified"
     rank = {"verified": 0, "degraded": 1, "inconclusive": 2, "failed": 3}
     foreign_target = next((target for target in targets if target.role == ROLE_FOREIGN), None)
+    ru_target = next((target for target in targets if target.role == ROLE_RU), None)
     public_vless: dict[str, object] = {"verdict": "inconclusive", "reason": "foreign verifier is unavailable"}
     public_hysteria2: dict[str, object] = {"verdict": "inconclusive", "reason": "foreign verifier is unavailable"}
     if foreign_target is not None:
-        public_vless = _verify_public_vless_uri(OUT_DIR / deployment_name / "client" / "vless-uri.txt", foreign_target, throughput_seconds=throughput_seconds)
-        public_hysteria2 = _verify_public_hysteria2(env, foreign_target, throughput_seconds=throughput_seconds)
+        verifier_source = env.get("FOREIGN_PUBLIC_IP") or foreign_target.public_ip or foreign_target.ssh_host
+        if ru_target is None:
+            baseline_front = {"error": "RU target is unavailable"}
+        elif not verifier_source:
+            baseline_front = {"error": "foreign verifier source address is unavailable"}
+        else:
+            baseline_front = _capture_client_front(ru_target, verifier_source)
+        public_vless = _verify_public_vless_uri(
+            OUT_DIR / deployment_name / "client" / "vless-uri.txt",
+            env,
+            foreign_target,
+            throughput_seconds=throughput_seconds,
+            on_running=lambda: {
+                "baseline": baseline_front,
+                "during": _capture_client_front(ru_target, verifier_source) if ru_target is not None and verifier_source else {"error": "RU target or verifier source is unavailable"},
+            },
+            reject_target=ru_target if require_native_agent else None,
+        )
+        if require_native_agent:
+            public_hysteria2 = _verify_public_hysteria2(env, foreign_target, throughput_seconds=0, reject_target=ru_target)
     snapshots: list[DiagnosticsSnapshot] = []
-    for target in targets:
-        try:
-            snapshot = _collect_agent_snapshot(target)
-            snapshot.deployment = deployment_name
-            snapshot = _verify_snapshot(snapshot)
-        except Exception as exc:  # noqa: BLE001
-            snapshot = DiagnosticsSnapshot(deployment=deployment_name, role=target.role, verdict="failed", reasons=[f"agent snapshot failed: {exc}"])
-        snapshots.append(snapshot)
-    snapshots = [_reconcile_public_capabilities(snapshot, public_vless) for snapshot in snapshots]
+    if require_native_agent:
+        for target in targets:
+            try:
+                snapshot = _collect_agent_snapshot(target)
+                snapshot.deployment = deployment_name
+                snapshot = _verify_snapshot(snapshot)
+            except Exception as exc:  # noqa: BLE001
+                snapshot = DiagnosticsSnapshot(deployment=deployment_name, role=target.role, verdict="failed", reasons=[f"agent snapshot failed: {exc}"])
+            snapshots.append(snapshot)
+        snapshots = [_reconcile_public_capabilities(snapshot, public_vless) for snapshot in snapshots]
     report_dir = OUT_DIR / "diagnostics" / f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{deployment_name}"
     report_dir.mkdir(parents=True, exist_ok=True)
     report_path = report_dir / "live-verify.json"
@@ -539,6 +1032,7 @@ def verify_live_workflow(deployment: str | None, *, non_interactive: bool = Fals
             {
                 "deployment": deployment_name,
                 "throughput_seconds": throughput_seconds,
+                "verification_scope": "release" if require_native_agent else "rollback-public-vless",
                 "public_vless": public_vless,
                 "public_hysteria2": public_hysteria2,
                 "snapshots": [snapshot.to_dict() for snapshot in snapshots],
@@ -550,16 +1044,29 @@ def verify_live_workflow(deployment: str | None, *, non_interactive: bool = Fals
         + "\n",
         encoding="utf-8",
     )
-    for verdict in [*(snapshot.verdict for snapshot in snapshots), str(public_vless["verdict"]), str(public_hysteria2["verdict"])]:
+    verdicts = [str(public_vless["verdict"])]
+    if require_native_agent:
+        verdicts = [*(snapshot.verdict for snapshot in snapshots), *verdicts]
+    for verdict in verdicts:
         if rank[verdict] > rank[worst]:
             worst = verdict
+    if require_native_agent and public_hysteria2.get("verdict") != "verified" and rank[worst] < rank["degraded"]:
+        worst = "degraded"
     print_header("Live verification result")
+    print(f"verification scope: {'release' if require_native_agent else 'rollback-public-vless'}")
     print(f"verify verdict: {worst}")
     for snapshot in snapshots:
         reason_text = "; ".join(snapshot.reasons) if snapshot.reasons else "fresh probes and installed manifest are consistent"
         print(f"{snapshot.role or 'unknown'}: {snapshot.verdict} - {reason_text}")
-    print(f"public-vless-uri: {public_vless['verdict']} - {public_vless.get('reason', public_vless.get('result', ''))}")
-    print(f"public-hysteria2: {public_hysteria2['verdict']} - {public_hysteria2.get('reason', public_hysteria2.get('result', ''))}")
+    profiles = [("public-vless-uri", public_vless)]
+    if require_native_agent:
+        profiles.append(("public-hysteria2", public_hysteria2))
+    for profile_name, profile in profiles:
+        print(f"{profile_name}: {profile['verdict']} - {profile.get('reason', profile.get('result', ''))}")
+        for component_name in ("functional", "performance"):
+            component = profile.get(component_name)
+            if isinstance(component, dict):
+                print(f"{profile_name}-{component_name}: {component['verdict']} - {component.get('reason', 'passed')}")
     print(f"report: {report_path}")
     print(f"Deployment env: {Path(env_path)}")
     return 0 if worst == "verified" else 1

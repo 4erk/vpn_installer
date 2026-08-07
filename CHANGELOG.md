@@ -6,6 +6,40 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.18.0] - 2026-08-06
+
+### Fixed
+
+- Межсерверное переключение больше не меняет исправный transport из-за кратковременной разницы RTT. Активный путь остаётся sticky; альтернативный путь проверяется только после отказа активного и выбирается после двух независимых свежих подтверждений. Внутренние budgets `800ms` для активного path и `1200ms` для холодного fallback не влияют на клиентские connect timeout.
+- Устранена race при WireGuard endpoint roaming: перед установкой нового endpoint закрывается только UDP-association отказавшего relay, затем новый путь проверяется тем же DNS-независимым target. Xray, sing-box, kernel WireGuard и клиентское TCP-соединение не перезапускаются.
+- Failure-injection lab передаёт один непрерывный `7.5 MiB` поток через принудительный underlay failover без повторного HTTP-запроса; повторные измерения переключения укладываются примерно в `3.5-3.7s`.
+- Global DNS теперь проходит через отдельный foreign relay и проверяется по полноценным `A` и `AAAA` ответам через точный VLESS URI. Глобальное подавление `AAAA` удалено, IPv4 остаётся предпочтительным, а рабочий IPv6 используется при необходимости.
+- Установка использует закреплённые release-local `sing-box` и Xray, проверяет их digest и фактический `ExecStart`, валидирует staged configs/assets/units, атомарно переключает `current` и откатывает все уже изменённые роли при любой неуспешной acceptance-проверке.
+- Manifest дополнен независимой проверкой digest всего immutable release-tree. Согласованное изменение manifest вместе с установленным файлом больше не может дать ложный `drift: none`.
+- Live verification запускает эфемерный клиент непосредственно из `out/1/client/vless-uri.txt` на foreign runner, коррелирует его с публичным Xray flow и отдельно проверяет DNS, RU/foreign identity, домены, IPv4/IPv6 и private/fake reject.
+- Диагностика schema 3 запрещает `verified` при отсутствующем collector, stale snapshot, неполном log window, несовпадающем runtime binary или повреждённом nft/WG/config. Fresh и historical окна больше не смешиваются.
+- Web-admin сохранён, но изменения operator rules теперь сериализованы lock-файлом, проверяются до применения и атомарно откатываются вместе с effective config при ошибке reload.
+- Live acceptance теперь жёстко проверяет целевую peak capacity, берёт несколько снимков публичного Xray front и допускает завершившийся короткий flow по source-correlated accept event. Transport rollback закрывает неудачную association и доказывает восстановленный endpoint полным overlay probe.
+- Target-side acceptance использует единый ключ `egress_ip`; rollback snapshots публикуются только после completion marker и каждая обязательная операция восстановления проверяется явно. Установка запрещает смену role/deployment без remove, определяет WAN до рендера и после оборванного SSH принимает только точное совпадение ожидаемого release ID.
+- Версии и SHA256 архивов/бинарников sing-box и Xray теперь читаются target installer и audit из одного render manifest. Release gate сверяет извлечённый бинарник с проверенным архивом, поэтому рассогласованный package digest блокируется до production cutover.
+- Дублирующий shell-postcheck удалён: завершение normal/interrupted install подтверждается одним transaction snapshot с точным release ID, acceptance marker и drift. Rollback проверяет сохранённый pre-cutover release ID и кросс-версионный dataplane-контракт, поэтому различия старых systemd unit не дают ложный rollback failure.
+- Python-agent запускается через закреплённый interpreter и поэтому требует читаемый, а не executable artifact. Full release acceptance по-прежнему требует native schema 3, а кросс-версионный rollback доказывает точный основной VLESS URI без ложного требования новой схемы от старого релиза.
+- SSH reload больше не проверяется одним мгновенным `ss`: installer bounded-ожидает listener readiness после systemd reload. Это устраняет ложный install failure в коротком окне между SIGHUP и повторным bind `:22`.
+- Target installer запрещает запись Python bytecode, а release-tree digest исключает только производные `*.pyc`/`__pycache__`, продолжая проверять все source/config/binary artifacts. Поэтому runtime cache больше не вызывает ложный `server-mutated`; stale transport observer во время install-lock остаётся degradation, а не path failure.
+- UDP DNS в public VLESS verifier использует одну bounded protocol retransmission в той же SOCKS/VLESS-сессии. Одна потерянная UDP-датаграмма после cold restart больше не маскирует восстановившийся dataplane как rollback failure.
+- Публичный Xray больше не передаёт UDP через нестабильный локальный SOCKS5 UDP hop: TCP остаётся в существующем sing-box router, а UDP и встроенный DNS Xray выходят только через адаптивный kernel `wg0` с тем же policy mark. RU-direct fallback не добавлен; переключение underlay продолжает выполняться под стабильным overlay без рестарта публичного front.
+- Live verifier принимает DNS отдельным direct UDP inbound, формирует корректный DNS wire packet, валидирует `A`/`AAAA` и игнорирует запоздавшие ответы с чужим transaction ID. Unit-тест сверяет запрос побайтно, а runtime audit воспроизводит двусторонний UDP через полный Xray Reality path.
+- Private/fake acceptance больше не трактует закрытый SOCKS stream как достаточное доказательство. Verifier засчитывает silent `reject no_drop` только при чистом manifest, guard до IPv4 catch-all и точных post-marker событиях обоих probe targets на соответствующем `router-in`/`public-hy2-in`; чужой inbound, stale event или изменённый config оставляют результат непройденным.
+- Journal JSON collector декодирует бинарное `MESSAGE` и удаляет ANSI sequences, которые цветной sing-box log заставляет journald представлять как массив байтов. Реальные event ID, inbound, destination и problem buckets больше не теряются в structured diagnostics.
+- Пустой результат `journalctl --grep` теперь является корректно собранным нулевым окном, а не collector failure. Compact status помечает сознательно не запрошенные live probes, maintenance и длинные log windows как `skipped`; реальные ошибки и пропущенные обязательные acceptance-поля по-прежнему дают ненулевой hard failure.
+- Плановый restart foreign-роли больше не оставляет RU в ложном `failed`: maintenance-состояние transport атомарно сохраняется под install lock, а controller перед RU cutover дожидается свежего `healthy` от фактического underlay. Старый transient failure больше не может сорвать следующий target-side acceptance.
+- Rollback больше не пытается перезапустить системный `nftables` без `/etc/nftables.conf`. Legacy unit останавливается при миграции, snapshot сохраняет только воспроизводимое состояние, а отдельный `vpn-stack-nftables.service` восстанавливается независимо.
+
+### Changed
+
+- Release gate сведён к одному полному `audit all`: unit/contract checks, clean-room bundle, target render, pinned binary config checks, rollback injection и сетевой failover lab не запускаются повторно отдельными фиктивными проходами.
+- Основной `vless-uri.txt`, публичный Xray/Reality вход, web-admin и маршрутизация foreign traffic без RU-direct fallback не изменены. Новых timeout/MTU/env-ручек не добавлено.
+
 ## [0.17.0] - 2026-08-06
 
 ### Fixed

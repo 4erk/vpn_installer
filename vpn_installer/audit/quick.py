@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import builtins
+from collections import Counter
+import ipaddress
 import json
 import os
 import shutil
@@ -16,13 +18,20 @@ from ..client_artifacts import PUBLIC_VLESS_OUTBOUND_TAG
 from ..config import load_env_file
 from ..dns_policy import GLOBAL_FOREIGN_DOMAINS, GLOBAL_FOREIGN_DOMAIN_SUFFIXES
 from ..manifest import XRAY_VERSION
-from ..render import find_cached_asset, render_all_artifacts
+from ..render import render_all_artifacts
 from ..runtime_deps import ensure_python_package
 from ..targets import build_target
-from .runner import AUDIT_IMAGE, VPN_PS1, AuditFailure, AuditRunner, powershell_executable, python_cmd, write_bytes
+from ..vless_verify import render_live_route_probe
+from .runner import AUDIT_IMAGE, VALID_GEOIP_SRS, VALID_GEOSITE_SRS, VPN_PS1, AuditFailure, AuditRunner, powershell_executable, python_cmd, write_bytes
 
 COVERAGE_THRESHOLD = 80
 COVERAGE_OMIT = "vpn_installer/audit/*"
+QUICK_ASSET_FIXTURES = {
+    "geosite-ru.srs": VALID_GEOSITE_SRS,
+    "geoip-ru.srs": VALID_GEOIP_SRS,
+    "ru-ipv4.zone": b"203.0.113.0/24\n",
+    "ru-ipv6.zone": b"2001:db8::/32\n",
+}
 
 
 def coverage_command(*args: str) -> list[str]:
@@ -65,33 +74,43 @@ def docker_readiness() -> tuple[bool, str]:
     return True, ""
 
 
-def run(runner: AuditRunner) -> None:
-    dev_mode = runner.mode == "all" or os.environ.get("VPN_AUDIT_DEV") == "1"
-    windows_host = os.name == "nt"
-    docker_available, docker_skip_reason = docker_readiness()
-    bash_available = shutil.which("bash") is not None
-    powershell_available = shutil.which("powershell") is not None or shutil.which("pwsh") is not None
+def test_bash_syntax_in_container(runner: AuditRunner) -> dict[str, str]:
+    container = f"audit-bash-syntax-{runner.run_id}"
+    with runner.docker_container(container, AUDIT_IMAGE):
+        runner.docker_exec(container, "mkdir -p /work")
+        runner.docker_copy(container, ROOT_DIR / "install.sh", "/work/install.sh")
+        runner.docker_exec(container, "bash -n /work/install.sh")
+    return {"runtime": "docker"}
 
-    if dev_mode and docker_available:
-        runner.ensure_audit_image()
+
+def run(runner: AuditRunner) -> None:
+    full_mode = runner.mode == "all"
+    windows_host = os.name == "nt"
+    docker_available = False
+    docker_skip_reason = ""
+    bash_available = False
+    powershell_available = False
+
+    if full_mode:
+        docker_available, docker_skip_reason = docker_readiness()
+        bash_available = shutil.which("bash") is not None
+        powershell_available = shutil.which("powershell") is not None or shutil.which("pwsh") is not None
+        if docker_available:
+            runner.ensure_audit_image()
     env_path, out_dir = runner.ensure_quick_env()
     env = load_env_file(env_path)
     runner.seed_foreign_block_cache(out_dir.name)
     ps_env = {"VPN_NO_PAUSE": "1"}
 
-    if dev_mode:
-        runner.skip("quick-unittest", "full audit uses one instrumented branch-coverage run")
+    if full_mode:
         runner.record("quick-coverage", lambda: test_coverage(runner))
-    else:
-        runner.skip("quick-unittest", "dev-only: unit-тесты запускаются только в полном аудите")
-        runner.skip("quick-coverage", "dev-only: coverage запускается только в полном аудите")
 
-    if dev_mode and bash_available:
+    if full_mode and docker_available:
+        runner.record("quick-bash-syntax", lambda: test_bash_syntax_in_container(runner))
+    elif full_mode and bash_available:
         runner.record("quick-bash-syntax", lambda: runner.run_bash("bash-syntax", "bash -n install.sh") or None)
-    elif dev_mode:
+    elif full_mode:
         runner.skip("quick-bash-syntax", "bash не найден, shell-проверки пропущены")
-    else:
-        runner.skip("quick-bash-syntax", "dev-only: shell-проверка выполняется только в полном аудите")
     runner.record(
         "quick-py-compile",
         lambda: runner.run_command(
@@ -125,34 +144,22 @@ def run(runner: AuditRunner) -> None:
         )
         or None,
     )
-    if windows_host and powershell_available:
+    if full_mode and windows_host and powershell_available:
         runner.record("quick-vpn-ps1-help", lambda: runner.run_powershell("vpn-ps1-help", ["-File", str(VPN_PS1), "--help"], env=ps_env) or None)
         runner.record("quick-vpn-ps1-install-help", lambda: runner.run_powershell("vpn-ps1-install-help", ["-File", str(VPN_PS1), "install", "--help"], env=ps_env) or None)
         runner.record("quick-vpn-menu-exit", lambda: test_vpn_menu_exit(runner))
-        if dev_mode:
-            runner.record("quick-windows-clean-room", lambda: test_windows_clean_room(runner))
-        else:
-            runner.skip("quick-windows-clean-room", "dev-only: clean-room Windows bootstrap выполняется только в полном аудите")
-    elif windows_host:
+        runner.record("quick-windows-clean-room", lambda: test_windows_clean_room(runner))
+    elif full_mode and windows_host:
         runner.skip("quick-vpn-ps1-help", "PowerShell не найден, Windows launcher help пропущен")
         runner.skip("quick-vpn-ps1-install-help", "PowerShell не найден, Windows install help пропущен")
         runner.skip("quick-vpn-menu-exit", "PowerShell не найден, menu smoke пропущен")
         runner.skip("quick-windows-clean-room", "PowerShell не найден, Windows clean-room пропущен")
-    else:
-        runner.skip("quick-vpn-ps1-help", "не Windows-хост: PowerShell smoke пропущен")
-        runner.skip("quick-vpn-ps1-install-help", "не Windows-хост: PowerShell smoke пропущен")
-        runner.skip("quick-vpn-menu-exit", "не Windows-хост: menu smoke для PowerShell пропущен")
-        runner.skip("quick-windows-clean-room", "не Windows-хост: Windows clean-room пропущен")
-
-    if not windows_host and bash_available:
+    if full_mode and not windows_host and bash_available:
         runner.record("quick-vpn-sh-help", lambda: runner.run_bash("vpn-sh-help", "bash ./vpn.sh --help", cwd=ROOT_DIR) or None)
         runner.record("quick-vpn-sh-audit-help", lambda: runner.run_bash("vpn-sh-audit-help", "bash ./vpn.sh audit --help", cwd=ROOT_DIR) or None)
-    elif not windows_host:
+    elif full_mode and not windows_host:
         runner.skip("quick-vpn-sh-help", "bash не найден, Linux launcher help пропущен")
         runner.skip("quick-vpn-sh-audit-help", "bash не найден, Linux audit help пропущен")
-    else:
-        runner.skip("quick-vpn-sh-help", "не Linux-хост: Linux launcher help пропущен")
-        runner.skip("quick-vpn-sh-audit-help", "не Linux-хост: Linux audit help пропущен")
     runner.record("quick-install-ux", test_install_ux_helpers)
     runner.record(
         "quick-render-all",
@@ -166,34 +173,27 @@ def run(runner: AuditRunner) -> None:
     runner.record("quick-validate-json", lambda: test_validate_json(out_dir))
     runner.record("quick-user-artifacts", lambda: test_user_artifacts(out_dir))
     runner.record("quick-validate-bundle", lambda: test_validate_bundle(out_dir))
-    if docker_available:
+    if full_mode and docker_available:
         runner.record("quick-singbox-runtime-ru", lambda: test_ru_singbox_runtime_smoke(runner, out_dir))
         runner.record("quick-interserver-hysteria-runtime", lambda: test_interserver_hysteria_runtime(runner, out_dir))
-    else:
+    elif full_mode:
         runner.skip("quick-singbox-runtime-ru", f"{docker_skip_reason}, runtime smoke для RU sing-box пропущен")
         runner.skip("quick-interserver-hysteria-runtime", f"{docker_skip_reason}, Hysteria2 runtime check пропущен")
 
-    if dev_mode and docker_available:
+    if full_mode and docker_available:
         runner.record("quick-xray-reality-interop", lambda: test_xray_reality_interop(runner, out_dir))
         runner.record("quick-cloud-init-schema", lambda: test_cloud_init_schema(runner, out_dir))
         runner.record("quick-cloud-init-render-only", lambda: test_cloud_init_render_only(runner, out_dir))
         runner.record("quick-bundle-render-only", lambda: test_bundle_render_only(runner, out_dir))
         runner.record("quick-linux-launcher-no-python", lambda: test_linux_launcher_no_python(runner))
         runner.record("quick-linux-launcher-python", lambda: test_linux_launcher_with_python(runner))
-    elif dev_mode:
+    elif full_mode:
         runner.skip("quick-xray-reality-interop", f"{docker_skip_reason}, Xray Reality interop check пропущен")
         runner.skip("quick-cloud-init-schema", f"{docker_skip_reason}, cloud-init schema check пропущен")
         runner.skip("quick-cloud-init-render-only", f"{docker_skip_reason}, cloud-init render-only check пропущен")
         runner.skip("quick-bundle-render-only", f"{docker_skip_reason}, bundle render-only check пропущен")
         runner.skip("quick-linux-launcher-no-python", f"{docker_skip_reason}, Linux launcher test пропущен")
         runner.skip("quick-linux-launcher-python", f"{docker_skip_reason}, Linux launcher test пропущен")
-    else:
-        runner.skip("quick-xray-reality-interop", "dev-only: Xray Reality interop выполняется только в полном аудите")
-        runner.skip("quick-cloud-init-schema", "dev-only: cloud-init schema выполняется только в полном аудите")
-        runner.skip("quick-cloud-init-render-only", "dev-only: cloud-init render-only выполняется только в полном аудите")
-        runner.skip("quick-bundle-render-only", "dev-only: bundle render-only выполняется только в полном аудите")
-        runner.skip("quick-linux-launcher-no-python", "dev-only: Linux launcher regression выполняется только в полном аудите")
-        runner.skip("quick-linux-launcher-python", "dev-only: Linux launcher regression выполняется только в полном аудите")
 
 
 def run_interop(runner: AuditRunner) -> None:
@@ -303,21 +303,8 @@ def seed_quick_asset_cache(env: dict[str, str], out_dir: Path) -> None:
         names.extend(["ru-ipv4.zone", "ru-ipv6.zone"])
     assets_dir = out_dir / "assets"
     assets_dir.mkdir(parents=True, exist_ok=True)
-    missing: list[str] = []
     for name in names:
-        target = assets_dir / name
-        if target.is_file() and target.stat().st_size > 0:
-            continue
-        cached = find_cached_asset(name, target)
-        if cached is None:
-            missing.append(name)
-            continue
-        shutil.copy2(cached, target)
-    if missing:
-        raise AuditFailure(
-            "quick audit requires local asset cache; refresh first: "
-            + ", ".join(missing)
-        )
+        write_bytes(assets_dir / name, QUICK_ASSET_FIXTURES[name])
 
 
 def test_render_all(
@@ -443,22 +430,41 @@ def test_validate_bundle(out_dir: Path) -> dict[str, str]:
             "deployment.env",
             "assets/geosite-ru.srs",
             "assets/geoip-ru.srs",
-            "rendered/sing-box.json",
-            "rendered/xray.json",
-            "rendered/vpn-stack-agent.py",
-            "rendered/vpn-stack-xray.service",
             "vpn_installer/install_support.py",
+            "vpn_installer/render.py",
+            "vpn_installer/server_agent.py",
         },
-        "foreign-exit.tar.gz": {"install.sh", "deployment.env", "rendered/sing-box.json", "rendered/vpn-stack-agent.py", "vpn_installer/install_support.py"},
+        "foreign-exit.tar.gz": {
+            "install.sh",
+            "deployment.env",
+            "vpn_installer/install_support.py",
+            "vpn_installer/render.py",
+            "vpn_installer/server_agent.py",
+        },
     }
     for tarball in tarballs:
         if not tarball.is_file():
             raise AuditFailure(f"Не найден bundle: {tarball}")
         with tarfile.open(tarball, "r:gz") as archive:
-            names = {member.name.lstrip("./") for member in archive.getmembers() if member.name not in {".", "./"}}
+            member_names = [member.name.lstrip("./") for member in archive.getmembers() if member.name not in {".", "./"}]
+        duplicates = sorted(name for name, count in Counter(member_names).items() if count > 1)
+        if duplicates:
+            raise AuditFailure(f"Bundle {tarball.name} содержит дубли: {', '.join(duplicates)}")
+        names = set(member_names)
         missing = sorted(expected[tarball.name] - names)
         if missing:
             raise AuditFailure(f"Bundle {tarball.name} не содержит: {', '.join(missing)}")
+        legacy = sorted(name for name in names if name == "rendered" or name.startswith("rendered/"))
+        if legacy:
+            raise AuditFailure(f"Bundle {tarball.name} содержит legacy rendered tree: {', '.join(legacy)}")
+        unrelated = sorted(
+            name
+            for name in names
+            if name.startswith("vpn_installer/audit/")
+            or name in {"vpn_installer/cli.py", "vpn_installer/workflows.py", "vpn_installer/client_artifacts.py"}
+        )
+        if unrelated:
+            raise AuditFailure(f"Bundle {tarball.name} содержит локальный код: {', '.join(unrelated)}")
     return {"bundle_dir": str(bundle_dir)}
 
 
@@ -599,7 +605,8 @@ def test_interserver_hysteria_runtime(runner: AuditRunner, out_dir: Path) -> dic
     work_dir = runner.work_dir / "interserver-hysteria-runtime"
     work_dir.mkdir(parents=True, exist_ok=True)
     client_config_path = work_dir / "client.json"
-    server_config_path = out_dir / "preview" / "foreign" / "sing-box.json"
+    rendered_server_config_path = out_dir / "preview" / "foreign" / "sing-box.json"
+    server_config_path = work_dir / "server.json"
 
     ru_config = json.loads((out_dir / "preview" / "ru" / "sing-box.json").read_text(encoding="utf-8"))
     hysteria_candidate = next(
@@ -612,6 +619,20 @@ def test_interserver_hysteria_runtime(runner: AuditRunner, out_dir: Path) -> dic
         raise AuditFailure("Interserver Hysteria2 candidate не содержит Salamander obfs")
     hysteria_candidate = dict(hysteria_candidate)
     hysteria_candidate["server"] = server_ip
+    rendered_server_config = json.loads(rendered_server_config_path.read_text(encoding="utf-8"))
+    hysteria_inbound = next(
+        (item for item in rendered_server_config.get("inbounds", []) if item.get("tag") == "interserver-hy2-in"),
+        None,
+    )
+    if not isinstance(hysteria_inbound, dict) or hysteria_inbound.get("type") != "hysteria2":
+        raise AuditFailure("Foreign config не содержит Hysteria2 transport inbound")
+    server_config = {
+        "log": rendered_server_config.get("log", {"level": "info", "timestamp": True}),
+        "inbounds": [hysteria_inbound],
+        "outbounds": [{"type": "direct", "tag": "direct"}],
+        "route": {"final": "direct"},
+    }
+    write_bytes(server_config_path, json.dumps(server_config, ensure_ascii=False, indent=2).encode("utf-8") + b"\n")
     client_config = {
         "log": {"level": "info", "timestamp": True},
         "inbounds": [{"type": "mixed", "tag": "probe-in", "listen": "0.0.0.0", "listen_port": 1080}],
@@ -672,19 +693,19 @@ def test_xray_reality_interop(runner: AuditRunner, out_dir: Path) -> dict[str, s
             {
                 "type": "hosts",
                 "tag": "interop-hosts",
-                "predefined": {"example.com": ["127.0.0.1"]},
+                "predefined": {"example.com": ["127.0.0.1", "::1"]},
             }
         ],
         "final": "interop-hosts",
     }
     router_config["route"]["final"] = "direct-ru"
-    router_config["route"]["default_domain_resolver"] = "interop-hosts"
+    router_config["route"]["auto_detect_interface"] = False
+    router_config["route"]["default_domain_resolver"] = {"server": "interop-hosts"}
     router_config["route"]["rules"] = [rule for rule in router_config["route"]["rules"] if rule.get("action") != "resolve"]
     router_config["outbounds"] = [
         {"type": "direct", "tag": "direct-ru"},
         {"type": "direct", "tag": "to-foreign"},
     ]
-
     xray_server_config = json.loads((out_dir / "preview" / "ru" / "xray.json").read_text(encoding="utf-8"))
     xray_server_config["log"] = {"loglevel": "debug"}
     xray_server_config["inbounds"][0]["listen"] = "0.0.0.0"
@@ -692,6 +713,8 @@ def test_xray_reality_interop(runner: AuditRunner, out_dir: Path) -> dict[str, s
     xray_server_config["inbounds"][0]["streamSettings"]["realitySettings"]["dest"] = "singbox-router:443"
     xray_server_config["outbounds"][0]["settings"]["servers"][0]["address"] = "singbox-router"
     xray_server_config["outbounds"][0]["settings"]["servers"][0]["port"] = router_config["inbounds"][0]["listen_port"]
+    foreign_overlay = next(item for item in xray_server_config["outbounds"] if item.get("tag") == "foreign-overlay")
+    foreign_overlay.pop("streamSettings", None)
 
     generated_client_config = json.loads((out_dir / "client" / "windows-xray.json").read_text(encoding="utf-8"))
     proxy_outbound = generated_client_config["outbounds"][0]
@@ -707,10 +730,18 @@ def test_xray_reality_interop(runner: AuditRunner, out_dir: Path) -> dict[str, s
                 "protocol": "socks",
                 "settings": {"udp": True},
                 "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"], "routeOnly": False},
-            }
+            },
+            {
+                "tag": "dns-probe",
+                "listen": "0.0.0.0",
+                "port": 1053,
+                "protocol": "dokodemo-door",
+                "settings": {"address": "1.1.1.1", "port": 53, "network": "udp"},
+            },
         ],
         "outbounds": [proxy_outbound],
     }
+    route_probe_path = work_dir / "route-probe.py"
     write_bytes(router_config_path, json.dumps(router_config, ensure_ascii=False, indent=2).encode("utf-8") + b"\n")
     write_bytes(xray_server_config_path, json.dumps(xray_server_config, ensure_ascii=False, indent=2).encode("utf-8") + b"\n")
     write_bytes(client_config_path, json.dumps(client_config, ensure_ascii=False, indent=2).encode("utf-8") + b"\n")
@@ -726,6 +757,32 @@ def test_xray_reality_interop(runner: AuditRunner, out_dir: Path) -> dict[str, s
                 runner.docker_exec(router, "openssl s_server -quiet -accept 443 -cert /tmp/example.crt -key /tmp/example.key -www >/tmp/example-tls.log 2>&1 & sleep 1")
                 runner.docker_exec(router, "ENABLE_DEPRECATED_MISSING_DOMAIN_RESOLVER=true sing-box run -c /work/sing-box-router.json >/tmp/sing-box-router.log 2>&1 & sleep 1")
                 runner.docker_exec(router, "for i in $(seq 1 40); do ss -ltn 2>/dev/null | grep -q ':2080 ' && exit 0; sleep 0.25; done; cat /tmp/sing-box-router.log; exit 1")
+                router_ip = runner.docker(
+                    "inspect-singbox-router-interop",
+                    ["inspect", "--format", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", router],
+                ).stdout.strip()
+                try:
+                    ipaddress.ip_address(router_ip)
+                except ValueError as exc:
+                    raise AuditFailure(f"sing-box router container IP is invalid: {router_ip!r}") from exc
+                xray_server_config["routing"]["rules"].insert(
+                    1,
+                    {"type": "field", "network": "udp", "ip": [router_ip], "outboundTag": "foreign-overlay"},
+                )
+                write_bytes(
+                    xray_server_config_path,
+                    json.dumps(xray_server_config, ensure_ascii=False, indent=2).encode("utf-8") + b"\n",
+                )
+                client_config["inbounds"][1]["settings"].update({"address": router_ip, "port": 1053})
+                write_bytes(client_config_path, json.dumps(client_config, ensure_ascii=False, indent=2).encode("utf-8") + b"\n")
+                runner.docker_exec(
+                    router,
+                    "dnsmasq --no-daemon --no-hosts --no-resolv --log-queries --interface=eth0 --bind-interfaces --port=1053 "
+                    "--host-record=example.com,93.184.216.34,2606:2800:220:1:248:1893:25c8:1946 "
+                    ">/tmp/dnsmasq.log 2>&1 & "
+                    "for i in $(seq 1 20); do ss -lun 2>/dev/null | grep -q ':1053 ' && exit 0; sleep 0.1; done; "
+                    "cat /tmp/dnsmasq.log; exit 1",
+                )
                 runner.docker(
                     "run-xray-front-interop",
                     [
@@ -766,6 +823,19 @@ def test_xray_reality_interop(runner: AuditRunner, out_dir: Path) -> dict[str, s
                         "/etc/xray/config.json",
                     ],
                 )
+                client_ip = runner.docker(
+                    "inspect-xray-client-interop",
+                    ["inspect", "--format", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", xray_client],
+                ).stdout.strip()
+                try:
+                    ipaddress.ip_address(client_ip)
+                except ValueError as exc:
+                    raise AuditFailure(f"Xray client container IP is invalid: {client_ip!r}") from exc
+                write_bytes(
+                    route_probe_path,
+                    render_live_route_probe(listen_host=client_ip, listen_port=10808, dns_listen_port=1053).encode("utf-8"),
+                )
+                runner.docker_copy(router, route_probe_path, "/work/route-probe.py")
                 def dump_interop_logs() -> None:
                     runner.docker(
                         "interop-router-singbox-log",
@@ -775,6 +845,11 @@ def test_xray_reality_interop(runner: AuditRunner, out_dir: Path) -> dict[str, s
                     runner.docker(
                         "interop-router-tls-log",
                         ["exec", router, "bash", "-lc", "cat /tmp/example-tls.log 2>/dev/null || true"],
+                        expected_codes={0, 1},
+                    )
+                    runner.docker(
+                        "interop-router-dns-log",
+                        ["exec", router, "bash", "-lc", "cat /tmp/dnsmasq.log 2>/dev/null || true"],
                         expected_codes={0, 1},
                     )
                     runner.docker("interop-router-container-log", ["logs", router], expected_codes={0, 1})
@@ -813,6 +888,27 @@ def test_xray_reality_interop(runner: AuditRunner, out_dir: Path) -> dict[str, s
                     raise
                 if completed is None or not completed.stdout.strip():
                     raise AuditFailure("Xray Reality interop не вернул ответ от локального TLS probe")
+                try:
+                    route_probe = json.loads(runner.docker_exec(router, "python3 /work/route-probe.py").stdout)
+                except Exception:
+                    dump_interop_logs()
+                    raise
+                queries = route_probe.get("dns", {}).get("queries", {})
+                if not all(queries.get(record, {}).get("verdict") == "verified" for record in ("A", "AAAA")):
+                    raise AuditFailure("Xray Reality interop не подтвердил UDP DNS A/AAAA")
+                private_reject = route_probe.get("private_reject", {})
+                if not isinstance(private_reject, dict):
+                    raise AuditFailure("Xray Reality interop получил malformed private/fake probe result")
+                private_targets = private_reject.get("targets", [])
+                if private_reject.get("verdict") == "failed" or not private_targets:
+                    raise AuditFailure("Xray Reality interop получил некорректный private/fake probe result")
+                if private_reject.get("verdict") == "inconclusive" and not all(
+                    isinstance(target, dict)
+                    and target.get("evidence") == "socks-success-eof"
+                    and target.get("correlation_required") is True
+                    for target in private_targets
+                ):
+                    raise AuditFailure("Xray Reality interop потерял обязательную private/fake log correlation")
         finally:
             if not runner.keep_docker:
                 runner._docker_cleanup(f"rm-{xray_front}", ["rm", "-f", xray_front])
@@ -833,22 +929,23 @@ def test_cloud_init_schema(runner: AuditRunner, out_dir: Path) -> dict[str, str]
 
 def test_cloud_init_render_only(runner: AuditRunner, out_dir: Path) -> dict[str, str]:
     artifacts_dir = runner.work_dir / "cloud-init-render"
-    for role in ("ru", "foreign"):
-        yaml_path = out_dir / "cloud-init" / f"{role}.yaml"
-        files, _ = runner.parse_cloud_init_payload(yaml_path)
-        role_dir = artifacts_dir / role
-        for file_path, content in files.items():
-            relative = Path(file_path.lstrip("/"))
-            write_bytes(role_dir / relative, content)
-        role_name = "ru-gateway" if role == "ru" else "foreign-exit"
-        runner.run_bash(
-            f"cloud-init-render-{role}",
-            f"bash ./install.sh --role {role_name} --env-file ./deployment.env --assets-dir ./assets --render-only --output-dir ./rendered",
-            cwd=role_dir / "root" / "vpn-stack",
-        )
-        output_dir = role_dir / "root" / "vpn-stack" / "rendered"
-        if not (output_dir / "sing-box.json").is_file():
-            raise AuditFailure(f"Cloud-init payload {role} не отрендерил sing-box.json")
+    container = f"audit-cloudinit-render-{runner.run_id}"
+    with runner.docker_container(container, AUDIT_IMAGE):
+        runner.docker_exec(container, "mkdir -p /work")
+        for role in ("ru", "foreign"):
+            yaml_path = out_dir / "cloud-init" / f"{role}.yaml"
+            files, _ = runner.parse_cloud_init_payload(yaml_path)
+            role_dir = artifacts_dir / role
+            for file_path, content in files.items():
+                relative = Path(file_path.lstrip("/"))
+                write_bytes(role_dir / relative, content)
+            role_name = "ru-gateway" if role == "ru" else "foreign-exit"
+            payload_root = role_dir / "root" / "vpn-stack"
+            runner.docker_copy(container, payload_root, f"/work/{role}")
+            runner.docker_exec(
+                container,
+                f"cd /work/{role} && bash ./install.sh --role {role_name} --env-file ./deployment.env --assets-dir ./assets --render-only --output-dir ./rendered && test -s ./rendered/sing-box.json",
+            )
     return {"artifacts_dir": str(artifacts_dir)}
 
 

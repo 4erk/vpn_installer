@@ -4,7 +4,7 @@ import json
 import shlex
 import textwrap
 from dataclasses import dataclass
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qsl, unquote, urlparse
 
 
 RUNNER_HTTP_PROBE_COUNT = 5
@@ -32,10 +32,8 @@ THROUGHPUT_SOURCE_URLS = (
     "https://speed.cloudflare.com/__down?bytes=50000000",
 )
 THROUGHPUT_ATTEMPT_SECONDS = 10
-THROUGHPUT_MIN_CAPACITY_ATTEMPT_SECONDS = 3
-THROUGHPUT_CAPACITY_SECONDS = 30
-THROUGHPUT_STABILITY_LIMIT_BYTES_PER_SECOND = 2_000_000
-THROUGHPUT_STABILITY_FLOOR_BYTES_PER_SECOND = 1_250_000
+THROUGHPUT_SUSTAINED_FLOOR_BYTES_PER_SECOND = 1_250_000
+THROUGHPUT_MAX_GAP_SECONDS = 2.0
 
 
 @dataclass(frozen=True)
@@ -54,10 +52,15 @@ def parse_vless_uri(raw_value: str) -> VlessUri:
     parsed = urlparse(raw_value.strip())
     if parsed.scheme != "vless" or not parsed.username or not parsed.hostname or not parsed.port:
         raise ValueError("invalid VLESS URI")
-    query = parse_qs(parsed.query)
-    if query.get("security", [""])[0] != "reality" or query.get("type", [""])[0] != "tcp":
+    pairs = parse_qsl(parsed.query, keep_blank_values=True)
+    allowed = {"security", "sni", "pbk", "sid", "fp", "type", "flow"}
+    keys = [key for key, _value in pairs]
+    if set(keys) != allowed or len(keys) != len(allowed):
+        raise ValueError("VLESS URI parameters must match the canonical contract exactly")
+    query = dict(pairs)
+    if query.get("security") != "reality" or query.get("type") != "tcp":
         raise ValueError("VLESS URI must use Reality over TCP")
-    required = {key: query.get(key, [""])[0] for key in ("sni", "pbk", "sid", "fp", "flow")}
+    required = {key: query.get(key, "") for key in ("sni", "pbk", "sid", "fp", "flow")}
     if not all(required.values()):
         raise ValueError("VLESS URI has incomplete Reality parameters")
     return VlessUri(
@@ -75,7 +78,18 @@ def parse_vless_uri(raw_value: str) -> VlessUri:
 def render_ephemeral_singbox_client(uri: VlessUri, *, listen_port: int) -> str:
     payload = {
         "log": {"level": "warn", "timestamp": True},
-        "inbounds": [{"type": "mixed", "listen": "127.0.0.1", "listen_port": listen_port, "tag": "verify-in"}],
+        "inbounds": [
+            {"type": "mixed", "listen": "127.0.0.1", "listen_port": listen_port, "tag": "verify-in"},
+            {
+                "type": "direct",
+                "tag": "verify-dns-in",
+                "listen": "127.0.0.1",
+                "listen_port": listen_port + 1,
+                "network": "udp",
+                "override_address": "1.1.1.1",
+                "override_port": 53,
+            },
+        ],
         "outbounds": [
             {
                 "type": "vless",
@@ -84,7 +98,6 @@ def render_ephemeral_singbox_client(uri: VlessUri, *, listen_port: int) -> str:
                 "server_port": uri.port,
                 "uuid": uri.uuid,
                 "flow": uri.flow,
-                "packet_encoding": "xudp",
                 "tls": {
                     "enabled": True,
                     "server_name": uri.server_name,
@@ -98,13 +111,14 @@ def render_ephemeral_singbox_client(uri: VlessUri, *, listen_port: int) -> str:
     return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
 
 
-def render_socks5_udp_dns_probe(*, listen_port: int) -> str:
-    """Return a stdlib-only SOCKS5 DNS and private-route probe for the verifier."""
+def render_live_route_probe(*, listen_port: int, dns_listen_port: int, listen_host: str = "127.0.0.1") -> str:
+    """Return a stdlib-only direct UDP DNS and SOCKS private-route probe."""
     return textwrap.dedent(
         f"""\
         import json
         import socket
         import struct
+        import time
 
         def receive_exact(sock, size):
             data = b""
@@ -115,10 +129,89 @@ def render_socks5_udp_dns_probe(*, listen_port: int) -> str:
                 data += chunk
             return data
 
-        def dns_query(name):
+        def dns_query(name, query_type, transaction_id):
             labels = name.split(".")
-            question = b"".join(bytes([len(label)]) + label.encode("ascii") for label in labels)
-            return b"\\x11\\x22\\x01\\x00\\x00\\x01\\x00\\x00\\x00\\x00\\x00\\x00" + question + b"\\x00\\x00\\x01\\x00\\x01"
+            question = b"".join(bytes([len(label)]) + label.encode("ascii") for label in labels) + b"\\x00"
+            return struct.pack("!HHHHHH", transaction_id, 0x0100, 1, 0, 0, 0) + question + struct.pack("!HH", query_type, 1)
+
+        def dns_name(packet, offset):
+            labels = []
+            next_offset = None
+            visited = set()
+            while True:
+                if offset >= len(packet):
+                    raise RuntimeError("truncated DNS name")
+                length = packet[offset]
+                if length & 0xC0 == 0xC0:
+                    if offset + 1 >= len(packet):
+                        raise RuntimeError("truncated DNS compression pointer")
+                    pointer = ((length & 0x3F) << 8) | packet[offset + 1]
+                    if pointer in visited or pointer >= len(packet):
+                        raise RuntimeError("invalid DNS compression pointer")
+                    visited.add(pointer)
+                    if next_offset is None:
+                        next_offset = offset + 2
+                    offset = pointer
+                    continue
+                if length & 0xC0:
+                    raise RuntimeError("invalid DNS label length")
+                offset += 1
+                if length == 0:
+                    return ".".join(labels).lower(), next_offset if next_offset is not None else offset
+                if length > 63 or offset + length > len(packet):
+                    raise RuntimeError("truncated DNS label")
+                try:
+                    labels.append(packet[offset:offset + length].decode("ascii"))
+                except UnicodeDecodeError as exc:
+                    raise RuntimeError("non-ASCII DNS label") from exc
+                offset += length
+
+        def validate_dns_response(packet, expected_name, expected_type, expected_transaction_id):
+            if len(packet) < 12:
+                raise RuntimeError("truncated DNS response")
+            transaction_id, flags, question_count, answer_count, _authority_count, _additional_count = struct.unpack("!HHHHHH", packet[:12])
+            if transaction_id != expected_transaction_id:
+                raise RuntimeError("DNS transaction mismatch")
+            if not flags & 0x8000:
+                raise RuntimeError("DNS QR bit is not set")
+            if flags & 0x0200:
+                raise RuntimeError("truncated DNS response")
+            rcode = flags & 0x000F
+            if rcode != 0:
+                raise RuntimeError(f"DNS RCODE is {{rcode}}")
+            if question_count != 1:
+                raise RuntimeError(f"unexpected DNS question count: {{question_count}}")
+            offset = 12
+            question_name, offset = dns_name(packet, offset)
+            if offset + 4 > len(packet):
+                raise RuntimeError("truncated DNS question")
+            question_type, question_class = struct.unpack("!HH", packet[offset:offset + 4])
+            offset += 4
+            if question_name != expected_name or question_type != expected_type or question_class != 1:
+                raise RuntimeError("DNS question mismatch")
+            expected_data_length = {{1: 4, 28: 16}}[expected_type]
+            matching_answers = 0
+            for _ in range(answer_count):
+                answer_name, offset = dns_name(packet, offset)
+                if offset + 10 > len(packet):
+                    raise RuntimeError("truncated DNS answer")
+                answer_type, answer_class, _ttl, data_length = struct.unpack("!HHIH", packet[offset:offset + 10])
+                offset += 10
+                if offset + data_length > len(packet):
+                    raise RuntimeError("truncated DNS answer data")
+                if answer_name == expected_name and answer_type == expected_type and answer_class == 1 and data_length == expected_data_length:
+                    matching_answers += 1
+                offset += data_length
+            if answer_count == 0 or matching_answers == 0:
+                raise RuntimeError(f"DNS response has no matching type {{expected_type}} answer")
+            return {{
+                "verdict": "verified",
+                "qr": True,
+                "rcode": rcode,
+                "question": {{"name": question_name, "type": question_type, "class": question_class}},
+                "answer_count": answer_count,
+                "matching_answers": matching_answers,
+            }}
 
         def socks_reply(sock):
             response = receive_exact(sock, 4)
@@ -135,62 +228,97 @@ def render_socks5_udp_dns_probe(*, listen_port: int) -> str:
                 raise RuntimeError("unknown SOCKS reply address type")
             return response[1], address, struct.unpack("!H", receive_exact(sock, 2))[0]
 
-        def private_connect_rejected(address, port):
-            control = socket.create_connection(("127.0.0.1", {listen_port}), timeout=2)
+        def private_connect_result(address, port):
+            control = socket.create_connection(({listen_host!r}, {listen_port}), timeout=2)
             try:
                 control.sendall(b"\\x05\\x01\\x00")
                 if receive_exact(control, 2) != b"\\x05\\x00":
                     raise RuntimeError("SOCKS authentication failed")
                 control.sendall(b"\\x05\\x01\\x00\\x01" + socket.inet_aton(address) + struct.pack("!H", port))
                 status, _bound_address, _bound_port = socks_reply(control)
+                if status == 2:
+                    return {{
+                        "verdict": "verified",
+                        "ok": True,
+                        "evidence": "socks-reply-reject",
+                        "socks_reply_status": status,
+                    }}
                 if status != 0:
-                    return True
+                    return {{
+                        "verdict": "inconclusive",
+                        "ok": False,
+                        "evidence": "socks-non-policy-error",
+                        "socks_reply_status": status,
+                    }}
                 control.sendall(b"HEAD / HTTP/1.0\\r\\n\\r\\n")
-                return control.recv(1) == b""
+                if control.recv(1) == b"":
+                    return {{
+                        "verdict": "inconclusive",
+                        "ok": False,
+                        "evidence": "socks-success-eof",
+                        "correlation_required": True,
+                    }}
+                return {{
+                    "verdict": "failed",
+                    "ok": False,
+                    "evidence": "private-target-returned-data",
+                }}
             finally:
                 control.close()
 
-        with socket.create_connection(("127.0.0.1", {listen_port}), timeout=8) as control:
-            control.sendall(b"\\x05\\x01\\x00")
-            if receive_exact(control, 2) != b"\\x05\\x00":
-                raise RuntimeError("SOCKS authentication failed")
-            control.sendall(b"\\x05\\x03\\x00\\x01\\x00\\x00\\x00\\x00\\x00\\x00")
-            response_status, relay_address, relay_port = socks_reply(control)
-            if response_status != 0:
-                raise RuntimeError(f"SOCKS UDP associate rejected: {{response_status}}")
-            if relay_address in {{"0.0.0.0", "::"}}:
-                relay_address = "127.0.0.1"
-
-            request = b"\\x00\\x00\\x00\\x01" + socket.inet_aton("1.1.1.1") + struct.pack("!H", 53) + dns_query("example.com")
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
-                udp.settimeout(10)
-                udp.sendto(request, (relay_address, relay_port))
-                reply, _peer = udp.recvfrom(4096)
-            if len(reply) < 14 or reply[:3] != b"\\x00\\x00\\x00":
-                raise RuntimeError("invalid SOCKS UDP reply")
-            if reply[3] == 1:
-                payload_offset = 10
-            elif reply[3] == 4:
-                payload_offset = 22
-            elif reply[3] == 3:
-                payload_offset = 5 + reply[4]
-            else:
-                raise RuntimeError("invalid SOCKS reply address type")
-            if reply[payload_offset:payload_offset + 2] != b"\\x11\\x22":
-                raise RuntimeError("DNS transaction mismatch")
+        dns_queries = {{}}
+        answer_bytes = 0
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
+            udp.settimeout(2)
+            for label, query_type, transaction_id in (("A", 1, 0x1122), ("AAAA", 28, 0x1123)):
+                request = dns_query("example.com", query_type, transaction_id)
+                expected_transaction = struct.pack("!H", transaction_id)
+                dns_payload = None
+                for attempt in range(2):
+                    udp.sendto(request, ({listen_host!r}, {dns_listen_port}))
+                    deadline = time.monotonic() + 2
+                    while time.monotonic() < deadline:
+                        udp.settimeout(max(0.001, deadline - time.monotonic()))
+                        try:
+                            candidate, _peer = udp.recvfrom(4096)
+                        except TimeoutError:
+                            break
+                        if candidate[:2] == expected_transaction:
+                            dns_payload = candidate
+                            break
+                    if dns_payload is not None:
+                        break
+                if dns_payload is None:
+                    raise TimeoutError(f"DNS {{label}} response timed out")
+                answer_bytes += len(dns_payload)
+                dns_queries[label] = validate_dns_response(
+                    dns_payload,
+                    "example.com",
+                    query_type,
+                    transaction_id,
+                )
+        dns_result = {{**dns_queries["A"], "queries": dns_queries}}
         private_targets = []
         for address, port in (("10.0.0.1", 80), ("172.19.0.2", 853)):
             try:
-                rejected = private_connect_rejected(address, port)
-                error = ""
+                target_result = private_connect_result(address, port)
             except Exception as exc:
-                rejected = False
-                error = str(exc)[:160]
-            private_targets.append({{"target": f"{{address}}:{{port}}", "ok": rejected, "error": error}})
+                target_result = {{"verdict": "failed", "ok": False, "evidence": "probe-error", "error": str(exc)[:160]}}
+            private_targets.append({{"target": f"{{address}}:{{port}}", **target_result}})
+        private_verdict = "verified"
+        if any(item["verdict"] == "failed" for item in private_targets):
+            private_verdict = "failed"
+        elif any(item["verdict"] != "verified" for item in private_targets):
+            private_verdict = "inconclusive"
         print(json.dumps({{
             "ok": True,
-            "answer_bytes": len(reply) - payload_offset,
-            "private_reject": {{"ok": all(item["ok"] for item in private_targets), "targets": private_targets}},
+            "dns": dns_result,
+            "answer_bytes": answer_bytes,
+            "private_reject": {{
+                "verdict": private_verdict,
+                "ok": private_verdict == "verified",
+                "targets": private_targets,
+            }},
         }}))
         """
     )
@@ -204,9 +332,9 @@ def render_vless_runner(
 ) -> str:
     """Render the external, full-path VLESS acceptance runner.
 
-    A short uncapped phase proves available capacity. The remainder is capped
-    above the acceptance floor, so a long production stability check cannot
-    starve active client traffic while still detecting stalls and disconnects.
+    The optional throughput phase measures the whole requested window. Peak
+    capacity remains diagnostic; release semantics are driven by sustained
+    goodput and the longest interval without transfer progress.
     """
 
     if not throughput_urls:
@@ -226,6 +354,10 @@ lock_path=${5:?missing runner lock path}
 work_dir=$(dirname -- "$config_path")
 cd "$work_dir" || exit 1
 proxy="socks5h://127.0.0.1:__LISTEN_PORT__"
+sing_box_bin=/etc/vpn-stack/current/bin/sing-box
+if [[ ! -x "$sing_box_bin" ]]; then
+    sing_box_bin=$(command -v sing-box 2>/dev/null || true)
+fi
 throughput_urls=(__THROUGHPUT_URLS__)
 throughput_sources_json=__THROUGHPUT_SOURCES_JSON__
 reliability_urls=(__RELIABILITY_URLS__)
@@ -240,6 +372,10 @@ done
 runner_started_ns=$(date +%s%N)
 pid=""
 watchdog_pid=""
+curl_pid=""
+reliability_results_path="$work_dir/reliability-results.tsv"
+throughput_payload_path="$work_dir/throughput-payload.bin"
+: >"$reliability_results_path"
 
 exec 9>"$lock_path"
 if ! flock -n 9; then
@@ -268,6 +404,11 @@ cleanup() {
         kill "$watchdog_pid" >/dev/null 2>&1 || true
         wait "$watchdog_pid" >/dev/null 2>&1 || true
     fi
+    if [[ -n "${curl_pid:-}" ]] && kill -0 "$curl_pid" 2>/dev/null; then
+        kill "$curl_pid" >/dev/null 2>&1 || true
+        wait "$curl_pid" >/dev/null 2>&1 || true
+    fi
+    rm -f -- "$reliability_results_path" "$throughput_payload_path"
     if [[ -z "${pid:-}" ]] || ! kill -0 "$pid" 2>/dev/null; then
         return
     fi
@@ -303,10 +444,13 @@ touch "$lease_path"
 watch_controller &
 watchdog_pid=$!
 event sing-box-check
-if ! sing-box check -c "$config_path" >sing-box.log 2>&1; then
+if [[ ! -x "$sing_box_bin" ]]; then
+    fail sing-box-missing
+fi
+if ! "$sing_box_bin" check -c "$config_path" >sing-box.log 2>&1; then
     fail sing-box-check
 fi
-sing-box run -c "$config_path" >sing-box.log 2>&1 &
+"$sing_box_bin" run -c "$config_path" >sing-box.log 2>&1 &
 pid=$!
 sleep __STARTUP_SECONDS__
 if ! kill -0 "$pid" 2>/dev/null; then
@@ -314,7 +458,7 @@ if ! kill -0 "$pid" 2>/dev/null; then
 fi
 
 event ru-identity
-if ! ru_ip=$(curl -4fsS --proxy "$proxy" --connect-timeout 5 --max-time __HTTP_TIMEOUT_SECONDS__ https://api.ipify.org 2>>runner-curl.log); then
+if ! ru_ip=$(curl -4fsS --proxy "$proxy" --connect-timeout 5 --max-time __HTTP_TIMEOUT_SECONDS__ https://ipv4-internet.yandex.net/api/v0/ip 2>>runner-curl.log | tr -d '"[:space:]'); then
     fail ru-identity
 fi
 event foreign-identity
@@ -339,9 +483,10 @@ import json
 import sys
 
 payload = json.loads(sys.argv[1])
-raise SystemExit(0 if payload.get("private_reject", {}).get("ok") is True else 1)
+private_reject = payload.get("private_reject", {})
+raise SystemExit(0 if private_reject.get("verdict") in {"verified", "inconclusive", "failed"} else 1)
 PY
-    fail private-reject
+    fail private-reject-result
 fi
 event ipv6-literal
 if ! ipv6_literal=$(curl -ksS -o /dev/null -w '%{http_code}' --proxy "$proxy" --connect-timeout 5 --max-time __HTTP_TIMEOUT_SECONDS__ https://[2606:4700:4700::1111]/cdn-cgi/trace 2>>runner-curl.log); then
@@ -351,7 +496,6 @@ fi
 event first-load-reliability
 reliability_attempts=0
 reliability_failures=0
-reliability_results_path=$(mktemp)
 while (( reliability_attempts < __RELIABILITY_ATTEMPTS__ )); do
     reliability_url=${reliability_urls[$((reliability_attempts % ${#reliability_urls[@]}))]}
     reliability_attempts=$((reliability_attempts + 1))
@@ -377,17 +521,12 @@ throughput_source_failures=0
 throughput_runs=0
 throughput_start_ns=0
 throughput_end_ns=0
-stability_bytes=0
-stability_ns=0
+throughput_max_gap_ns=0
 if (( throughput_seconds > 0 )); then
     event throughput-start
     throughput_start_ns=$(date +%s%N)
     throughput_deadline_ns=$((throughput_start_ns + throughput_seconds * 1000000000))
-    capacity_seconds=$throughput_seconds
-    if (( capacity_seconds > __THROUGHPUT_CAPACITY_SECONDS__ )); then
-        capacity_seconds=__THROUGHPUT_CAPACITY_SECONDS__
-    fi
-    capacity_deadline_ns=$((throughput_start_ns + capacity_seconds * 1000000000))
+    last_progress_ns=$throughput_start_ns
     while :; do
         now_ns=$(date +%s%N)
         remaining_ns=$((throughput_deadline_ns - now_ns))
@@ -397,57 +536,64 @@ if (( throughput_seconds > 0 )); then
         throughput_runs=$((throughput_runs + 1))
         source_index=$((attempt_index % ${#throughput_urls[@]}))
         throughput_url=${throughput_urls[$source_index]}
-        phase=stability
-        phase_deadline_ns=$throughput_deadline_ns
-        curl_rate_args=()
-        if (( now_ns < capacity_deadline_ns )); then
-            phase=capacity
-            phase_deadline_ns=$capacity_deadline_ns
-        else
-            source_index=$((${#throughput_urls[@]} - 1))
-            throughput_url=${throughput_urls[$source_index]}
-            curl_rate_args=(--limit-rate __THROUGHPUT_STABILITY_LIMIT_BYTES_PER_SECOND__)
-        fi
-        phase_remaining_ns=$((phase_deadline_ns - now_ns))
-        if [[ "$phase" == "capacity" ]] && (( phase_remaining_ns < __THROUGHPUT_MIN_CAPACITY_ATTEMPT_SECONDS__ * 1000000000 )); then
-            event throughput-capacity-boundary
-            sleep "$(format_duration_ns "$phase_remaining_ns")"
-            continue
-        fi
         attempt_budget_ns=$remaining_ns
-        if (( attempt_budget_ns > phase_remaining_ns )); then
-            attempt_budget_ns=$phase_remaining_ns
-        fi
-        if [[ "$phase" == "capacity" ]] && (( attempt_budget_ns > __THROUGHPUT_ATTEMPT_SECONDS__ * 1000000000 )); then
+        if (( attempt_budget_ns > __THROUGHPUT_ATTEMPT_SECONDS__ * 1000000000 )); then
             attempt_budget_ns=$((__THROUGHPUT_ATTEMPT_SECONDS__ * 1000000000))
         fi
         attempt_seconds=$(format_duration_ns "$attempt_budget_ns")
-        event "throughput-$phase-attempt-$attempt_index-source-$source_index-remaining-$remaining_seconds"
+        event "throughput-attempt-$attempt_index-source-$source_index-remaining-$remaining_seconds"
         attempt_start_ns=$now_ns
-        throughput_count_file=$(mktemp)
-        timeout --foreground --signal=TERM --kill-after=__CURL_WATCHDOG_KILL_SECONDS__s "${attempt_seconds}s" curl -4fsS --proxy "$proxy" --connect-timeout 5 "${curl_rate_args[@]}" -o - "$throughput_url" 2>>runner-curl.log | wc -c >"$throughput_count_file"
-        pipeline_status=("${PIPESTATUS[@]}")
-        curl_status=${pipeline_status[0]}
-        counter_status=${pipeline_status[1]}
-        curl_output=$(tr -d '[:space:]' <"$throughput_count_file")
-        rm -f "$throughput_count_file"
+        : >"$throughput_payload_path"
+        timeout --foreground --signal=TERM --kill-after=__CURL_WATCHDOG_KILL_SECONDS__s "${attempt_seconds}s" \
+            curl -4fsS --proxy "$proxy" --connect-timeout 5 -o "$throughput_payload_path" "$throughput_url" 2>>runner-curl.log &
+        curl_pid=$!
+        observed_bytes=0
+        while kill -0 "$curl_pid" 2>/dev/null; do
+            curl_state=$(ps -o stat= -p "$curl_pid" 2>/dev/null | tr -d '[:space:]')
+            [[ -n "$curl_state" && "${curl_state:0:1}" != "Z" ]] || break
+            sleep 0.25
+            sample_ns=$(date +%s%N)
+            sample_bytes=$(stat -c %s -- "$throughput_payload_path" 2>/dev/null || printf '0')
+            [[ "$sample_bytes" =~ ^[0-9]+$ ]] || sample_bytes=0
+            if (( sample_bytes > observed_bytes )); then
+                progress_gap_ns=$((sample_ns - last_progress_ns))
+                (( progress_gap_ns > throughput_max_gap_ns )) && throughput_max_gap_ns=$progress_gap_ns
+                last_progress_ns=$sample_ns
+                observed_bytes=$sample_bytes
+            else
+                current_gap_ns=$((sample_ns - last_progress_ns))
+                (( current_gap_ns > throughput_max_gap_ns )) && throughput_max_gap_ns=$current_gap_ns
+            fi
+        done
+        wait "$curl_pid"
+        curl_status=$?
+        curl_pid=""
         now_ns=$(date +%s%N)
-        if (( counter_status != 0 )) || [[ ! "$curl_output" =~ ^[0-9]+$ ]]; then
+        curl_output=$(stat -c %s -- "$throughput_payload_path" 2>/dev/null || printf '0')
+        metrics_valid=1
+        if [[ ! "$curl_output" =~ ^[0-9]+$ ]]; then
+            metrics_valid=0
+            curl_output=0
+        fi
+        if (( curl_output > observed_bytes )); then
+            progress_gap_ns=$((now_ns - last_progress_ns))
+            (( progress_gap_ns > throughput_max_gap_ns )) && throughput_max_gap_ns=$progress_gap_ns
+            last_progress_ns=$now_ns
+        fi
+        current_gap_ns=$((now_ns - last_progress_ns))
+        (( current_gap_ns > throughput_max_gap_ns )) && throughput_max_gap_ns=$current_gap_ns
+        rm -f -- "$throughput_payload_path"
+        if (( metrics_valid == 0 )); then
             throughput_source_failures=$((throughput_source_failures + 1))
             throughput_source_failure_counts[$source_index]=$((throughput_source_failure_counts[$source_index] + 1))
             event throughput-invalid-metrics
             continue
         fi
+        capacity_source_ns[$source_index]=$((capacity_source_ns[$source_index] + now_ns - attempt_start_ns))
         if (( curl_output > 0 )); then
             throughput_bytes=$((throughput_bytes + curl_output))
             throughput_attempts=$((throughput_attempts + 1))
-            if [[ "$phase" == "capacity" ]]; then
-                capacity_source_bytes[$source_index]=$((capacity_source_bytes[$source_index] + curl_output))
-                capacity_source_ns[$source_index]=$((capacity_source_ns[$source_index] + now_ns - attempt_start_ns))
-            else
-                stability_bytes=$((stability_bytes + curl_output))
-                stability_ns=$((stability_ns + now_ns - attempt_start_ns))
-            fi
+            capacity_source_bytes[$source_index]=$((capacity_source_bytes[$source_index] + curl_output))
         fi
         if (( curl_status == 0 )); then
             if (( curl_output == 0 )); then
@@ -465,6 +611,8 @@ if (( throughput_seconds > 0 )); then
         event "throughput-curl-exit-$curl_status"
     done
     throughput_end_ns=$(date +%s%N)
+    final_gap_ns=$((throughput_end_ns - last_progress_ns))
+    (( final_gap_ns > throughput_max_gap_ns )) && throughput_max_gap_ns=$final_gap_ns
     if (( throughput_attempts == 0 || throughput_bytes == 0 )); then
         throughput_failures=1
     fi
@@ -474,7 +622,7 @@ capacity_source_bytes_csv=$(IFS=,; printf '%s' "${capacity_source_bytes[*]}")
 capacity_source_ns_csv=$(IFS=,; printf '%s' "${capacity_source_ns[*]}")
 throughput_source_failure_counts_csv=$(IFS=,; printf '%s' "${throughput_source_failure_counts[*]}")
 
-python3 - "$ru_ip" "$foreign_ip" "$github" "$google" "$throughput_bytes" "$throughput_start_ns" "$throughput_end_ns" "$throughput_attempts" "$throughput_failures" "$throughput_source_failures" "$throughput_sources_json" "$capacity_source_bytes_csv" "$capacity_source_ns_csv" "$throughput_source_failure_counts_csv" "$stability_bytes" "$stability_ns" "$udp_dns" "$ipv6_literal" "$reliability_results_path" <<'PY'
+python3 - "$ru_ip" "$foreign_ip" "$github" "$google" "$throughput_bytes" "$throughput_start_ns" "$throughput_end_ns" "$throughput_attempts" "$throughput_failures" "$throughput_source_failures" "$throughput_sources_json" "$capacity_source_bytes_csv" "$capacity_source_ns_csv" "$throughput_source_failure_counts_csv" "$throughput_max_gap_ns" "$udp_dns" "$ipv6_literal" "$reliability_results_path" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -500,11 +648,10 @@ for url, source_byte_count, elapsed_ns, failure_count in zip(sources, source_byt
 successful_sources = sum(item["bytes_downloaded"] > 0 and item["duration_seconds"] > 0 for item in source_metrics)
 throughput = {
     "bytes_per_second": bytes_downloaded / duration_seconds if duration_seconds else 0.0,
+    "sustained_bytes_per_second": bytes_downloaded / duration_seconds if duration_seconds else 0.0,
     "capacity_bytes_per_second": max((item["bytes_per_second"] for item in source_metrics), default=0.0),
     "capacity_duration_seconds": sum(item["duration_seconds"] for item in source_metrics),
-    "stability_bytes_per_second": int(sys.argv[15]) / (int(sys.argv[16]) / 1_000_000_000) if int(sys.argv[16]) else 0.0,
-    "stability_duration_seconds": int(sys.argv[16]) / 1_000_000_000,
-    "stability_limit_bytes_per_second": __THROUGHPUT_STABILITY_LIMIT_BYTES_PER_SECOND__,
+    "max_gap_seconds": int(sys.argv[15]) / 1_000_000_000,
     "duration_seconds": duration_seconds,
     "bytes_downloaded": bytes_downloaded,
     "attempts": int(sys.argv[8]),
@@ -516,7 +663,7 @@ throughput = {
     "source_metrics": source_metrics,
 }
 reliability_probes = []
-for line in Path(sys.argv[19]).read_text(encoding="utf-8").splitlines():
+for line in Path(sys.argv[18]).read_text(encoding="utf-8").splitlines():
     url, ok, curl_status, http_status, total_seconds = line.split("\t", 4)
     reliability_probes.append({
         "url": url,
@@ -541,8 +688,8 @@ print(json.dumps({
     "github_status": sys.argv[3],
     "google_status": sys.argv[4],
     "throughput": throughput,
-    "udp_dns": json.loads(sys.argv[17]),
-    "ipv6_literal_status": sys.argv[18],
+    "udp_dns": json.loads(sys.argv[16]),
+    "ipv6_literal_status": sys.argv[17],
     "first_load_reliability": reliability,
 }))
 PY
@@ -559,12 +706,6 @@ PY
         "__CURL_WATCHDOG_KILL_SECONDS__", str(RUNNER_CURL_WATCHDOG_KILL_SECONDS)
     ).replace(
         "__THROUGHPUT_ATTEMPT_SECONDS__", str(THROUGHPUT_ATTEMPT_SECONDS)
-    ).replace(
-        "__THROUGHPUT_MIN_CAPACITY_ATTEMPT_SECONDS__", str(THROUGHPUT_MIN_CAPACITY_ATTEMPT_SECONDS)
-    ).replace(
-        "__THROUGHPUT_CAPACITY_SECONDS__", str(THROUGHPUT_CAPACITY_SECONDS)
-    ).replace(
-        "__THROUGHPUT_STABILITY_LIMIT_BYTES_PER_SECOND__", str(THROUGHPUT_STABILITY_LIMIT_BYTES_PER_SECOND)
     ).replace(
         "__RELIABILITY_ATTEMPTS__", str(RUNNER_RELIABILITY_ATTEMPTS)
     ).replace(

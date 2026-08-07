@@ -1,15 +1,21 @@
 from __future__ import annotations
 
 import logging
+import base64
+import hashlib
 import json
+import os
 import shlex
 import socket
 import sys
+import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any
 
-from .common import command_exists, fail, print_header, run_command
+from .common import STATE_DIR, command_exists, fail, print_header, run_command
+from .diagnostics import DiagnosticsSnapshot
 from .models import AppError, RemoteTarget
 from .runtime_deps import ensure_python_package
 
@@ -17,12 +23,106 @@ SSH_CONNECT_TIMEOUT = 20
 SSH_BANNER_TIMEOUT = 20
 SSH_AUTH_TIMEOUT = 45
 SSH_COMMAND_TIMEOUT = 1800
+SSH_COMMAND_TIMEOUT_GRACE = 10
+SSH_UPLOAD_TIMEOUT = 300
+SSH_CAPTURE_MAX_BYTES = 16 * 1024 * 1024
 SSH_PASSWORD_AUTH_RETRIES = 3
 SSH_PASSWORD_AUTH_RETRY_DELAY = 1.0
 SSH_BANNER_RETRIES = 3
 SSH_BANNER_RETRY_DELAY = 1.0
 SSH_CONNECT_RETRY_DELAY = 1.0
 _PARAMIKO_LOGGER_CONFIGURED = False
+_KNOWN_HOSTS_LOCK = threading.Lock()
+KNOWN_HOSTS_PATH = STATE_DIR / "known_hosts"
+
+
+def ensure_known_hosts_file() -> Path:
+    KNOWN_HOSTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    KNOWN_HOSTS_PATH.touch(exist_ok=True)
+    return KNOWN_HOSTS_PATH
+
+
+def host_key_alias(target: RemoteTarget) -> str:
+    return target.ssh_host if target.ssh_port == 22 else f"[{target.ssh_host}]:{target.ssh_port}"
+
+
+def persist_host_key(hostname: str, key: Any) -> None:
+    paramiko = ensure_paramiko_installed()
+    path = ensure_known_hosts_file()
+    with _KNOWN_HOSTS_LOCK:
+        host_keys = paramiko.HostKeys()
+        if path.stat().st_size:
+            host_keys.load(str(path))
+        host_keys.add(hostname, key.get_name(), key)
+        fd, tmp_name = tempfile.mkstemp(prefix=".known_hosts.", dir=str(path.parent))
+        os.close(fd)
+        tmp_path = Path(tmp_name)
+        try:
+            host_keys.save(str(tmp_path))
+            os.replace(tmp_path, path)
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+
+def host_key_fingerprint(key: Any) -> str:
+    digest = hashlib.sha256(key.asbytes()).digest()
+    return "SHA256:" + base64.b64encode(digest).decode("ascii").rstrip("=")
+
+
+def probe_host_key(target: RemoteTarget) -> Any:
+    paramiko = ensure_paramiko_installed()
+    sock = open_ssh_socket(target)
+    transport = paramiko.Transport(sock)
+    try:
+        transport.start_client(timeout=SSH_BANNER_TIMEOUT)
+        key = transport.get_remote_server_key()
+        if key is None:
+            raise AppError(f"{target.label}: SSH-сервер не предоставил host key.")
+        return key
+    except AppError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise AppError(f"{target.label}: не удалось получить SSH host key: {exc}") from exc
+    finally:
+        transport.close()
+
+
+def ensure_target_host_key(
+    target: RemoteTarget,
+    *,
+    allow_enroll: bool,
+    prompt_yes_no: Any | None = None,
+) -> None:
+    paramiko = ensure_paramiko_installed()
+    alias = host_key_alias(target)
+    managed = paramiko.HostKeys()
+    managed_path = ensure_known_hosts_file()
+    if managed_path.stat().st_size:
+        managed.load(str(managed_path))
+    if managed.lookup(alias) is not None:
+        return
+
+    key = probe_host_key(target)
+    fingerprint = host_key_fingerprint(key)
+    system_client = paramiko.SSHClient()
+    system_client.load_system_host_keys()
+    system_entry = getattr(system_client, "_system_host_keys", paramiko.HostKeys()).lookup(alias)
+    if system_entry is not None:
+        trusted = system_entry.get(key.get_name())
+        if trusted is not None and trusted.asbytes() == key.asbytes():
+            persist_host_key(alias, key)
+            return
+    if not allow_enroll or prompt_yes_no is None:
+        raise AppError(
+            f"{target.label}: неизвестный SSH host key {key.get_name()} {fingerprint}. "
+            "Первое доверие разрешено только в интерактивном режиме."
+        )
+    if not prompt_yes_no(
+        f"{target.label}: доверять SSH host key {key.get_name()} {fingerprint}?",
+        default=False,
+    ):
+        raise AppError(f"{target.label}: SSH host key не подтверждён.")
+    persist_host_key(alias, key)
 
 
 def ensure_paramiko_installed():
@@ -41,12 +141,61 @@ def configure_paramiko_logging() -> None:
     _PARAMIKO_LOGGER_CONFIGURED = True
 
 
+def canonical_host_key_type(algorithm: str) -> str:
+    base = algorithm.removesuffix("-cert-v01@openssh.com")
+    if base in {"rsa-sha2-256", "rsa-sha2-512"}:
+        return "ssh-rsa"
+    return base
+
+
+def known_host_key_types(client: Any, hostname: str) -> set[str]:
+    result: set[str] = set()
+    for store in (getattr(client, "_system_host_keys", None), getattr(client, "_host_keys", None)):
+        if store is None:
+            continue
+        try:
+            entry = store.lookup(hostname)
+            if entry is not None:
+                result.update(str(key_type) for key_type in entry.keys())
+        except (AttributeError, TypeError):
+            continue
+    return result
+
+
+def load_trusted_host_keys(client: Any, hostname: str) -> Path:
+    known_hosts = ensure_known_hosts_file()
+    if known_hosts.stat().st_size:
+        client.load_host_keys(str(known_hosts))
+    return known_hosts
+
+
+def known_host_disabled_algorithms(paramiko: Any, client: Any, hostname: str) -> dict[str, list[str]] | None:
+    known_types = known_host_key_types(client, hostname)
+    if not known_types:
+        return None
+    try:
+        preferred = tuple(str(item) for item in paramiko.Transport._preferred_keys)  # noqa: SLF001
+    except (AttributeError, TypeError):
+        return None
+    disabled = [algorithm for algorithm in preferred if canonical_host_key_type(algorithm) not in known_types]
+    return {"keys": disabled} if disabled else None
+
+
 def use_python_ssh_backend(target: RemoteTarget) -> bool:
     return target.auth_mode == "password" or not (command_exists("ssh") and command_exists("scp"))
 
 
 def ssh_base_args(target: RemoteTarget) -> list[str]:
-    args = ["ssh", "-o", "StrictHostKeyChecking=accept-new", "-p", str(target.ssh_port)]
+    known_hosts = ensure_known_hosts_file()
+    args = [
+        "ssh",
+        "-o",
+        "StrictHostKeyChecking=yes",
+        "-o",
+        f"UserKnownHostsFile={known_hosts}",
+        "-p",
+        str(target.ssh_port),
+    ]
     if target.ssh_bind_address:
         args.extend(["-o", f"BindAddress={target.ssh_bind_address}"])
     if target.identity_path:
@@ -56,7 +205,16 @@ def ssh_base_args(target: RemoteTarget) -> list[str]:
 
 
 def scp_base_args(target: RemoteTarget) -> list[str]:
-    args = ["scp", "-o", "StrictHostKeyChecking=accept-new", "-P", str(target.ssh_port)]
+    known_hosts = ensure_known_hosts_file()
+    args = [
+        "scp",
+        "-o",
+        "StrictHostKeyChecking=yes",
+        "-o",
+        f"UserKnownHostsFile={known_hosts}",
+        "-P",
+        str(target.ssh_port),
+    ]
     if target.ssh_bind_address:
         args.extend(["-o", f"BindAddress={target.ssh_bind_address}"])
     if target.identity_path:
@@ -64,9 +222,17 @@ def scp_base_args(target: RemoteTarget) -> list[str]:
     return args
 
 
-def build_remote_command(command_body: str, target: RemoteTarget, as_root: bool) -> tuple[str, str | None]:
+def build_remote_command(
+    command_body: str,
+    target: RemoteTarget,
+    as_root: bool,
+    *,
+    command_timeout: int = SSH_COMMAND_TIMEOUT,
+) -> tuple[str, str | None]:
     input_text: str | None = None
     shell_command = f"bash -lc {shlex.quote(command_body)}"
+    if command_timeout > 0:
+        shell_command = f"timeout --signal=TERM --kill-after=5s {int(command_timeout)}s {shell_command}"
     if as_root and target.ssh_user != "root":
         if target.sudo_mode == "nopasswd":
             shell_command = f"sudo -n {shell_command}"
@@ -97,6 +263,15 @@ def open_bound_ssh_socket(target: RemoteTarget) -> socket.socket:
         raise AppError(f"Прямой SSH через {target.ssh_bind_address} к {target.label} недоступен: {exc}") from exc
 
 
+def open_ssh_socket(target: RemoteTarget) -> socket.socket:
+    if target.ssh_bind_address:
+        return open_bound_ssh_socket(target)
+    try:
+        return socket.create_connection((target.ssh_host, target.ssh_port), timeout=SSH_CONNECT_TIMEOUT)
+    except OSError as exc:
+        raise AppError(f"Прямой SSH к {target.label} недоступен: {exc}") from exc
+
+
 def paramiko_connect(target: RemoteTarget):
     paramiko = ensure_paramiko_installed()
     configure_paramiko_logging()
@@ -124,10 +299,15 @@ def paramiko_connect(target: RemoteTarget):
     attempts = max(SSH_PASSWORD_AUTH_RETRIES if target.auth_mode == "password" else 1, SSH_BANNER_RETRIES)
     for attempt in range(1, attempts + 1):
         client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        alias = host_key_alias(target)
+        load_trusted_host_keys(client, alias)
+        client.set_missing_host_key_policy(paramiko.RejectPolicy())
         bound_socket: socket.socket | None = None
         try:
             attempt_kwargs = connect_kwargs.copy()
+            disabled_algorithms = known_host_disabled_algorithms(paramiko, client, alias)
+            if disabled_algorithms:
+                attempt_kwargs["disabled_algorithms"] = disabled_algorithms
             if target.ssh_bind_address:
                 bound_socket = open_bound_ssh_socket(target)
                 attempt_kwargs["sock"] = bound_socket
@@ -200,12 +380,23 @@ def paramiko_exec(
         channel = stdout.channel
         out_chunks: list[bytes] = []
         err_chunks: list[bytes] = []
+        captured_bytes = 0
         started_at = time.monotonic()
         while True:
             if channel.recv_ready():
-                out_chunks.append(channel.recv(4096))
+                chunk = channel.recv(4096)
+                out_chunks.append(chunk)
+                captured_bytes += len(chunk)
             if channel.recv_stderr_ready():
-                err_chunks.append(channel.recv_stderr(4096))
+                chunk = channel.recv_stderr(4096)
+                err_chunks.append(chunk)
+                captured_bytes += len(chunk)
+            if captured_bytes > SSH_CAPTURE_MAX_BYTES:
+                channel.close()
+                raise AppError(
+                    f"Удалённая команда на {target.label} превысила лимит вывода "
+                    f"{SSH_CAPTURE_MAX_BYTES} байт."
+                )
             if channel.exit_status_ready() and not channel.recv_ready() and not channel.recv_stderr_ready():
                 break
             if command_timeout > 0 and time.monotonic() - started_at > command_timeout:
@@ -291,6 +482,7 @@ def paramiko_upload(target: RemoteTarget, local_path: Path, remote_path: str) ->
     try:
         sftp = client.open_sftp()
         try:
+            sftp.get_channel().settimeout(SSH_UPLOAD_TIMEOUT)
             sftp.put(str(local_path), remote_path)
         finally:
             sftp.close()
@@ -301,14 +493,15 @@ def paramiko_upload(target: RemoteTarget, local_path: Path, remote_path: str) ->
 
 
 def ssh_capture(target: RemoteTarget, command_body: str, *, as_root: bool = False, command_timeout: int = SSH_COMMAND_TIMEOUT) -> str:
-    remote_command, input_text = build_remote_command(command_body, target, as_root)
+    remote_command, input_text = build_remote_command(command_body, target, as_root, command_timeout=command_timeout)
+    local_timeout = command_timeout + SSH_COMMAND_TIMEOUT_GRACE if command_timeout > 0 else 0
     if use_python_ssh_backend(target):
         exit_status, stdout, stderr = paramiko_exec(
             target,
             remote_command,
             input_text=input_text,
             get_pty=bool(input_text),
-            command_timeout=command_timeout,
+            command_timeout=local_timeout,
         )
         if exit_status != 0:
             detail = (stderr or stdout).strip()
@@ -318,26 +511,46 @@ def ssh_capture(target: RemoteTarget, command_body: str, *, as_root: bool = Fals
         ssh_base_args(target) + [remote_command],
         capture_output=True,
         input_text=input_text,
-        timeout=command_timeout if command_timeout > 0 else None,
+        timeout=local_timeout if local_timeout > 0 else None,
     )
     return completed.stdout
 
 
-def ssh_stream(target: RemoteTarget, command_body: str, *, as_root: bool = False) -> None:
-    remote_command, input_text = build_remote_command(command_body, target, as_root)
+def ssh_stream(
+    target: RemoteTarget,
+    command_body: str,
+    *,
+    as_root: bool = False,
+    command_timeout: int = SSH_COMMAND_TIMEOUT,
+) -> None:
+    remote_command, input_text = build_remote_command(command_body, target, as_root, command_timeout=command_timeout)
+    local_timeout = command_timeout + SSH_COMMAND_TIMEOUT_GRACE if command_timeout > 0 else 0
     if use_python_ssh_backend(target):
-        exit_status = paramiko_stream(target, remote_command, input_text=input_text, get_pty=bool(input_text))
+        exit_status = paramiko_stream(
+            target,
+            remote_command,
+            input_text=input_text,
+            get_pty=bool(input_text),
+            command_timeout=local_timeout,
+        )
         if exit_status != 0:
             raise AppError(f"Удалённая команда завершилась с ошибкой на {target.label}.\n{exit_status}")
         return
-    run_command(ssh_base_args(target) + [remote_command], input_text=input_text)
+    run_command(
+        ssh_base_args(target) + [remote_command],
+        input_text=input_text,
+        timeout=local_timeout if local_timeout > 0 else None,
+    )
 
 
 def scp_upload(target: RemoteTarget, local_path: Path, remote_path: str) -> None:
     if use_python_ssh_backend(target):
         paramiko_upload(target, local_path, remote_path)
         return
-    run_command(scp_base_args(target) + [str(local_path), f"{target.ssh_user}@{target.ssh_host}:{remote_path}"])
+    run_command(
+        scp_base_args(target) + [str(local_path), f"{target.ssh_user}@{target.ssh_host}:{remote_path}"],
+        timeout=SSH_UPLOAD_TIMEOUT,
+    )
 
 
 def parse_kv_output(payload: str) -> dict[str, str]:
@@ -395,7 +608,7 @@ def preflight_script(
             "printf 'installed_at=%s\\n' \"$installed_at\"",
             "printf 'sing_box=%s\\n' \"$(service_state sing-box.service)\"",
             "printf 'xray=%s\\n' \"$(service_state vpn-stack-xray.service)\"",
-            "printf 'nftables=%s\\n' \"$(service_state nftables.service)\"",
+            "printf 'nftables=%s\\n' \"$(service_state vpn-stack-nftables.service)\"",
             "printf 'wireguard=%s\\n' \"$(service_state wg-quick@${WG_INTERFACE}.service)\"",
             "printf 'health_timer=%s\\n' \"$(service_state vpn-stack-health.timer)\"",
             "printf 'ssh_service=%s\\n' \"$(service_state ssh.service)\"",
@@ -417,9 +630,14 @@ def remote_preflight(
     try:
         return bootstrap_from_snapshot(remote_agent_snapshot(target, live_probes=run_live_probes, compact=not run_live_probes))
     except (AppError, ValueError, json.JSONDecodeError):
-        # Bootstrap hosts predate the agent. The fallback is intentionally used
-        # only until a managed release has installed a schema-2 agent.
-        pass
+        installed = ssh_capture(
+            target,
+            "if test -r /usr/local/lib/vpn-stack/vpn-stack-agent.py; then printf 1; else printf 0; fi",
+            command_timeout=30,
+        ).strip()
+        if installed == "1":
+            raise
+        # Only unmanaged/bootstrap hosts may use the legacy collector.
     return parse_kv_output(
         ssh_capture(
             target,
@@ -429,40 +647,42 @@ def remote_preflight(
 
 
 def remote_agent_snapshot(target: RemoteTarget, *, live_probes: bool = False, profile: str = "light", compact: bool = False) -> dict[str, Any]:
-    command = "test -x /usr/local/lib/vpn-stack/vpn-stack-agent.py && /usr/bin/python3 /usr/local/lib/vpn-stack/vpn-stack-agent.py snapshot"
+    command = "test -r /usr/local/lib/vpn-stack/vpn-stack-agent.py && /usr/bin/python3 /usr/local/lib/vpn-stack/vpn-stack-agent.py snapshot"
     if live_probes:
         command += f" --live-probes --profile {shlex.quote(profile)}"
     if compact:
         command += " --compact"
     payload = json.loads(ssh_capture(target, command, command_timeout=180 if live_probes else 90))
-    if int(payload.get("schema_version", 0)) != 2:
+    if int(payload.get("schema_version", 0)) not in {2, 3}:
         raise AppError("vpn-stack-agent returned an unsupported snapshot schema")
     return payload
 
 
 def bootstrap_from_snapshot(snapshot: dict[str, Any]) -> dict[str, str]:
-    """Extract only lifecycle bootstrap fields from the schema-2 agent payload."""
-    services = snapshot.get("services", {})
-    artifacts = snapshot.get("artifacts", {})
-    host = snapshot.get("host", {})
-    wireguard = snapshot.get("wireguard", {})
+    """Extract lifecycle fields after the single agent-schema boundary."""
+    normalized = DiagnosticsSnapshot.from_agent(snapshot)
+    services = normalized.services
+    artifacts = normalized.artifacts
+    host = normalized.host
+    wireguard = normalized.wg_state
     peer = next(iter(wireguard.get("peers", [])), {})
-    front = snapshot.get("front", {})
-    tcp_adaptation = snapshot.get("network", {}).get("tcp_adaptation", {})
-    interfaces = snapshot.get("network", {}).get("interfaces", {})
+    front = normalized.front
+    tcp_adaptation = normalized.network.get("tcp_adaptation", {})
+    interfaces = normalized.network.get("interfaces", {})
     public_interface = next(iter(interfaces), "")
     return {
-        "schema_version": str(snapshot.get("schema_version", "")),
+        "schema_version": str(normalized.schema_version),
         "login_user": str(host.get("login_user", "")),
         "is_root": "1" if host.get("is_root") is True else "0",
         "has_sudo": "1" if host.get("has_sudo") is True else "0",
         "hostname": str(host.get("hostname", "")),
         "os_id": str(host.get("os_id", "")),
         "os_version": str(host.get("os_version", "")),
-        "deployment_name": str(snapshot.get("deployment", "")),
-        "role": str(snapshot.get("role", "")),
-        "installed": "1" if snapshot.get("release", {}).get("release_id") else "0",
-        "installed_at": str(snapshot.get("release", {}).get("installed_at", "")),
+        "deployment_name": normalized.deployment,
+        "role": normalized.role,
+        "installed": "1" if normalized.release.get("release_id") else "0",
+        "release_id": str(normalized.release.get("release_id", "")),
+        "installed_at": str(normalized.release.get("installed_at", "")),
         "sing_box": str(services.get("sing-box", "")),
         "xray": str(services.get("xray", "")),
         "nftables": str(services.get("nftables", "")),
@@ -473,7 +693,7 @@ def bootstrap_from_snapshot(snapshot: dict[str, Any]) -> dict[str, str]:
         "installed_env_sha256": str(artifacts.get("installed_env_sha256", "")),
         "installed_singbox_sha256": str(artifacts.get("files", {}).get("sing-box.json", {}).get("actual_sha256", "")),
         "render_manifest_singbox_sha256": str(artifacts.get("files", {}).get("sing-box.json", {}).get("expected_sha256", "")),
-        "render_manifest_policy_version": str(snapshot.get("release", {}).get("policy_version", "")),
+        "render_manifest_policy_version": str(normalized.release.get("policy_version", "")),
         "drift": str(artifacts.get("drift", "unknown")),
         "default_iface": str(host.get("default_interface", "") or public_interface),
         "wg_latest_handshake": str(peer.get("latest_handshake", "")),

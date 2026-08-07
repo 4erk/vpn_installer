@@ -41,6 +41,45 @@ class AuditRunnerTests(unittest.TestCase):
         self.assertEqual(runner.results[1].status, "failed")
         self.assertEqual(runner.failures, 1)
 
+    def test_required_skip_makes_summary_incomplete_and_exit_nonzero(self) -> None:
+        runner = self.make_runner()
+        runner.record("structural", lambda: None)
+        runner.skip("runtime", "docker unavailable")
+        runner.write_summary()
+
+        payload = json.loads(runner.summary_path().read_text(encoding="utf-8"))
+        self.assertEqual(runner.outcome, "incomplete")
+        self.assertEqual(runner.exit_code, 2)
+        self.assertFalse(runner.success)
+        self.assertEqual(payload["outcome"], "incomplete")
+        self.assertFalse(payload["success"])
+        self.assertFalse(payload["complete"])
+
+    def test_failure_takes_precedence_over_incomplete(self) -> None:
+        runner = self.make_runner()
+        runner.skip("runtime", "docker unavailable")
+        runner.record("broken", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+        runner.write_summary()
+        payload = json.loads(runner.summary_path().read_text(encoding="utf-8"))
+        self.assertEqual(runner.outcome, "failed")
+        self.assertEqual(runner.exit_code, 1)
+        self.assertFalse(payload["success"])
+        self.assertFalse(payload["complete"])
+
+    def test_runner_returns_incomplete_exit_code_for_skipped_check(self) -> None:
+        runner = self.make_runner("interop")
+        fake_quick = types.SimpleNamespace(run=MagicMock(), run_interop=lambda current: current.skip("runtime", "docker unavailable"))
+        fake_docker = types.SimpleNamespace(run=MagicMock())
+        fake_lab = types.SimpleNamespace(run=MagicMock())
+        import sys
+
+        with patch.dict(sys.modules, {"vpn_installer.audit.quick": fake_quick, "vpn_installer.audit.docker": fake_docker, "vpn_installer.audit.lab": fake_lab}):
+            rc = runner.run()
+        payload = json.loads(runner.summary_path().read_text(encoding="utf-8"))
+        self.assertEqual(rc, 2)
+        self.assertEqual(payload["outcome"], "incomplete")
+        self.assertFalse(payload["success"])
+
     def test_runner_run_dispatches_modes(self) -> None:
         runner = self.make_runner("all")
         fake_quick = types.SimpleNamespace(run=MagicMock())

@@ -18,13 +18,20 @@ from typing import Callable
 
 from ..common import INSTALL_SCRIPT_PATH, OUT_DIR, ROOT_DIR, RUNTIME_SITE_PACKAGES, ensure_file_parent
 from ..config import generate_default_env, load_env_file, render_env_text
+from ..manifest import SING_BOX_LINUX_AMD64_ARCHIVE_SHA256, SING_BOX_LINUX_AMD64_BINARY_SHA256, SING_BOX_VERSION
 
 AUDIT_ROOT = OUT_DIR / "audit"
-AUDIT_SINGBOX_REQUIRED_VERSION = "1.13.12"
+AUDIT_SINGBOX_REQUIRED_VERSION = SING_BOX_VERSION
+AUDIT_SINGBOX_LINUX_AMD64_SHA256 = SING_BOX_LINUX_AMD64_ARCHIVE_SHA256
+AUDIT_SINGBOX_LINUX_AMD64_BINARY_SHA256 = SING_BOX_LINUX_AMD64_BINARY_SHA256
 AUDIT_IMAGE = f"vpn-installer-audit-base:sing-box-{AUDIT_SINGBOX_REQUIRED_VERSION}"
 AUDIT_COMMAND_TIMEOUT_SECONDS = 120
 AUDIT_DOCKER_TIMEOUT_SECONDS = 45
 AUDIT_IMAGE_BUILD_TIMEOUT_SECONDS = 600
+VALID_GEOSITE_SRS_BASE64 = "U1JTAnjaYmRgYmBkgAAOGCOLubSI6z8DIAAA//8KOAJr"
+VALID_GEOIP_SRS_BASE64 = "U1JTAnjaYmRgY2SAAEaW0wyFDCDi/38GQAAAAP//GVUEiA=="
+VALID_GEOSITE_SRS = base64.b64decode(VALID_GEOSITE_SRS_BASE64)
+VALID_GEOIP_SRS = base64.b64decode(VALID_GEOIP_SRS_BASE64)
 VPN_PS1 = ROOT_DIR / "vpn.ps1"
 VPN_SH = ROOT_DIR / "vpn.sh"
 REPO_FILES_FOR_BOOTSTRAP = [
@@ -160,6 +167,26 @@ class AuditRunner:
         self.failures = 0
         self.base_image_ready = False
 
+    @property
+    def outcome(self) -> str:
+        if self.failures or any(result.status == "failed" for result in self.results):
+            return "failed"
+        if any(result.status == "skipped" for result in self.results):
+            return "incomplete"
+        return "passed"
+
+    @property
+    def success(self) -> bool:
+        return self.outcome == "passed"
+
+    @property
+    def exit_code(self) -> int:
+        if self.outcome == "failed":
+            return 1
+        if self.outcome == "incomplete":
+            return 2
+        return 0
+
     def note(self, message: str) -> None:
         print(message)
 
@@ -167,19 +194,23 @@ class AuditRunner:
         return self.run_dir / "summary.json"
 
     def write_summary(self) -> None:
+        outcome = self.outcome
+        complete = not any(result.status == "skipped" for result in self.results)
         payload = {
             "mode": self.mode,
             "run_id": self.run_id,
             "started_at": self.started_at,
             "completed_at": utc_stamp(),
-            "success": self.failures == 0,
+            "outcome": outcome,
+            "success": outcome == "passed",
+            "complete": complete,
             "results": [asdict(result) for result in self.results],
         }
         write_text(self.summary_path(), json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
         if self.json_output:
             print(json.dumps(payload, ensure_ascii=False, indent=2))
             return
-        print(f"\nИтог: {'OK' if self.failures == 0 else 'FAIL'}")
+        print(f"\nИтог: {outcome.upper()}")
         print(f"Summary: {self.summary_path()}")
         for result in self.results:
             print(f"- {result.name}: {result.status}")
@@ -221,7 +252,7 @@ class AuditRunner:
             )
         finally:
             self.write_summary()
-        return 0 if self.failures == 0 else 1
+        return self.exit_code
 
     def record(self, name: str, fn: Callable[[], dict[str, str] | str | None]) -> None:
         self.note(f"\n== {name} ==")
@@ -392,7 +423,7 @@ class AuditRunner:
                     AUDIT_IMAGE,
                     "bash",
                     "-lc",
-                    "python3 -c 'import cryptography' && sing-box version | awk 'NR == 1 {print $3}'",
+                    f"python3 -c 'import cryptography' && echo '{AUDIT_SINGBOX_LINUX_AMD64_BINARY_SHA256}  /usr/local/bin/sing-box' | sha256sum -c - >/dev/null && sing-box version | awk 'NR == 1 {{print $3}}'",
                 ],
                 capture_output=True,
                 text=True,
@@ -425,7 +456,16 @@ class AuditRunner:
                 tar \
                 wireguard-tools \
                 && rm -rf /var/lib/apt/lists/*
-            RUN bash -lc 'curl -fsSL https://sing-box.sagernet.org/installation/tools/install.sh | bash -s -- --version {AUDIT_SINGBOX_REQUIRED_VERSION} && sing-box version >/tmp/singbox-version.txt'
+            RUN set -eux; \
+                curl -fsSL --connect-timeout 10 --max-time 120 \
+                  https://github.com/SagerNet/sing-box/releases/download/v{AUDIT_SINGBOX_REQUIRED_VERSION}/sing-box-{AUDIT_SINGBOX_REQUIRED_VERSION}-linux-amd64.tar.gz \
+                  -o /tmp/sing-box.tar.gz; \
+                echo '{AUDIT_SINGBOX_LINUX_AMD64_SHA256}  /tmp/sing-box.tar.gz' | sha256sum -c -; \
+                tar -xzf /tmp/sing-box.tar.gz -C /tmp; \
+                echo '{AUDIT_SINGBOX_LINUX_AMD64_BINARY_SHA256}  /tmp/sing-box-{AUDIT_SINGBOX_REQUIRED_VERSION}-linux-amd64/sing-box' | sha256sum -c -; \
+                install -m 0755 /tmp/sing-box-{AUDIT_SINGBOX_REQUIRED_VERSION}-linux-amd64/sing-box /usr/local/bin/sing-box; \
+                rm -rf /tmp/sing-box.tar.gz /tmp/sing-box-{AUDIT_SINGBOX_REQUIRED_VERSION}-linux-amd64; \
+                sing-box version >/tmp/singbox-version.txt
             CMD ["sleep", "infinity"]
             """
         )

@@ -2,8 +2,29 @@ from __future__ import annotations
 
 import unittest
 
-from vpn_installer.diagnostics import DiagnosticsSnapshot
+from vpn_installer.diagnostics import (
+    COLLECTOR_NAMES,
+    LOG_WINDOW_KEYS,
+    CollectorState,
+    DiagnosticsSnapshot,
+    LogWindowSnapshot,
+)
+from vpn_installer.log_classifier import BUCKETS
 from vpn_installer.status_output import format_snapshot_summary
+
+
+OBSERVED_AT = "2026-07-20T08:00:00Z"
+
+
+def ok_collectors() -> dict[str, CollectorState]:
+    return {name: CollectorState.ok(OBSERVED_AT) for name in COLLECTOR_NAMES}
+
+
+def collected_windows() -> dict[str, LogWindowSnapshot]:
+    return {
+        name: LogWindowSnapshot.empty(observed_at=OBSERVED_AT, since=name, until=OBSERVED_AT)
+        for name in LOG_WINDOW_KEYS
+    }
 
 
 class StatusOutputTests(unittest.TestCase):
@@ -17,17 +38,27 @@ class StatusOutputTests(unittest.TestCase):
         self.assertIn("live probes: not run by read-only status; use vpn verify live for route acceptance", lines)
 
     def test_formats_snapshot_windows_buckets_destinations_and_reasons(self) -> None:
+        windows = collected_windows()
+        windows["5m"] = LogWindowSnapshot.collected(
+            {bucket: 2 if bucket == "ipv4_literal_timeout" else 0 for bucket in BUCKETS},
+            observed_at=OBSERVED_AT,
+            since="2026-07-20T07:55:00Z",
+            until=OBSERVED_AT,
+            top_destinations={"ipv4_literal_timeout": {"91.108.56.103:443": 2}},
+        )
+        windows["24h"] = LogWindowSnapshot.collected(
+            {bucket: 9 if bucket == "ipv4_literal_timeout" else 0 for bucket in BUCKETS},
+            observed_at=OBSERVED_AT,
+            since="2026-07-19T08:00:00Z",
+            until=OBSERVED_AT,
+        )
         lines = format_snapshot_summary(
             DiagnosticsSnapshot(
                 role="ru-gateway",
                 drift="none",
                 verdict="degraded",
-                fresh_window_minutes=30,
-                historical_window_hours=4,
-                log_buckets={"ipv4_literal_timeout": 2},
-                historical_log_buckets={"ipv4_literal_timeout": 9},
-                top_destinations={"ipv4_literal_timeout": "91.108.56.103:443=2"},
-                fresh_since="2026-07-20T08:00:00Z",
+                collectors=ok_collectors(),
+                log_windows=windows,
                 runtime_overrides={"admin_routing_rules_count": "2"},
                 storage={
                     "root_filesystem": {
@@ -105,11 +136,16 @@ class StatusOutputTests(unittest.TestCase):
         rendered = "\n".join(lines)
         self.assertIn("role: ru-gateway", rendered)
         self.assertIn("drift: none", rendered)
-        self.assertIn("current log window: since=2026-07-20T08:00:00Z, duration=30m", rendered)
-        self.assertIn("historical window: 4h", rendered)
-        self.assertIn("ipv4_literal_timeout=2", rendered)
-        self.assertIn("historical log buckets: ipv4_literal_timeout=9", rendered)
-        self.assertIn("91.108.56.103:443=2", rendered)
+        self.assertIn("snapshot schema: 3", rendered)
+        self.assertIn("collector status: ok", rendered)
+        self.assertIn(
+            "log window 5m: status=ok (observed=2026-07-20T08:00:00Z), "
+            "since=2026-07-20T07:55:00Z, until=2026-07-20T08:00:00Z, counts=ipv4_literal_timeout=2",
+            rendered,
+        )
+        self.assertIn("log window 24h:", rendered)
+        self.assertIn("counts=ipv4_literal_timeout=9", rendered)
+        self.assertIn("top destinations [5m]: ipv4_literal_timeout:91.108.56.103:443=2", rendered)
         self.assertIn("runtime overrides:", rendered)
         self.assertIn("admin_routing_rules_count=2", rendered)
         self.assertIn("root filesystem: source=/dev/vda1, fs=ext4, state=clean, errors=0, boot_fsck=enabled, verdict=verified", rendered)
@@ -234,6 +270,25 @@ class StatusOutputTests(unittest.TestCase):
             "host-wide tcp counters (informational; last health cycle): out=unavailable, retrans=229",
             lines,
         )
+
+    def test_distinguishes_unavailable_log_data_from_collected_zero(self) -> None:
+        windows = collected_windows()
+        windows["5m"] = LogWindowSnapshot.unavailable("journalctl timed out")
+        rendered = "\n".join(
+            format_snapshot_summary(
+                DiagnosticsSnapshot(
+                    collectors={
+                        **ok_collectors(),
+                        "logs": CollectorState.error("journalctl timed out"),
+                    },
+                    log_windows=windows,
+                )
+            )
+        )
+        self.assertIn("collector status: error", rendered)
+        self.assertIn("log window 5m: status=error (journalctl timed out), counts=unavailable", rendered)
+        self.assertIn("log window 30m:", rendered)
+        self.assertIn("counts=no classified events", rendered)
 
 
 if __name__ == "__main__":

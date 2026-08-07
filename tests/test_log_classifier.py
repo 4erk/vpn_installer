@@ -2,10 +2,23 @@ from __future__ import annotations
 
 import unittest
 
-from vpn_installer.log_classifier import classify_line, source_endpoint_from_line, source_from_line, summarize_lines
+from vpn_installer.log_classifier import (
+    BUCKETS,
+    classify_line,
+    inbound_destination_from_line,
+    inbound_tag_from_line,
+    source_endpoint_from_line,
+    source_from_line,
+    summarize_lines,
+)
 
 
 class LogClassifierTests(unittest.TestCase):
+    def test_inbound_event_parser_returns_exact_tag_and_destination(self) -> None:
+        line = "+0300 2026-08-07 03:54:45 INFO [3039373591 0ms] inbound/mixed[router-in]: inbound connection to 10.0.0.1:80"
+        self.assertEqual(inbound_tag_from_line(line), "router-in")
+        self.assertEqual(inbound_destination_from_line(line), "10.0.0.1:80")
+
     def test_source_normalizes_ipv4_mapped_ipv6(self) -> None:
         line = "INFO [1] inbound/vless[proxy]: process connection from [::ffff:203.0.113.20]:50123"
         self.assertEqual(source_from_line(line), "203.0.113.20")
@@ -82,6 +95,29 @@ class LogClassifierTests(unittest.TestCase):
         self.assertEqual(classified.bucket, "dns_timeout")
         self.assertEqual(classified.destination, "www.msftconnecttest.com:A")
 
+    def test_dns_outcomes_have_distinct_exclusive_buckets(self) -> None:
+        samples = {
+            "dns_nodata": "ERROR [1 2ms] dns: exchange failed for no-v6.example. IN AAAA: empty result",
+            "dns_timeout": "ERROR [2 10.0s] dns: exchange failed for slow.example. IN A: context deadline exceeded",
+            "dns_refused": "ERROR [3 3ms] dns: lookup failed for refused.example: REFUSED",
+            "dns_nxdomain": "ERROR [4 4ms] router: lookup absent.example: NXDOMAIN",
+            "dns_servfail": "ERROR [5 5ms] dns: lookup failed for broken.example: SERVFAIL",
+        }
+        for bucket, line in samples.items():
+            with self.subTest(bucket=bucket):
+                classified = classify_line(line)
+                self.assertIsNotNone(classified)
+                self.assertEqual(classified.bucket, bucket)
+
+        summary = summarize_lines(samples.values())
+        self.assertEqual(sum(summary["counts"].values()), len(samples))
+        self.assertNotIn("dns_failed", BUCKETS)
+
+    def test_unknown_dns_failure_is_not_folded_into_a_generic_dns_bucket(self) -> None:
+        classified = classify_line("ERROR [6 1ms] dns: lookup failed for unknown.example: malformed upstream reply")
+        self.assertIsNotNone(classified)
+        self.assertEqual(classified.bucket, "unclassified_error")
+
     def test_dns_context_cancelled_is_client_noise_not_dns_failure(self) -> None:
         classified = classify_line(
             "+0000 2026-07-18 20:22:04 ERROR [364916214 8.1s] dns: lookup failed for www.google.com: context canceled"
@@ -125,6 +161,16 @@ class LogClassifierTests(unittest.TestCase):
         summary = summarize_lines(lines)
         self.assertEqual(summary["counts"]["dns_nxdomain"], 1)
         self.assertEqual(summary["counts"]["unclassified_error"], 0)
+
+    def test_same_numeric_id_in_different_units_is_not_deduplicated(self) -> None:
+        summary = summarize_lines(
+            [
+                "[unit=sing-box.service] ERROR [42 1s] dns: exchange failed for a.example. IN A: context deadline exceeded",
+                "[unit=vpn-stack-xray.service] ERROR [42 1s] connection reset",
+            ]
+        )
+        self.assertEqual(summary["counts"]["dns_timeout"], 1)
+        self.assertEqual(summary["counts"]["client_reset_eof"], 1)
 
     def test_classifies_xray_disabled_invalid_separately_from_invalid_reality(self) -> None:
         disabled = classify_line("from 203.0.113.4:456 accepted tcp:disabled.invalid:443")

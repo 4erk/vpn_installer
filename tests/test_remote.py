@@ -13,10 +13,16 @@ from vpn_installer.models import AppError, ROLE_RU, RemoteTarget
 from vpn_installer.remote import (
     build_remote_command,
     configure_paramiko_logging,
+    canonical_host_key_type,
     ensure_remote_privilege,
+    ensure_target_host_key,
     fetch_remote_deployment_env,
     parse_kv_output,
     paramiko_connect,
+    known_host_disabled_algorithms,
+    known_host_key_types,
+    load_trusted_host_keys,
+    host_key_alias,
     open_bound_ssh_socket,
     paramiko_exec,
     paramiko_stream,
@@ -66,9 +72,14 @@ class RemoteTests(unittest.TestCase):
         body = "python3 - <<'PY'\nprint('ok')\nPY"
         command, input_text = build_remote_command(body, target, as_root=True)
         self.assertIsNone(input_text)
-        self.assertTrue(command.startswith("bash -lc "))
+        self.assertTrue(command.startswith("timeout --signal=TERM --kill-after=5s 1800s bash -lc "))
         self.assertIn("'\"'\"'PY'\"'\"'", command)
         self.assertIn("print('\"'\"'ok'\"'\"')", command)
+
+    def test_build_remote_command_enforces_target_side_timeout(self) -> None:
+        target = RemoteTarget(role=ROLE_RU, ssh_user="root")
+        command, _ = build_remote_command("sleep 60", target, as_root=True, command_timeout=7)
+        self.assertTrue(command.startswith("timeout --signal=TERM --kill-after=5s 7s bash -lc "))
 
     def test_key_mode_uses_system_ssh_when_available(self) -> None:
         target = RemoteTarget(role=ROLE_RU, auth_mode="key")
@@ -77,9 +88,16 @@ class RemoteTests(unittest.TestCase):
 
     def test_ssh_and_scp_base_args_include_identity(self) -> None:
         target = RemoteTarget(role=ROLE_RU, ssh_host="203.0.113.10", ssh_port=2222, ssh_user="root", identity_path="/tmp/id")
-        self.assertIn("-i", ssh_base_args(target))
-        self.assertIn("/tmp/id", ssh_base_args(target))
-        self.assertIn("-P", scp_base_args(target))
+        with tempfile.TemporaryDirectory() as tmp, patch("vpn_installer.remote.KNOWN_HOSTS_PATH", Path(tmp) / "known_hosts"):
+            ssh_args = ssh_base_args(target)
+            scp_args = scp_base_args(target)
+        self.assertIn("-i", ssh_args)
+        self.assertIn("/tmp/id", ssh_args)
+        self.assertIn("-P", scp_args)
+        self.assertTrue(any(value.startswith("UserKnownHostsFile=") for value in ssh_args))
+        self.assertTrue(any(value.startswith("UserKnownHostsFile=") for value in scp_args))
+        self.assertIn("StrictHostKeyChecking=yes", ssh_args)
+        self.assertIn("StrictHostKeyChecking=yes", scp_args)
 
     def test_ssh_and_scp_base_args_include_explicit_bind_address(self) -> None:
         target = RemoteTarget(role=ROLE_RU, ssh_host="203.0.113.10", ssh_bind_address="192.168.0.101")
@@ -94,13 +112,15 @@ class RemoteTests(unittest.TestCase):
             patch("vpn_installer.remote.run_command", return_value=completed) as run_mock,
         ):
             self.assertEqual(ssh_capture(target, "echo ok", command_timeout=12), "ok")
-        self.assertEqual(run_mock.call_args.kwargs["timeout"], 12)
+        self.assertEqual(run_mock.call_args.kwargs["timeout"], 22)
+        self.assertIn("timeout --signal=TERM --kill-after=5s 12s", run_mock.call_args.args[0][-1])
 
     def test_ssh_capture_passes_timeout_to_paramiko_backend(self) -> None:
         target = RemoteTarget(role=ROLE_RU, ssh_host="203.0.113.10", ssh_user="root", auth_mode="password")
         with patch("vpn_installer.remote.paramiko_exec", return_value=(0, "ok", "")) as exec_mock:
             self.assertEqual(ssh_capture(target, "echo ok", command_timeout=12), "ok")
-        self.assertEqual(exec_mock.call_args.kwargs["command_timeout"], 12)
+        self.assertEqual(exec_mock.call_args.kwargs["command_timeout"], 22)
+        self.assertIn("timeout --signal=TERM --kill-after=5s 12s", exec_mock.call_args.args[1])
 
     def test_build_remote_command_requires_privilege_confirmation(self) -> None:
         target = RemoteTarget(role=ROLE_RU, ssh_user="ubuntu", sudo_mode="unknown")
@@ -118,6 +138,100 @@ class RemoteTests(unittest.TestCase):
         kwargs = fake_client.connect.call_args.kwargs
         self.assertEqual(kwargs["password"], "secret")
         self.assertFalse(kwargs["look_for_keys"])
+
+    def test_known_rsa_host_disables_unrecorded_key_families(self) -> None:
+        system_keys = Mock()
+        system_keys.lookup.return_value = {"ssh-rsa": object()}
+        local_keys = Mock()
+        local_keys.lookup.return_value = None
+        client = SimpleNamespace(_system_host_keys=system_keys, _host_keys=local_keys)
+        paramiko = SimpleNamespace(
+            Transport=SimpleNamespace(
+                _preferred_keys=("ssh-ed25519", "ecdsa-sha2-nistp256", "rsa-sha2-512", "rsa-sha2-256", "ssh-rsa")
+            )
+        )
+
+        self.assertEqual(known_host_key_types(client, "example.test"), {"ssh-rsa"})
+        self.assertEqual(
+            known_host_disabled_algorithms(paramiko, client, "example.test"),
+            {"keys": ["ssh-ed25519", "ecdsa-sha2-nistp256"]},
+        )
+        self.assertEqual(canonical_host_key_type("rsa-sha2-512"), "ssh-rsa")
+        self.assertEqual(canonical_host_key_type("ssh-ed25519-cert-v01@openssh.com"), "ssh-ed25519")
+
+    def test_unknown_host_does_not_restrict_first_negotiation(self) -> None:
+        keys = Mock()
+        keys.lookup.return_value = None
+        client = SimpleNamespace(_system_host_keys=keys, _host_keys=keys)
+        paramiko = SimpleNamespace(Transport=SimpleNamespace(_preferred_keys=("ssh-ed25519", "ssh-rsa")))
+        self.assertIsNone(known_host_disabled_algorithms(paramiko, client, "new.example"))
+
+    def test_managed_host_key_overrides_stale_system_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch("vpn_installer.remote.KNOWN_HOSTS_PATH", Path(tmp) / "known_hosts"):
+            known_hosts = Path(tmp) / "known_hosts"
+            known_hosts.write_text("managed entry\n", encoding="utf-8")
+            managed_store = Mock()
+            managed_store.lookup.return_value = {"ssh-ed25519": object()}
+            client = SimpleNamespace(
+                _host_keys=managed_store,
+                load_host_keys=Mock(),
+                load_system_host_keys=Mock(),
+            )
+            self.assertEqual(load_trusted_host_keys(client, "example.test"), known_hosts)
+        client.load_host_keys.assert_called_once_with(str(known_hosts))
+        client.load_system_host_keys.assert_not_called()
+
+    def test_empty_managed_store_does_not_implicitly_trust_system_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch("vpn_installer.remote.KNOWN_HOSTS_PATH", Path(tmp) / "known_hosts"):
+            managed_store = Mock()
+            managed_store.lookup.return_value = None
+            client = SimpleNamespace(
+                _host_keys=managed_store,
+                load_host_keys=Mock(),
+                load_system_host_keys=Mock(),
+            )
+            load_trusted_host_keys(client, "example.test")
+        client.load_system_host_keys.assert_not_called()
+
+    def test_unknown_host_key_is_rejected_non_interactively(self) -> None:
+        fake_store = Mock()
+        fake_store.lookup.return_value = None
+        fake_client = SimpleNamespace(
+            _host_keys=fake_store,
+            _system_host_keys=fake_store,
+            load_host_keys=Mock(),
+            load_system_host_keys=Mock(),
+        )
+        fake_key = Mock()
+        fake_key.get_name.return_value = "ssh-ed25519"
+        fake_key.asbytes.return_value = b"key"
+        target = RemoteTarget(role=ROLE_RU, ssh_host="example.test", ssh_port=2222)
+        fake_paramiko = SimpleNamespace(SSHClient=Mock(return_value=fake_client), HostKeys=Mock(return_value=fake_store))
+        with tempfile.TemporaryDirectory() as tmp, patch("vpn_installer.remote.KNOWN_HOSTS_PATH", Path(tmp) / "known_hosts"), patch("vpn_installer.remote.ensure_paramiko_installed", return_value=fake_paramiko), patch("vpn_installer.remote.probe_host_key", return_value=fake_key):
+            with self.assertRaises(AppError) as ctx:
+                ensure_target_host_key(target, allow_enroll=False)
+        self.assertIn("SHA256:", str(ctx.exception))
+        self.assertEqual(host_key_alias(target), "[example.test]:2222")
+
+    def test_unknown_host_key_requires_explicit_interactive_acceptance(self) -> None:
+        fake_store = Mock()
+        fake_store.lookup.return_value = None
+        fake_client = SimpleNamespace(
+            _host_keys=fake_store,
+            _system_host_keys=fake_store,
+            load_host_keys=Mock(),
+            load_system_host_keys=Mock(),
+        )
+        fake_key = Mock()
+        fake_key.get_name.return_value = "ssh-ed25519"
+        fake_key.asbytes.return_value = b"key"
+        target = RemoteTarget(role=ROLE_RU, ssh_host="example.test")
+        fake_paramiko = SimpleNamespace(SSHClient=Mock(return_value=fake_client), HostKeys=Mock(return_value=fake_store))
+        prompt = Mock(return_value=True)
+        with tempfile.TemporaryDirectory() as tmp, patch("vpn_installer.remote.KNOWN_HOSTS_PATH", Path(tmp) / "known_hosts"), patch("vpn_installer.remote.ensure_paramiko_installed", return_value=fake_paramiko), patch("vpn_installer.remote.probe_host_key", return_value=fake_key), patch("vpn_installer.remote.persist_host_key") as persist:
+            ensure_target_host_key(target, allow_enroll=True, prompt_yes_no=prompt)
+        prompt.assert_called_once()
+        persist.assert_called_once_with("example.test", fake_key)
 
     def test_paramiko_connect_uses_bound_socket_when_requested(self) -> None:
         fake_client = Mock()
@@ -158,6 +272,7 @@ class RemoteTests(unittest.TestCase):
         ssh_client_factory = Mock(side_effect=[first_client, second_client])
         fake_paramiko = SimpleNamespace(
             SSHClient=ssh_client_factory,
+            RejectPolicy=Mock(return_value="reject"),
             AutoAddPolicy=Mock(return_value="policy"),
             ssh_exception=SimpleNamespace(AuthenticationException=FakeAuthTimeout),
         )
@@ -175,6 +290,7 @@ class RemoteTests(unittest.TestCase):
         ssh_client_factory = Mock(side_effect=[first_client, second_client])
         fake_paramiko = SimpleNamespace(
             SSHClient=ssh_client_factory,
+            RejectPolicy=Mock(return_value="reject"),
             AutoAddPolicy=Mock(return_value="policy"),
             ssh_exception=SimpleNamespace(AuthenticationException=Exception),
         )
@@ -212,6 +328,7 @@ class RemoteTests(unittest.TestCase):
         fake_client.connect.side_effect = FakeSshException("Error reading SSH protocol banner")
         fake_paramiko = SimpleNamespace(
             SSHClient=Mock(return_value=fake_client),
+            RejectPolicy=Mock(return_value="reject"),
             AutoAddPolicy=Mock(return_value="policy"),
             ssh_exception=SimpleNamespace(AuthenticationException=Exception),
         )
@@ -351,17 +468,25 @@ class RemoteTests(unittest.TestCase):
         self.assertEqual(parse_kv_output(payload), {"a": "1", "b": "2"})
 
     def test_remote_preflight_uses_ssh_capture(self) -> None:
-        snapshot = {"schema_version": 2, "role": "ru-gateway", "services": {}, "artifacts": {}, "logs": {"fresh": {}, "windows_minutes": {}}, "release": {}, "wireguard": {}, "network": {}, "front": {}}
+        snapshot = {"schema_version": 2, "generated_at": "2026-08-06T12:00:00+00:00", "role": "ru-gateway", "services": {}, "artifacts": {}, "logs": {"fresh": {}, "windows_minutes": {}}, "release": {}, "wireguard": {}, "network": {}, "front": {}}
         with patch("vpn_installer.remote.ssh_capture", return_value=json.dumps(snapshot)) as mocked:
             payload = remote_preflight(RemoteTarget(role=ROLE_RU), "wgx")
         mocked.assert_called_once()
+        self.assertIn("test -r /usr/local/lib/vpn-stack/vpn-stack-agent.py", mocked.call_args.args[1])
+        self.assertNotIn("test -x /usr/local/lib/vpn-stack/vpn-stack-agent.py", mocked.call_args.args[1])
         self.assertEqual(payload["role"], "ru-gateway")
 
     def test_remote_preflight_uses_compact_bootstrap_when_agent_is_unavailable(self) -> None:
-        with patch("vpn_installer.remote.ssh_capture", return_value="role=ru-gateway\n") as mocked:
+        with patch("vpn_installer.remote.ssh_capture", side_effect=["not-json", "0", "role=ru-gateway\n"]) as mocked:
             remote_preflight(RemoteTarget(role=ROLE_RU), "wgx", fresh_since_epoch=1783733001)
-        self.assertEqual(mocked.call_count, 2)
+        self.assertEqual(mocked.call_count, 3)
         self.assertIn("WG_INTERFACE=wgx", mocked.call_args.args[1])
+
+    def test_remote_preflight_does_not_hide_broken_installed_agent(self) -> None:
+        with patch("vpn_installer.remote.ssh_capture", side_effect=["not-json", "1"]) as mocked:
+            with self.assertRaises(json.JSONDecodeError):
+                remote_preflight(RemoteTarget(role=ROLE_RU), "wgx")
+        self.assertEqual(mocked.call_count, 2)
 
     def test_fetch_remote_deployment_env_uses_root_capture(self) -> None:
         with patch("vpn_installer.remote.ssh_capture", return_value='DEPLOY_NAME="demo"\n') as mocked:
@@ -372,6 +497,7 @@ class RemoteTests(unittest.TestCase):
         preflight = bootstrap_from_snapshot(
             {
                 "schema_version": 2,
+                "generated_at": "2026-08-06T12:00:00+00:00",
                 "deployment": "demo",
                 "role": ROLE_RU,
                 "release": {"release_id": "release-1", "installed_at": "2026-07-15T00:00:00Z", "policy_version": "0.11.0"},
@@ -403,6 +529,7 @@ class RemoteTests(unittest.TestCase):
         )
         self.assertEqual(preflight["is_root"], "1")
         self.assertEqual(preflight["installed"], "1")
+        self.assertEqual(preflight["release_id"], "release-1")
         self.assertEqual(preflight["default_iface"], "eth0")
         self.assertEqual(preflight["resolver"], "active")
         self.assertEqual(preflight["udp_wmem_default"], "8388608")

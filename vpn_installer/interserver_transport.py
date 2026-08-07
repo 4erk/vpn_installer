@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import os
 from datetime import datetime, timezone
 from typing import Any
 
@@ -21,16 +22,73 @@ TRANSPORT_RELAY_PORTS = {
     TRANSPORT_WG_TAG: 19091,
     TRANSPORT_HY2_TAG: 19092,
 }
+TRANSPORT_PROBE_INBOUND_TAGS = {
+    TRANSPORT_WG_TAG: "interserver-probe-wg-in",
+    TRANSPORT_HY2_TAG: "interserver-probe-hy2-in",
+}
+TRANSPORT_PROBE_PORTS = {
+    TRANSPORT_WG_TAG: 19093,
+    TRANSPORT_HY2_TAG: 19094,
+}
 TRANSPORT_HEALTHCHECK_URL = "https://1.1.1.1/cdn-cgi/trace"
+TRANSPORT_SELECTED_PROBE_TIMEOUT_MS = 800
 TRANSPORT_PROBE_TIMEOUT_MS = 1200
 TRANSPORT_PROBE_INTERVAL_SECONDS = 2
 TRANSPORT_FAILURE_CONFIRMATIONS = 2
-TRANSPORT_LATENCY_ADVANTAGE_MS = 30
-TRANSPORT_LATENCY_CONFIRMATIONS = 3
-TRANSPORT_STATE_SCHEMA_VERSION = 6
+TRANSPORT_ALTERNATE_HEALTH_CONFIRMATIONS = 2
+TRANSPORT_EVIDENCE_MAX_GAP_SECONDS = TRANSPORT_PROBE_INTERVAL_SECONDS * 5
+TRANSPORT_PREFERRED_TAG = TRANSPORT_WG_TAG
+TRANSPORT_STATE_SCHEMA_VERSION = 7
 UNDERLAY_WG_RU_ADDRESS = "10.75.0.1/32"
 UNDERLAY_WG_FOREIGN_ADDRESS = "10.75.0.2/32"
 UNDERLAY_WG_MTU = 1420
+X25519_P = 2**255 - 19
+X25519_A24 = 121665
+
+
+def clamp_x25519_private(private_key: bytes) -> bytes:
+    if len(private_key) != 32:
+        raise ValueError("invalid X25519 private key length")
+    data = bytearray(private_key)
+    data[0] &= 248
+    data[31] &= 127
+    data[31] |= 64
+    return bytes(data)
+
+
+def x25519_public_from_private(private_key: bytes) -> bytes:
+    scalar = int.from_bytes(clamp_x25519_private(private_key), "little")
+    x1, x2, z2, x3, z3, swap = 9, 1, 0, 9, 1, 0
+    for bit in range(254, -1, -1):
+        current = (scalar >> bit) & 1
+        swap ^= current
+        if swap:
+            x2, x3 = x3, x2
+            z2, z3 = z3, z2
+        swap = current
+        a = (x2 + z2) % X25519_P
+        aa = (a * a) % X25519_P
+        b = (x2 - z2) % X25519_P
+        bb = (b * b) % X25519_P
+        e = (aa - bb) % X25519_P
+        c = (x3 + z3) % X25519_P
+        d = (x3 - z3) % X25519_P
+        da = (d * a) % X25519_P
+        cb = (c * b) % X25519_P
+        x3 = pow((da + cb) % X25519_P, 2, X25519_P)
+        z3 = (x1 * pow((da - cb) % X25519_P, 2, X25519_P)) % X25519_P
+        x2 = (aa * bb) % X25519_P
+        z2 = (e * ((aa + X25519_A24 * e) % X25519_P)) % X25519_P
+    if swap:
+        x2, x3 = x3, x2
+        z2, z3 = z3, z2
+    result = (x2 * pow(z2, X25519_P - 2, X25519_P)) % X25519_P
+    return result.to_bytes(32, "little")
+
+
+def generate_x25519_pair() -> tuple[bytes, bytes]:
+    private_key = clamp_x25519_private(os.urandom(32))
+    return private_key, x25519_public_from_private(private_key)
 
 
 def generate_transport_identity() -> dict[str, str]:
@@ -147,31 +205,12 @@ def derive_transport_obfs_password(wireguard_preshared_key: str) -> str:
 
 
 def derive_underlay_wireguard_identity(wireguard_preshared_key: str) -> dict[str, str]:
-    from .runtime_deps import ensure_python_package
-
-    ensure_python_package("cryptography", "cryptography>=41,<47")
-    from cryptography.hazmat.primitives import serialization
-    from cryptography.hazmat.primitives.asymmetric import x25519
-
-    private_bytes = bytearray(
+    private_key = clamp_x25519_private(
         _derive_transport_bytes(wireguard_preshared_key, b"vpn-stack/interserver/wireguard/private/v1")
     )
-    private_bytes[0] &= 248
-    private_bytes[31] &= 127
-    private_bytes[31] |= 64
-    private_key = x25519.X25519PrivateKey.from_private_bytes(bytes(private_bytes))
-    public_key = private_key.public_key()
     return {
-        "private_key": base64.b64encode(
-            private_key.private_bytes(
-                serialization.Encoding.Raw,
-                serialization.PrivateFormat.Raw,
-                serialization.NoEncryption(),
-            )
-        ).decode("ascii"),
-        "public_key": base64.b64encode(
-            public_key.public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
-        ).decode("ascii"),
+        "private_key": base64.b64encode(private_key).decode("ascii"),
+        "public_key": base64.b64encode(x25519_public_from_private(private_key)).decode("ascii"),
         "pre_shared_key": base64.b64encode(
             _derive_transport_bytes(wireguard_preshared_key, b"vpn-stack/interserver/wireguard/psk/v1")
         ).decode("ascii"),
@@ -221,6 +260,29 @@ def _relay_rules(env: dict[str, str]) -> list[dict[str, Any]]:
     ]
 
 
+def _probe_inbounds() -> list[dict[str, Any]]:
+    return [
+        {
+            "type": "mixed",
+            "tag": TRANSPORT_PROBE_INBOUND_TAGS[tag],
+            "listen": "127.0.0.1",
+            "listen_port": TRANSPORT_PROBE_PORTS[tag],
+        }
+        for tag in TRANSPORT_CANDIDATE_TAGS
+    ]
+
+
+def _probe_rules() -> list[dict[str, Any]]:
+    return [
+        {
+            "inbound": [TRANSPORT_PROBE_INBOUND_TAGS[tag]],
+            "action": "route",
+            "outbound": tag,
+        }
+        for tag in TRANSPORT_CANDIDATE_TAGS
+    ]
+
+
 def build_ru_transport_topology(env: dict[str, str]) -> dict[str, Any]:
     identity = derive_underlay_wireguard_identity(env["WG_PRESHARED_KEY"])
     endpoint = {
@@ -243,9 +305,9 @@ def build_ru_transport_topology(env: dict[str, str]) -> dict[str, Any]:
     }
     return {
         "endpoints": [endpoint],
-        "inbounds": _relay_inbounds(),
+        "inbounds": [*_relay_inbounds(), *_probe_inbounds()],
         "outbounds": [_hysteria_outbound(env)],
-        "route_rules": _relay_rules(env),
+        "route_rules": [*_relay_rules(env), *_probe_rules()],
     }
 
 
@@ -275,15 +337,15 @@ def transport_topology_configured(config: dict[str, Any], env: dict[str, str]) -
         stable_overlay = outbounds.get(TRANSPORT_OVERLAY_TAG, {})
         wireguard = by_tag(config.get("endpoints", [])).get(TRANSPORT_WG_TAG, {})
         expected_hysteria = _hysteria_outbound(env)
-        expected_relays = _relay_inbounds()
-        expected_rules = _relay_rules(env)
+        expected_inbounds = [*_relay_inbounds(), *_probe_inbounds()]
+        expected_rules = [*_relay_rules(env), *_probe_rules()]
     except (KeyError, TypeError, ValueError):
         return False
     if stable_overlay.get("type") != "direct" or stable_overlay.get("bind_interface") != env.get("WG_INTERFACE", "wg0"):
         return False
     if outbounds.get(TRANSPORT_HY2_TAG) != expected_hysteria:
         return False
-    if any(by_tag(config.get("inbounds", [])).get(item["tag"]) != item for item in expected_relays):
+    if any(by_tag(config.get("inbounds", [])).get(item["tag"]) != item for item in expected_inbounds):
         return False
     peers = wireguard.get("peers", [])
     peer = peers[0] if isinstance(peers, list) and len(peers) == 1 and isinstance(peers[0], dict) else {}
@@ -313,6 +375,95 @@ def _normalize_probe(probe: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+def _probe_failure_reason(probe: dict[str, Any]) -> str:
+    error = " ".join(str(probe.get("error", "")).lower().split())
+    categories = (
+        ("timeout", ("timed out", "timeout", "deadline")),
+        ("connection_refused", ("connection refused",)),
+        ("network_unreachable", ("network is unreachable", "no route to host")),
+        ("host_unreachable", ("host is unreachable",)),
+        ("tls_failure", ("certificate", "tls")),
+        ("invalid_probe_response", ("delay result is missing",)),
+    )
+    return next((reason for reason, markers in categories if any(marker in error for marker in markers)), error[:120] or "probe_failed")
+
+
+def _parse_timestamp(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _cycle_relation(previous_at: Any, observed_at: str) -> str:
+    previous_time = _parse_timestamp(previous_at)
+    current_time = _parse_timestamp(observed_at)
+    if previous_time is None or current_time is None:
+        return "reset"
+    gap_seconds = (current_time - previous_time).total_seconds()
+    if gap_seconds == 0:
+        return "same"
+    if 0 < gap_seconds <= TRANSPORT_EVIDENCE_MAX_GAP_SECONDS:
+        return "next"
+    return "reset"
+
+
+def _next_evidence(
+    previous: dict[str, Any],
+    *,
+    key: str,
+    path: str,
+    reason: str,
+    cycle_relation: str,
+) -> dict[str, Any]:
+    value = previous.get(key, {})
+    prior = value if isinstance(value, dict) else {}
+    same_evidence = prior.get("path") == path and prior.get("reason") == reason
+    count = max(1, int(prior.get("confirmations", 0) or 0)) if same_evidence and cycle_relation != "reset" else 1
+    if same_evidence and cycle_relation == "next":
+        count += 1
+    return {
+        "path": path,
+        "reason": reason,
+        "confirmations": count,
+    }
+
+
+def _policy_state(
+    selected: str,
+    probes: dict[str, dict[str, Any]],
+    observed_at: str,
+    state: str,
+    reason: str,
+    recommended: str | None = None,
+    hard_failure: bool = False,
+    **details: Any,
+) -> dict[str, Any]:
+    target = selected if recommended is None else recommended
+    return {
+        "schema_version": TRANSPORT_STATE_SCHEMA_VERSION,
+        "updated_at": observed_at,
+        "state": state,
+        "preferred": TRANSPORT_PREFERRED_TAG,
+        "selected": selected,
+        "recommended": target,
+        "would_switch": target != selected,
+        "hard_failure_evidence": hard_failure,
+        # Retained as inert fields for readers of schema 6 state.
+        "latency_candidate": "",
+        "latency_confirmations": 0,
+        "probes": probes,
+        "reason": reason,
+        **details,
+    }
+
+
 def evaluate_transport_policy(
     *,
     selected: str,
@@ -320,78 +471,78 @@ def evaluate_transport_policy(
     previous: dict[str, Any] | None = None,
     observed_at: str | None = None,
 ) -> dict[str, Any]:
-    previous = previous or {}
+    previous = previous if isinstance(previous, dict) and previous.get("schema_version") in {6, TRANSPORT_STATE_SCHEMA_VERSION} else {}
     observed_at = observed_at or datetime.now(timezone.utc).isoformat()
     normalized = {tag: _normalize_probe(probes.get(tag)) for tag in TRANSPORT_CANDIDATE_TAGS}
     if selected not in TRANSPORT_CANDIDATE_TAGS:
-        return {
-            "schema_version": TRANSPORT_STATE_SCHEMA_VERSION,
-            "updated_at": observed_at,
-            "state": "failed",
-            "selected": selected,
-            "recommended": selected,
-            "would_switch": False,
-            "hard_failure_evidence": False,
-            "latency_candidate": "",
-            "latency_confirmations": 0,
-            "probes": normalized,
-            "reason": "selected underlay is invalid",
-        }
+        return _policy_state(selected, normalized, observed_at, "failed", "selected underlay is invalid")
 
     alternate = next(tag for tag in TRANSPORT_CANDIDATE_TAGS if tag != selected)
     selected_probe = normalized[selected]
     alternate_probe = normalized[alternate]
-    recommended = selected
-    state = "healthy"
-    hard_failure = False
-    latency_candidate = ""
-    latency_confirmations = 0
-    reason = "selected underlay is healthy"
+    failed_switch = previous.get("state") == "failed" and previous.get("would_switch") is True
+    prior = previous if previous.get("selected") == selected and not failed_switch else {}
+    cycle_relation = _cycle_relation(prior.get("updated_at"), observed_at)
 
+    # Missing observations are not path failures. Simultaneous failures against
+    # the shared target cannot identify a bad underlay and must never trigger a switch.
     if not selected_probe["checked"]:
-        state = "failed"
-        reason = "selected underlay was not probed"
-    elif not selected_probe["ok"]:
-        if selected_probe["attempts"] < TRANSPORT_FAILURE_CONFIRMATIONS:
-            state = "suspect"
-            reason = "selected underlay failed once"
-        elif alternate_probe["ok"]:
-            state = "recovering"
-            hard_failure = True
-            recommended = alternate
-            reason = f"{selected} failed twice while {alternate} is reachable"
-        else:
-            state = "failed"
-            hard_failure = True
-            reason = "both interserver underlays failed"
-    elif alternate_probe["ok"] and (
-        selected_probe["delay_ms"] > alternate_probe["delay_ms"] + TRANSPORT_LATENCY_ADVANTAGE_MS
-    ):
-        latency_candidate = alternate
-        previous_confirmations = (
-            int(previous.get("latency_confirmations", 0) or 0)
-            if previous.get("selected") == selected and previous.get("latency_candidate") == alternate
-            else 0
+        return _policy_state(selected, normalized, observed_at, "inconclusive", "selected underlay was not probed")
+    if not selected_probe["ok"] and alternate_probe["checked"] and not alternate_probe["ok"]:
+        return _policy_state(
+            selected,
+            normalized,
+            observed_at,
+            "inconclusive",
+            "both underlays failed against the shared probe target; path failure is not attributable",
         )
-        latency_confirmations = previous_confirmations + 1
+    if not selected_probe["ok"]:
+        failure_reason = _probe_failure_reason(selected_probe)
+        failure = _next_evidence(
+            prior,
+            key="failure",
+            path=selected,
+            reason=failure_reason,
+            cycle_relation=cycle_relation,
+        )
+        confirmed_failure = failure["confirmations"] >= TRANSPORT_FAILURE_CONFIRMATIONS
+        state = "failed" if confirmed_failure and not alternate_probe["ok"] else "suspect"
         reason = (
-            f"{alternate} latency advantage confirmation "
-            f"{latency_confirmations}/{TRANSPORT_LATENCY_CONFIRMATIONS}"
+            f"{selected} {failure_reason} confirmation "
+            f"{failure['confirmations']}/{TRANSPORT_FAILURE_CONFIRMATIONS}"
         )
-        if latency_confirmations >= TRANSPORT_LATENCY_CONFIRMATIONS:
-            state = "optimizing"
-            recommended = alternate
+        details: dict[str, Any] = {"failure": failure}
+        recommended: str | None = None
+        if alternate_probe["ok"]:
+            alternate_health = _next_evidence(
+                prior,
+                key="alternate_health",
+                path=alternate,
+                reason="healthy",
+                cycle_relation=cycle_relation,
+            )
+            details["alternate_health"] = alternate_health
+            if (
+                confirmed_failure
+                and alternate_health["confirmations"] >= TRANSPORT_ALTERNATE_HEALTH_CONFIRMATIONS
+            ):
+                state = "recovering"
+                recommended = alternate
+                reason = (
+                    f"{selected} has confirmed {failure_reason}; "
+                    f"{alternate} is confirmed healthy"
+                )
+        elif confirmed_failure:
+            reason = f"{selected} has confirmed {failure_reason}; alternate is not proven healthy"
+        return _policy_state(
+            selected,
+            normalized,
+            observed_at,
+            state,
+            reason,
+            recommended=recommended,
+            hard_failure=confirmed_failure,
+            **details,
+        )
 
-    return {
-        "schema_version": TRANSPORT_STATE_SCHEMA_VERSION,
-        "updated_at": observed_at,
-        "state": state,
-        "selected": selected,
-        "recommended": recommended,
-        "would_switch": recommended != selected,
-        "hard_failure_evidence": hard_failure,
-        "latency_candidate": latency_candidate,
-        "latency_confirmations": latency_confirmations,
-        "probes": normalized,
-        "reason": reason,
-    }
+    return _policy_state(selected, normalized, observed_at, "healthy", "selected underlay is healthy and remains sticky")

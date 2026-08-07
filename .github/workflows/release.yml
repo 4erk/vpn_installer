@@ -6,11 +6,63 @@ on:
       - '*.*.*'
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  release:
+  gate:
     runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Verify tag, package version, and changelog
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          python <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          from vpn_installer import VERSION
+
+          tag = os.environ["GITHUB_REF_NAME"]
+          if not re.fullmatch(r"\d+\.\d+\.\d+", tag):
+              raise SystemExit(f"tag is not strict SemVer: {tag}")
+          if tag != VERSION:
+              raise SystemExit(f"tag {tag} does not match vpn_installer.VERSION {VERSION}")
+
+          changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
+          headings = re.findall(r"^## \[([^]]+)\] - \d{4}-\d{2}-\d{2}$", changelog, re.MULTILINE)
+          if not headings or headings[0] != tag:
+              latest = headings[0] if headings else "missing"
+              raise SystemExit(f"latest CHANGELOG release {latest} does not match tag {tag}")
+          if headings.count(tag) != 1:
+              raise SystemExit(f"CHANGELOG must contain exactly one release heading for {tag}")
+          PY
+
+      - name: Install bounded test dependencies
+        timeout-minutes: 2
+        run: python -m pip install --disable-pip-version-check -r requirements-dev.txt
+
+      - name: Run complete release gate
+        timeout-minutes: 9
+        run: python -m vpn_installer audit all --json
+
+  release:
+    needs: gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -30,12 +82,11 @@ jobs:
           pattern = re.compile(r"^## \[" + re.escape(tag) + r"\] - .*$", re.MULTILINE)
           match = pattern.search(changelog)
           if not match:
-              body = f"Release {tag}"
-          else:
-              start = match.start()
-              next_match = re.search(r"^## \[", changelog[match.end():], re.MULTILINE)
-              end = match.end() + next_match.start() if next_match else len(changelog)
-              body = changelog[start:end].strip()
+              raise SystemExit(f"CHANGELOG section not found for {tag}")
+          start = match.start()
+          next_match = re.search(r"^## \[", changelog[match.end():], re.MULTILINE)
+          end = match.end() + next_match.start() if next_match else len(changelog)
+          body = changelog[start:end].strip()
           Path("release-body.md").write_text(body + "\n", encoding="utf-8")
           PY
 

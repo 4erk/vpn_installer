@@ -93,7 +93,10 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(payload["route"]["default_domain_resolver"]["server"], "dns-remote")
         self.assertEqual(payload["route"]["rules"][0], {"inbound": ["tun-in"], "action": "sniff", "timeout": "1s"})
         self.assertEqual(payload["route"]["rules"][1]["ip_version"], 6)
-        self.assertEqual(payload["route"]["rules"][2], {"protocol": "dns", "action": "hijack-dns"})
+        self.assertEqual(
+            payload["route"]["rules"][2],
+            {"inbound": ["tun-in"], "port": 53, "action": "hijack-dns"},
+        )
         self.assertFalse(any(rule.get("network") == "udp" and rule.get("port") == 443 for rule in payload["route"]["rules"]))
         self.assertEqual(payload["inbounds"][0]["address"], [env["CLIENT_TUN_ADDRESS_V4"]])
         self.assertNotIn("sniff", payload["inbounds"][0])
@@ -133,7 +136,7 @@ class RenderTests(unittest.TestCase):
     def test_ru_server_config_sets_default_domain_resolver(self) -> None:
         env = self.make_env()
         payload = json.loads(render.render_ru_singbox(env))
-        self.assertEqual(payload["route"]["default_domain_resolver"]["server"], "dns-ru-direct")
+        self.assertEqual(payload["route"]["default_domain_resolver"]["server"], "dns-global")
 
     def test_ru_server_config_accepts_single_primary_vless_user(self) -> None:
         env = self.make_env()
@@ -160,16 +163,57 @@ class RenderTests(unittest.TestCase):
         env = self.make_env()
         router_payload = json.loads(render.render_ru_singbox(env))
         xray_payload = json.loads(render.render_ru_xray(env))
-        self.assertEqual([inbound["listen_port"] for inbound in router_payload["inbounds"]], [2080, 443, 19091, 19092])
+        self.assertEqual([inbound["listen_port"] for inbound in router_payload["inbounds"]], [2080, 443, 19091, 19092, 19093, 19094])
         self.assertEqual(
             [inbound["tag"] for inbound in router_payload["inbounds"]],
-            ["router-in", "public-hy2-in", "interserver-overlay-wg-in", "interserver-overlay-hy2-in"],
+            [
+                "router-in",
+                "public-hy2-in",
+                "interserver-overlay-wg-in",
+                "interserver-overlay-hy2-in",
+                "interserver-probe-wg-in",
+                "interserver-probe-hy2-in",
+            ],
         )
         inbound_rules = [rule for rule in router_payload["route"]["rules"] if rule.get("inbound")]
-        self.assertEqual(inbound_rules[-1], {"inbound": ["router-in"], "action": "sniff", "timeout": "250ms"})
+        self.assertEqual(
+            next(rule for rule in inbound_rules if rule.get("action") == "sniff"),
+            {"inbound": ["router-in"], "action": "sniff", "timeout": "250ms"},
+        )
         self.assertEqual(xray_payload["inbounds"][0]["port"], 443)
         self.assertEqual(xray_payload["outbounds"][0]["protocol"], "socks")
         self.assertEqual(xray_payload["outbounds"][0]["settings"]["servers"][0], {"address": "127.0.0.1", "port": 2080})
+        foreign_overlay = xray_payload["outbounds"][1]
+        self.assertEqual(foreign_overlay["protocol"], "freedom")
+        self.assertEqual(foreign_overlay["tag"], "foreign-overlay")
+        self.assertEqual(
+            foreign_overlay["streamSettings"]["sockopt"],
+            {"interface": env["WG_INTERFACE"], "mark": int(env["APP_ROUTE_MARK"])},
+        )
+        self.assertEqual(
+            xray_payload["routing"]["rules"],
+            [
+                {"type": "field", "inboundTag": ["xray-global-dns"], "outboundTag": "foreign-overlay"},
+                {
+                    "type": "field",
+                    "network": "udp",
+                    "ip": list(render.PRIVATE_OR_FAKE_DESTINATION_CIDRS),
+                    "outboundTag": "blocked",
+                },
+                {"type": "field", "network": "udp", "outboundTag": "foreign-overlay"},
+            ],
+        )
+        self.assertEqual(xray_payload["outbounds"][2], {"protocol": "blackhole", "tag": "blocked"})
+        self.assertEqual(xray_payload["dns"]["servers"][0]["address"], f"tcp://{env['WG_FOREIGN_ADDRESS'].split('/', 1)[0]}")
+        self.assertIn(
+            {
+                "inbound": ["public-hy2-in"],
+                "port": 53,
+                "action": "route",
+                "outbound": "to-foreign",
+            },
+            router_payload["route"]["rules"],
+        )
 
     def test_ru_server_reality_sets_explicit_time_tolerance_by_default(self) -> None:
         env = self.make_env()
@@ -206,6 +250,16 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(servers["dns-ru-direct"], {"type": "local", "tag": "dns-ru-direct"})
         self.assertNotIn("detour", servers["dns-ru-direct"])
         self.assertEqual(servers["dns-global"]["detour"], "to-foreign")
+
+    def test_ru_server_does_not_suppress_or_reject_aaaa(self) -> None:
+        payload = json.loads(render.render_ru_singbox(self.make_env()))
+        self.assertFalse(
+            any(
+                "AAAA" in rule.get("query_type", []) and rule.get("action") in {"reject", "predefined"}
+                for rule in payload["dns"]["rules"]
+            )
+        )
+        self.assertEqual(payload["dns"]["strategy"], "prefer_ipv4")
 
     def test_health_service_delegates_to_agent(self) -> None:
         service = render.render_health_service()
@@ -278,7 +332,7 @@ class RenderTests(unittest.TestCase):
         env = self.make_env()
         payload = json.loads(render.render_ru_singbox(env))
         route_rules = payload["route"]["rules"]
-        self.assertIn({"ip_is_private": True, "action": "reject"}, route_rules)
+        self.assertIn({"ip_is_private": True, "action": "reject", "method": "default", "no_drop": True}, route_rules)
         self.assertFalse(any(rule.get("port") == 853 for rule in route_rules))
         client_rules = [rule for rule in route_rules if rule.get("inbound") == ["router-in"] or not rule.get("inbound")]
         self.assertFalse(any("override_address" in rule for rule in client_rules))
@@ -311,17 +365,19 @@ class RenderTests(unittest.TestCase):
         direct_domain_dns_rule = next(rule for rule in dns_rules if rule.get("action") == "route" and rule.get("server") == "dns-ru-direct" and "domain" in rule)
         self.assertIn("api.oneme.ru", direct_domain_dns_rule["domain"])
         self.assertIn("api.ok.ru", direct_domain_dns_rule["domain"])
-        self.assertIn("checkip.amazonaws.com", direct_domain_dns_rule["domain"])
-        self.assertIn("ident.me", direct_domain_dns_rule["domain"])
+        self.assertNotIn("checkip.amazonaws.com", direct_domain_dns_rule["domain"])
+        self.assertNotIn("ident.me", direct_domain_dns_rule["domain"])
         self.assertIn("ip.mail.ru", direct_domain_dns_rule["domain"])
         self.assertIn("ipv4-internet.yandex.net", direct_domain_dns_rule["domain"])
         self.assertNotIn("ipv6-internet.yandex.net", direct_domain_dns_rule["domain"])
         self.assertIn("2ip.ru", direct_domain_dns_rule["domain"])
         self.assertNotIn("www.msftconnecttest.com", direct_domain_dns_rule["domain"])
         self.assertNotIn("mtalk.google.com", direct_domain_dns_rule["domain"])
-        ipv6_probe_reject_rule = next(rule for rule in dns_rules if "ipv6.msftconnecttest.com" in rule.get("domain", []))
-        self.assertEqual(ipv6_probe_reject_rule["action"], "reject")
-        self.assertIn("ipv6-internet.yandex.net", ipv6_probe_reject_rule["domain"])
+        ipv6_probe_rule = next(rule for rule in dns_rules if "ipv6.msftconnecttest.com" in rule.get("domain", []))
+        self.assertEqual(ipv6_probe_rule["action"], "route")
+        self.assertEqual(ipv6_probe_rule["server"], "dns-global")
+        self.assertEqual(ipv6_probe_rule["strategy"], "prefer_ipv4")
+        self.assertIn("ipv6-internet.yandex.net", ipv6_probe_rule["domain"])
 
         direct_suffix_dns_rule = next(
             rule
@@ -329,22 +385,24 @@ class RenderTests(unittest.TestCase):
             if "domain_suffix" in rule and rule.get("server") == "dns-ru-direct"
         )
         self.assertNotIn(".gstatic.com", direct_suffix_dns_rule["domain_suffix"])
-        self.assertIn(".ipify.org", direct_suffix_dns_rule["domain_suffix"])
-        self.assertIn(".ipinfo.io", direct_suffix_dns_rule["domain_suffix"])
+        self.assertNotIn(".ipify.org", direct_suffix_dns_rule["domain_suffix"])
+        self.assertNotIn(".ipinfo.io", direct_suffix_dns_rule["domain_suffix"])
+        self.assertEqual(direct_suffix_dns_rule["domain_suffix"], [".gosuslugi.ru"])
 
         direct_domain_route_rule = next(rule for rule in route_rules if rule.get("outbound") == "direct-ru" and "domain" in rule)
         self.assertIn("gosuslugi.ru", direct_domain_route_rule["domain"])
-        self.assertIn("ipapi.co", direct_domain_route_rule["domain"])
+        self.assertNotIn("ipapi.co", direct_domain_route_rule["domain"])
         self.assertNotIn("www.msftncsi.com", direct_domain_route_rule["domain"])
-        self.assertIn("icanhazip.com", direct_domain_route_rule["domain"])
+        self.assertNotIn("icanhazip.com", direct_domain_route_rule["domain"])
         self.assertIn("ip.mail.ru", direct_domain_route_rule["domain"])
         self.assertIn("ipv4-internet.yandex.net", direct_domain_route_rule["domain"])
         self.assertNotIn("ipv6-internet.yandex.net", direct_domain_route_rule["domain"])
         self.assertIn("2ip.ru", direct_domain_route_rule["domain"])
 
         direct_suffix_route_rule = next(rule for rule in route_rules if rule.get("outbound") == "direct-ru" and "domain_suffix" in rule)
-        self.assertIn(".ident.me", direct_suffix_route_rule["domain_suffix"])
-        self.assertIn(".icanhazip.com", direct_suffix_route_rule["domain_suffix"])
+        self.assertNotIn(".ident.me", direct_suffix_route_rule["domain_suffix"])
+        self.assertNotIn(".icanhazip.com", direct_suffix_route_rule["domain_suffix"])
+        self.assertEqual(direct_suffix_route_rule["domain_suffix"], [".gosuslugi.ru"])
         self.assertNotIn(".gstatic.com", direct_suffix_route_rule["domain_suffix"])
 
         self.assertFalse(any(rule.get("domain") == ["api.ok.ru"] and rule.get("outbound") == "block" for rule in route_rules))
@@ -396,7 +454,7 @@ class RenderTests(unittest.TestCase):
                 self.assertTrue((client_dir / "windows-route-bypass.ps1").is_file())
                 self.assertTrue((client_dir.parent / "NEXT-STEPS.txt").is_file())
 
-    def test_cloud_init_artifacts_embed_renderer_and_pre_rendered_role_files(self) -> None:
+    def test_cloud_init_artifacts_embed_renderer_without_stale_role_files(self) -> None:
         env = self.make_env()
         with tempfile.TemporaryDirectory() as tmp:
             with patch.object(render, "OUT_DIR", Path(tmp)):
@@ -408,8 +466,7 @@ class RenderTests(unittest.TestCase):
                 cloud_dir = render.render_cloud_init_artifacts(env)
                 ru_yaml = (cloud_dir / "ru.yaml").read_text(encoding="utf-8")
                 self.assertIn("/root/vpn-stack/vpn_installer/install_support.py", ru_yaml)
-                self.assertIn("/root/vpn-stack/rendered/sing-box.json", ru_yaml)
-                self.assertIn("/root/vpn-stack/rendered/vpn-stack-agent.py", ru_yaml)
+                self.assertNotIn("/root/vpn-stack/rendered/", ru_yaml)
 
     def test_fetch_assets_fail_fast_without_cache(self) -> None:
         env = self.make_env()
@@ -640,7 +697,7 @@ class RenderTests(unittest.TestCase):
     def test_foreign_singbox_terminates_pinned_hysteria2_without_fixed_bandwidth(self) -> None:
         env = self.make_env()
         payload = json.loads(render.render_foreign_singbox(env))
-        inbound = payload["inbounds"][0]
+        inbound = next(item for item in payload["inbounds"] if item["tag"] == "interserver-hy2-in")
         self.assertEqual(inbound["type"], "hysteria2")
         self.assertEqual(inbound["tag"], "interserver-hy2-in")
         self.assertNotIn("up_mbps", inbound)
@@ -648,6 +705,14 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(inbound["obfs"]["type"], "salamander")
         self.assertTrue(inbound["tls"]["certificate"][0].startswith("-----BEGIN CERTIFICATE-----"))
         self.assertTrue(inbound["tls"]["key"][0].startswith("-----BEGIN PRIVATE KEY-----"))
+
+    def test_foreign_dns_relay_is_bound_only_to_inner_wireguard_address(self) -> None:
+        env = self.make_env()
+        payload = json.loads(render.render_foreign_singbox(env))
+        inbound = next(item for item in payload["inbounds"] if item["tag"] == "dns-relay-in")
+        self.assertEqual(inbound["listen"], render.wg_host_address(env["WG_FOREIGN_ADDRESS"]))
+        self.assertEqual(inbound["network"], "tcp")
+        self.assertEqual((inbound["override_address"], inbound["override_port"]), ("127.0.0.53", 53))
 
     def test_render_sshd_hardening_uses_expected_limits(self) -> None:
         env = self.make_env()
@@ -678,6 +743,9 @@ class RenderTests(unittest.TestCase):
         self.assertIn('ip saddr @admin_clients_ipv4 tcp dport 11333 counter accept comment "vpnstack-admin-active-client"', rules)
         self.assertIn('ip saddr { 203.0.113.10, 198.51.100.20 } tcp dport 11333 counter accept comment "vpnstack-admin-tunnel-client"', rules)
         self.assertNotIn("tcp dport 11333 counter accept\n", rules)
+        self.assertNotIn("flush ruleset", rules)
+        self.assertNotIn("table ip nat", rules)
+        self.assertNotIn("table ip6 nat", rules)
 
     def test_render_ru_nftables_opens_admin_web_for_current_vpn_clients_by_default(self) -> None:
         env = self.make_env()
@@ -717,9 +785,92 @@ class RenderTests(unittest.TestCase):
         self.assertIn(f"ip saddr {env['RU_PUBLIC_IP']} udp dport 18443 counter accept", rules)
         self.assertIn(f'iifname "{env["WG_INTERFACE"]}" oifname "eth0" tcp flags syn tcp option maxseg size set 1320 accept', rules)
         self.assertIn(f'iifname "eth0" oifname "{env["WG_INTERFACE"]}" tcp flags syn tcp option maxseg size set 1320 accept', rules)
-        self.assertIn("table ip6 nat", rules)
+        self.assertIn("table ip vpnstack_nat4", rules)
+        self.assertIn("table ip6 vpnstack_nat6", rules)
+        self.assertNotIn("table ip nat", rules)
+        self.assertNotIn("table ip6 nat", rules)
+        self.assertNotIn("flush ruleset", rules)
         self.assertIn(f'ip6 saddr {env["WG_IPV6_PREFIX"]} oifname "eth0" masquerade', rules)
         self.assertNotIn("notrack", rules)
+
+    def test_nft_apply_owns_only_vpn_stack_tables_and_is_reloadable(self) -> None:
+        rendered = render.rendered_files_for_role(self.make_env(), render.ROLE_RU)
+        script = render.render_nft_apply_script()
+        service = render.render_nftables_service()
+        self.assertIn("vpn-stack-nft-apply.sh", rendered)
+        self.assertIn("vpn-stack-nftables.service", rendered)
+        self.assertIn("inet:vpnstack", script)
+        self.assertIn("ip:vpnstack_nat4", script)
+        self.assertIn("ip6:vpnstack_nat6", script)
+        self.assertNotIn("legacy_nat_marker", script)
+        self.assertNotIn("ip:nat", script)
+        self.assertNotIn("ip6:nat", script)
+        self.assertIn("nft --check --file", script)
+        self.assertEqual(script.count("nft --file"), 1)
+        self.assertIn('mode=${1#--}', script)
+        self.assertIn('[ "$mode" != delete ]', script)
+        self.assertNotIn("flush ruleset", script)
+        self.assertNotIn("delete table ip nat", script)
+        self.assertNotIn("delete table ip6 nat", script)
+        self.assertIn("ExecStart=/bin/sh /usr/local/lib/vpn-stack/nft-apply.sh /etc/vpn-stack/nftables.conf", service)
+        self.assertIn("ExecReload=/bin/sh /usr/local/lib/vpn-stack/nft-apply.sh /etc/vpn-stack/nftables.conf", service)
+        self.assertIn("RemainAfterExit=yes", service)
+
+    @unittest.skipIf(os.name == "nt", "POSIX shell behavior is exercised on Linux CI")
+    def test_nft_apply_is_idempotent_and_uses_one_apply_transaction(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            state = root / "state"
+            legacy_marker = root / "legacy-nat-owned"
+            log = root / "nft.log"
+            config = root / "nftables.conf"
+            apply_script = root / "nft-apply.sh"
+            config.write_text(
+                "table inet vpnstack {}\n"
+                "table ip vpnstack_nat4 {}\n"
+                "table ip6 vpnstack_nat6 {}\n",
+                encoding="utf-8",
+            )
+            apply_script.write_text(render.render_nft_apply_script(), encoding="utf-8")
+            apply_script.chmod(0o755)
+            fake_nft = fake_bin / "nft"
+            fake_nft.write_text(
+                "#!/bin/sh\n"
+                "set -eu\n"
+                "echo \"$*\" >>\"$NFT_TEST_LOG\"\n"
+                "if [ \"$1\" = list ]; then grep -Fx \"$3 $4\" \"$NFT_TEST_STATE\" >/dev/null 2>&1; exit $?; fi\n"
+                "if [ \"$1\" = --check ]; then exit 0; fi\n"
+                "cat \"$2\" >>\"$NFT_TEST_LOG\"\n"
+                "printf 'inet vpnstack\\nip vpnstack_nat4\\nip6 vpnstack_nat6\\n' >\"$NFT_TEST_STATE\"\n",
+                encoding="utf-8",
+            )
+            fake_nft.chmod(0o755)
+            state.write_text("", encoding="utf-8")
+            env = {
+                **os.environ,
+                "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+                "NFT_TEST_LOG": str(log),
+                "NFT_TEST_STATE": str(state),
+                "VPNSTACK_LEGACY_NFTABLES_NAT_MARKER": str(legacy_marker),
+            }
+            subprocess.run(["sh", str(apply_script), str(config)], check=True, env=env)
+            subprocess.run(["sh", str(apply_script), str(config)], check=True, env=env)
+            with state.open("a", encoding="utf-8") as handle:
+                handle.write("ip nat\nip6 nat\n")
+            legacy_marker.touch()
+            subprocess.run(["sh", str(apply_script), str(config)], check=True, env=env)
+            calls = log.read_text(encoding="utf-8")
+            call_lines = calls.splitlines()
+            self.assertEqual(sum(line.startswith("--file ") for line in call_lines), 3, calls)
+            self.assertEqual(sum(line.startswith("--check --file ") for line in call_lines), 3, calls)
+            self.assertIn("delete table inet vpnstack", calls)
+            self.assertIn("delete table ip vpnstack_nat4", calls)
+            self.assertIn("delete table ip6 vpnstack_nat6", calls)
+            self.assertIn("delete table ip nat", calls)
+            self.assertIn("delete table ip6 nat", calls)
+            self.assertFalse(legacy_marker.exists())
 
     def test_render_sysctl_reserves_conntrack_capacity_without_timeout_tuning(self) -> None:
         for role in (render.ROLE_RU, render.ROLE_FOREIGN):
@@ -869,10 +1020,10 @@ class RenderTests(unittest.TestCase):
         self.assertNotIn("maxTimeDiff", xray_payload["inbounds"][0]["streamSettings"]["realitySettings"])
         direct_domain_rule = next(rule for rule in route_rules if rule.get("outbound") == "direct-ru" and "domain" in rule)
         self.assertIn("api.ok.ru", direct_domain_rule["domain"])
-        self.assertIn("checkip.amazonaws.com", direct_domain_rule["domain"])
+        self.assertNotIn("checkip.amazonaws.com", direct_domain_rule["domain"])
         self.assertIn("2ip.ru", direct_domain_rule["domain"])
         direct_suffix_rule = next(rule for rule in route_rules if rule.get("outbound") == "direct-ru" and "domain_suffix" in rule)
-        self.assertIn(".ipify.org", direct_suffix_rule["domain_suffix"])
+        self.assertEqual(direct_suffix_rule["domain_suffix"], [".gosuslugi.ru"])
         cidr_rule = next(rule for rule in route_rules if rule.get("outbound") == "direct-ru" and "ip_cidr" in rule)
         self.assertEqual(cidr_rule["ip_cidr"], ["203.0.113.0/24", "203.0.113.10/32"])
         dns_direct_rule = next(rule for rule in dns_rules if rule.get("action") == "route" and rule.get("server") == "dns-ru-direct" and "domain" in rule)

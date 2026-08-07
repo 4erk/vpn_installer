@@ -10,16 +10,9 @@ import urllib.parse
 from pathlib import Path
 from typing import Any
 
-from . import client_artifacts as _client_artifacts
-from .client_artifacts import (
-    client_route_excludes,
-    render_client_profile,
-    render_vless_uri,
-    render_windows_route_bypass_script,
-    render_xray_client_profile,
-)
 from .common import INSTALL_SCRIPT_PATH, OUT_DIR, ROOT_DIR, ensure_file_parent, print_header, warn, write_text
 from .config import apply_ru_direct_overlays, download_asset, parse_env_text, render_env_text, require_env, split_asset_sources
+from .dns_policy import FOREIGN_DNS_RELAY_PORT
 from .interserver_transport import (
     HY2_CLASH_API_LISTEN,
     HY2_PORT,
@@ -51,9 +44,32 @@ from .network_profile import (
     UDP_WMEM_MAX,
 )
 from .public_transport import render_public_hy2_inbound
-from .routing_policy import build_ru_routing_policy
+from .routing_policy import PRIVATE_OR_FAKE_DESTINATION_CIDRS, build_ru_routing_policy
 from .specs import DeploymentSpec
 from .system_resolver import render_resolved_dropin
+
+
+SERVER_RENDER_MODULES = (
+    "__init__.py",
+    "admin_apply.py",
+    "admin_web.py",
+    "common.py",
+    "config.py",
+    "diagnostics.py",
+    "dns_policy.py",
+    "install_support.py",
+    "interserver_transport.py",
+    "log_classifier.py",
+    "manifest.py",
+    "models.py",
+    "network_profile.py",
+    "public_transport.py",
+    "render.py",
+    "routing_policy.py",
+    "server_agent.py",
+    "specs.py",
+    "system_resolver.py",
+)
 
 
 def find_cached_asset(asset_name: str, target_path: Path) -> Path | None:
@@ -163,14 +179,27 @@ def render_ru_singbox(env: dict[str, str]) -> str:
     policy_parts = policy.singbox_parts()
     transport = build_ru_transport_topology(env)
 
+    dns_servers = [
+        {"type": "local", "tag": "dns-ru-direct"},
+        {
+            "type": "tcp",
+            "tag": "dns-global",
+            "server": wg_host_address(env["WG_FOREIGN_ADDRESS"]),
+            "server_port": FOREIGN_DNS_RELAY_PORT,
+            "detour": "to-foreign",
+        },
+    ]
+    outbounds = [*policy_parts["outbounds"], *transport["outbounds"]]
+    policy.validate_runtime_targets(
+        dns_servers=(server["tag"] for server in dns_servers),
+        outbounds=(outbound["tag"] for outbound in outbounds),
+    )
+
     payload = {
         "log": {"level": log_level, "timestamp": True},
         "dns": {
-            "strategy": "ipv4_only",
-            "servers": [
-                {"type": "local", "tag": "dns-ru-direct"},
-                {"type": "https", "tag": "dns-global", "server": env["GLOBAL_DOH_SERVER"], "server_port": 443, "path": env["GLOBAL_DOH_PATH"], "detour": "to-foreign", "tls": {"enabled": True, "server_name": env["GLOBAL_DOH_SERVER_NAME"]}},
-            ],
+            "strategy": "prefer_ipv4",
+            "servers": dns_servers,
             "rules": policy_parts["dns_rules"],
             "final": "dns-global",
             "cache_capacity": 4096,
@@ -186,10 +215,10 @@ def render_ru_singbox(env: dict[str, str]) -> str:
             *transport["inbounds"],
         ],
         "endpoints": transport["endpoints"],
-        "outbounds": [*policy_parts["outbounds"], *transport["outbounds"]],
+        "outbounds": outbounds,
         "route": {
             "auto_detect_interface": True,
-            "default_domain_resolver": {"server": "dns-ru-direct", "strategy": "ipv4_only"},
+            "default_domain_resolver": {"server": "dns-global", "strategy": "prefer_ipv4"},
             "rule_set": [
                 {"tag": "ru-geosite", "type": "local", "format": "binary", "path": f"{env['RULESET_DIR']}/geosite-ru.srs"},
                 {"tag": "ru-geoip", "type": "local", "format": "binary", "path": f"{env['RULESET_DIR']}/geoip-ru.srs"},
@@ -216,6 +245,19 @@ def render_ru_xray(env: dict[str, str]) -> str:
     }
     payload = {
         "log": {"loglevel": "warning"},
+        "dns": {
+            "servers": [
+                {
+                    "address": f"tcp://{wg_host_address(env['WG_FOREIGN_ADDRESS'])}",
+                    "port": FOREIGN_DNS_RELAY_PORT,
+                    "tag": "xray-global-dns",
+                    "queryStrategy": "UseIP",
+                    "skipFallback": True,
+                }
+            ],
+            "queryStrategy": "UseIP",
+            "disableCache": False,
+        },
         "inbounds": [
             {
                 "listen": "0.0.0.0",
@@ -242,8 +284,33 @@ def render_ru_xray(env: dict[str, str]) -> str:
                 "protocol": "socks",
                 "tag": "split-router",
                 "settings": {"servers": [{"address": "127.0.0.1", "port": env_int(env, "RU_ROUTER_LISTEN_PORT")}]},
-            }
+            },
+            {
+                "protocol": "freedom",
+                "tag": "foreign-overlay",
+                "settings": {"domainStrategy": "UseIP"},
+                "streamSettings": {
+                    "sockopt": {
+                        "interface": env["WG_INTERFACE"],
+                        "mark": env_int(env, "APP_ROUTE_MARK"),
+                    }
+                },
+            },
+            {"protocol": "blackhole", "tag": "blocked"},
         ],
+        "routing": {
+            "domainStrategy": "AsIs",
+            "rules": [
+                {"type": "field", "inboundTag": ["xray-global-dns"], "outboundTag": "foreign-overlay"},
+                {
+                    "type": "field",
+                    "network": "udp",
+                    "ip": list(PRIVATE_OR_FAKE_DESTINATION_CIDRS),
+                    "outboundTag": "blocked",
+                },
+                {"type": "field", "network": "udp", "outboundTag": "foreign-overlay"},
+            ],
+        },
     }
     return render_json(payload)
 
@@ -253,6 +320,15 @@ def render_foreign_singbox(env: dict[str, str]) -> str:
         {
             "log": {"level": "warn", "timestamp": True},
             "inbounds": [
+                {
+                    "type": "direct",
+                    "tag": "dns-relay-in",
+                    "listen": wg_host_address(env["WG_FOREIGN_ADDRESS"]),
+                    "listen_port": FOREIGN_DNS_RELAY_PORT,
+                    "network": "tcp",
+                    "override_address": "127.0.0.53",
+                    "override_port": 53,
+                },
                 {
                     "type": "hysteria2",
                     "tag": "interserver-hy2-in",
@@ -339,8 +415,6 @@ def render_foreign_wg(env: dict[str, str]) -> str:
 def render_foreign_nftables(env: dict[str, str], wan_iface: str) -> str:
     block_ru = env.get("FOREIGN_BLOCK_RU", "0").strip() == "1"
     lines = [
-        "flush ruleset",
-        "",
         "table inet vpnstack {",
     ]
     if block_ru:
@@ -374,6 +448,9 @@ def render_foreign_nftables(env: dict[str, str], wan_iface: str) -> str:
         ]
     )
     lines.append(f"    tcp dport {env['SSH_PORT']} counter accept")
+    lines.append(
+        f'    iifname "{env["WG_INTERFACE"]}" ip saddr {wg_host_address(env["WG_RU_ADDRESS"])} tcp dport {FOREIGN_DNS_RELAY_PORT} counter accept'
+    )
     forward_rules = [
         f'    iifname "{env["WG_INTERFACE"]}" ip saddr {wg_host_address(UNDERLAY_WG_RU_ADDRESS)} udp dport {env["WG_PORT"]} counter accept',
         f"    ip saddr {env['RU_PUBLIC_IP']} udp dport {env['WG_PORT']} counter accept",
@@ -404,14 +481,14 @@ def render_foreign_nftables(env: dict[str, str], wan_iface: str) -> str:
             "  }",
             "}",
             "",
-            "table ip nat {",
+            "table ip vpnstack_nat4 {",
             "  chain postrouting {",
             "    type nat hook postrouting priority srcnat;",
             f'    ip saddr {{ {wg_host_address(env["WG_RU_ADDRESS"])}, {wg_host_address(UNDERLAY_WG_RU_ADDRESS)} }} oifname "{wan_iface}" masquerade',
             "  }",
             "}",
             "",
-            "table ip6 nat {",
+            "table ip6 vpnstack_nat6 {",
             "  chain postrouting {",
             "    type nat hook postrouting priority srcnat;",
             f'    ip6 saddr {env["WG_IPV6_PREFIX"]} oifname "{wan_iface}" masquerade',
@@ -437,8 +514,6 @@ def render_ru_firewall_nftables(env: dict[str, str]) -> str:
         if value:
             admin_tunnel_sources.append(value)
     lines = [
-        "flush ruleset",
-        "",
         "table inet vpnstack {",
     ]
     if admin_enabled and admin_active_client_required:
@@ -494,6 +569,63 @@ def render_ru_firewall_nftables(env: dict[str, str]) -> str:
     return "\n".join(lines)
 
 
+def render_nft_apply_script() -> str:
+    return textwrap.dedent(
+        """
+        #!/bin/sh
+        set -eu
+
+        mode=apply
+        if [ "${1:-}" = "--check" ] || [ "${1:-}" = "--delete" ]; then
+          mode=${1#--}
+          shift
+        fi
+        config=${1:-/etc/vpn-stack/nftables.conf}
+        batch=$(mktemp)
+        trap 'rm -f "$batch"' EXIT HUP INT TERM
+
+        owned_tables="inet:vpnstack ip:vpnstack_nat4 ip6:vpnstack_nat6"
+        for owned_table in $owned_tables; do
+          family=${owned_table%%:*}
+          table=${owned_table#*:}
+          if nft list table "$family" "$table" >/dev/null 2>&1; then
+            printf 'delete table %s %s\n' "$family" "$table" >>"$batch"
+          fi
+        done
+        if [ "$mode" != delete ]; then
+          cat "$config" >>"$batch"
+        fi
+        [ -s "$batch" ] || exit 0
+        nft --check --file "$batch"
+        [ "$mode" != check ] || exit 0
+        nft --file "$batch"
+        """
+    ).strip() + "\n"
+
+
+def render_nftables_service() -> str:
+    return "\n".join(
+        [
+            "[Unit]",
+            "Description=Apply vpn-stack-owned nftables tables",
+            "DefaultDependencies=no",
+            "After=systemd-modules-load.service",
+            "Before=network-pre.target",
+            "Wants=network-pre.target",
+            "",
+            "[Service]",
+            "Type=oneshot",
+            "RemainAfterExit=yes",
+            "ExecStart=/bin/sh /usr/local/lib/vpn-stack/nft-apply.sh /etc/vpn-stack/nftables.conf",
+            "ExecReload=/bin/sh /usr/local/lib/vpn-stack/nft-apply.sh /etc/vpn-stack/nftables.conf",
+            "",
+            "[Install]",
+            "WantedBy=multi-user.target",
+            "",
+        ]
+    )
+
+
 def render_admin_web_service() -> str:
     return textwrap.dedent(
         """
@@ -524,7 +656,7 @@ def render_xray_service() -> str:
             "",
             "[Service]",
             "Type=simple",
-            "ExecStart=/usr/bin/env xray run -c /etc/xray/config.json",
+            "ExecStart=/etc/vpn-stack/current/bin/xray run -c /etc/xray/config.json",
             "Restart=on-failure",
             "RestartSec=3s",
             "LimitNOFILE=1048576",
@@ -534,6 +666,35 @@ def render_xray_service() -> str:
             "",
         ]
     )
+
+
+def render_singbox_service(role: str) -> str:
+    service_lines = [
+            "[Unit]",
+            "Description=vpn-stack sing-box router",
+            "After=network-online.target",
+            "Wants=network-online.target",
+            "",
+            "[Service]",
+            "Type=simple",
+    ]
+    if role == ROLE_RU:
+        service_lines.append(
+            "ExecStartPre=/usr/bin/python3 /etc/vpn-stack/current/admin_apply.py --base /etc/vpn-stack/current/sing-box.json --config /etc/sing-box/config.json --rules /etc/vpn-stack/admin-routing-rules.json --no-restart"
+        )
+    service_lines.extend(
+        [
+            "ExecStart=/etc/vpn-stack/current/bin/sing-box -D /var/lib/sing-box -C /etc/sing-box run",
+            "Restart=on-failure",
+            "RestartSec=3s",
+            "LimitNOFILE=1048576",
+            "",
+            "[Install]",
+            "WantedBy=multi-user.target",
+            "",
+        ]
+    )
+    return "\n".join(service_lines)
 
 
 def render_sshd_hardening(env: dict[str, str]) -> str:
@@ -674,15 +835,51 @@ def deployment_out_dir(env: dict[str, str]) -> Path:
     return OUT_DIR / env["DEPLOY_NAME"]
 
 
+def client_route_excludes(env: dict[str, str]) -> list[str]:
+    from .client_artifacts import client_route_excludes as implementation
+
+    return implementation(env)
+
+
+def render_client_profile(env: dict[str, str], auto_redirect: bool, *, android_safe: bool = False) -> str:
+    from .client_artifacts import render_client_profile as implementation
+
+    return implementation(env, auto_redirect, android_safe=android_safe)
+
+
+def render_xray_client_profile(env: dict[str, str]) -> str:
+    from .client_artifacts import render_xray_client_profile as implementation
+
+    return implementation(env)
+
+
+def render_windows_route_bypass_script(env: dict[str, str]) -> str:
+    from .client_artifacts import render_windows_route_bypass_script as implementation
+
+    return implementation(env)
+
+
+def render_vless_uri(env: dict[str, str]) -> str:
+    from .client_artifacts import render_vless_uri as implementation
+
+    return implementation(env)
+
+
 def client_artifact_paths(env: dict[str, str]) -> dict[str, Path]:
+    from . import client_artifacts as _client_artifacts
+
     return _client_artifacts.client_artifact_paths(env, out_dir=OUT_DIR)
 
 
 def render_next_steps(env: dict[str, str]) -> str:
+    from . import client_artifacts as _client_artifacts
+
     return _client_artifacts.render_next_steps(env, out_dir=OUT_DIR)
 
 
 def render_client_profiles(env: dict[str, str]) -> Path:
+    from . import client_artifacts as _client_artifacts
+
     return _client_artifacts.render_client_profiles(env, out_dir=OUT_DIR)
 
 
@@ -701,15 +898,19 @@ def rendered_files_for_role(env: dict[str, str], role: str, *, assets: dict[str,
     if role == ROLE_RU:
         files = {
             "sing-box.json": render_ru_singbox(env),
+            "sing-box.service": render_singbox_service(role),
             "xray.json": render_ru_xray(env),
             f"{env['WG_INTERFACE']}.conf": render_ru_wg(env),
             "nftables.conf": render_ru_firewall_nftables(env),
+            "vpn-stack-nft-apply.sh": render_nft_apply_script(),
+            "vpn-stack-nftables.service": render_nftables_service(),
             "sshd-vpn-stack.conf": render_sshd_hardening(env),
             "sysctl-vpn-stack.conf": render_sysctl(role),
             "modules-vpn-stack.conf": render_modules_load(),
             "apt-vpn-stack-unattended.conf": render_apt_periodic_dropin(),
             "resolved-vpn-stack.conf": render_resolved_dropin(),
             "vpn-stack-agent.py": server_script_asset("server_agent.py"),
+            "diagnostics.py": server_script_asset("diagnostics.py"),
             "log_classifier.py": server_script_asset("log_classifier.py"),
             "interserver_transport.py": server_script_asset("interserver_transport.py"),
             "network_profile.py": server_script_asset("network_profile.py"),
@@ -728,14 +929,18 @@ def rendered_files_for_role(env: dict[str, str], role: str, *, assets: dict[str,
     wan_iface = env.get("WAN_INTERFACE", "").strip() or "eth0"
     files = {
         "sing-box.json": render_foreign_singbox(env),
+        "sing-box.service": render_singbox_service(role),
         f"{env['WG_INTERFACE']}.conf": render_foreign_wg(env),
         "nftables.conf": render_foreign_nftables(env, wan_iface),
+        "vpn-stack-nft-apply.sh": render_nft_apply_script(),
+        "vpn-stack-nftables.service": render_nftables_service(),
         "sshd-vpn-stack.conf": render_sshd_hardening(env),
         "sysctl-vpn-stack.conf": render_sysctl(role),
         "modules-vpn-stack.conf": render_modules_load(),
         "apt-vpn-stack-unattended.conf": render_apt_periodic_dropin(),
         "resolved-vpn-stack.conf": render_resolved_dropin(),
         "vpn-stack-agent.py": server_script_asset("server_agent.py"),
+        "diagnostics.py": server_script_asset("diagnostics.py"),
         "log_classifier.py": server_script_asset("log_classifier.py"),
         "interserver_transport.py": server_script_asset("interserver_transport.py"),
         "network_profile.py": server_script_asset("network_profile.py"),
@@ -744,7 +949,13 @@ def rendered_files_for_role(env: dict[str, str], role: str, *, assets: dict[str,
     }
     if journal_limits_enabled(env):
         files["journald-vpn-stack.conf"] = render_journald_dropin(env)
-    files["render-manifest.json"] = render_manifest(render_env_text(env), role, files, assets=assets)
+    files["render-manifest.json"] = render_manifest(
+        render_env_text(env),
+        role,
+        files,
+        assets=assets,
+        foreign_block_ru=env.get("FOREIGN_BLOCK_RU", "0").strip() == "1",
+    )
     return files
 
 
@@ -758,7 +969,9 @@ def copy_python_package(target_root: Path) -> Path:
     destination = target_root / "vpn_installer"
     if destination.exists():
         shutil.rmtree(destination)
-    shutil.copytree(ROOT_DIR / "vpn_installer", destination, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    destination.mkdir(parents=True)
+    for name in SERVER_RENDER_MODULES:
+        shutil.copy2(ROOT_DIR / "vpn_installer" / name, destination / name)
     return destination
 
 
@@ -816,8 +1029,6 @@ def render_cloud_init_role(role: str, env_text: str, assets_dir: Path) -> str:
         write_text(cloud_root / "install.sh", INSTALL_SCRIPT_PATH.read_text(encoding="utf-8"))
         write_text(cloud_root / "deployment.env", env_text)
         copy_python_package(cloud_root)
-        assets = {path.name: path for path in assets_dir.glob("*") if path.is_file()}
-        write_role_rendered_files(env=parse_env_text(env_text), role=role, output_dir=cloud_root / "rendered", assets=assets)
         lines = [
             "#cloud-config",
             "package_update: true",
@@ -855,7 +1066,7 @@ def create_tarball(source_dir: Path, destination_tarball: Path) -> None:
     ensure_file_parent(destination_tarball)
     with tarfile.open(destination_tarball, "w:gz") as archive:
         for item in sorted(source_dir.rglob("*")):
-            archive.add(item, arcname=str(item.relative_to(source_dir)))
+            archive.add(item, arcname=str(item.relative_to(source_dir)), recursive=False)
 
 
 def package_bundle(env: dict[str, str]) -> Path:
@@ -877,8 +1088,6 @@ def package_bundle(env: dict[str, str]) -> Path:
     shutil.copy2(server_dir / "foreign.env", foreign_bundle / "deployment.env")
     copy_python_package(ru_bundle)
     copy_python_package(foreign_bundle)
-    shutil.copytree(preview_dir_for_role(out_dir / "preview", ROLE_RU), ru_bundle / "rendered", dirs_exist_ok=True)
-    shutil.copytree(preview_dir_for_role(out_dir / "preview", ROLE_FOREIGN), foreign_bundle / "rendered", dirs_exist_ok=True)
     for asset_name in ("geosite-ru.srs", "geoip-ru.srs"):
         copy_asset_if_present(assets_dir / asset_name, ru_bundle / "assets" / asset_name)
     if env.get("FOREIGN_BLOCK_RU", "0") == "1":

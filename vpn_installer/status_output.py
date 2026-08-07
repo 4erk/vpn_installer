@@ -1,28 +1,71 @@
 from __future__ import annotations
 
-from .diagnostics import DiagnosticsSnapshot
+from .diagnostics import LOG_WINDOW_KEYS, CollectorState, DiagnosticsSnapshot, LogWindowSnapshot
+
+
+def _collector_label(state: CollectorState) -> str:
+    details: list[str] = []
+    if state.observed_at:
+        details.append(f"observed={state.observed_at}")
+    if state.message:
+        details.append(state.message)
+    return state.status + (f" ({'; '.join(details)})" if details else "")
+
+
+def _format_log_window(name: str, window: LogWindowSnapshot) -> list[str]:
+    boundaries = []
+    if window.since:
+        boundaries.append(f"since={window.since}")
+    if window.until:
+        boundaries.append(f"until={window.until}")
+    prefix = f"log window {name}: status={_collector_label(window.collector)}"
+    if boundaries:
+        prefix += ", " + ", ".join(boundaries)
+    if window.counts is None:
+        lines = [prefix + ", counts=unavailable"]
+    else:
+        nonzero = [f"{bucket}={count}" for bucket, count in window.counts.items() if isinstance(count, int) and count > 0]
+        unknown = [bucket for bucket, count in window.counts.items() if count is None]
+        if nonzero or unknown:
+            rendered = [*nonzero, *(f"{bucket}=?" for bucket in unknown)]
+            lines = [prefix + ", counts=" + ", ".join(rendered)]
+        else:
+            lines = [prefix + ", counts=no classified events"]
+    if window.top_destinations:
+        destinations = ", ".join(
+            f"{bucket}:{destination}={count}"
+            for bucket, ranked in sorted(window.top_destinations.items())
+            for destination, count in ranked.items()
+        )
+        if destinations:
+            lines.append(f"top destinations [{name}]: {destinations}")
+    return lines
 
 
 def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
     lines = [
+        f"snapshot schema: {snapshot.schema_version}",
         f"role: {snapshot.role or '-'}",
         f"drift: {snapshot.drift}",
         f"verdict: {snapshot.verdict}",
-        f"current log window: since={snapshot.fresh_since or '-'}, duration={snapshot.fresh_window_minutes}m",
+        f"collector status: {snapshot.collector_status}",
+        "collectors: " + ", ".join(
+            f"{name}={_collector_label(snapshot.collectors[name])}" for name in snapshot.collectors
+        ),
     ]
-    if snapshot.historical_window_hours:
-        lines.append(f"historical window: {snapshot.historical_window_hours}h")
     if snapshot.verdict == "inconclusive" and snapshot.route_probes.get("profile") == "none":
         lines.append("live probes: not run by read-only status; use vpn verify live for route acceptance")
-    if snapshot.log_buckets:
-        fresh = ", ".join(f"{key}={value}" for key, value in sorted(snapshot.log_buckets.items()))
-        lines.append(f"log buckets: {fresh}")
-    if snapshot.historical_log_buckets:
-        historical = ", ".join(f"{key}={value}" for key, value in sorted(snapshot.historical_log_buckets.items()))
-        lines.append(f"historical log buckets: {historical}")
-    if snapshot.top_destinations:
-        destinations = ", ".join(f"{key}: {value}" for key, value in sorted(snapshot.top_destinations.items()))
-        lines.append(f"top destinations: {destinations}")
+    for window_name in LOG_WINDOW_KEYS:
+        lines.extend(_format_log_window(window_name, snapshot.log_windows[window_name]))
+    if snapshot.migration:
+        warnings = snapshot.migration.get("warnings", [])
+        details = [
+            f"source_schema={snapshot.migration.get('source_schema_version', '-')}",
+            f"boundary={snapshot.migration.get('boundary', '-')}",
+        ]
+        if warnings:
+            details.append("warnings=" + " | ".join(str(value) for value in warnings))
+        lines.append("migration: " + ", ".join(details))
     if snapshot.runtime_overrides:
         overrides = ", ".join(f"{key}={value}" for key, value in sorted(snapshot.runtime_overrides.items()) if value)
         if overrides:
@@ -47,14 +90,16 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
             lines.append("public front lifetime loss sources: " + ",".join(str(source) for source in loss_sources))
         lines.append(
             "public TCP sockets: "
-            f"active={snapshot.front.get('active_connections', 0)}, "
-            f"closing={snapshot.front.get('closing_connections', 0)}"
+            f"active={snapshot.front.get('active_connections', 'unknown')}, "
+            f"closing={snapshot.front.get('closing_connections', 'unknown')}"
         )
         closing_sources = snapshot.front.get("closing_churn_sources", [])
         if closing_sources:
             lines.append("public front closing churn sources: " + ",".join(str(source) for source in closing_sources))
     tcp_adaptation = snapshot.network.get("tcp_adaptation", {})
     if tcp_adaptation:
+        metrics_state = tcp_adaptation.get("metrics_save_disabled")
+        metrics_label = "disabled" if metrics_state == 1 else "enabled" if metrics_state == 0 else "unknown"
         lines.append(
             "tcp adaptation: "
             f"cc={tcp_adaptation.get('congestion_control', '-')}, "
@@ -62,7 +107,7 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
             f"(limit={tcp_adaptation.get('qdisc_limit', '-')},flow_limit={tcp_adaptation.get('qdisc_flow_limit', '-')},"
             f"drops={tcp_adaptation.get('qdisc_drops', '-')},flow_limit_drops={tcp_adaptation.get('qdisc_flow_limit_drops', '-')}), "
             f"mtu_probing={tcp_adaptation.get('mtu_probing', '-')}, mtu_floor={tcp_adaptation.get('mtu_probe_floor', '-')}, "
-            f"metrics_cache={'disabled' if tcp_adaptation.get('metrics_save_disabled') == 1 else 'enabled'}, "
+            f"metrics_cache={metrics_label}, "
             f"probe_interval_s={tcp_adaptation.get('probe_interval_seconds', '-')}, "
             f"udp_rmem={tcp_adaptation.get('udp_rmem_default', '-')}/{tcp_adaptation.get('udp_rmem_max', '-')}, "
             f"udp_wmem={tcp_adaptation.get('udp_wmem_default', '-')}/{tcp_adaptation.get('udp_wmem_max', '-')}"
@@ -124,9 +169,9 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
     if public_client:
         lines.append(
             "public QUIC transport: "
-            f"configured={public_client.get('configured', False)}, "
-            f"listener={public_client.get('listening', False)}, "
-            f"firewall={public_client.get('firewall', False)}, "
+            f"configured={public_client.get('configured', 'unknown')}, "
+            f"listener={public_client.get('listening', 'unknown')}, "
+            f"firewall={public_client.get('firewall', 'unknown')}, "
             f"port={public_client.get('port', '-')}"
         )
     health_state = snapshot.network.get("health_state", "")
@@ -181,8 +226,8 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
         lines.append(
             "last front degradation: "
             f"at={front_degradation.get('observed_at', '-')}, sources={sources}, "
-            f"retrans={aggregate.get('bytes_retrans', 0)}/{aggregate.get('bytes_sent', 0)} "
-            f"({aggregate.get('retransmit_ratio_pct', 0)}%)"
+            f"retrans={aggregate.get('bytes_retrans', 'unknown')}/{aggregate.get('bytes_sent', 'unknown')} "
+            f"({aggregate.get('retransmit_ratio_pct', 'unknown')}%)"
         )
     front_interval = snapshot.network.get("recent_front_interval", {})
     if front_interval:
@@ -191,9 +236,9 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
         lines.append(
             "front interval: "
             f"at={front_interval.get('observed_at', '-')}, observation={front_interval.get('observation', '-')}, "
-            f"flows={front_interval.get('sampled_flows', 0)}, sources={sources}, "
-            f"retrans={aggregate.get('bytes_retrans', 0)}/{aggregate.get('activity_bytes', 0)} "
-            f"({aggregate.get('retransmit_ratio_pct', 0)}%)"
+            f"flows={front_interval.get('sampled_flows', 'unknown')}, sources={sources}, "
+            f"retrans={aggregate.get('bytes_retrans', 'unknown')}/{aggregate.get('activity_bytes', 'unknown')} "
+            f"({aggregate.get('retransmit_ratio_pct', 'unknown')}%)"
         )
     if snapshot.reasons:
         lines.append("reasons: " + "; ".join(snapshot.reasons))

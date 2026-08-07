@@ -29,8 +29,32 @@ class RoutingPolicyTests(unittest.TestCase):
         self.assertEqual(set(outbounds), {"direct-ru", "to-foreign"})
         self.assertEqual(outbounds["to-foreign"]["type"], "direct")
         self.assertEqual(outbounds["to-foreign"]["bind_interface"], "wg0")
-        self.assertEqual(outbounds["to-foreign"]["domain_resolver"]["server"], "dns-ru-direct")
+        self.assertEqual(outbounds["to-foreign"]["domain_resolver"]["server"], "dns-global")
         self.assertFalse(any("connect_timeout" in outbound for outbound in outbounds.values()))
+
+    def test_policy_metadata_compiles_resolvers_outbounds_and_blocked_fallback(self) -> None:
+        policy = build_ru_routing_policy(self.make_env())
+        global_foreign = policy.classes["global_foreign"]
+        self.assertEqual(global_foreign.fallback, "blocked")
+        self.assertEqual(global_foreign.dns_rules[0]["server"], global_foreign.resolver)
+        self.assertEqual(global_foreign.pre_route_rules[0]["server"], global_foreign.resolver)
+        self.assertEqual(global_foreign.route_rules[0]["outbound"], global_foreign.outbound)
+
+        dns_rule = next(rule for rule in policy.dns_rules if "mtalk.google.com" in rule.get("domain", []))
+        resolve_index = next(
+            i
+            for i, rule in enumerate(policy.route_rules)
+            if rule.get("action") == "resolve" and "mtalk.google.com" in rule.get("domain", [])
+        )
+        route_index = next(
+            i
+            for i, rule in enumerate(policy.route_rules)
+            if rule.get("action") == "route" and "mtalk.google.com" in rule.get("domain", [])
+        )
+        self.assertEqual(dns_rule["server"], global_foreign.resolver)
+        self.assertEqual(policy.route_rules[resolve_index]["server"], global_foreign.resolver)
+        self.assertEqual(policy.route_rules[route_index]["outbound"], global_foreign.outbound)
+        self.assertTrue(any(rule.get("ip_is_private") is True for rule in policy.route_rules[resolve_index:route_index]))
 
     def test_domain_policy_finishes_before_literal_policy(self) -> None:
         rules = build_ru_routing_policy(self.make_env()).route_rules
@@ -82,20 +106,30 @@ class RoutingPolicyTests(unittest.TestCase):
 
     def test_client_dns_and_routed_domains_have_private_guards(self) -> None:
         rules = build_ru_routing_policy(self.make_env()).dns_rules
-        self.assertIn({"ip_is_private": True, "action": "reject", "server": "dns-global"}, rules)
+        self.assertIn({"ip_is_private": True, "server": "dns-global", "action": "reject", "method": "default", "no_drop": True}, rules)
         route_rules = build_ru_routing_policy(self.make_env()).route_rules
         self.assertTrue(any(rule.get("server") == "dns-ru-direct" and rule.get("action") == "resolve" for rule in route_rules))
         self.assertTrue(any(rule.get("server") == "dns-global" and rule.get("action") == "resolve" for rule in route_rules))
-        self.assertIn({"ip_is_private": True, "action": "reject"}, route_rules)
+        self.assertIn({"ip_is_private": True, "action": "reject", "method": "default", "no_drop": True}, route_rules)
 
-    def test_ipv6_only_probe_cannot_leak_from_legacy_direct_domains(self) -> None:
+    def test_ipv6_probe_uses_global_route_even_when_legacy_direct_env_mentions_it(self) -> None:
         env = self.make_env()
         env["RU_FORCE_DIRECT_DOMAIN"] += ",ipv6-internet.yandex.net"
         policy = build_ru_routing_policy(env)
-        rejected = next(rule for rule in policy.dns_rules if rule.get("action") == "reject" and "domain" in rule)
-        routed_domains = [domain for rule in policy.dns_rules if rule.get("action") == "route" for domain in rule.get("domain", [])]
-        self.assertIn("ipv6-internet.yandex.net", rejected["domain"])
-        self.assertNotIn("ipv6-internet.yandex.net", routed_domains)
+        global_dns = next(
+            rule
+            for rule in policy.dns_rules
+            if rule.get("server") == "dns-global" and "ipv6-internet.yandex.net" in rule.get("domain", [])
+        )
+        direct_domains = {
+            domain
+            for rule in policy.route_rules
+            if rule.get("outbound") == "direct-ru"
+            for domain in rule.get("domain", [])
+        }
+        self.assertEqual(global_dns["action"], "route")
+        self.assertEqual(global_dns["strategy"], "prefer_ipv4")
+        self.assertNotIn("ipv6-internet.yandex.net", direct_domains)
 
     def test_global_services_cannot_leak_from_legacy_direct_policy(self) -> None:
         env = self.make_env()
@@ -123,7 +157,7 @@ class RoutingPolicyTests(unittest.TestCase):
     def test_private_addresses_including_tun_dot_reject_without_dns_override(self) -> None:
         rules = build_ru_routing_policy(self.make_env()).route_rules
         private_index = next(i for i, rule in enumerate(rules) if rule.get("ip_is_private") is True)
-        self.assertEqual(rules[private_index], {"ip_is_private": True, "action": "reject"})
+        self.assertEqual(rules[private_index], {"ip_is_private": True, "action": "reject", "method": "default", "no_drop": True})
         self.assertFalse(any(rule.get("port") == 853 for rule in rules))
         self.assertFalse(any("override_address" in rule for rule in rules))
 

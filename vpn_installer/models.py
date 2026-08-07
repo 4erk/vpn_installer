@@ -39,7 +39,7 @@ ENV_SECTIONS = [
     ("# WireGuard between RU and foreign", ["WG_INTERFACE", "WG_PORT", "WG_MTU", "WG_ROUTE_TABLE", "APP_ROUTE_MARK", "WG_TUNNEL_FWMARK", "WG_RU_ADDRESS", "WG_FOREIGN_ADDRESS", "WG_RU_ADDRESS_V6", "WG_FOREIGN_ADDRESS_V6", "WG_IPV6_PREFIX", "WG_RU_PRIVATE_KEY", "WG_RU_PUBLIC_KEY", "WG_FOREIGN_PRIVATE_KEY", "WG_FOREIGN_PUBLIC_KEY", "WG_PRESHARED_KEY"]),
     ("# Generated identity for the resilient interserver transport", ["INTERSERVER_HY2_CERTIFICATE_B64", "INTERSERVER_HY2_PRIVATE_KEY_B64", "INTERSERVER_HY2_PUBLIC_KEY_SHA256"]),
     ("# DNS policy", ["GLOBAL_DOH_SERVER", "GLOBAL_DOH_SERVER_NAME", "GLOBAL_DOH_PATH"]),
-    ("# Forced policy rules for the Russian server: Russian APIs, reachability checks, IP-check services", ["RU_FORCE_DIRECT_DOMAIN", "RU_FORCE_DIRECT_DOMAIN_SUFFIX", "RU_FORCE_DIRECT_IP_CIDR", "RU_BLOCK_IP_CIDR"]),
+    ("# Explicit Russian routing policy; diagnostics must not add production route exceptions", ["RU_FORCE_DIRECT_DOMAIN", "RU_FORCE_DIRECT_DOMAIN_SUFFIX", "RU_FORCE_DIRECT_IP_CIDR", "RU_BLOCK_IP_CIDR"]),
     ("# Rule assets for the RU server. Several source URLs can be listed through spaces.", ["RULESET_DIR", "RU_GEOSITE_URL", "RU_GEOIP_URL"]),
     ("# Optional RU egress deny list on the foreign server. Several source URLs can be listed through spaces.", ["FOREIGN_BLOCK_RU", "FOREIGN_RU_IPV4_LIST_URL", "FOREIGN_RU_IPV6_LIST_URL"]),
     (
@@ -95,8 +95,6 @@ REQUIRED_ENV_VARS = [
 ]
 
 DEFAULT_ASSET_TIMEOUT = 30
-X25519_P = 2**255 - 19
-X25519_A24 = 121665
 
 
 @dataclass

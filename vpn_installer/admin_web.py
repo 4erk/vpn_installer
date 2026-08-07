@@ -19,6 +19,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+sys.dont_write_bytecode = True
+
 try:
     from . import admin_apply
 except ImportError:  # pragma: no cover - standalone server-side execution
@@ -27,7 +29,6 @@ except ImportError:  # pragma: no cover - standalone server-side execution
 ENV_PATH = Path("/etc/vpn-stack/deployment.env")
 AUTH_PATH = Path("/etc/vpn-stack/admin-auth.json")
 RULES_PATH = admin_apply.RULES_PATH
-APPLY_SCRIPT = Path("/usr/local/lib/vpn-stack/admin_apply.py")
 PBKDF2_ROUNDS = 200_000
 CSRF_TOKEN = secrets.token_urlsafe(32)
 CLIENT_IP_CACHE: dict[str, Any] = {"expires_at": 0.0, "listen_port": None, "ips": set()}
@@ -336,55 +337,30 @@ def client_ip_allowed(client_ip: str, env: dict[str, str]) -> bool:
 
 
 def load_rules() -> list[dict[str, Any]]:
+    return admin_apply.load_rules(RULES_PATH)
+
+
+def commit_rules(new_rules: list[dict[str, Any]], old_rules: list[dict[str, Any]]) -> tuple[bool, str]:
     try:
-        return admin_apply.load_rules(RULES_PATH)
-    except Exception:
-        return []
-
-
-def save_rules(rules: list[dict[str, Any]]) -> None:
-    write_json_atomic(RULES_PATH, {"rules": rules, "updated_at": int(time.time())})
-
-
-def apply_rules() -> tuple[bool, str]:
-    try:
-        if APPLY_SCRIPT.exists():
-            subprocess.run([sys.executable, str(APPLY_SCRIPT), "--no-restart"], check=True, capture_output=True, text=True, timeout=30)
-        else:
-            admin_apply.apply_rules(restart=False)
-        return True, "Правила проверены и записаны."
-    except subprocess.CalledProcessError as exc:
-        detail = (exc.stderr or exc.stdout or str(exc)).strip()
-        return False, detail
+        admin_apply.commit_rules(
+            new_rules,
+            rules_path=RULES_PATH,
+            restart=True,
+            expected_generation=admin_apply.rules_generation(old_rules),
+        )
+        return True, "Правила проверены, применены и сервис подтверждён."
+    except admin_apply.RulesConflictError:
+        raise
     except Exception as exc:
         return False, str(exc)
 
 
-def schedule_singbox_restart(delay_seconds: float = 0.35) -> None:
-    def restart() -> None:
-        time.sleep(delay_seconds)
-        try:
-            subprocess.run(["systemctl", "restart", "sing-box"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
-        except Exception:
-            pass
-
-    threading.Thread(target=restart, daemon=True).start()
-
-
-def commit_rules(new_rules: list[dict[str, Any]], old_rules: list[dict[str, Any]]) -> tuple[bool, str]:
-    save_rules(new_rules)
-    ok, message = apply_rules()
-    if not ok:
-        save_rules(old_rules)
-        return False, message
-    schedule_singbox_restart()
-    return True, message
-
-
 def routes_payload() -> dict[str, Any]:
     env = load_env()
+    rules = load_rules()
     return {
-        "rules": load_rules(),
+        "rules": rules,
+        "generation": admin_apply.rules_generation(rules),
         "config": {
             "foreign_block_ru": env.get("FOREIGN_BLOCK_RU", "0").strip() == "1",
         },
@@ -754,7 +730,10 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/settings":
             self.send_html(settings_body())
         elif path == "/api/routes":
-            self.send_json(routes_payload())
+            try:
+                self.send_json(routes_payload())
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
         else:
             self.send_error(HTTPStatus.NOT_FOUND)
 
@@ -775,6 +754,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not ok:
                     raise RuntimeError(message)
                 self.send_json({**routes_payload(), "message": "Правило сохранено и применено."})
+            except admin_apply.RulesConflictError as exc:
+                self.send_json({"error": str(exc)}, HTTPStatus.CONFLICT)
             except Exception as exc:
                 self.send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
         elif path == "/settings":
@@ -813,9 +794,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         rule_id = urllib.parse.unquote(path[len(prefix):])
-        old_rules = load_rules()
-        matched = False
         try:
+            old_rules = load_rules()
+            matched = False
             patch = self.read_json()
             new_rules: list[dict[str, Any]] = []
             for rule in old_rules:
@@ -835,6 +816,8 @@ class Handler(BaseHTTPRequestHandler):
             if not ok:
                 raise RuntimeError(message)
             self.send_json({**routes_payload(), "message": "Правило обновлено и применено."})
+        except admin_apply.RulesConflictError as exc:
+            self.send_json({"error": str(exc)}, HTTPStatus.CONFLICT)
         except Exception as exc:
             self.send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
 
@@ -849,16 +832,21 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         rule_id = urllib.parse.unquote(path[len(prefix):])
-        old_rules = load_rules()
-        new_rules = [rule for rule in old_rules if rule.get("id") != rule_id]
-        if len(new_rules) == len(old_rules):
-            self.send_json({"error": "Правило не найдено."}, HTTPStatus.NOT_FOUND)
-            return
-        ok, message = commit_rules(new_rules, old_rules)
-        if not ok:
-            self.send_json({"error": message}, HTTPStatus.BAD_REQUEST)
-            return
-        self.send_json({**routes_payload(), "message": "Правило удалено и конфиг применён."})
+        try:
+            old_rules = load_rules()
+            new_rules = [rule for rule in old_rules if rule.get("id") != rule_id]
+            if len(new_rules) == len(old_rules):
+                self.send_json({"error": "Правило не найдено."}, HTTPStatus.NOT_FOUND)
+                return
+            ok, message = commit_rules(new_rules, old_rules)
+            if not ok:
+                self.send_json({"error": message}, HTTPStatus.BAD_REQUEST)
+                return
+            self.send_json({**routes_payload(), "message": "Правило удалено и конфиг применён."})
+        except admin_apply.RulesConflictError as exc:
+            self.send_json({"error": str(exc)}, HTTPStatus.CONFLICT)
+        except Exception as exc:
+            self.send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
 
 
 class StealthAdminServer(ThreadingHTTPServer):

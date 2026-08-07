@@ -11,14 +11,12 @@ import uuid
 from pathlib import Path
 
 from .common import DEPLOYMENTS_DIR, env_line, fail, parse_env_value, read_text, sanitize_name, write_text
-from .interserver_transport import generate_transport_identity, validate_transport_identity
+from .interserver_transport import generate_transport_identity, generate_x25519_pair, validate_transport_identity
 from .models import (
     ALLOW_EMPTY_OVERRIDE,
     DEFAULT_ASSET_TIMEOUT,
     ENV_SECTIONS,
     REQUIRED_ENV_VARS,
-    X25519_A24,
-    X25519_P,
     AppError,
 )
 
@@ -130,8 +128,22 @@ RU_DIRECT_OVERLAY_FILES = {
 }
 
 RETIRED_DIRECT_POLICY_VALUES = {
-    "RU_FORCE_DIRECT_DOMAIN": frozenset({"mtalk.google.com"}),
-    "RU_FORCE_DIRECT_DOMAIN_SUFFIX": frozenset({".gstatic.com"}),
+    "RU_FORCE_DIRECT_DOMAIN": frozenset(
+        {
+            "mtalk.google.com",
+            "ifconfig.me",
+            "ifconfig.co",
+            "checkip.amazonaws.com",
+            "ipapi.co",
+            "ipinfo.io",
+            "ident.me",
+            "tnedi.me",
+            "icanhazip.com",
+        }
+    ),
+    "RU_FORCE_DIRECT_DOMAIN_SUFFIX": frozenset(
+        {".gstatic.com", ".ipify.org", ".ipinfo.io", ".ident.me", ".tnedi.me", ".icanhazip.com"}
+    ),
 }
 
 TRANSPORT_IDENTITY_KEYS = (
@@ -180,49 +192,6 @@ def render_env_text(env: dict[str, str]) -> str:
         for key in extra_keys:
             lines.append(env_line(key, env[key]))
     return "\n".join(lines) + "\n"
-
-
-def clamp_x25519_private(private_key: bytes) -> bytes:
-    data = bytearray(private_key)
-    data[0] &= 248
-    data[31] &= 127
-    data[31] |= 64
-    return bytes(data)
-
-
-def x25519_public_from_private(private_key: bytes) -> bytes:
-    scalar = int.from_bytes(clamp_x25519_private(private_key), "little")
-    x1, x2, z2, x3, z3, swap = 9, 1, 0, 9, 1, 0
-    for bit in range(254, -1, -1):
-        current = (scalar >> bit) & 1
-        swap ^= current
-        if swap:
-            x2, x3 = x3, x2
-            z2, z3 = z3, z2
-        swap = current
-        a = (x2 + z2) % X25519_P
-        aa = (a * a) % X25519_P
-        b = (x2 - z2) % X25519_P
-        bb = (b * b) % X25519_P
-        e = (aa - bb) % X25519_P
-        c = (x3 + z3) % X25519_P
-        d = (x3 - z3) % X25519_P
-        da = (d * a) % X25519_P
-        cb = (c * b) % X25519_P
-        x3 = pow((da + cb) % X25519_P, 2, X25519_P)
-        z3 = (x1 * pow((da - cb) % X25519_P, 2, X25519_P)) % X25519_P
-        x2 = (aa * bb) % X25519_P
-        z2 = (e * ((aa + (X25519_A24 * e)) % X25519_P)) % X25519_P
-    if swap:
-        x2, x3 = x3, x2
-        z2, z3 = z3, z2
-    result = (x2 * pow(z2, X25519_P - 2, X25519_P)) % X25519_P
-    return result.to_bytes(32, "little")
-
-
-def generate_x25519_pair() -> tuple[bytes, bytes]:
-    private_key = clamp_x25519_private(os.urandom(32))
-    return private_key, x25519_public_from_private(private_key)
 
 
 def generate_default_env(
@@ -282,8 +251,8 @@ def generate_default_env(
         "GLOBAL_DOH_SERVER": "8.8.8.8",
         "GLOBAL_DOH_SERVER_NAME": "dns.google",
         "GLOBAL_DOH_PATH": "/dns-query",
-        "RU_FORCE_DIRECT_DOMAIN": "api.oneme.ru,calls.okcdn.ru,gosuslugi.ru,api.ok.ru,ifconfig.me,ifconfig.co,checkip.amazonaws.com,ipapi.co,ipinfo.io,ident.me,tnedi.me,icanhazip.com,ip.mail.ru,ipv4-internet.yandex.net,2ip.ru",
-        "RU_FORCE_DIRECT_DOMAIN_SUFFIX": ".gosuslugi.ru,.ipify.org,.ipinfo.io,.ident.me,.tnedi.me,.icanhazip.com",
+        "RU_FORCE_DIRECT_DOMAIN": "api.oneme.ru,calls.okcdn.ru,gosuslugi.ru,api.ok.ru,ip.mail.ru,ipv4-internet.yandex.net,2ip.ru",
+        "RU_FORCE_DIRECT_DOMAIN_SUFFIX": ".gosuslugi.ru",
         "RU_FORCE_DIRECT_IP_CIDR": "",
         "RU_BLOCK_IP_CIDR": "",
         "RULESET_DIR": "/var/lib/vpn-stack/rules",

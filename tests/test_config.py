@@ -219,18 +219,19 @@ class ConfigTests(unittest.TestCase):
         self.assertNotIn("SUBSCRIPTION_PORT", env)
         self.assertNotIn("SUBSCRIPTION_TOKEN", env)
 
-    def test_default_ru_forced_direct_domains_include_ip_check_services(self) -> None:
+    def test_default_ru_forced_direct_domains_do_not_capture_global_ip_checks(self) -> None:
         env = config.generate_default_env("sample")
         self.assertIn("api.ok.ru", env["RU_FORCE_DIRECT_DOMAIN"])
-        self.assertIn("checkip.amazonaws.com", env["RU_FORCE_DIRECT_DOMAIN"])
-        self.assertIn("ident.me", env["RU_FORCE_DIRECT_DOMAIN"])
+        self.assertNotIn("checkip.amazonaws.com", env["RU_FORCE_DIRECT_DOMAIN"])
+        self.assertNotIn("ident.me", env["RU_FORCE_DIRECT_DOMAIN"])
         self.assertIn("ip.mail.ru", env["RU_FORCE_DIRECT_DOMAIN"])
         self.assertIn("ipv4-internet.yandex.net", env["RU_FORCE_DIRECT_DOMAIN"])
         self.assertNotIn("ipv6-internet.yandex.net", env["RU_FORCE_DIRECT_DOMAIN"])
         self.assertIn("2ip.ru", env["RU_FORCE_DIRECT_DOMAIN"])
         self.assertNotIn("mtalk.google.com", env["RU_FORCE_DIRECT_DOMAIN"])
-        self.assertIn(".ipify.org", env["RU_FORCE_DIRECT_DOMAIN_SUFFIX"])
-        self.assertIn(".ipinfo.io", env["RU_FORCE_DIRECT_DOMAIN_SUFFIX"])
+        self.assertNotIn(".ipify.org", env["RU_FORCE_DIRECT_DOMAIN_SUFFIX"])
+        self.assertNotIn(".ipinfo.io", env["RU_FORCE_DIRECT_DOMAIN_SUFFIX"])
+        self.assertEqual(env["RU_FORCE_DIRECT_DOMAIN_SUFFIX"], ".gosuslugi.ru")
         self.assertNotIn(".gstatic.com", env["RU_FORCE_DIRECT_DOMAIN_SUFFIX"])
         self.assertEqual(env["RU_BLOCK_IP_CIDR"], "")
         self.assertNotIn("RU_BLOCK_QUIC", env)
@@ -264,7 +265,7 @@ class ConfigTests(unittest.TestCase):
     def test_merge_env_with_defaults_appends_new_direct_domain_defaults(self) -> None:
         merged = config.merge_env_with_defaults(
             {
-                "RU_FORCE_DIRECT_DOMAIN": "api.oneme.ru,legacy.example,mtalk.google.com",
+                "RU_FORCE_DIRECT_DOMAIN": "api.oneme.ru,legacy.example,mtalk.google.com,checkip.amazonaws.com",
                 "RU_FORCE_DIRECT_DOMAIN_SUFFIX": ".legacy.example,.ipify.org,.gstatic.com",
             },
             "sample",
@@ -277,9 +278,9 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("ip.mail.ru", domains)
         self.assertEqual(domains.count("api.oneme.ru"), 1)
         self.assertNotIn("mtalk.google.com", domains)
+        self.assertNotIn("checkip.amazonaws.com", domains)
         self.assertIn(".legacy.example", suffixes)
-        self.assertIn(".ipify.org", suffixes)
-        self.assertEqual(suffixes.count(".ipify.org"), 1)
+        self.assertNotIn(".ipify.org", suffixes)
         self.assertNotIn(".gstatic.com", suffixes)
 
     def test_merge_env_with_defaults_removes_legacy_network_defaults(self) -> None:
