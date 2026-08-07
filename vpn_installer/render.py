@@ -45,7 +45,7 @@ from .network_profile import (
 )
 from .public_transport import render_public_hy2_inbound
 from .routing_policy import PRIVATE_OR_FAKE_DESTINATION_CIDRS, build_ru_routing_policy
-from .specs import DeploymentSpec
+from .specs import DeploymentSpec, reality_handshake_target
 from .system_resolver import render_resolved_dropin
 
 
@@ -237,7 +237,7 @@ def render_ru_xray(env: dict[str, str]) -> str:
         short_ids.append("")
     reality: dict[str, Any] = {
         "show": False,
-        "dest": f"{env['RU_REALITY_HANDSHAKE_SERVER']}:{env_int(env, 'RU_REALITY_HANDSHAKE_PORT')}",
+        "target": reality_handshake_target(env["RU_REALITY_SERVER_NAME"]),
         "xver": 0,
         "serverNames": [env["RU_REALITY_SERVER_NAME"]],
         "privateKey": env["RU_REALITY_PRIVATE_KEY"],

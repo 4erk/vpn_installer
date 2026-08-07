@@ -70,7 +70,13 @@ class StatusOutputTests(unittest.TestCase):
                         "verdict": "verified",
                     }
                 },
-                front={"loss_observed_sources": ["203.0.113.20"]},
+                front={
+                    "loss_observed_sources": ["203.0.113.20"],
+                    "reality_target": "r.bing.com:443",
+                    "reality_target_config_key": "target",
+                    "reality_server_names": ["www.bing.com"],
+                    "reality_pending_handshakes": 0,
+                },
                 network={
                     "tcp_adaptation": {
                         "congestion_control": "bbr",
@@ -167,6 +173,11 @@ class StatusOutputTests(unittest.TestCase):
         self.assertIn("admin_routing_rules_count=2", rendered)
         self.assertIn("root filesystem: source=/dev/vda1, fs=ext4, state=clean, errors=0, boot_fsck=enabled, verdict=verified", rendered)
         self.assertIn("public front lifetime loss sources: 203.0.113.20", rendered)
+        self.assertIn(
+            "Reality target: target=r.bing.com:443, config_key=target, "
+            "server_names=www.bing.com, pending_handshakes=0",
+            rendered,
+        )
         self.assertIn("domain_to_foreign_timeout present", rendered)
         self.assertIn(
             "tcp adaptation: cc=bbr, qdisc=fq(limit=10000,flow_limit=512,drops=7,flow_limit_drops=7), "

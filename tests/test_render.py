@@ -220,6 +220,8 @@ class RenderTests(unittest.TestCase):
         payload = json.loads(render.render_ru_xray(env))
         reality = payload["inbounds"][0]["streamSettings"]["realitySettings"]
         self.assertEqual(payload["inbounds"][0]["port"], 443)
+        self.assertEqual(reality["target"], "r.bing.com:443")
+        self.assertNotIn("dest", reality)
         self.assertNotIn("maxTimeDiff", reality)
 
     def test_ru_server_reality_accepts_primary_and_empty_short_id_by_default(self) -> None:
@@ -227,6 +229,14 @@ class RenderTests(unittest.TestCase):
         payload = json.loads(render.render_ru_xray(env))
         reality = payload["inbounds"][0]["streamSettings"]["realitySettings"]
         self.assertEqual(reality["shortIds"], [env["RU_REALITY_SHORT_ID"], ""])
+
+    def test_ru_server_reality_keeps_custom_sni_and_target_consistent(self) -> None:
+        env = self.make_env()
+        env["RU_REALITY_SERVER_NAME"] = "www.cloudflare.com"
+        payload = json.loads(render.render_ru_xray(env))
+        reality = payload["inbounds"][0]["streamSettings"]["realitySettings"]
+        self.assertEqual(reality["serverNames"], ["www.cloudflare.com"])
+        self.assertEqual(reality["target"], "www.cloudflare.com:443")
 
     def test_ru_server_reality_can_disable_empty_short_id_compat(self) -> None:
         env = self.make_env()

@@ -140,7 +140,7 @@ $env:VPN_SSH_BIND_ADDRESS="192.168.0.101"
 8. `vpn status` выводит отдельные счётчики DNS, domain, IPv4-literal, IPv6-literal и private/fake ошибок за свежее и историческое окна
 9. Если включён TUN/full VPN и `client-check` показывает self-tunnel, используй route bypass helper ниже
 
-Основной публичный вход принимает обычный VLESS/Reality tunnel через Xray TCP `:443` и передаёт трафик во внутренний `sing-box` router. На UDP того же порта работает дополнительный Hysteria2 ingress для стандартного `hysteria2://` URI; он использует ту же routing policy. Если клиент отправляет private/fake IP вроде `fdfd::...` без домена, такие случаи явно группируются в `status/diagnose`.
+Основной публичный вход принимает обычный VLESS/Reality tunnel через Xray TCP `:443` и передаёт трафик во внутренний `sing-box` router. Клиентский SNI остаётся частью стабильного URI, а серверный camouflage target версионируется в коде и не является runtime env-переключателем. `status` показывает фактический target и число Xray handshake, застрявших в `SYN-SENT`. На UDP того же порта работает дополнительный Hysteria2 ingress для стандартного `hysteria2://` URI; он использует ту же routing policy. Если клиент отправляет private/fake IP вроде `fdfd::...` без домена, такие случаи явно группируются в `status/diagnose`.
 
 Внешняя подписка с сервера больше не считается штатным путём; локальные JSON остаются управляемым вариантом.
 

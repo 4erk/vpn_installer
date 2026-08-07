@@ -81,6 +81,13 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
         )
     if snapshot.role == "ru-gateway" and snapshot.front:
         lines.append(
+            "Reality target: "
+            f"target={snapshot.front.get('reality_target') or '-'}, "
+            f"config_key={snapshot.front.get('reality_target_config_key') or '-'}, "
+            f"server_names={','.join(str(value) for value in snapshot.front.get('reality_server_names', [])) or '-'}, "
+            f"pending_handshakes={snapshot.front.get('reality_pending_handshakes', 'unknown')}"
+        )
+        lines.append(
             "public front liveness: "
             f"keepalive_idle_s={snapshot.front.get('tcp_keepalive_idle_seconds', '-')}, "
             f"keepalive_interval_s={snapshot.front.get('tcp_keepalive_interval_seconds', '-')}"

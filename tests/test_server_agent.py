@@ -1687,6 +1687,25 @@ class ServerAgentTests(unittest.TestCase):
         self.assertEqual(server_agent.front_observation(front), "observed")
         self.assertEqual(server_agent.public_front_verdict("active", front), "verified")
 
+    def test_public_front_reports_accumulated_reality_handshakes_as_degraded(self) -> None:
+        front = {
+            "listening": True,
+            "recent_degraded_sources": [],
+            "reality_pending_handshakes": server_agent.REALITY_PENDING_HANDSHAKE_DEGRADED,
+        }
+        self.assertEqual(server_agent.front_observation(front), "degraded")
+        self.assertEqual(server_agent.public_front_verdict("active", front), "degraded")
+
+    def test_reality_pending_handshakes_count_only_xray_target_sockets(self) -> None:
+        output = (
+            '0 1 10.0.0.1:50001 13.107.21.200:443 users:(("xray",pid=1,fd=1))\n'
+            '0 1 10.0.0.1:50002 13.107.21.200:443 users:(("curl",pid=2,fd=2))\n'
+            '0 1 10.0.0.1:50003 13.107.21.200:80 users:(("xray",pid=1,fd=3))\n'
+        )
+        completed = subprocess.CompletedProcess(["ss"], 0, output, "")
+        with patch.object(server_agent, "run", return_value=completed):
+            self.assertEqual(server_agent.xray_reality_pending_handshakes("r.bing.com:443"), 1)
+
     def test_xray_front_socket_policy_reads_inbound_liveness_values(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "xray.json"
@@ -1697,6 +1716,10 @@ class ServerAgentTests(unittest.TestCase):
                             {
                                 "port": 443,
                                 "streamSettings": {
+                                    "realitySettings": {
+                                        "target": "r.bing.com:443",
+                                        "serverNames": ["www.bing.com"],
+                                    },
                                     "sockopt": {
                                         "tcpKeepAliveIdle": 90,
                                         "tcpKeepAliveInterval": 15,
@@ -1708,7 +1731,10 @@ class ServerAgentTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            with patch.object(server_agent, "XRAY_CONFIG_PATH", config):
+            with (
+                patch.object(server_agent, "XRAY_CONFIG_PATH", config),
+                patch.object(server_agent, "xray_reality_pending_handshakes", return_value=0),
+            ):
                 policy = server_agent.xray_front_socket_policy(443)
 
         self.assertEqual(
@@ -1716,6 +1742,10 @@ class ServerAgentTests(unittest.TestCase):
             {
                 "tcp_keepalive_idle_seconds": 90,
                 "tcp_keepalive_interval_seconds": 15,
+                "reality_target": "r.bing.com:443",
+                "reality_target_config_key": "target",
+                "reality_server_names": ["www.bing.com"],
+                "reality_pending_handshakes": 0,
             },
         )
 

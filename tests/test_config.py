@@ -113,7 +113,6 @@ class ConfigTests(unittest.TestCase):
                 "ADMIN_WEB_BIND": "127.0.0.1",
                 "UTLS_FINGERPRINT": "randomized",
                 "RU_REALITY_SERVER_NAME": "www.cloudflare.com",
-                "RU_REALITY_HANDSHAKE_SERVER": "www.cloudflare.com",
                 "SSH_MAX_STARTUPS": "5:30:20",
                 "SSH_PER_SOURCE_MAX_STARTUPS": "2",
                 "WG_MTU": "1380",
@@ -130,7 +129,6 @@ class ConfigTests(unittest.TestCase):
             "ADMIN_WEB_BIND": "127.0.0.1",
             "UTLS_FINGERPRINT": "randomized",
             "RU_REALITY_SERVER_NAME": "www.cloudflare.com",
-            "RU_REALITY_HANDSHAKE_SERVER": "www.cloudflare.com",
             "SSH_MAX_STARTUPS": "5:30:20",
             "SSH_PER_SOURCE_MAX_STARTUPS": "2",
             "WG_MTU": "1380",
@@ -205,6 +203,17 @@ class ConfigTests(unittest.TestCase):
     def test_default_reality_time_tolerance_is_explicit(self) -> None:
         env = config.generate_default_env("sample")
         self.assertEqual(env["RU_REALITY_MAX_TIME_DIFFERENCE"], "24h")
+
+    def test_reality_handshake_target_is_not_an_operator_env_override(self) -> None:
+        env = config.merge_env_with_defaults(
+            {
+                "RU_REALITY_HANDSHAKE_SERVER": "www.bing.com",
+                "RU_REALITY_HANDSHAKE_PORT": "443",
+            },
+            "sample",
+        )
+        self.assertNotIn("RU_REALITY_HANDSHAKE_SERVER", env)
+        self.assertNotIn("RU_REALITY_HANDSHAKE_PORT", env)
 
     def test_default_reality_accepts_empty_short_id_for_mobile_compat(self) -> None:
         env = config.generate_default_env("sample")

@@ -710,7 +710,9 @@ def test_xray_reality_interop(runner: AuditRunner, out_dir: Path) -> dict[str, s
     xray_server_config["log"] = {"loglevel": "debug"}
     xray_server_config["inbounds"][0]["listen"] = "0.0.0.0"
     xray_server_config["inbounds"][0]["port"] = 443
-    xray_server_config["inbounds"][0]["streamSettings"]["realitySettings"]["dest"] = "singbox-router:443"
+    reality_settings = xray_server_config["inbounds"][0]["streamSettings"]["realitySettings"]
+    reality_settings.pop("dest", None)
+    reality_settings["target"] = "singbox-router:443"
     xray_server_config["outbounds"][0]["settings"]["servers"][0]["address"] = "singbox-router"
     xray_server_config["outbounds"][0]["settings"]["servers"][0]["port"] = router_config["inbounds"][0]["listen_port"]
     foreign_overlay = next(item for item in xray_server_config["outbounds"] if item.get("tag") == "foreign-overlay")

@@ -259,7 +259,6 @@ require_common_env() {
   require_var FOREIGN_PUBLIC_IP
   require_var CLIENT_UUID
   require_var RU_REALITY_SERVER_NAME
-  require_var RU_REALITY_HANDSHAKE_SERVER
   require_var RU_REALITY_PRIVATE_KEY
   require_var RU_REALITY_PUBLIC_KEY
   require_var RU_REALITY_SHORT_ID

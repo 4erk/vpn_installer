@@ -140,6 +140,7 @@ FRONT_RTT_INFLATION_FACTOR = 3
 FRONT_RTO_DEGRADED_MS = 1_000
 FRONT_COUNTER_MAX_INTERVAL_SECONDS = 300
 FRONT_CURRENT_ACTIVITY_MAX_IDLE_MS = 30_000
+REALITY_PENDING_HANDSHAKE_DEGRADED = 5
 LOG_CONTEXT_MAX_EVENT_IDS = 500
 PROBLEM_LOG_GREP = (
     "ERROR|FATAL|processed invalid connection|accepted tcp:disabled[.]invalid|"
@@ -1474,7 +1475,21 @@ def front_interval_snapshot(
     return interval, counters
 
 
-def xray_front_socket_policy(port: int) -> dict[str, int]:
+def xray_reality_pending_handshakes(target: str) -> int | None:
+    _host, target_port = split_endpoint(target)
+    if target_port is None:
+        return None
+    sockets = run(["ss", "-Htanp", "state", "syn-sent"], timeout=5)
+    if sockets.returncode != 0:
+        return None
+    return sum(
+        '"xray"' in line.lower()
+        and any(split_endpoint(field)[1] == target_port for field in line.split())
+        for line in sockets.stdout.splitlines()
+    )
+
+
+def xray_front_socket_policy(port: int) -> dict[str, Any]:
     config = read_json(XRAY_CONFIG_PATH, {})
     for inbound in config.get("inbounds", []) if isinstance(config, dict) else []:
         if not isinstance(inbound, dict):
@@ -1485,10 +1500,12 @@ def xray_front_socket_policy(port: int) -> dict[str, int]:
             continue
         if inbound_port != port:
             continue
-        sockopt = inbound.get("streamSettings", {}).get("sockopt", {})
-        if not isinstance(sockopt, dict):
+        stream_settings = inbound.get("streamSettings", {})
+        if not isinstance(stream_settings, dict):
             return {}
-        result: dict[str, int] = {}
+        sockopt = stream_settings.get("sockopt", {})
+        sockopt = sockopt if isinstance(sockopt, dict) else {}
+        result: dict[str, Any] = {}
         for output_name, config_name in (
             ("tcp_keepalive_idle_seconds", "tcpKeepAliveIdle"),
             ("tcp_keepalive_interval_seconds", "tcpKeepAliveInterval"),
@@ -1497,6 +1514,19 @@ def xray_front_socket_policy(port: int) -> dict[str, int]:
                 result[output_name] = int(sockopt.get(config_name, 0))
             except (TypeError, ValueError):
                 result[output_name] = 0
+        reality = stream_settings.get("realitySettings", {})
+        if isinstance(reality, dict):
+            target_key = "target" if reality.get("target") else "dest" if reality.get("dest") else ""
+            target = str(reality.get(target_key, "")) if target_key else ""
+            server_names = reality.get("serverNames", [])
+            result.update(
+                {
+                    "reality_target": target,
+                    "reality_target_config_key": target_key or "missing",
+                    "reality_server_names": [str(value) for value in server_names] if isinstance(server_names, list) else [],
+                    "reality_pending_handshakes": xray_reality_pending_handshakes(target) if target else None,
+                }
+            )
         return result
     return {}
 
@@ -1541,6 +1571,9 @@ def front_observation(front: dict[str, Any], interval: dict[str, Any] | None = N
         if interval is not None and interval.get("baseline") is not True
         else front.get("recent_degraded_sources", [])
     )
+    pending_handshakes = front.get("reality_pending_handshakes")
+    if isinstance(pending_handshakes, int) and pending_handshakes >= REALITY_PENDING_HANDSHAKE_DEGRADED:
+        return "degraded"
     if int(front.get("stale_connections_5m", 0)) >= 25 and int(front.get("keepalive_timer_connections", 0)) < int(front.get("stale_connections_5m", 0)):
         return "degraded"
     if len(degraded_sources) >= 3:

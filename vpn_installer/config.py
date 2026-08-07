@@ -37,6 +37,8 @@ MERGED_SOURCE_DEFAULT_KEYS = {
 DEPRECATED_ENV_KEYS = {
     "CLIENT_COMPAT_UUID",
     "RU_COMPAT_LISTEN_PORTS",
+    "RU_REALITY_HANDSHAKE_SERVER",
+    "RU_REALITY_HANDSHAKE_PORT",
     "RU_LITERAL_POLICY",
     "RU_IPV6_LITERAL_POLICY",
     "RU_IPV6_POLICY",
@@ -221,8 +223,6 @@ def generate_default_env(
         "RU_LISTEN_PORT": "443",
         "RU_ROUTER_LISTEN_PORT": "2080",
         "RU_REALITY_SERVER_NAME": "www.bing.com",
-        "RU_REALITY_HANDSHAKE_SERVER": "www.bing.com",
-        "RU_REALITY_HANDSHAKE_PORT": "443",
         "RU_REALITY_PRIVATE_KEY": base64_url_nopad(reality_private),
         "RU_REALITY_PUBLIC_KEY": base64_url_nopad(reality_public),
         "RU_REALITY_SHORT_ID": "0123456789abcdef",

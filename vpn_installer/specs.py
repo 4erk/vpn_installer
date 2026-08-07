@@ -6,6 +6,17 @@ from typing import Mapping
 from .models import REQUIRED_ENV_VARS, ROLE_FOREIGN, ROLE_RU
 
 
+# The public SNI stays in client state; server-side target exceptions are versioned.
+REALITY_HANDSHAKE_TARGETS = {"www.bing.com": "r.bing.com:443"}
+
+
+def reality_handshake_target(server_name: str) -> str:
+    normalized = server_name.strip().lower()
+    if not normalized:
+        raise ValueError("Reality server name must not be empty")
+    return REALITY_HANDSHAKE_TARGETS.get(normalized, f"{normalized}:443")
+
+
 @dataclass(frozen=True)
 class DeploymentSpec:
     """Normalized deployment input consumed by rendering and install support."""

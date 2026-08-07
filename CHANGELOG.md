@@ -6,6 +6,19 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.19.4] - 2026-08-08
+
+### Fixed
+
+- Устранён воспроизводимый источник периодических зависаний основного VLESS/Reality входа: прежний camouflage target `www.bing.com:443` возвращал большой набор edge-адресов, часть которых оставляла Xray в `SYN-SENT` и задерживала первый запрос. Server-side target заменён на проверенный `r.bing.com:443`, при этом публичный SNI `www.bing.com`, ключи Reality и основной клиентский URI не меняются.
+- Camouflage target больше не сохраняется как операторский env-параметр. Старые `RU_REALITY_HANDSHAKE_SERVER` и `RU_REALITY_HANDSHAKE_PORT` удаляются общей нормализацией, поэтому reinstall не может вернуть нестабильное legacy-значение.
+- Agent выводит фактический Reality target, используемый ключ конфигурации и число Xray handshake в `SYN-SENT`. Накопление таких сокетов классифицируется как soft degradation и не вызывает restart либо смену клиентского/межсерверного маршрута.
+
+### Changed
+
+- Xray renderer и Docker interop используют канонический ключ `target`; тест проверяет реальный Reality TCP/UDP handshake на закреплённой версии Xray.
+- Routing policy, WG/Hysteria2 adaptation, MTU, congestion control, web-admin и байтовое содержимое `out/1/client/vless-uri.txt` не изменены.
+
 ## [0.19.3] - 2026-08-07
 
 ### Fixed
