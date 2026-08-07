@@ -3,7 +3,10 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import ipaddress
 import os
+import socket
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -30,20 +33,141 @@ TRANSPORT_PROBE_PORTS = {
     TRANSPORT_WG_TAG: 19093,
     TRANSPORT_HY2_TAG: 19094,
 }
-TRANSPORT_HEALTHCHECK_URL = "https://1.1.1.1/cdn-cgi/trace"
-TRANSPORT_SELECTED_PROBE_TIMEOUT_MS = 800
-TRANSPORT_PROBE_TIMEOUT_MS = 1200
+TRANSPORT_OVERLAY_PROBE_TIMEOUT_MS = 800
+TRANSPORT_CANDIDATE_PROBE_TIMEOUT_MS = 1200
 TRANSPORT_PROBE_INTERVAL_SECONDS = 2
 TRANSPORT_FAILURE_CONFIRMATIONS = 2
 TRANSPORT_ALTERNATE_HEALTH_CONFIRMATIONS = 2
 TRANSPORT_EVIDENCE_MAX_GAP_SECONDS = TRANSPORT_PROBE_INTERVAL_SECONDS * 5
 TRANSPORT_PREFERRED_TAG = TRANSPORT_WG_TAG
-TRANSPORT_STATE_SCHEMA_VERSION = 7
+TRANSPORT_PREFERRED_RECOVERY_CONFIRMATIONS = 3
+TRANSPORT_PREFERRED_PROBE_INTERVAL_SECONDS = 10
+TRANSPORT_PREFERRED_EVIDENCE_MAX_GAP_SECONDS = TRANSPORT_PREFERRED_PROBE_INTERVAL_SECONDS * 3
+TRANSPORT_STATE_SCHEMA_VERSION = 8
 UNDERLAY_WG_RU_ADDRESS = "10.75.0.1/32"
 UNDERLAY_WG_FOREIGN_ADDRESS = "10.75.0.2/32"
 UNDERLAY_WG_MTU = 1420
 X25519_P = 2**255 - 19
 X25519_A24 = 121665
+
+
+def _receive_exact(connection: socket.socket, size: int) -> bytes:
+    chunks: list[bytes] = []
+    while size:
+        chunk = connection.recv(size)
+        if not chunk:
+            raise OSError("peer closed before the probe response was complete")
+        chunks.append(chunk)
+        size -= len(chunk)
+    return b"".join(chunks)
+
+
+def _probe_result(scope: str, target: str, started: float, error: str = "") -> dict[str, Any]:
+    elapsed_ms = max(1, round((time.monotonic() - started) * 1000))
+    return {
+        "checked": True,
+        "ok": not error,
+        "attempts": 1,
+        "delay_ms": 0 if error else elapsed_ms,
+        "elapsed_ms": elapsed_ms,
+        "scope": scope,
+        "target": target,
+        "error": error[:240],
+    }
+
+
+def transport_candidate_probe(
+    tag: str,
+    target_port: int,
+    *,
+    timeout_ms: int = TRANSPORT_CANDIDATE_PROBE_TIMEOUT_MS,
+) -> dict[str, Any]:
+    """Prove one raw underlay without depending on DNS or an Internet endpoint."""
+
+    started = time.monotonic()
+    proxy_port = TRANSPORT_PROBE_PORTS.get(tag)
+    target_host = UNDERLAY_WG_FOREIGN_ADDRESS.split("/", 1)[0]
+    target = f"{target_host}:{target_port}"
+    if proxy_port is None:
+        return _probe_result("raw-underlay", target, started, "unknown transport candidate")
+    if not 1 <= target_port <= 65535:
+        return _probe_result("raw-underlay", target, started, "invalid transport probe target port")
+    timeout_seconds = max(0.001, timeout_ms / 1000)
+    try:
+        with socket.create_connection(("127.0.0.1", proxy_port), timeout=timeout_seconds) as connection:
+            connection.settimeout(timeout_seconds)
+            connection.sendall(b"\x05\x01\x00")
+            if _receive_exact(connection, 2) != b"\x05\x00":
+                raise OSError("SOCKS5 proxy rejected unauthenticated probing")
+            address = ipaddress.ip_address(target_host)
+            address_type = b"\x01" if address.version == 4 else b"\x04"
+            connection.sendall(b"\x05\x01\x00" + address_type + address.packed + target_port.to_bytes(2, "big"))
+            version, status, _reserved, reply_type = _receive_exact(connection, 4)
+            if version != 5 or status != 0:
+                raise OSError(f"SOCKS5 CONNECT failed with status {status}")
+            if reply_type == 3:
+                address_size = _receive_exact(connection, 1)[0]
+            elif reply_type in {1, 4}:
+                address_size = 4 if reply_type == 1 else 16
+            else:
+                raise OSError("SOCKS5 proxy returned an invalid address type")
+            _receive_exact(connection, address_size + 2)
+    except (OSError, ValueError) as exc:
+        return _probe_result("raw-underlay", target, started, str(exc))
+    return _probe_result("raw-underlay", target, started)
+
+
+def _global_dns_endpoint(config: dict[str, Any]) -> tuple[str, int]:
+    dns = config.get("dns", {})
+    servers = dns.get("servers", []) if isinstance(dns, dict) else []
+    server = next(
+        (item for item in servers if isinstance(item, dict) and item.get("tag") == "dns-global"),
+        {},
+    ) if isinstance(servers, list) else {}
+    try:
+        return str(server.get("server", "")), int(server.get("server_port", 0) or 0)
+    except (TypeError, ValueError):
+        return "", 0
+
+
+def transport_overlay_probe(
+    config: dict[str, Any],
+    *,
+    timeout_ms: int = TRANSPORT_OVERLAY_PROBE_TIMEOUT_MS,
+) -> dict[str, Any]:
+    """Prove the installed overlay and its real DNS relay with a local-only query."""
+
+    started = time.monotonic()
+    host, port = _global_dns_endpoint(config)
+    target = "dns-global"
+    if host and port:
+        target = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+    if not host or not 1 <= port <= 65535:
+        return _probe_result("overlay-dns", target, started, "dns-global endpoint is invalid")
+    transaction_id = int.from_bytes(os.urandom(2), "big")
+    question = b"\x09localhost\x00\x00\x01\x00\x01"
+    query = transaction_id.to_bytes(2, "big") + b"\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00" + question
+    timeout_seconds = max(0.001, timeout_ms / 1000)
+    try:
+        with socket.create_connection((host, port), timeout=timeout_seconds) as connection:
+            connection.settimeout(timeout_seconds)
+            connection.sendall(len(query).to_bytes(2, "big") + query)
+            response_size = int.from_bytes(_receive_exact(connection, 2), "big")
+            if response_size < 12:
+                raise OSError("DNS relay returned a truncated response")
+            response = _receive_exact(connection, response_size)
+        flags = int.from_bytes(response[2:4], "big")
+        if (
+            int.from_bytes(response[:2], "big") != transaction_id
+            or flags & 0x8000 == 0
+            or flags & 0x000F
+            or int.from_bytes(response[4:6], "big") != 1
+            or int.from_bytes(response[6:8], "big") < 1
+        ):
+            raise OSError("DNS relay returned an invalid localhost answer")
+    except (OSError, ValueError) as exc:
+        return _probe_result("overlay-dns", target, started, str(exc))
+    return _probe_result("overlay-dns", target, started)
 
 
 def clamp_x25519_private(private_key: bytes) -> bytes:
@@ -366,13 +490,17 @@ def transport_topology_configured(config: dict[str, Any], env: dict[str, str]) -
 def _normalize_probe(probe: dict[str, Any] | None) -> dict[str, Any]:
     probe = probe or {}
     checked = probe.get("checked") is True if "checked" in probe else bool(probe)
-    return {
+    normalized = {
         "checked": checked,
         "ok": checked and probe.get("ok") is True,
         "attempts": max(0, int(probe.get("attempts", 1 if checked else 0) or 0)),
         "delay_ms": max(0, int(probe.get("delay_ms", 0) or 0)),
         "error": str(probe.get("error", ""))[:240],
     }
+    for key in ("scope", "target", "elapsed_ms"):
+        if key in probe:
+            normalized[key] = probe[key]
+    return normalized
 
 
 def _probe_failure_reason(probe: dict[str, Any]) -> str:
@@ -401,7 +529,12 @@ def _parse_timestamp(value: Any) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
-def _cycle_relation(previous_at: Any, observed_at: str) -> str:
+def _cycle_relation(
+    previous_at: Any,
+    observed_at: str,
+    *,
+    max_gap_seconds: int = TRANSPORT_EVIDENCE_MAX_GAP_SECONDS,
+) -> str:
     previous_time = _parse_timestamp(previous_at)
     current_time = _parse_timestamp(observed_at)
     if previous_time is None or current_time is None:
@@ -409,7 +542,7 @@ def _cycle_relation(previous_at: Any, observed_at: str) -> str:
     gap_seconds = (current_time - previous_time).total_seconds()
     if gap_seconds == 0:
         return "same"
-    if 0 < gap_seconds <= TRANSPORT_EVIDENCE_MAX_GAP_SECONDS:
+    if 0 < gap_seconds <= max_gap_seconds:
         return "next"
     return "reset"
 
@@ -471,7 +604,7 @@ def evaluate_transport_policy(
     previous: dict[str, Any] | None = None,
     observed_at: str | None = None,
 ) -> dict[str, Any]:
-    previous = previous if isinstance(previous, dict) and previous.get("schema_version") in {6, TRANSPORT_STATE_SCHEMA_VERSION} else {}
+    previous = previous if isinstance(previous, dict) and previous.get("schema_version") == TRANSPORT_STATE_SCHEMA_VERSION else {}
     observed_at = observed_at or datetime.now(timezone.utc).isoformat()
     normalized = {tag: _normalize_probe(probes.get(tag)) for tag in TRANSPORT_CANDIDATE_TAGS}
     if selected not in TRANSPORT_CANDIDATE_TAGS:
@@ -484,18 +617,10 @@ def evaluate_transport_policy(
     prior = previous if previous.get("selected") == selected and not failed_switch else {}
     cycle_relation = _cycle_relation(prior.get("updated_at"), observed_at)
 
-    # Missing observations are not path failures. Simultaneous failures against
-    # the shared target cannot identify a bad underlay and must never trigger a switch.
+    # Missing observations are not path failures. The selected observation covers
+    # the real overlay, while the alternate observation covers only that raw underlay.
     if not selected_probe["checked"]:
         return _policy_state(selected, normalized, observed_at, "inconclusive", "selected underlay was not probed")
-    if not selected_probe["ok"] and alternate_probe["checked"] and not alternate_probe["ok"]:
-        return _policy_state(
-            selected,
-            normalized,
-            observed_at,
-            "inconclusive",
-            "both underlays failed against the shared probe target; path failure is not attributable",
-        )
     if not selected_probe["ok"]:
         failure_reason = _probe_failure_reason(selected_probe)
         failure = _next_evidence(
@@ -545,4 +670,62 @@ def evaluate_transport_policy(
             **details,
         )
 
-    return _policy_state(selected, normalized, observed_at, "healthy", "selected underlay is healthy and remains sticky")
+    if selected == TRANSPORT_PREFERRED_TAG:
+        return _policy_state(selected, normalized, observed_at, "healthy", "preferred overlay path is healthy")
+
+    preferred_probe = normalized[TRANSPORT_PREFERRED_TAG]
+    recovery_details: dict[str, Any] = {}
+    prior_recovery = prior.get("preferred_recovery")
+    if isinstance(prior_recovery, dict):
+        recovery_details["preferred_recovery"] = prior_recovery
+    if prior.get("preferred_probe_at"):
+        recovery_details["preferred_probe_at"] = prior["preferred_probe_at"]
+    if not preferred_probe["checked"]:
+        return _policy_state(
+            selected,
+            normalized,
+            observed_at,
+            "healthy",
+            "fallback overlay path is healthy; preferred probe is deferred",
+            **recovery_details,
+        )
+    if not preferred_probe["ok"]:
+        return _policy_state(
+            selected,
+            normalized,
+            observed_at,
+            "healthy",
+            f"fallback overlay path is healthy; preferred underlay {_probe_failure_reason(preferred_probe)}",
+            preferred_probe_at=observed_at,
+        )
+
+    recovery_relation = _cycle_relation(
+        prior.get("preferred_probe_at"),
+        observed_at,
+        max_gap_seconds=TRANSPORT_PREFERRED_EVIDENCE_MAX_GAP_SECONDS,
+    )
+    recovery = _next_evidence(
+        prior,
+        key="preferred_recovery",
+        path=TRANSPORT_PREFERRED_TAG,
+        reason="healthy",
+        cycle_relation=recovery_relation,
+    )
+    confirmed = recovery["confirmations"] >= TRANSPORT_PREFERRED_RECOVERY_CONFIRMATIONS
+    return _policy_state(
+        selected,
+        normalized,
+        observed_at,
+        "recovering",
+        (
+            "preferred underlay is confirmed healthy"
+            if confirmed
+            else (
+                f"preferred underlay recovery confirmation "
+                f"{recovery['confirmations']}/{TRANSPORT_PREFERRED_RECOVERY_CONFIRMATIONS}"
+            )
+        ),
+        recommended=TRANSPORT_PREFERRED_TAG if confirmed else None,
+        preferred_recovery=recovery,
+        preferred_probe_at=observed_at,
+    )

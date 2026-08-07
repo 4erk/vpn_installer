@@ -289,39 +289,40 @@ class InterserverTransportIdentityTests(unittest.TestCase):
         self.assertEqual(retry["alternate_health"]["confirmations"], 1)
         self.assertFalse(retry["would_switch"])
 
-    def test_common_target_failure_never_selects_an_unproven_alternate(self) -> None:
-        common_failure = {
-            TRANSPORT_WG_TAG: {"checked": True, "ok": False, "attempts": 2, "error": "HTTP 503"},
-            TRANSPORT_HY2_TAG: {"checked": True, "ok": False, "attempts": 1, "error": "HTTP 503"},
+    def test_failed_overlay_never_selects_an_unproven_alternate(self) -> None:
+        failures = {
+            TRANSPORT_WG_TAG: {"checked": True, "ok": False, "attempts": 1, "scope": "overlay-dns", "error": "timed out"},
+            TRANSPORT_HY2_TAG: {"checked": True, "ok": False, "attempts": 1, "scope": "raw-underlay", "error": "connection refused"},
         }
         first = evaluate_transport_policy(
             selected=TRANSPORT_WG_TAG,
-            probes=common_failure,
+            probes=failures,
             observed_at="2026-08-06T12:00:00+00:00",
         )
         second = evaluate_transport_policy(
             selected=TRANSPORT_WG_TAG,
-            probes=common_failure,
+            probes=failures,
             previous=first,
             observed_at="2026-08-06T12:00:02+00:00",
         )
         alternate_once = evaluate_transport_policy(
             selected=TRANSPORT_WG_TAG,
             probes={
-                TRANSPORT_WG_TAG: {"checked": True, "ok": False, "attempts": 2, "error": "HTTP 503"},
+                TRANSPORT_WG_TAG: {"checked": True, "ok": False, "attempts": 1, "scope": "overlay-dns", "error": "timed out"},
                 TRANSPORT_HY2_TAG: {"checked": True, "ok": True, "delay_ms": 70},
             },
             previous=second,
             observed_at="2026-08-06T12:00:04+00:00",
         )
-        self.assertEqual(first["state"], "inconclusive")
-        self.assertNotIn("failure", second)
+        self.assertEqual(first["state"], "suspect")
+        self.assertEqual(second["state"], "failed")
+        self.assertEqual(second["failure"]["confirmations"], 2)
         self.assertFalse(second["would_switch"])
-        self.assertEqual(alternate_once["failure"]["confirmations"], 1)
+        self.assertEqual(alternate_once["failure"]["confirmations"], 3)
         self.assertEqual(alternate_once["alternate_health"]["confirmations"], 1)
         self.assertFalse(alternate_once["would_switch"])
 
-    def test_recovered_fallback_remains_sticky_while_it_is_healthy(self) -> None:
+    def test_healthy_fallback_returns_to_preferred_after_three_fresh_probes(self) -> None:
         failure = {
             TRANSPORT_WG_TAG: {"checked": True, "ok": False, "attempts": 2, "error": "timed out"},
             TRANSPORT_HY2_TAG: {"checked": True, "ok": True, "delay_ms": 70},
@@ -349,19 +350,43 @@ class InterserverTransportIdentityTests(unittest.TestCase):
             TRANSPORT_HY2_TAG: {"checked": True, "ok": True, "delay_ms": 90},
             TRANSPORT_WG_TAG: {"checked": True, "ok": True, "delay_ms": 40},
         }
-        for second in range(4, 42, 2):
+        for second in (4, 14, 24):
             state = evaluate_transport_policy(
                 selected=TRANSPORT_HY2_TAG,
                 probes=healthy,
                 previous=state,
                 observed_at=f"2026-08-06T12:00:{second:02d}+00:00",
             )
-        self.assertEqual(state["state"], "healthy")
+        self.assertEqual(state["state"], "recovering")
         self.assertEqual(state["selected"], TRANSPORT_HY2_TAG)
-        self.assertEqual(state["recommended"], TRANSPORT_HY2_TAG)
-        self.assertFalse(state["would_switch"])
-        self.assertNotIn("recovery", state)
+        self.assertEqual(state["recommended"], TRANSPORT_WG_TAG)
+        self.assertTrue(state["would_switch"])
+        self.assertEqual(state["preferred_recovery"]["confirmations"], 3)
         json.dumps(state)
+
+    def test_deferred_cycle_preserves_but_does_not_increment_recovery_evidence(self) -> None:
+        first = evaluate_transport_policy(
+            selected=TRANSPORT_HY2_TAG,
+            probes={
+                TRANSPORT_HY2_TAG: {"checked": True, "ok": True, "delay_ms": 50},
+                TRANSPORT_WG_TAG: {"checked": True, "ok": True, "delay_ms": 20},
+            },
+            observed_at="2026-08-06T12:00:00+00:00",
+        )
+        deferred = evaluate_transport_policy(
+            selected=TRANSPORT_HY2_TAG,
+            probes={
+                TRANSPORT_HY2_TAG: {"checked": True, "ok": True, "delay_ms": 50},
+                TRANSPORT_WG_TAG: {"checked": False, "ok": False},
+            },
+            previous=first,
+            observed_at="2026-08-06T12:00:02+00:00",
+        )
+
+        self.assertEqual(first["preferred_recovery"]["confirmations"], 1)
+        self.assertEqual(deferred["preferred_recovery"]["confirmations"], 1)
+        self.assertEqual(deferred["preferred_probe_at"], first["preferred_probe_at"])
+        self.assertFalse(deferred["would_switch"])
 
 if __name__ == "__main__":
     unittest.main()

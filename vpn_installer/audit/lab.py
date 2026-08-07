@@ -7,7 +7,7 @@ import time
 
 from ..common import OUT_DIR
 from ..config import load_env_file
-from ..interserver_transport import TRANSPORT_HY2_TAG
+from ..interserver_transport import TRANSPORT_HY2_TAG, UNDERLAY_WG_FOREIGN_ADDRESS
 from ..render import (
     render_all_artifacts,
     render_foreign_nftables,
@@ -70,16 +70,22 @@ def build_lab_client_config(env: dict[str, str]) -> str:
 
 def build_lab_ru_config(env: dict[str, str]) -> str:
     payload = json.loads(render_ru_singbox(env))
-    payload["dns"]["servers"] = [
-        {"type": "udp", "tag": "dns-ru-direct", "server": LAB_IPS["dns"], "server_port": 53},
-        {"type": "udp", "tag": "dns-global", "server": LAB_IPS["dns"], "server_port": 53},
-    ]
+    direct_dns = next(server for server in payload["dns"]["servers"] if server.get("tag") == "dns-ru-direct")
+    direct_dns.clear()
+    direct_dns.update({"type": "udp", "tag": "dns-ru-direct", "server": LAB_IPS["dns"], "server_port": 53})
     payload["dns"]["final"] = "dns-global"
     payload["inbounds"][0]["listen"] = "0.0.0.0"
     payload["inbounds"][0]["listen_port"] = int(env.get("RU_ROUTER_LISTEN_PORT", "2080"))
     for rule_set in payload["route"]["rule_set"]:
         if rule_set.get("tag") == "ru-geoip":
             rule_set.update({"format": "source", "path": "/opt/geoip-ru.json"})
+    return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+
+
+def build_lab_foreign_config(env: dict[str, str]) -> str:
+    payload = json.loads(render_foreign_singbox(env))
+    dns_relay = next(inbound for inbound in payload["inbounds"] if inbound.get("tag") == "dns-relay-in")
+    dns_relay.update({"override_address": LAB_IPS["dns"], "override_port": 53})
     return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
 
 
@@ -131,6 +137,7 @@ def build_lab_dnsmasq() -> str:
         log-facility=-
         port=53
         bind-interfaces
+        address=/localhost/127.0.0.1
         address=/ya.ru/{LAB_IPS["ru_web"]}
         address=/example.com/{LAB_IPS["global_web"]}
         address=/blocked-ru.example/{LAB_IPS["ru_web"]}
@@ -191,17 +198,13 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
             write_text(ru_nft, render_ru_firewall_nftables(env))
             write_text(foreign_nft, render_foreign_nftables(env, "eth1"))
             write_text(ru_cfg, build_lab_ru_config(env))
-            write_text(foreign_cfg, render_foreign_singbox(env))
+            write_text(foreign_cfg, build_lab_foreign_config(env))
             write_text(client_cfg, build_lab_client_config(env))
             write_text(dns_conf, build_lab_dnsmasq())
             write_text(ru_web, build_lab_web_server("ru-web"))
             write_text(global_web, build_lab_web_server("global-web"))
             write_text(geoip_source, json.dumps({"version": 3, "rules": [{"ip_cidr": [LAB_RU_SUBNET]}]}, indent=2) + "\n")
             transport_source = (agent_dir / "interserver_transport.py").read_text(encoding="utf-8")
-            transport_source = transport_source.replace(
-                'TRANSPORT_HEALTHCHECK_URL = "https://1.1.1.1/cdn-cgi/trace"',
-                f'TRANSPORT_HEALTHCHECK_URL = "http://{LAB_IPS["global_web"]}/health"',
-            )
             write_text(lab_transport_policy, transport_source)
 
             runner.docker_exec(ru_container, "mkdir -p /opt/agent /etc/vpn-stack /etc/sing-box /var/lib/vpn-stack")
@@ -246,6 +249,8 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
             runner.docker_exec(ru_container, "sysctl -w net.ipv4.conf.all.src_valid_mark=1 >/dev/null")
             runner.docker_exec(ru_container, "ip address add 10.0.0.20/32 dev lo && nohup python3 -m http.server 80 --bind 10.0.0.20 >/opt/private-direct-web.log 2>&1 &")
             runner.docker_exec(foreign_container, "wg-quick up /opt/wg0.conf")
+            probe_address = UNDERLAY_WG_FOREIGN_ADDRESS.split("/", 1)[0]
+            runner.docker_exec(foreign_container, f"nohup python3 -m http.server 22 --bind {probe_address} >/opt/transport-probe.log 2>&1 &")
             runner.docker_exec(foreign_container, "nohup sing-box run -c /opt/foreign-singbox.json >/opt/foreign-singbox.log 2>&1 &")
             runner.docker_exec(ru_container, "wg-quick up /opt/wg0.conf")
             runner.docker_exec(foreign_container, "ip address add 10.0.0.20/32 dev lo && nohup python3 -m http.server 80 --bind 10.0.0.20 >/opt/private-web.log 2>&1 &")
@@ -322,6 +327,23 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
             request_count = runner.docker_exec(global_web_container, "grep -Fxc /stream /opt/requests.log")
             if request_count.stdout.strip() != "1":
                 raise AuditFailure("Continuity check retried HTTP instead of preserving one TCP stream")
+            runner.docker_exec(ru_container, "nft delete table inet underlay_fault")
+            time.sleep(0.5)
+            recovery: list[dict[str, object]] = []
+            for attempt in range(3):
+                if attempt:
+                    time.sleep(10.1)
+                recovery.append(
+                    json.loads(
+                        runner.docker_exec(ru_container, "python3 /opt/agent/vpn-stack-agent.py transport-reconcile").stdout
+                    )
+                )
+            if not (
+                all(state.get("changed") is not True and state.get("selected") == TRANSPORT_HY2_TAG for state in recovery[:2])
+                and recovery[-1].get("changed") is True
+                and recovery[-1].get("selected") != TRANSPORT_HY2_TAG
+            ):
+                raise AuditFailure(f"Transport agent did not return to the recovered preferred underlay: {recovery}")
             continuity_report = lab_dir / "transport-continuity.json"
             write_text(
                 continuity_report,
@@ -333,12 +355,12 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
                         "stream_bytes": LAB_STREAM_BYTES,
                         "stream_seconds": stream_seconds,
                         "server_request_count": 1,
+                        "preferred_recovery": recovery,
                     },
                     indent=2,
                     sort_keys=True,
                 ) + "\n",
             )
-            runner.docker_exec(ru_container, "nft delete table inet underlay_fault")
 
             private_dns = runner.lab_curl(client_container, "http://private.invalid/", expect_codes={5, 7, 22, 28, 52, 56, 97})
             if private_dns.returncode == 0:

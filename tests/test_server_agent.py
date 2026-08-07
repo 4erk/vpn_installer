@@ -8,9 +8,9 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
-from vpn_installer import server_agent
+from vpn_installer import interserver_transport, server_agent
 from vpn_installer.config import generate_default_env
 from vpn_installer.diagnostics import DiagnosticsSnapshot
 from vpn_installer.log_classifier import classify_line
@@ -166,6 +166,30 @@ class ServerAgentTests(unittest.TestCase):
         self.assertEqual(error, "")
         self.assertNotIn("\x1b", events[0][1])
         self.assertEqual(server_agent.summarize_lines(line for _timestamp, line in events)["counts"]["dns_timeout"], 1)
+
+    def test_journal_problem_events_adds_matching_inbound_context(self) -> None:
+        problem = {
+            "__REALTIME_TIMESTAMP": "1786075987103741",
+            "_SYSTEMD_UNIT": "sing-box.service",
+            "MESSAGE": "ERROR [4252783395 10s] open connection to 185.178.210.193:443 using outbound/direct[direct-ru]: i/o timeout",
+        }
+        context = {
+            "__REALTIME_TIMESTAMP": "1786075977103741",
+            "_SYSTEMD_UNIT": "sing-box.service",
+            "MESSAGE": "INFO [4252783395 0ms] inbound/mixed[router-in]: inbound connection to cs.pikabu.ru:443",
+        }
+        results = [
+            subprocess.CompletedProcess(["journalctl"], 0, json.dumps(problem), ""),
+            subprocess.CompletedProcess(["journalctl"], 0, json.dumps(context), ""),
+        ]
+        with patch.object(server_agent, "run", side_effect=results) as command:
+            events, error = server_agent.journal_problem_events(30)
+
+        self.assertEqual(error, "")
+        self.assertEqual(len(events), 2)
+        self.assertIn("4252783395", command.call_args_list[1].args[0][-1])
+        summary = server_agent.summarize_lines(line for _timestamp, line in events)
+        self.assertEqual(summary["top_destinations"]["direct_ru_timeout"], {"cs.pikabu.ru:443": 1})
 
     def test_classifier_assigns_timeout_to_one_bucket(self) -> None:
         line = "ERROR dns: exchange failed for www.msftconnecttest.com. IN A: context deadline exceeded"
@@ -796,6 +820,7 @@ class ServerAgentTests(unittest.TestCase):
                 "bytes_retrans": 2_829,
                 "retransmit_ratio_pct": 23.092,
                 "degraded_sources": ["203.0.113.20"],
+                "recent_degraded_sources": ["203.0.113.20"],
                 "flows": {
                     "203.0.113.20:50123": {
                         "source": "203.0.113.20",
@@ -822,13 +847,14 @@ class ServerAgentTests(unittest.TestCase):
 
     def test_front_degradation_evidence_is_bounded(self) -> None:
         flows = {
-            f"203.0.113.20:{port}": {"quality": "degraded", "bytes_retrans": port}
+            f"203.0.113.20:{port}": {"source": "203.0.113.20", "quality": "degraded", "bytes_retrans": port}
             for port in range(100, 125)
         }
         evidence = server_agent.front_degradation_evidence(
             {
                 "flows": flows,
                 "degraded_sources": ["203.0.113.20"],
+                "recent_degraded_sources": ["203.0.113.20"],
                 "connections": len(flows),
                 "bytes_sent": 1_000_000,
                 "bytes_retrans": 20_000,
@@ -1562,6 +1588,27 @@ class ServerAgentTests(unittest.TestCase):
         self.assertNotIn("timer", front["clients"])
         self.assertEqual(server_agent.front_observation(front), "observed")
 
+    def test_front_snapshot_keeps_idle_lifetime_loss_out_of_current_sources(self) -> None:
+        def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            if "-Htan" in args:
+                return subprocess.CompletedProcess(args, 0, "ESTAB 0 0 94.232.248.35:443 203.0.113.20:50123\n", "")
+            if "-Htoein" in args:
+                return subprocess.CompletedProcess(
+                    args,
+                    0,
+                    "ESTAB 0 0 94.232.248.35:443 203.0.113.20:50123\n"
+                    "\t cubic rtt:400/20 rto:1200 lastsnd:60001 lastrcv:60001 bytes_sent:2000000 bytes_retrans:100000 retrans:0/8\n",
+                    "",
+                )
+            return subprocess.CompletedProcess(args, 0, "LISTEN 0 4096 94.232.248.35:443 0.0.0.0:*\n", "")
+
+        with patch.object(server_agent, "run", side_effect=fake_run):
+            front = server_agent.tcp_front_snapshot(443)
+
+        self.assertEqual(front["degraded_sources"], ["203.0.113.20"])
+        self.assertEqual(front["recent_degraded_sources"], [])
+        self.assertEqual(server_agent.front_observation(front), "observed")
+
     def test_front_snapshot_ignores_optional_ss_fields_before_endpoints(self) -> None:
         def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
             if "-Htan" in args:
@@ -1618,6 +1665,7 @@ class ServerAgentTests(unittest.TestCase):
         degraded = {
             "listening": True,
             "degraded_sources": ["203.0.113.20"],
+            "recent_degraded_sources": ["203.0.113.20"],
             "fin_wait_1_sources": [],
         }
         self.assertEqual(server_agent.public_front_verdict("active", degraded), "degraded")
@@ -1627,6 +1675,17 @@ class ServerAgentTests(unittest.TestCase):
         front = {"listening": True, "degraded_sources": [], "fin_wait_1_sources": []}
         interval = {"degraded_sources": ["203.0.113.20"], "observation": "client_specific"}
         self.assertEqual(server_agent.public_front_verdict("active", front, interval), "degraded")
+
+    def test_public_front_ignores_degraded_lifetime_metrics_after_flow_is_idle(self) -> None:
+        front = {
+            "listening": True,
+            "degraded_sources": ["203.0.113.20"],
+            "recent_degraded_sources": [],
+            "stale_connections_5m": 1,
+            "keepalive_timer_connections": 1,
+        }
+        self.assertEqual(server_agent.front_observation(front), "observed")
+        self.assertEqual(server_agent.public_front_verdict("active", front), "verified")
 
     def test_xray_front_socket_policy_reads_inbound_liveness_values(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1912,25 +1971,54 @@ class ServerAgentTests(unittest.TestCase):
         self.assertEqual(selection["candidates"]["interserver-underlay-wg"]["delay_ms"], 310)
         self.assertFalse(selection["candidates"]["interserver-underlay-wg"]["fresh"])
 
-    def test_transport_cycle_probes_alternate_only_after_selected_failure(self) -> None:
+    def test_transport_cycle_probes_alternate_only_after_overlay_failure(self) -> None:
         failed = {"checked": True, "ok": False, "attempts": 1, "error": "timeout"}
         healthy = {"checked": True, "ok": True, "attempts": 1, "delay_ms": 50}
-        with patch.object(server_agent, "transport_candidate_probe", side_effect=[failed, healthy]) as probe:
-            result = server_agent.collect_transport_probes("127.0.0.1:19090", "interserver-underlay-wg")
+        config = {"dns": {"servers": []}}
+        with (
+            patch.object(server_agent, "transport_overlay_probe", return_value=failed),
+            patch.object(server_agent, "transport_candidate_probe", return_value=healthy) as probe,
+        ):
+            result = server_agent.collect_transport_probes(
+                config,
+                "interserver-underlay-wg",
+                {},
+                target_port=22,
+                observed_at="2026-08-07T12:00:00+00:00",
+            )
 
-        self.assertEqual(probe.call_count, 2)
+        probe.assert_called_once_with("interserver-underlay-hy2", 22)
         self.assertEqual(result["interserver-underlay-wg"], failed)
         self.assertEqual(result["interserver-underlay-hy2"], healthy)
 
-        with patch.object(server_agent, "transport_candidate_probe", return_value=healthy) as probe:
-            result = server_agent.collect_transport_probes("127.0.0.1:19090", "interserver-underlay-hy2")
+        with (
+            patch.object(server_agent, "transport_overlay_probe", return_value=healthy),
+            patch.object(server_agent, "transport_candidate_probe", return_value=healthy) as probe,
+        ):
+            result = server_agent.collect_transport_probes(
+                config,
+                "interserver-underlay-hy2",
+                {"preferred_probe_at": "2026-08-07T11:59:55+00:00"},
+                target_port=22,
+                observed_at="2026-08-07T12:00:00+00:00",
+            )
 
-        probe.assert_called_once_with(
-            "127.0.0.1:19090",
-            "interserver-underlay-hy2",
-            timeout_ms=server_agent.TRANSPORT_SELECTED_PROBE_TIMEOUT_MS,
-        )
+        probe.assert_not_called()
         self.assertFalse(result["interserver-underlay-wg"]["checked"])
+
+        with (
+            patch.object(server_agent, "transport_overlay_probe", return_value=healthy),
+            patch.object(server_agent, "transport_candidate_probe", return_value=healthy) as probe,
+        ):
+            server_agent.collect_transport_probes(
+                config,
+                "interserver-underlay-hy2",
+                {"preferred_probe_at": "2026-08-07T11:59:49+00:00"},
+                target_port=22,
+                observed_at="2026-08-07T12:00:00+00:00",
+            )
+
+        probe.assert_called_once_with("interserver-underlay-wg", 22)
 
     def test_transport_reconcile_does_not_switch_during_install_transaction(self) -> None:
         previous = {"selected": "interserver-underlay-wg", "state": "healthy"}
@@ -1948,15 +2036,41 @@ class ServerAgentTests(unittest.TestCase):
         select.assert_not_called()
 
     def test_transport_candidate_probe_uses_path_specific_local_proxy(self) -> None:
-        completed = subprocess.CompletedProcess(["curl"], 0, "0.042", "")
-        with patch.object(server_agent, "run", return_value=completed) as command:
-            result = server_agent.transport_candidate_probe("127.0.0.1:19090", "interserver-underlay-hy2")
+        connection = MagicMock()
+        connection.__enter__.return_value = connection
+        connection.recv.side_effect = [b"\x05\x00", b"\x05\x00\x00\x01", b"\x00\x00\x00\x00\x00\x00"]
+        with patch.object(interserver_transport.socket, "create_connection", return_value=connection) as connect:
+            result = server_agent.transport_candidate_probe("interserver-underlay-hy2", 22)
 
         self.assertTrue(result["ok"])
-        self.assertEqual(result["delay_ms"], 42)
-        args = command.call_args.args[0]
-        self.assertIn("socks5://127.0.0.1:19094", args)
-        self.assertIn(server_agent.TRANSPORT_HEALTHCHECK_URL, args)
+        self.assertEqual(result["scope"], "raw-underlay")
+        self.assertEqual(result["target"], "10.75.0.2:22")
+        connect.assert_called_once_with(("127.0.0.1", 19094), timeout=1.2)
+        self.assertEqual(connection.sendall.call_args_list[0].args[0], b"\x05\x01\x00")
+        self.assertTrue(connection.sendall.call_args_list[1].args[0].endswith(b"\x00\x16"))
+
+    def test_transport_overlay_probe_uses_installed_dns_relay(self) -> None:
+        connection = MagicMock()
+        connection.__enter__.return_value = connection
+        response = b"\x12\x34\x81\x80\x00\x01\x00\x01\x00\x00\x00\x00"
+        connection.recv.side_effect = [len(response).to_bytes(2, "big"), response]
+        config = {
+            "dns": {
+                "servers": [
+                    {"type": "tcp", "tag": "dns-global", "server": "10.74.0.2", "server_port": 1053}
+                ]
+            }
+        }
+        with (
+            patch.object(interserver_transport.os, "urandom", return_value=b"\x12\x34"),
+            patch.object(interserver_transport.socket, "create_connection", return_value=connection) as connect,
+        ):
+            result = server_agent.transport_overlay_probe(config)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["scope"], "overlay-dns")
+        connect.assert_called_once_with(("10.74.0.2", 1053), timeout=0.8)
+        self.assertTrue(connection.sendall.call_args.args[0].endswith(b"\x09localhost\x00\x00\x01\x00\x01"))
 
     def test_close_transport_associations_does_not_touch_application_flows(self) -> None:
         payload = {
@@ -2071,19 +2185,22 @@ class ServerAgentTests(unittest.TestCase):
         self.assertFalse(payload["would_switch"])
         write.assert_called_once_with(server_agent.TRANSPORT_STATE_PATH, payload)
 
-    def test_overlay_proof_reuses_dns_independent_transport_target(self) -> None:
+    def test_overlay_proof_checks_bidirectional_transfer_and_dns_relay(self) -> None:
         env = {"WG_INTERFACE": "wg0", "WG_FOREIGN_PUBLIC_KEY": "peer-key", "WG_FOREIGN_ADDRESS": "10.74.0.2/24", "RU_ROUTER_LISTEN_PORT": "2080"}
         results = [
             subprocess.CompletedProcess(["wg"], 0, "peer-key 10 20\n", ""),
             subprocess.CompletedProcess(["ping"], 0, "", ""),
             subprocess.CompletedProcess(["wg"], 0, "peer-key 30 40\n", ""),
-            subprocess.CompletedProcess(["curl"], 0, "ip=198.51.100.20\n", ""),
         ]
-        with patch.object(server_agent, "run", side_effect=results) as command:
+        with (
+            patch.object(server_agent, "run", side_effect=results) as command,
+            patch.object(server_agent, "read_json", return_value={"dns": {"servers": []}}),
+            patch.object(server_agent, "transport_overlay_probe", return_value={"ok": True}),
+        ):
             server_agent.prove_wireguard_overlay(env)
 
-        self.assertIn(server_agent.TRANSPORT_HEALTHCHECK_URL, command.call_args_list[-1].args[0])
-        self.assertNotIn("https://www.cloudflare.com/cdn-cgi/trace", command.call_args_list[-1].args[0])
+        self.assertEqual(command.call_count, 3)
+        self.assertEqual(command.call_args_list[1].args[0][0], "ping")
 
     def test_interserver_transport_snapshot_reports_foreign_listener(self) -> None:
         config = {

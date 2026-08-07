@@ -36,21 +36,20 @@ try:
         summarize_lines,
     )
     from .interserver_transport import (
-        HY2_CLASH_API_LISTEN,
         HY2_PORT,
         TRANSPORT_CANDIDATE_TAGS,
         TRANSPORT_FAILURE_CONFIRMATIONS,
-        TRANSPORT_HEALTHCHECK_URL,
         TRANSPORT_HY2_TAG,
+        TRANSPORT_PREFERRED_PROBE_INTERVAL_SECONDS,
+        TRANSPORT_PREFERRED_TAG,
         TRANSPORT_PROBE_INTERVAL_SECONDS,
-        TRANSPORT_PROBE_PORTS,
-        TRANSPORT_PROBE_TIMEOUT_MS,
         TRANSPORT_RELAY_INBOUND_TAGS,
         TRANSPORT_RELAY_PORTS,
-        TRANSPORT_SELECTED_PROBE_TIMEOUT_MS,
         TRANSPORT_STATE_SCHEMA_VERSION,
         TRANSPORT_WG_TAG,
         evaluate_transport_policy,
+        transport_candidate_probe,
+        transport_overlay_probe,
         transport_topology_configured,
     )
 except ImportError:  # Installed agent runs as a standalone script.
@@ -68,21 +67,20 @@ except ImportError:  # Installed agent runs as a standalone script.
         summarize_lines,
     )
     from interserver_transport import (  # type: ignore[no-redef]
-        HY2_CLASH_API_LISTEN,
         HY2_PORT,
         TRANSPORT_CANDIDATE_TAGS,
         TRANSPORT_FAILURE_CONFIRMATIONS,
-        TRANSPORT_HEALTHCHECK_URL,
         TRANSPORT_HY2_TAG,
+        TRANSPORT_PREFERRED_PROBE_INTERVAL_SECONDS,
+        TRANSPORT_PREFERRED_TAG,
         TRANSPORT_PROBE_INTERVAL_SECONDS,
-        TRANSPORT_PROBE_PORTS,
-        TRANSPORT_PROBE_TIMEOUT_MS,
         TRANSPORT_RELAY_INBOUND_TAGS,
         TRANSPORT_RELAY_PORTS,
-        TRANSPORT_SELECTED_PROBE_TIMEOUT_MS,
         TRANSPORT_STATE_SCHEMA_VERSION,
         TRANSPORT_WG_TAG,
         evaluate_transport_policy,
+        transport_candidate_probe,
+        transport_overlay_probe,
         transport_topology_configured,
     )
 
@@ -141,6 +139,8 @@ FRONT_RTT_DEGRADED_MS = 250
 FRONT_RTT_INFLATION_FACTOR = 3
 FRONT_RTO_DEGRADED_MS = 1_000
 FRONT_COUNTER_MAX_INTERVAL_SECONDS = 300
+FRONT_CURRENT_ACTIVITY_MAX_IDLE_MS = 30_000
+LOG_CONTEXT_MAX_EVENT_IDS = 500
 PROBLEM_LOG_GREP = (
     "ERROR|FATAL|processed invalid connection|accepted tcp:disabled[.]invalid|"
     "connection rejected|mux connection closed|EOF|connection reset|using outbound/vless"
@@ -391,6 +391,58 @@ def journal_command_error(result: subprocess.CompletedProcess[str]) -> str:
     return (result.stderr.strip() or f"journalctl exited with {result.returncode}")[:240]
 
 
+def _parse_journal_events(result: subprocess.CompletedProcess[str]) -> tuple[list[tuple[float, str]], int]:
+    events: list[tuple[float, str]] = []
+    malformed = 0
+    for raw_line in result.stdout.splitlines():
+        try:
+            record = json.loads(raw_line)
+            timestamp = float(record["__REALTIME_TIMESTAMP"]) / 1_000_000
+            message = journal_record_message(record)
+            unit = str(record.get("_SYSTEMD_UNIT") or record.get("SYSLOG_IDENTIFIER") or "unknown")
+            if not message:
+                raise ValueError("journal message is empty or malformed")
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            malformed += 1
+            continue
+        events.append((timestamp, f"[unit={unit}] {message}"))
+    return events, malformed
+
+
+def _journal_event_context(minutes: int, problem_events: list[tuple[float, str]]) -> list[tuple[float, str]]:
+    event_ids = list(
+        dict.fromkeys(
+            event_id
+            for _timestamp, line in problem_events
+            if "[unit=sing-box.service]" in line and (event_id := event_id_from_line(line))
+        )
+    )[-LOG_CONTEXT_MAX_EVENT_IDS:]
+    if not event_ids:
+        return []
+    event_pattern = "|".join(re.escape(event_id) for event_id in event_ids)
+    result = run(
+        [
+            "journalctl",
+            "-u",
+            "sing-box.service",
+            "--since",
+            f"{minutes} minutes ago",
+            "--no-pager",
+            "--output=json",
+            rf"--grep=\[(?:\x1B\[[0-9;]*m)*(?:{event_pattern})\b",
+        ],
+        timeout=30,
+    )
+    if journal_command_error(result):
+        return []
+    context, _malformed = _parse_journal_events(result)
+    return [
+        event
+        for event in context
+        if inbound_destination_from_line(event[1]) or "dns: lookup succeed for " in event[1]
+    ]
+
+
 def journal_problem_events(minutes: int) -> tuple[list[tuple[float, str]], str]:
     result = run(
         [
@@ -410,20 +462,8 @@ def journal_problem_events(minutes: int) -> tuple[list[tuple[float, str]], str]:
     command_error = journal_command_error(result)
     if command_error:
         return [], command_error
-    events: list[tuple[float, str]] = []
-    malformed = 0
-    for raw_line in result.stdout.splitlines():
-        try:
-            record = json.loads(raw_line)
-            timestamp = float(record["__REALTIME_TIMESTAMP"]) / 1_000_000
-            message = journal_record_message(record)
-            unit = str(record.get("_SYSTEMD_UNIT") or record.get("SYSLOG_IDENTIFIER") or "unknown")
-            if not message:
-                raise ValueError("journal message is empty or malformed")
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-            malformed += 1
-            continue
-        events.append((timestamp, f"[unit={unit}] {message}"))
+    events, malformed = _parse_journal_events(result)
+    events.extend(_journal_event_context(minutes, events))
     if malformed:
         return events, f"journalctl returned {malformed} malformed JSON record(s)"
     return events, ""
@@ -1216,6 +1256,15 @@ def tcp_front_snapshot(port: int) -> dict[str, Any]:
         for metrics in all_flow_metrics.values()
         if metrics["phase"] == "active" and metrics["quality"] == "degraded"
     }
+    recent_degraded_sources = {
+        str(metrics["source"])
+        for metrics in all_flow_metrics.values()
+        if (
+            metrics["phase"] == "active"
+            and metrics["quality"] == "degraded"
+            and float(metrics.get("idle_ms_p95") or 0) < FRONT_CURRENT_ACTIVITY_MAX_IDLE_MS
+        )
+    }
     loss_observed_sources = sorted(
         source
         for source in all_client_metrics
@@ -1242,6 +1291,7 @@ def tcp_front_snapshot(port: int) -> dict[str, Any]:
         "bytes_retrans": bytes_retrans,
         "retransmit_ratio_pct": round(bytes_retrans * 100 / bytes_sent, 3) if bytes_sent else 0.0,
         "degraded_sources": sorted(degraded_sources),
+        "recent_degraded_sources": sorted(recent_degraded_sources),
         "loss_observed_sources": loss_observed_sources,
         "unacked": unacked,
         "keepalive_timer_connections": keepalive_timers,
@@ -1486,8 +1536,11 @@ def public_hy2_snapshot(port: int) -> dict[str, Any]:
 
 def front_observation(front: dict[str, Any], interval: dict[str, Any] | None = None) -> str:
     """Classify active data-path loss without conflating socket teardown."""
-    interval_sources = set((interval or {}).get("degraded_sources", []))
-    degraded_sources = set(front.get("degraded_sources", [])) | interval_sources
+    degraded_sources = set(
+        interval.get("degraded_sources", [])
+        if interval is not None and interval.get("baseline") is not True
+        else front.get("recent_degraded_sources", [])
+    )
     if int(front.get("stale_connections_5m", 0)) >= 25 and int(front.get("keepalive_timer_connections", 0)) < int(front.get("stale_connections_5m", 0)):
         return "degraded"
     if len(degraded_sources) >= 3:
@@ -1523,29 +1576,36 @@ def front_degradation_evidence(
     observed_at: str,
     interval: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    interval_supplied = interval is not None and interval.get("baseline") is not True
+    current_sources = set(
+        interval.get("degraded_sources", [])
+        if interval_supplied and interval is not None
+        else front.get("recent_degraded_sources", [])
+    )
+    evidence_flows = (interval or {}).get("flows", {}) if interval_supplied else front.get("flows", {})
     degraded_flows = dict(
         sorted(
             (
                 (key, metrics)
-                for key, metrics in front.get("flows", {}).items()
-                if metrics.get("quality") == "degraded"
+                for key, metrics in evidence_flows.items()
+                if isinstance(metrics, dict) and metrics.get("quality") == "degraded" and metrics.get("source") in current_sources
             ),
             key=lambda item: -int(item[1].get("bytes_retrans", 0)),
         )[:20]
     )
-    interval = interval or {}
+    interval_data = interval or {}
     interval_flows = {
         key: metrics
-        for key, metrics in interval.get("flows", {}).items()
+        for key, metrics in interval_data.get("flows", {}).items()
         if isinstance(metrics, dict) and metrics.get("quality") == "degraded"
     }
-    degraded_sources = sorted(set(front.get("degraded_sources", [])) | set(interval.get("degraded_sources", [])))
+    degraded_sources = sorted(current_sources)
     closing_sources = sorted(set(front.get("closing_churn_sources", [])))
     if not degraded_sources and not degraded_flows and not interval_flows and not closing_sources:
         return {}
     return {
         "observed_at": observed_at,
-        "observation": front_observation(front, interval),
+        "observation": front_observation(front, interval_data if interval_supplied else None),
         "degraded_sources": degraded_sources,
         "closing_churn": {
             "observation": closing_churn_observation(front),
@@ -1564,7 +1624,7 @@ def front_degradation_evidence(
         },
         "flows": degraded_flows,
         "interval": {
-            "aggregate": interval.get("aggregate", {}),
+            "aggregate": interval_data.get("aggregate", {}),
             "flows": interval_flows,
         },
     }
@@ -1688,54 +1748,29 @@ def transport_selection_snapshot(config: dict[str, Any], env: dict[str, str]) ->
     }
 
 
-def transport_candidate_probe(_controller: str, tag: str, *, timeout_ms: int = TRANSPORT_PROBE_TIMEOUT_MS) -> dict[str, Any]:
-    started = time.monotonic()
-    port = TRANSPORT_PROBE_PORTS.get(tag)
-    if port is None:
-        return {"checked": True, "ok": False, "attempts": 1, "delay_ms": 0, "error": "unknown transport candidate"}
-    timeout_seconds = timeout_ms / 1000
-    result = run(
-        [
-            "curl",
-            "-4fsS",
-            "--proxy",
-            f"socks5://127.0.0.1:{port}",
-            "--connect-timeout",
-            str(timeout_seconds),
-            "--max-time",
-            str(timeout_seconds),
-            "--output",
-            os.devnull,
-            "--write-out",
-            "%{time_total}",
-            TRANSPORT_HEALTHCHECK_URL,
-        ],
-        timeout=2,
-    )
-    if result.returncode != 0:
-        return {
-            "checked": True,
-            "ok": False,
-            "attempts": 1,
-            "delay_ms": 0,
-            "elapsed_ms": round((time.monotonic() - started) * 1000),
-            "error": (result.stderr.strip() or f"curl exit {result.returncode}")[:240],
-        }
-    try:
-        delay_ms = max(1, round(float(result.stdout.strip()) * 1000))
-    except ValueError:
-        return {"checked": True, "ok": False, "attempts": 1, "delay_ms": 0, "error": "curl timing is invalid"}
-    return {"checked": True, "ok": True, "attempts": 1, "delay_ms": delay_ms, "error": ""}
+def preferred_transport_probe_due(previous: dict[str, Any], observed_at: str) -> bool:
+    now = parse_iso_datetime(observed_at)
+    age = iso_age_seconds(str(previous.get("preferred_probe_at", "")), now=now) if now else None
+    return age is None or age >= TRANSPORT_PREFERRED_PROBE_INTERVAL_SECONDS
 
 
-def collect_transport_probes(controller: str, selected: str) -> dict[str, dict[str, Any]]:
+def collect_transport_probes(
+    config: dict[str, Any],
+    selected: str,
+    previous: dict[str, Any],
+    *,
+    target_port: int,
+    observed_at: str,
+) -> dict[str, dict[str, Any]]:
     probes = {tag: {"checked": False, "ok": False, "attempts": 0} for tag in TRANSPORT_CANDIDATE_TAGS}
     if selected not in probes:
         return probes
-    probes[selected] = transport_candidate_probe(controller, selected, timeout_ms=TRANSPORT_SELECTED_PROBE_TIMEOUT_MS)
+    probes[selected] = transport_overlay_probe(config)
     if probes[selected].get("ok") is not True:
         alternate = next(tag for tag in TRANSPORT_CANDIDATE_TAGS if tag != selected)
-        probes[alternate] = transport_candidate_probe(controller, alternate, timeout_ms=TRANSPORT_PROBE_TIMEOUT_MS)
+        probes[alternate] = transport_candidate_probe(alternate, target_port)
+    elif selected != TRANSPORT_PREFERRED_TAG and preferred_transport_probe_due(previous, observed_at):
+        probes[TRANSPORT_PREFERRED_TAG] = transport_candidate_probe(TRANSPORT_PREFERRED_TAG, target_port)
     return probes
 
 
@@ -1793,23 +1828,10 @@ def prove_wireguard_overlay(env: dict[str, str]) -> None:
     after_rx, after_tx = transfer()
     if after_rx <= before_rx or after_tx <= before_tx:
         raise RuntimeError("new WireGuard overlay path produced no bidirectional transfer delta")
-    router_port = str(env.get("RU_ROUTER_LISTEN_PORT", "2080"))
-    http = run(
-        [
-            "curl",
-            "-4fsS",
-            "--proxy",
-            f"socks5h://127.0.0.1:{router_port}",
-            "--connect-timeout",
-            "2",
-            "--max-time",
-            "5",
-            TRANSPORT_HEALTHCHECK_URL,
-        ],
-        timeout=6,
-    )
-    if http.returncode != 0 or "ip=" not in http.stdout:
-        raise RuntimeError((http.stderr.strip() or "new WireGuard overlay path failed the router HTTP proof")[:240])
+    config = read_json(SINGBOX_CONFIG_PATH, {})
+    dns_probe = transport_overlay_probe(config if isinstance(config, dict) else {})
+    if dns_probe.get("ok") is not True:
+        raise RuntimeError(f"new WireGuard overlay path failed the DNS relay proof: {dns_probe.get('error', 'unknown error')}")
 
 
 def select_transport(env: dict[str, str], controller: str, tag: str) -> int:
@@ -1921,13 +1943,25 @@ def _reconcile_interserver_transport_unlocked() -> dict[str, Any]:
             write_json_atomic(TRANSPORT_STATE_PATH, payload)
             return payload
 
-        probes = collect_transport_probes(controller, selected)
+        observed_at = utc_now()
+        try:
+            target_port = int(env.get("SSH_PORT", "22") or 0)
+        except ValueError:
+            target_port = 0
+        probes = collect_transport_probes(
+            config,
+            selected,
+            previous if isinstance(previous, dict) else {},
+            target_port=target_port,
+            observed_at=observed_at,
+        )
         payload = evaluate_transport_policy(
             selected=selected,
             probes=probes,
             previous=previous,
-            observed_at=utc_now(),
+            observed_at=observed_at,
         )
+        payload["overlay_probe"] = probes.get(selected, {})
         if payload.get("would_switch"):
             target = str(payload.get("recommended", ""))
             try:
@@ -2465,7 +2499,11 @@ def run_probes(env: dict[str, str], role: str, profile: str) -> dict[str, Any]:
         identities["router"] = expected_identity(probe_identity(proxy="socks5h://127.0.0.1:2080"), foreign_ip)
     private_reject = probe_private_reject("socks5h://127.0.0.1:2080") if role == "ru-gateway" else {"ok": True, "not_applicable": True}
     if role == "ru-gateway":
-        hysteria_candidate = transport_candidate_probe(HY2_CLASH_API_LISTEN, TRANSPORT_HY2_TAG)
+        try:
+            transport_target_port = int(env.get("SSH_PORT", "22") or 0)
+        except ValueError:
+            transport_target_port = 0
+        hysteria_candidate = transport_candidate_probe(TRANSPORT_HY2_TAG, transport_target_port)
         required_paths: dict[str, list[dict[str, Any]]] = {
             "ru_direct_identity": [identities["direct"]],
             "foreign_domains_via_wg": required_domain_results(via_wg),
