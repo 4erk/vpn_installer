@@ -243,6 +243,18 @@ def test_install_rollback_state(runner: AuditRunner) -> dict[str, str]:
                 configure_system_resolver
                 test -L "${RESOLV_CONF_PATH}"
                 grep -Fxq 'restart systemd-resolved.service' "${SYSTEMCTL_LOG}"
+
+                printf 'same resolver config\n' >"${VPNSTACK_RELEASES_DIR}/old/resolved-vpn-stack.conf"
+                printf 'same resolver config\n' >"${VPNSTACK_RELEASES_DIR}/new/resolved-vpn-stack.conf"
+                ln -s "${VPNSTACK_RELEASES_DIR}/old" "${VPNSTACK_PREVIOUS_RELEASE}"
+                ln -s "${VPNSTACK_RELEASES_DIR}/new" "${VPNSTACK_CURRENT_RELEASE}"
+                : >"${SYSTEMCTL_LOG}"
+                configure_system_resolver
+                ! grep -Fq 'restart systemd-resolved.service' "${SYSTEMCTL_LOG}"
+                printf 'changed resolver config\n' >"${VPNSTACK_RELEASES_DIR}/new/resolved-vpn-stack.conf"
+                configure_system_resolver
+                grep -Fxq 'restart systemd-resolved.service' "${SYSTEMCTL_LOG}"
+                rm -f "${VPNSTACK_CURRENT_RELEASE}" "${VPNSTACK_PREVIOUS_RELEASE}"
                 ln -s "${VPNSTACK_RELEASES_DIR}/old" "${VPNSTACK_CURRENT_RELEASE}"
 
                 create_revision_snapshot

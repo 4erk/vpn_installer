@@ -1228,16 +1228,35 @@ configure_unattended_security_updates() {
   systemctl enable --now apt-daily.timer apt-daily-upgrade.timer >/dev/null 2>&1 || true
 }
 
+resolver_stub_ready() {
+  local stub_listener='127\.0\.0\.53(%[^[:space:]:]+)?:53'
+  [[ -e "${RESOLVED_STUB_PATH}" ]] \
+    && systemctl is-active --quiet systemd-resolved.service \
+    && ss -H -lnt "sport = :53" | grep -Eq "${stub_listener}" \
+    && ss -H -lun "sport = :53" | grep -Eq "${stub_listener}"
+}
+
+resolver_release_config_unchanged() {
+  local current_release=""
+  local previous_release=""
+  current_release="$(readlink -f "${VPNSTACK_CURRENT_RELEASE}" 2>/dev/null || true)"
+  previous_release="$(readlink -f "${VPNSTACK_PREVIOUS_RELEASE}" 2>/dev/null || true)"
+  [[ -n "${current_release}" && -n "${previous_release}" ]] \
+    && [[ -f "${current_release}/resolved-vpn-stack.conf" ]] \
+    && [[ -f "${previous_release}/resolved-vpn-stack.conf" ]] \
+    && cmp -s "${current_release}/resolved-vpn-stack.conf" "${previous_release}/resolved-vpn-stack.conf"
+}
+
 configure_system_resolver() {
   local attempt=0
-  local stub_listener='127\.0\.0\.53(%[^[:space:]:]+)?:53'
   systemctl enable systemd-resolved.service
+  if resolver_release_config_unchanged && resolver_stub_ready; then
+    ln -sfn "../run/systemd/resolve/stub-resolv.conf" "${RESOLV_CONF_PATH}"
+    return 0
+  fi
   systemctl restart systemd-resolved.service
   for ((attempt = 0; attempt < 50; attempt++)); do
-    if [[ -e "${RESOLVED_STUB_PATH}" ]] \
-      && systemctl is-active --quiet systemd-resolved.service \
-      && ss -H -lnt "sport = :53" | grep -Eq "${stub_listener}" \
-      && ss -H -lun "sport = :53" | grep -Eq "${stub_listener}"; then
+    if resolver_stub_ready; then
       ln -sfn "../run/systemd/resolve/stub-resolv.conf" "${RESOLV_CONF_PATH}"
       return 0
     fi
@@ -1597,6 +1616,11 @@ if not collectors or any(state.get("status") != "ok" for state in collectors.val
 windows = payload.get("log_windows", {})
 if not windows or any(window.get("collector", {}).get("status") != "ok" for window in windows.values()):
     raise SystemExit(f"post-activation log windows are incomplete: {windows}")
+since_release = windows.get("since_release") or {}
+top_destinations = since_release.get("top_destinations") or {}
+local_dns_refused = (top_destinations.get("upstream_refused") or {}).get("127.0.0.53:53", 0)
+if local_dns_refused:
+    raise SystemExit(f"local resolver refused {local_dns_refused} request(s) after activation")
 verdicts = payload.get("component_verdicts", {})
 if verdicts.get("server_path") != "verified":
     raise SystemExit(f"post-activation server path failed: {payload.get('reasons', [])}")

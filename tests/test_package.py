@@ -94,6 +94,8 @@ class PackageTests(unittest.TestCase):
         self.assertIn('link_release_file "${source_dir}" "resolved-vpn-stack.conf"', script)
         self.assertIn("systemd-resolved", script)
         self.assertIn('ln -sfn "../run/systemd/resolve/stub-resolv.conf"', script)
+        self.assertIn("resolver_release_config_unchanged", script)
+        self.assertIn("local resolver refused", script)
         self.assertIn("extend_baseline_contract", script)
         self.assertIn('link_release_file "${source_dir}" "modules-vpn-stack.conf"', script)
         self.assertIn("modprobe nf_conntrack", script)
@@ -166,7 +168,7 @@ class PackageTests(unittest.TestCase):
 
     def test_package_exposes_version_via_getattr(self) -> None:
         package = importlib.import_module("vpn_installer")
-        self.assertEqual(package.__version__, "0.19.4")
+        self.assertEqual(package.__version__, "0.19.5")
         with self.assertRaises(AttributeError):
             package.__getattr__("nope")
 
