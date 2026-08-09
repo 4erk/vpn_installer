@@ -67,7 +67,7 @@ Foreign-классы всегда остаются на `to-foreign`. Health и 
 
 ## Server agent и диагностика
 
-`vpn-stack-agent` - stdlib-only серверный executable. Он предоставляет operator-команды `snapshot`, `probe`, `health`, `front`, `client`, `routes` и `assets`; внутренние `transport-reconcile`/`transport-watch` управляют только endpoint стабильного overlay. Agent компилирует решение из structured probes и закрывает только association выбранного relay. Нормализация log buckets вынесена в отдельный `log_classifier.py`, который поставляется и хешируется вместе с agent.
+`vpn-stack-agent` - stdlib-only серверный executable. Он предоставляет operator-команды `snapshot`, `probe`, `health`, `front`, `client`, `routes` и `assets`; внутренние `transport-reconcile`/`transport-watch` управляют только endpoint стабильного overlay. Transport probe проверяет внутренний WG независимо от DNS, а холодный relay подтверждается ответом удалённого SSH, а не локальным SOCKS accept. Старую association agent закрывает только после proof нового пути; ошибка активации атомарно возвращает старый endpoint и открывает bounded circuit breaker. Нормализация log buckets вынесена в отдельный `log_classifier.py`, который поставляется и хешируется вместе с agent.
 
 Snapshot schema 3 содержит:
 

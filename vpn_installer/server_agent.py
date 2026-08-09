@@ -16,7 +16,7 @@ import urllib.parse
 import urllib.request
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -46,10 +46,11 @@ try:
         TRANSPORT_RELAY_INBOUND_TAGS,
         TRANSPORT_RELAY_PORTS,
         TRANSPORT_STATE_SCHEMA_VERSION,
+        TRANSPORT_SWITCH_RETRY_BASE_SECONDS,
+        TRANSPORT_SWITCH_RETRY_MAX_SECONDS,
         TRANSPORT_WG_TAG,
         evaluate_transport_policy,
         transport_candidate_probe,
-        transport_overlay_probe,
         transport_topology_configured,
     )
 except ImportError:  # Installed agent runs as a standalone script.
@@ -77,10 +78,11 @@ except ImportError:  # Installed agent runs as a standalone script.
         TRANSPORT_RELAY_INBOUND_TAGS,
         TRANSPORT_RELAY_PORTS,
         TRANSPORT_STATE_SCHEMA_VERSION,
+        TRANSPORT_SWITCH_RETRY_BASE_SECONDS,
+        TRANSPORT_SWITCH_RETRY_MAX_SECONDS,
         TRANSPORT_WG_TAG,
         evaluate_transport_policy,
         transport_candidate_probe,
-        transport_overlay_probe,
         transport_topology_configured,
     )
 
@@ -1782,21 +1784,59 @@ def preferred_transport_probe_due(previous: dict[str, Any], observed_at: str) ->
     return age is None or age >= TRANSPORT_PREFERRED_PROBE_INTERVAL_SECONDS
 
 
+def transport_overlay_path_probe(env: dict[str, str]) -> dict[str, Any]:
+    """Probe only the active interserver overlay, independent of DNS and Internet services."""
+
+    started = time.monotonic()
+    interface = env.get("WG_INTERFACE", "wg0")
+    target = str(env.get("WG_FOREIGN_ADDRESS", "")).split("/", 1)[0]
+    if not target:
+        return {
+            "checked": True,
+            "ok": False,
+            "attempts": 1,
+            "delay_ms": 0,
+            "elapsed_ms": 0,
+            "scope": "overlay-icmp",
+            "target": "",
+            "error": "foreign WireGuard address is missing",
+        }
+    result = run(
+        ["ping", "-n", "-I", interface, "-c", "1", "-W", "1", "-s", "32", target],
+        timeout=2,
+    )
+    elapsed_ms = max(1, round((time.monotonic() - started) * 1000))
+    error = ""
+    if result.returncode != 0:
+        error = " ".join((result.stderr.strip() or result.stdout.strip() or f"ping exit {result.returncode}").split())[:240]
+    return {
+        "checked": True,
+        "ok": not error,
+        "attempts": 1,
+        "delay_ms": 0 if error else elapsed_ms,
+        "elapsed_ms": elapsed_ms,
+        "scope": "overlay-icmp",
+        "target": target,
+        "error": error,
+    }
+
+
 def collect_transport_probes(
-    config: dict[str, Any],
     selected: str,
     previous: dict[str, Any],
     *,
+    env: dict[str, str],
     target_port: int,
     observed_at: str,
 ) -> dict[str, dict[str, Any]]:
     probes = {tag: {"checked": False, "ok": False, "attempts": 0} for tag in TRANSPORT_CANDIDATE_TAGS}
     if selected not in probes:
         return probes
-    probes[selected] = transport_overlay_probe(config)
+    probes[selected] = transport_overlay_path_probe(env)
     if probes[selected].get("ok") is not True:
         alternate = next(tag for tag in TRANSPORT_CANDIDATE_TAGS if tag != selected)
-        probes[alternate] = transport_candidate_probe(alternate, target_port)
+        if transport_switch_backoff_active(previous, alternate, observed_at) is None:
+            probes[alternate] = transport_candidate_probe(alternate, target_port)
     elif selected != TRANSPORT_PREFERRED_TAG and preferred_transport_probe_due(previous, observed_at):
         probes[TRANSPORT_PREFERRED_TAG] = transport_candidate_probe(TRANSPORT_PREFERRED_TAG, target_port)
     return probes
@@ -1850,16 +1890,36 @@ def prove_wireguard_overlay(env: dict[str, str]) -> None:
         raise RuntimeError("WireGuard peer transfer counters are missing")
 
     before_rx, before_tx = transfer()
-    result = run(["ping", "-n", "-M", "do", "-s", "1280", "-I", interface, "-c", "2", "-W", "2", target], timeout=5)
-    if result.returncode != 0:
-        raise RuntimeError((result.stderr.strip() or "new WireGuard overlay path failed its MTU proof")[:240])
+    path_probe: dict[str, Any] = {}
+    for attempt in range(4):
+        path_probe = transport_overlay_path_probe(env)
+        if path_probe.get("ok") is True:
+            break
+        if attempt < 3:
+            time.sleep(0.25)
+    if path_probe.get("ok") is not True:
+        raise RuntimeError(
+            f"new WireGuard overlay path failed its liveness proof: {path_probe.get('error', 'unknown error')}"
+        )
+
+    mtu_result: subprocess.CompletedProcess[str] | None = None
+    for attempt in range(4):
+        mtu_result = run(
+            ["ping", "-n", "-M", "do", "-s", "1280", "-I", interface, "-c", "1", "-W", "1", target],
+            timeout=2,
+        )
+        if mtu_result.returncode == 0:
+            break
+        if attempt < 3:
+            time.sleep(0.25)
+    if mtu_result is None or mtu_result.returncode != 0:
+        detail = " ".join(
+            ((mtu_result.stderr if mtu_result else "") or (mtu_result.stdout if mtu_result else "") or "new WireGuard overlay path failed its MTU proof").split()
+        )
+        raise RuntimeError(detail[:240])
     after_rx, after_tx = transfer()
     if after_rx <= before_rx or after_tx <= before_tx:
         raise RuntimeError("new WireGuard overlay path produced no bidirectional transfer delta")
-    config = read_json(SINGBOX_CONFIG_PATH, {})
-    dns_probe = transport_overlay_probe(config if isinstance(config, dict) else {})
-    if dns_probe.get("ok") is not True:
-        raise RuntimeError(f"new WireGuard overlay path failed the DNS relay proof: {dns_probe.get('error', 'unknown error')}")
 
 
 def select_transport(env: dict[str, str], controller: str, tag: str) -> int:
@@ -1883,19 +1943,20 @@ def select_transport(env: dict[str, str], controller: str, tag: str) -> int:
 
     closed = 0
     try:
-        closed = close_transport_associations(controller, old_tag)
         set_endpoint(endpoint)
         time.sleep(0.1)
         if wireguard_overlay_selection(env).get("selected") != tag:
             raise RuntimeError("new WireGuard endpoint did not become active")
         prove_wireguard_overlay(env)
+        try:
+            closed = close_transport_associations(controller, old_tag)
+        except (OSError, RuntimeError, ValueError, urllib.error.URLError):
+            # The old idle association is harmless and expires naturally. It must
+            # never roll back an already proven replacement path.
+            closed = 0
         return closed
     except (OSError, RuntimeError, ValueError, urllib.error.URLError) as exc:
         rollback_errors: list[str] = []
-        try:
-            close_transport_associations(controller, tag)
-        except (OSError, RuntimeError, ValueError, urllib.error.URLError) as rollback_exc:
-            rollback_errors.append(f"target association cleanup failed: {rollback_exc}")
         try:
             set_endpoint(old_endpoint)
         except (OSError, RuntimeError) as rollback_exc:
@@ -1909,9 +1970,50 @@ def select_transport(env: dict[str, str], controller: str, tag: str) -> int:
                     prove_wireguard_overlay(env)
             except (OSError, RuntimeError, ValueError, urllib.error.URLError) as rollback_exc:
                 rollback_errors.append(f"restored overlay proof failed: {rollback_exc}")
+        try:
+            close_transport_associations(controller, tag)
+        except (OSError, RuntimeError, ValueError, urllib.error.URLError):
+            pass
         if rollback_errors:
             raise RuntimeError(f"{exc}; rollback failed: {'; '.join(rollback_errors)}") from exc
         raise RuntimeError(f"{exc}; previous WireGuard endpoint restored and verified") from exc
+
+
+def transport_switch_backoff_active(
+    previous: dict[str, Any],
+    target: str,
+    observed_at: str,
+) -> dict[str, Any] | None:
+    backoff = previous.get("switch_backoff", {})
+    if not isinstance(backoff, dict) or backoff.get("target") != target:
+        return None
+    retry_at = parse_iso_datetime(str(backoff.get("retry_at", "")))
+    observed = parse_iso_datetime(observed_at)
+    if retry_at is None or observed is None or observed >= retry_at:
+        return None
+    return backoff
+
+
+def next_transport_switch_failure(
+    previous: dict[str, Any],
+    target: str,
+    reason: str,
+    observed_at: str,
+) -> dict[str, Any]:
+    prior = previous.get("switch_backoff", {})
+    attempts = int(prior.get("attempts", 0) or 0) + 1 if isinstance(prior, dict) and prior.get("target") == target else 1
+    delay = min(
+        TRANSPORT_SWITCH_RETRY_MAX_SECONDS,
+        TRANSPORT_SWITCH_RETRY_BASE_SECONDS * (2 ** min(attempts - 1, 8)),
+    )
+    observed = parse_iso_datetime(observed_at) or datetime.now(timezone.utc)
+    return {
+        "target": target,
+        "attempts": attempts,
+        "failed_at": observed_at,
+        "retry_at": (observed + timedelta(seconds=delay)).isoformat(),
+        "reason": reason[:240],
+    }
 
 
 def reconcile_interserver_transport() -> dict[str, Any]:
@@ -1943,6 +2045,7 @@ def _reconcile_interserver_transport_unlocked() -> dict[str, Any]:
         env = parse_env()
         controller = str(config.get("experimental", {}).get("clash_api", {}).get("external_controller", "")) if isinstance(config, dict) else ""
         previous = read_json(TRANSPORT_STATE_PATH, {})
+        previous_state = previous if isinstance(previous, dict) else {}
         if not isinstance(config, dict) or not transport_topology_configured(config, env) or not controller:
             payload = {
                 "schema_version": TRANSPORT_STATE_SCHEMA_VERSION,
@@ -1977,25 +2080,63 @@ def _reconcile_interserver_transport_unlocked() -> dict[str, Any]:
         except ValueError:
             target_port = 0
         probes = collect_transport_probes(
-            config,
             selected,
-            previous if isinstance(previous, dict) else {},
+            previous_state,
+            env=env,
             target_port=target_port,
             observed_at=observed_at,
         )
         payload = evaluate_transport_policy(
             selected=selected,
             probes=probes,
-            previous=previous,
+            previous=previous_state,
             observed_at=observed_at,
         )
         payload["overlay_probe"] = probes.get(selected, {})
+        last_switch_failure = previous_state.get("last_switch_failure")
+        if isinstance(last_switch_failure, dict):
+            payload["last_switch_failure"] = last_switch_failure
+        alternate = next((tag for tag in TRANSPORT_CANDIDATE_TAGS if tag != selected), "")
+        switch_backoff = transport_switch_backoff_active(previous_state, alternate, observed_at)
+        if switch_backoff is not None and probes.get(selected, {}).get("ok") is not True:
+            payload["switch_backoff"] = switch_backoff
+            if payload.get("would_switch"):
+                payload.update(
+                    {
+                        "state": "failed",
+                        "recommended": selected,
+                        "would_switch": False,
+                        "changed": False,
+                        "reason": (
+                            f"{payload.get('reason', '')}; fallback activation is paused until "
+                            f"{switch_backoff.get('retry_at', 'the next retry window')}"
+                        ),
+                    }
+                )
         if payload.get("would_switch"):
             target = str(payload.get("recommended", ""))
             try:
                 closed_associations = select_transport(env, controller, target)
             except (OSError, RuntimeError, ValueError) as exc:
-                payload.update({"state": "failed", "reason": f"WireGuard endpoint update failed: {str(exc)[:180]}"})
+                failure_reason = f"WireGuard endpoint update failed: {str(exc)[:180]}"
+                rollback_verified = "previous WireGuard endpoint restored and verified" in str(exc)
+                switch_failure = next_transport_switch_failure(
+                    previous_state,
+                    target,
+                    failure_reason,
+                    observed_at,
+                )
+                payload.update(
+                    {
+                        "state": "degraded" if rollback_verified else "failed",
+                        "recommended": selected,
+                        "would_switch": False,
+                        "changed": False,
+                        "switch_backoff": switch_failure,
+                        "last_switch_failure": switch_failure,
+                        "reason": failure_reason,
+                    }
+                )
             else:
                 payload.update(
                     {
@@ -2035,8 +2176,7 @@ def watch_interserver_transport() -> None:
         if signature != previous_signature:
             print(json.dumps(payload, ensure_ascii=False, sort_keys=True), flush=True)
             previous_signature = signature
-        interval = 0.25 if payload.get("state") == "suspect" else TRANSPORT_PROBE_INTERVAL_SECONDS
-        time.sleep(max(0.1, interval - (time.monotonic() - started)))
+        time.sleep(max(0.1, TRANSPORT_PROBE_INTERVAL_SECONDS - (time.monotonic() - started)))
 
 
 def transport_state_snapshot(path: Path = TRANSPORT_STATE_PATH) -> dict[str, Any]:

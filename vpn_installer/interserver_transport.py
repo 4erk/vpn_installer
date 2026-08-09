@@ -33,7 +33,6 @@ TRANSPORT_PROBE_PORTS = {
     TRANSPORT_WG_TAG: 19093,
     TRANSPORT_HY2_TAG: 19094,
 }
-TRANSPORT_OVERLAY_PROBE_TIMEOUT_MS = 800
 TRANSPORT_CANDIDATE_PROBE_TIMEOUT_MS = 1200
 TRANSPORT_PROBE_INTERVAL_SECONDS = 2
 TRANSPORT_FAILURE_CONFIRMATIONS = 2
@@ -43,7 +42,9 @@ TRANSPORT_PREFERRED_TAG = TRANSPORT_WG_TAG
 TRANSPORT_PREFERRED_RECOVERY_CONFIRMATIONS = 3
 TRANSPORT_PREFERRED_PROBE_INTERVAL_SECONDS = 10
 TRANSPORT_PREFERRED_EVIDENCE_MAX_GAP_SECONDS = TRANSPORT_PREFERRED_PROBE_INTERVAL_SECONDS * 3
-TRANSPORT_STATE_SCHEMA_VERSION = 8
+TRANSPORT_SWITCH_RETRY_BASE_SECONDS = 30
+TRANSPORT_SWITCH_RETRY_MAX_SECONDS = 300
+TRANSPORT_STATE_SCHEMA_VERSION = 9
 UNDERLAY_WG_RU_ADDRESS = "10.75.0.1/32"
 UNDERLAY_WG_FOREIGN_ADDRESS = "10.75.0.2/32"
 UNDERLAY_WG_MTU = 1420
@@ -60,6 +61,24 @@ def _receive_exact(connection: socket.socket, size: int) -> bytes:
         chunks.append(chunk)
         size -= len(chunk)
     return b"".join(chunks)
+
+
+def _receive_ssh_banner(connection: socket.socket) -> bytes:
+    """Read the remote identification so a local SOCKS accept is not mistaken for path health."""
+
+    pending = b""
+    for _line in range(8):
+        while b"\n" not in pending and len(pending) < 512:
+            chunk = connection.recv(128)
+            if not chunk:
+                raise OSError("peer closed before the SSH banner")
+            pending += chunk
+        line, separator, pending = pending.partition(b"\n")
+        if not separator:
+            raise OSError("SSH banner is too long")
+        if line.rstrip(b"\r").startswith(b"SSH-"):
+            return line.rstrip(b"\r")
+    raise OSError("remote service returned no SSH banner")
 
 
 def _probe_result(scope: str, target: str, started: float, error: str = "") -> dict[str, Any]:
@@ -112,62 +131,10 @@ def transport_candidate_probe(
             else:
                 raise OSError("SOCKS5 proxy returned an invalid address type")
             _receive_exact(connection, address_size + 2)
+            _receive_ssh_banner(connection)
     except (OSError, ValueError) as exc:
         return _probe_result("raw-underlay", target, started, str(exc))
     return _probe_result("raw-underlay", target, started)
-
-
-def _global_dns_endpoint(config: dict[str, Any]) -> tuple[str, int]:
-    dns = config.get("dns", {})
-    servers = dns.get("servers", []) if isinstance(dns, dict) else []
-    server = next(
-        (item for item in servers if isinstance(item, dict) and item.get("tag") == "dns-global"),
-        {},
-    ) if isinstance(servers, list) else {}
-    try:
-        return str(server.get("server", "")), int(server.get("server_port", 0) or 0)
-    except (TypeError, ValueError):
-        return "", 0
-
-
-def transport_overlay_probe(
-    config: dict[str, Any],
-    *,
-    timeout_ms: int = TRANSPORT_OVERLAY_PROBE_TIMEOUT_MS,
-) -> dict[str, Any]:
-    """Prove the installed overlay and its real DNS relay with a local-only query."""
-
-    started = time.monotonic()
-    host, port = _global_dns_endpoint(config)
-    target = "dns-global"
-    if host and port:
-        target = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
-    if not host or not 1 <= port <= 65535:
-        return _probe_result("overlay-dns", target, started, "dns-global endpoint is invalid")
-    transaction_id = int.from_bytes(os.urandom(2), "big")
-    question = b"\x09localhost\x00\x00\x01\x00\x01"
-    query = transaction_id.to_bytes(2, "big") + b"\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00" + question
-    timeout_seconds = max(0.001, timeout_ms / 1000)
-    try:
-        with socket.create_connection((host, port), timeout=timeout_seconds) as connection:
-            connection.settimeout(timeout_seconds)
-            connection.sendall(len(query).to_bytes(2, "big") + query)
-            response_size = int.from_bytes(_receive_exact(connection, 2), "big")
-            if response_size < 12:
-                raise OSError("DNS relay returned a truncated response")
-            response = _receive_exact(connection, response_size)
-        flags = int.from_bytes(response[2:4], "big")
-        if (
-            int.from_bytes(response[:2], "big") != transaction_id
-            or flags & 0x8000 == 0
-            or flags & 0x000F
-            or int.from_bytes(response[4:6], "big") != 1
-            or int.from_bytes(response[6:8], "big") < 1
-        ):
-            raise OSError("DNS relay returned an invalid localhost answer")
-    except (OSError, ValueError) as exc:
-        return _probe_result("overlay-dns", target, started, str(exc))
-    return _probe_result("overlay-dns", target, started)
 
 
 def clamp_x25519_private(private_key: bytes) -> bytes:

@@ -250,7 +250,10 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
             runner.docker_exec(ru_container, "ip address add 10.0.0.20/32 dev lo && nohup python3 -m http.server 80 --bind 10.0.0.20 >/opt/private-direct-web.log 2>&1 &")
             runner.docker_exec(foreign_container, "wg-quick up /opt/wg0.conf")
             probe_address = UNDERLAY_WG_FOREIGN_ADDRESS.split("/", 1)[0]
-            runner.docker_exec(foreign_container, f"nohup python3 -m http.server 22 --bind {probe_address} >/opt/transport-probe.log 2>&1 &")
+            runner.docker_exec(
+                foreign_container,
+                f"nohup sh -c \"while true; do printf 'SSH-2.0-vpn-stack-lab\\r\\n' | nc -l -s {probe_address} -p 22; done\" >/opt/transport-probe.log 2>&1 &",
+            )
             runner.docker_exec(foreign_container, "nohup sing-box run -c /opt/foreign-singbox.json >/opt/foreign-singbox.log 2>&1 &")
             runner.docker_exec(ru_container, "wg-quick up /opt/wg0.conf")
             runner.docker_exec(foreign_container, "ip address add 10.0.0.20/32 dev lo && nohup python3 -m http.server 80 --bind 10.0.0.20 >/opt/private-web.log 2>&1 &")
