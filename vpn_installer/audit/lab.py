@@ -7,7 +7,7 @@ import time
 
 from ..common import OUT_DIR
 from ..config import load_env_file
-from ..interserver_transport import TRANSPORT_HY2_TAG, UNDERLAY_WG_FOREIGN_ADDRESS
+from ..interserver_transport import TRANSPORT_HY2_TAG
 from ..render import (
     render_all_artifacts,
     render_foreign_nftables,
@@ -249,11 +249,6 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
             runner.docker_exec(ru_container, "sysctl -w net.ipv4.conf.all.src_valid_mark=1 >/dev/null")
             runner.docker_exec(ru_container, "ip address add 10.0.0.20/32 dev lo && nohup python3 -m http.server 80 --bind 10.0.0.20 >/opt/private-direct-web.log 2>&1 &")
             runner.docker_exec(foreign_container, "wg-quick up /opt/wg0.conf")
-            probe_address = UNDERLAY_WG_FOREIGN_ADDRESS.split("/", 1)[0]
-            runner.docker_exec(
-                foreign_container,
-                f"nohup sh -c \"while true; do printf 'SSH-2.0-vpn-stack-lab\\r\\n' | nc -l -s {probe_address} -p 22; done\" >/opt/transport-probe.log 2>&1 &",
-            )
             runner.docker_exec(foreign_container, "nohup sing-box run -c /opt/foreign-singbox.json >/opt/foreign-singbox.log 2>&1 &")
             runner.docker_exec(ru_container, "wg-quick up /opt/wg0.conf")
             runner.docker_exec(foreign_container, "ip address add 10.0.0.20/32 dev lo && nohup python3 -m http.server 80 --bind 10.0.0.20 >/opt/private-web.log 2>&1 &")
@@ -308,7 +303,6 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
             if not (
                 transition.get("changed") is True
                 and transition.get("selected") == TRANSPORT_HY2_TAG
-                and transition.get("closed_associations", 0) >= 1
             ):
                 raise AuditFailure(f"Transport agent did not perform the expected failover: {transition}")
             switch_seconds = time.monotonic() - switch_started

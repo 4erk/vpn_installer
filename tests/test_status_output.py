@@ -140,7 +140,7 @@ class StatusOutputTests(unittest.TestCase):
                                     "checked": True,
                                     "ok": True,
                                     "delay_ms": 23,
-                                    "scope": "raw-underlay",
+                                    "scope": "raw-underlay-udp",
                                 }
                             },
                         },

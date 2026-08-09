@@ -10,12 +10,14 @@ from cryptography.hazmat.primitives import serialization
 
 from vpn_installer.config import generate_default_env
 from vpn_installer.interserver_transport import (
+    TRANSPORT_CANDIDATE_TAGS,
     TRANSPORT_HY2_TAG,
     TRANSPORT_OVERLAY_TAG,
     TRANSPORT_PROBE_INBOUND_TAGS,
     TRANSPORT_PROBE_PORTS,
-    TRANSPORT_RELAY_INBOUND_TAGS,
-    TRANSPORT_RELAY_PORTS,
+    TRANSPORT_RELAY_INBOUND_TAG,
+    TRANSPORT_RELAY_PORT,
+    TRANSPORT_SELECTOR_TAG,
     TRANSPORT_WG_TAG,
     build_ru_transport_topology,
     decode_transport_pem,
@@ -88,22 +90,32 @@ class InterserverTransportIdentityTests(unittest.TestCase):
         self.assertEqual(len(base64.b64decode(first["private_key"])), 32)
         self.assertEqual(len(base64.b64decode(first["public_key"])), 32)
 
-    def test_topology_compiles_two_static_relays_without_application_selector(self) -> None:
+    def test_topology_compiles_one_stable_relay_with_an_underlay_selector(self) -> None:
         env = generate_default_env("demo")
         env["FOREIGN_PUBLIC_IP"] = "198.51.100.20"
         topology = build_ru_transport_topology(env)
         self.assertEqual(
             {item["tag"]: item["listen_port"] for item in topology["inbounds"]},
             {
-                **{tag: TRANSPORT_RELAY_PORTS[candidate] for candidate, tag in TRANSPORT_RELAY_INBOUND_TAGS.items()},
+                TRANSPORT_RELAY_INBOUND_TAG: TRANSPORT_RELAY_PORT,
                 **{tag: TRANSPORT_PROBE_PORTS[candidate] for candidate, tag in TRANSPORT_PROBE_INBOUND_TAGS.items()},
             },
         )
         self.assertEqual(
             [rule["outbound"] for rule in topology["route_rules"]],
-            [TRANSPORT_WG_TAG, TRANSPORT_HY2_TAG, TRANSPORT_WG_TAG, TRANSPORT_HY2_TAG],
+            [TRANSPORT_SELECTOR_TAG, TRANSPORT_WG_TAG, TRANSPORT_HY2_TAG],
         )
-        self.assertFalse(any(item.get("type") == "selector" for item in topology["outbounds"]))
+        selector = next(item for item in topology["outbounds"] if item.get("tag") == TRANSPORT_SELECTOR_TAG)
+        self.assertEqual(
+            selector,
+            {
+                "type": "selector",
+                "tag": TRANSPORT_SELECTOR_TAG,
+                "outbounds": list(TRANSPORT_CANDIDATE_TAGS),
+                "default": TRANSPORT_WG_TAG,
+                "interrupt_exist_connections": True,
+            },
+        )
 
     def test_topology_validation_uses_the_compiled_model(self) -> None:
         env = generate_default_env("demo")

@@ -43,8 +43,9 @@ try:
         TRANSPORT_PREFERRED_PROBE_INTERVAL_SECONDS,
         TRANSPORT_PREFERRED_TAG,
         TRANSPORT_PROBE_INTERVAL_SECONDS,
-        TRANSPORT_RELAY_INBOUND_TAGS,
-        TRANSPORT_RELAY_PORTS,
+        TRANSPORT_RELAY_INBOUND_TAG,
+        TRANSPORT_RELAY_PORT,
+        TRANSPORT_SELECTOR_TAG,
         TRANSPORT_STATE_SCHEMA_VERSION,
         TRANSPORT_SWITCH_RETRY_BASE_SECONDS,
         TRANSPORT_SWITCH_RETRY_MAX_SECONDS,
@@ -75,8 +76,9 @@ except ImportError:  # Installed agent runs as a standalone script.
         TRANSPORT_PREFERRED_PROBE_INTERVAL_SECONDS,
         TRANSPORT_PREFERRED_TAG,
         TRANSPORT_PROBE_INTERVAL_SECONDS,
-        TRANSPORT_RELAY_INBOUND_TAGS,
-        TRANSPORT_RELAY_PORTS,
+        TRANSPORT_RELAY_INBOUND_TAG,
+        TRANSPORT_RELAY_PORT,
+        TRANSPORT_SELECTOR_TAG,
         TRANSPORT_STATE_SCHEMA_VERSION,
         TRANSPORT_SWITCH_RETRY_BASE_SECONDS,
         TRANSPORT_SWITCH_RETRY_MAX_SECONDS,
@@ -1699,12 +1701,15 @@ def clash_api_json(
     path: str,
     *,
     method: str = "GET",
+    payload: dict[str, Any] | None = None,
     timeout: float = 3,
 ) -> dict[str, Any]:
+    body = json.dumps(payload, separators=(",", ":")).encode("utf-8") if payload is not None else None
     request = urllib.request.Request(
         f"http://{controller}{path}",
         method=method,
-        headers={"Accept": "application/json"},
+        data=body,
+        headers={"Accept": "application/json", "Content-Type": "application/json"},
     )
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     with opener.open(request, timeout=timeout) as response:
@@ -1717,16 +1722,15 @@ def clash_api_json(
     return decoded
 
 
-def wireguard_overlay_selection(env: dict[str, str]) -> dict[str, Any]:
+def wireguard_overlay_relay(env: dict[str, str]) -> dict[str, Any]:
     interface = env.get("WG_INTERFACE", "wg0")
     peer = env.get("WG_FOREIGN_PUBLIC_KEY", "")
     if not peer:
-        return {"available": False, "selected": "", "endpoint": "", "reason": "WireGuard peer is not configured"}
+        return {"available": False, "endpoint": "", "reason": "WireGuard peer is not configured"}
     result = run(["wg", "show", interface, "endpoints"], timeout=3)
     if result.returncode != 0:
         return {
             "available": False,
-            "selected": "",
             "endpoint": "",
             "reason": (result.stderr.strip() or "WireGuard endpoint is unavailable")[:240],
         }
@@ -1737,17 +1741,33 @@ def wireguard_overlay_selection(env: dict[str, str]) -> dict[str, Any]:
             endpoint = fields[1]
             break
     host, port = split_endpoint(endpoint)
-    selected = next((tag for tag, relay_port in TRANSPORT_RELAY_PORTS.items() if relay_port == port), "")
-    available = normalize_source(host) in {"127.0.0.1", "::1"} and bool(selected)
+    available = normalize_source(host) in {"127.0.0.1", "::1"} and port == TRANSPORT_RELAY_PORT
     return {
         "available": available,
-        "selected": selected,
         "endpoint": endpoint,
-        "reason": "" if available else "WireGuard overlay endpoint is not a managed relay",
+        "reason": "" if available else "WireGuard overlay endpoint is not the fixed managed relay",
     }
 
 
-def transport_selection_snapshot(config: dict[str, Any], env: dict[str, str]) -> dict[str, Any]:
+def transport_selector_selection(controller: str) -> dict[str, Any]:
+    try:
+        selector = clash_api_json(
+            controller,
+            f"/proxies/{urllib.parse.quote(TRANSPORT_SELECTOR_TAG, safe='')}",
+            timeout=2,
+        )
+    except (OSError, ValueError, urllib.error.URLError) as exc:
+        return {"available": False, "selected": "", "reason": f"selector state is unavailable: {exc}"[:240]}
+    selected = str(selector.get("now", ""))
+    available = selected in TRANSPORT_CANDIDATE_TAGS
+    return {
+        "available": available,
+        "selected": selected,
+        "reason": "" if available else "selector returned an invalid underlay",
+    }
+
+
+def transport_selection_snapshot(config: dict[str, Any], env: dict[str, str], controller: str) -> dict[str, Any]:
     def tags(items: Any) -> set[str]:
         if not isinstance(items, list):
             return set()
@@ -1763,17 +1783,19 @@ def transport_selection_snapshot(config: dict[str, Any], env: dict[str, str]) ->
         TRANSPORT_WG_TAG: {"configured": TRANSPORT_WG_TAG in endpoint_tags},
         TRANSPORT_HY2_TAG: {"configured": TRANSPORT_HY2_TAG in outbound_tags},
     }
-    overlay = wireguard_overlay_selection(env)
-    selected = str(overlay.get("selected", ""))
+    relay = wireguard_overlay_relay(env)
+    selector = transport_selector_selection(controller)
+    selected = str(selector.get("selected", ""))
     topology_configured = transport_topology_configured(config, env)
-    available = overlay.get("available") is True and topology_configured
+    available = relay.get("available") is True and selector.get("available") is True and topology_configured
     return {
         "available": available,
         "selected": selected,
-        "endpoint": overlay.get("endpoint", ""),
+        "endpoint": relay.get("endpoint", ""),
+        "selector": TRANSPORT_SELECTOR_TAG,
         "candidates": candidates,
         "reason": "" if available else str(
-            overlay.get("reason") or "transport topology is incomplete"
+            relay.get("reason") or selector.get("reason") or "transport topology is incomplete"
         ),
     }
 
@@ -1782,6 +1804,14 @@ def preferred_transport_probe_due(previous: dict[str, Any], observed_at: str) ->
     now = parse_iso_datetime(observed_at)
     age = iso_age_seconds(str(previous.get("preferred_probe_at", "")), now=now) if now else None
     return age is None or age >= TRANSPORT_PREFERRED_PROBE_INTERVAL_SECONDS
+
+
+def ping_failure_reason(result: subprocess.CompletedProcess[str], fallback: str) -> str:
+    detail = " ".join((result.stderr.strip() or result.stdout.strip() or fallback).split())
+    lowered = detail.lower()
+    if "100% packet loss" in lowered or "0 received" in lowered:
+        return f"{fallback} timed out"
+    return detail[:240]
 
 
 def transport_overlay_path_probe(env: dict[str, str]) -> dict[str, Any]:
@@ -1808,7 +1838,7 @@ def transport_overlay_path_probe(env: dict[str, str]) -> dict[str, Any]:
     elapsed_ms = max(1, round((time.monotonic() - started) * 1000))
     error = ""
     if result.returncode != 0:
-        error = " ".join((result.stderr.strip() or result.stdout.strip() or f"ping exit {result.returncode}").split())[:240]
+        error = ping_failure_reason(result, "WireGuard overlay liveness probe")
     return {
         "checked": True,
         "ok": not error,
@@ -1826,7 +1856,6 @@ def collect_transport_probes(
     previous: dict[str, Any],
     *,
     env: dict[str, str],
-    target_port: int,
     observed_at: str,
 ) -> dict[str, dict[str, Any]]:
     probes = {tag: {"checked": False, "ok": False, "attempts": 0} for tag in TRANSPORT_CANDIDATE_TAGS}
@@ -1836,40 +1865,10 @@ def collect_transport_probes(
     if probes[selected].get("ok") is not True:
         alternate = next(tag for tag in TRANSPORT_CANDIDATE_TAGS if tag != selected)
         if transport_switch_backoff_active(previous, alternate, observed_at) is None:
-            probes[alternate] = transport_candidate_probe(alternate, target_port)
+            probes[alternate] = transport_candidate_probe(alternate)
     elif selected != TRANSPORT_PREFERRED_TAG and preferred_transport_probe_due(previous, observed_at):
-        probes[TRANSPORT_PREFERRED_TAG] = transport_candidate_probe(TRANSPORT_PREFERRED_TAG, target_port)
+        probes[TRANSPORT_PREFERRED_TAG] = transport_candidate_probe(TRANSPORT_PREFERRED_TAG)
     return probes
-
-
-def close_transport_associations(controller: str, tag: str) -> int:
-    payload = clash_api_json(controller, "/connections", timeout=2)
-    connections = payload.get("connections", [])
-    expected_type = f"direct/{TRANSPORT_RELAY_INBOUND_TAGS[tag]}"
-    closed = 0
-    for connection in connections if isinstance(connections, list) else []:
-        if not isinstance(connection, dict):
-            continue
-        chains = connection.get("chains", [])
-        metadata = connection.get("metadata", {})
-        connection_id = str(connection.get("id", ""))
-        if (
-            not isinstance(chains, list)
-            or tag not in chains
-            or not isinstance(metadata, dict)
-            or metadata.get("network") != "udp"
-            or metadata.get("type") != expected_type
-            or not connection_id
-        ):
-            continue
-        clash_api_json(
-            controller,
-            f"/connections/{urllib.parse.quote(connection_id, safe='')}",
-            method="DELETE",
-            timeout=2,
-        )
-        closed += 1
-    return closed
 
 
 def prove_wireguard_overlay(env: dict[str, str]) -> None:
@@ -1890,93 +1889,89 @@ def prove_wireguard_overlay(env: dict[str, str]) -> None:
         raise RuntimeError("WireGuard peer transfer counters are missing")
 
     before_rx, before_tx = transfer()
-    path_probe: dict[str, Any] = {}
-    for attempt in range(4):
-        path_probe = transport_overlay_path_probe(env)
-        if path_probe.get("ok") is True:
-            break
-        if attempt < 3:
-            time.sleep(0.25)
-    if path_probe.get("ok") is not True:
-        raise RuntimeError(
-            f"new WireGuard overlay path failed its liveness proof: {path_probe.get('error', 'unknown error')}"
-        )
-
-    mtu_result: subprocess.CompletedProcess[str] | None = None
-    for attempt in range(4):
-        mtu_result = run(
-            ["ping", "-n", "-M", "do", "-s", "1280", "-I", interface, "-c", "1", "-W", "1", target],
-            timeout=2,
-        )
-        if mtu_result.returncode == 0:
-            break
-        if attempt < 3:
-            time.sleep(0.25)
-    if mtu_result is None or mtu_result.returncode != 0:
-        detail = " ".join(
-            ((mtu_result.stderr if mtu_result else "") or (mtu_result.stdout if mtu_result else "") or "new WireGuard overlay path failed its MTU proof").split()
-        )
-        raise RuntimeError(detail[:240])
+    path_result = run(
+        ["ping", "-n", "-M", "do", "-s", "1280", "-I", interface, "-c", "3", "-i", "0.2", "-W", "1", target],
+        timeout=3,
+    )
+    if path_result.returncode != 0:
+        raise RuntimeError(ping_failure_reason(path_result, "WireGuard overlay liveness and MTU proof"))
     after_rx, after_tx = transfer()
     if after_rx <= before_rx or after_tx <= before_tx:
         raise RuntimeError("new WireGuard overlay path produced no bidirectional transfer delta")
 
 
-def select_transport(env: dict[str, str], controller: str, tag: str) -> int:
-    if tag not in TRANSPORT_RELAY_PORTS:
+def reset_transport_relay(controller: str) -> int:
+    """Close only the inner-WireGuard relay association so it follows the new selector."""
+
+    payload = clash_api_json(controller, "/connections", timeout=2)
+    connections = payload.get("connections", [])
+    expected_type = f"direct/{TRANSPORT_RELAY_INBOUND_TAG}"
+    closed = 0
+    for connection in connections if isinstance(connections, list) else []:
+        if not isinstance(connection, dict):
+            continue
+        chains = connection.get("chains", [])
+        metadata = connection.get("metadata", {})
+        connection_id = str(connection.get("id", ""))
+        if (
+            not isinstance(chains, list)
+            or TRANSPORT_SELECTOR_TAG not in chains
+            or not isinstance(metadata, dict)
+            or metadata.get("network") != "udp"
+            or metadata.get("type") != expected_type
+            or not connection_id
+        ):
+            continue
+        clash_api_json(
+            controller,
+            f"/connections/{urllib.parse.quote(connection_id, safe='')}",
+            method="DELETE",
+            timeout=2,
+        )
+        closed += 1
+    return closed
+
+
+def select_transport(env: dict[str, str], controller: str, tag: str) -> None:
+    if tag not in TRANSPORT_CANDIDATE_TAGS:
         raise ValueError(f"unknown transport candidate: {tag}")
-    interface = env.get("WG_INTERFACE", "wg0")
-    peer = env.get("WG_FOREIGN_PUBLIC_KEY", "")
-    endpoint = f"127.0.0.1:{TRANSPORT_RELAY_PORTS[tag]}"
-    current = wireguard_overlay_selection(env)
+    current = transport_selector_selection(controller)
     old_tag = str(current.get("selected", ""))
     if old_tag == tag:
-        return 0
-    old_endpoint = str(current.get("endpoint", ""))
-    if old_tag not in TRANSPORT_CANDIDATE_TAGS or not old_endpoint:
-        raise RuntimeError("current WireGuard overlay endpoint is not recoverable")
+        return
+    if old_tag not in TRANSPORT_CANDIDATE_TAGS:
+        raise RuntimeError("current underlay selector state is not recoverable")
 
-    def set_endpoint(value: str) -> None:
-        result = run(["wg", "set", interface, "peer", peer, "endpoint", value], timeout=3)
-        if result.returncode != 0:
-            raise RuntimeError((result.stderr.strip() or "WireGuard endpoint update failed")[:240])
+    def set_selector(value: str) -> None:
+        clash_api_json(
+            controller,
+            f"/proxies/{urllib.parse.quote(TRANSPORT_SELECTOR_TAG, safe='')}",
+            method="PUT",
+            payload={"name": value},
+            timeout=2,
+        )
+        selected = transport_selector_selection(controller)
+        if selected.get("selected") != value:
+            raise RuntimeError("underlay selector did not apply the requested path")
+        reset_transport_relay(controller)
 
-    closed = 0
     try:
-        set_endpoint(endpoint)
-        time.sleep(0.1)
-        if wireguard_overlay_selection(env).get("selected") != tag:
-            raise RuntimeError("new WireGuard endpoint did not become active")
+        set_selector(tag)
         prove_wireguard_overlay(env)
-        try:
-            closed = close_transport_associations(controller, old_tag)
-        except (OSError, RuntimeError, ValueError, urllib.error.URLError):
-            # The old idle association is harmless and expires naturally. It must
-            # never roll back an already proven replacement path.
-            closed = 0
-        return closed
     except (OSError, RuntimeError, ValueError, urllib.error.URLError) as exc:
         rollback_errors: list[str] = []
         try:
-            set_endpoint(old_endpoint)
-        except (OSError, RuntimeError) as rollback_exc:
-            rollback_errors.append(f"endpoint restore failed: {rollback_exc}")
+            set_selector(old_tag)
+        except (OSError, RuntimeError, ValueError, urllib.error.URLError) as rollback_exc:
+            rollback_errors.append(f"selector restore failed: {rollback_exc}")
         else:
-            time.sleep(0.1)
             try:
-                if wireguard_overlay_selection(env).get("selected") != old_tag:
-                    rollback_errors.append("previous endpoint did not become active")
-                else:
-                    prove_wireguard_overlay(env)
+                prove_wireguard_overlay(env)
             except (OSError, RuntimeError, ValueError, urllib.error.URLError) as rollback_exc:
                 rollback_errors.append(f"restored overlay proof failed: {rollback_exc}")
-        try:
-            close_transport_associations(controller, tag)
-        except (OSError, RuntimeError, ValueError, urllib.error.URLError):
-            pass
         if rollback_errors:
             raise RuntimeError(f"{exc}; rollback failed: {'; '.join(rollback_errors)}") from exc
-        raise RuntimeError(f"{exc}; previous WireGuard endpoint restored and verified") from exc
+        raise RuntimeError(f"{exc}; previous selector path restored and verified") from exc
 
 
 def transport_switch_backoff_active(
@@ -2059,7 +2054,7 @@ def _reconcile_interserver_transport_unlocked() -> dict[str, Any]:
             write_json_atomic(TRANSPORT_STATE_PATH, payload)
             return payload
 
-        selection = transport_selection_snapshot(config, env)
+        selection = transport_selection_snapshot(config, env, controller)
         selected = str(selection.get("selected", ""))
         if not selection.get("available"):
             payload = {
@@ -2075,15 +2070,10 @@ def _reconcile_interserver_transport_unlocked() -> dict[str, Any]:
             return payload
 
         observed_at = utc_now()
-        try:
-            target_port = int(env.get("SSH_PORT", "22") or 0)
-        except ValueError:
-            target_port = 0
         probes = collect_transport_probes(
             selected,
             previous_state,
             env=env,
-            target_port=target_port,
             observed_at=observed_at,
         )
         payload = evaluate_transport_policy(
@@ -2116,10 +2106,10 @@ def _reconcile_interserver_transport_unlocked() -> dict[str, Any]:
         if payload.get("would_switch"):
             target = str(payload.get("recommended", ""))
             try:
-                closed_associations = select_transport(env, controller, target)
+                select_transport(env, controller, target)
             except (OSError, RuntimeError, ValueError) as exc:
-                failure_reason = f"WireGuard endpoint update failed: {str(exc)[:180]}"
-                rollback_verified = "previous WireGuard endpoint restored and verified" in str(exc)
+                failure_reason = f"underlay selector update failed: {str(exc)[:180]}"
+                rollback_verified = "previous selector path restored and verified" in str(exc)
                 switch_failure = next_transport_switch_failure(
                     previous_state,
                     target,
@@ -2141,11 +2131,10 @@ def _reconcile_interserver_transport_unlocked() -> dict[str, Any]:
                 payload.update(
                     {
                         "changed": True,
-                        "closed_associations": closed_associations,
                         "selected": target,
                         "would_switch": False,
                         "state": "degraded" if payload.get("hard_failure_evidence") else "healthy",
-                        "reason": f"{payload.get('reason', '')}; WireGuard endpoint updated",
+                        "reason": f"{payload.get('reason', '')}; underlay selector updated",
                     }
                 )
         write_json_atomic(TRANSPORT_STATE_PATH, payload)
@@ -2219,7 +2208,8 @@ def interserver_transport_snapshot(role: str, env: dict[str, str]) -> dict[str, 
                     session_active = True
                     break
         configured = transport_topology_configured(config, env)
-        selection = transport_selection_snapshot(config, env)
+        controller = str(config.get("experimental", {}).get("clash_api", {}).get("external_controller", ""))
+        selection = transport_selection_snapshot(config, env, controller)
         adaptive_state = transport_state_snapshot()
         if not adaptive_state:
             adaptive_state = {"state": "failed", "fresh": False, "reason": "transport watcher has not reported"}
@@ -2229,7 +2219,8 @@ def interserver_transport_snapshot(role: str, env: dict[str, str]) -> dict[str, 
             "candidates": list(TRANSPORT_CANDIDATE_TAGS),
             "server": server,
             "port": port,
-            "relay_ports": dict(TRANSPORT_RELAY_PORTS),
+            "relay_port": TRANSPORT_RELAY_PORT,
+            "selector": TRANSPORT_SELECTOR_TAG,
             "hysteria_session_active": session_active,
             "selection": selection,
             "adaptive_state": adaptive_state,
@@ -2667,11 +2658,7 @@ def run_probes(env: dict[str, str], role: str, profile: str) -> dict[str, Any]:
         identities["router"] = expected_identity(probe_identity(proxy="socks5h://127.0.0.1:2080"), foreign_ip)
     private_reject = probe_private_reject("socks5h://127.0.0.1:2080") if role == "ru-gateway" else {"ok": True, "not_applicable": True}
     if role == "ru-gateway":
-        try:
-            transport_target_port = int(env.get("SSH_PORT", "22") or 0)
-        except ValueError:
-            transport_target_port = 0
-        hysteria_candidate = transport_candidate_probe(TRANSPORT_HY2_TAG, transport_target_port)
+        hysteria_candidate = transport_candidate_probe(TRANSPORT_HY2_TAG)
         required_paths: dict[str, list[dict[str, Any]]] = {
             "ru_direct_identity": [identities["direct"]],
             "foreign_domains_via_wg": required_domain_results(via_wg),
@@ -3574,7 +3561,8 @@ def main(argv: list[str] | None = None) -> int:
         controller = str(config.get("experimental", {}).get("clash_api", {}).get("external_controller", ""))
         if not controller:
             raise RuntimeError("transport controller is unavailable")
-        payload = {"selected": args.tag, "closed_associations": select_transport(env, controller, args.tag)}
+        select_transport(env, controller, args.tag)
+        payload = {"selected": args.tag, "changed": True}
     elif args.command == "network-apply":
         payload = apply_qdisc_profile()
     elif args.command == "routes":

@@ -1983,18 +1983,19 @@ class ServerAgentTests(unittest.TestCase):
     def test_transport_selection_snapshot_reports_configured_topology_without_urltest_history(self) -> None:
         env = generate_default_env("demo")
         config = json.loads(render_ru_singbox(env))
-        overlay = {"available": True, "selected": "interserver-underlay-hy2", "endpoint": "127.0.0.1:19092"}
+        relay = {"available": True, "endpoint": "127.0.0.1:19091", "reason": ""}
+        selector = {"available": True, "selected": "interserver-underlay-hy2", "reason": ""}
         with (
-            patch.object(server_agent, "wireguard_overlay_selection", return_value=overlay),
-            patch.object(server_agent, "clash_api_json") as clash_api,
+            patch.object(server_agent, "wireguard_overlay_relay", return_value=relay),
+            patch.object(server_agent, "transport_selector_selection", return_value=selector),
         ):
-            selection = server_agent.transport_selection_snapshot(config, env)
+            selection = server_agent.transport_selection_snapshot(config, env, "127.0.0.1:19090")
 
         self.assertTrue(selection["available"])
         self.assertEqual(selection["selected"], "interserver-underlay-hy2")
+        self.assertEqual(selection["endpoint"], "127.0.0.1:19091")
         self.assertTrue(selection["candidates"]["interserver-underlay-wg"]["configured"])
         self.assertTrue(selection["candidates"]["interserver-underlay-hy2"]["configured"])
-        clash_api.assert_not_called()
 
     def test_transport_selection_rejects_an_incomplete_topology(self) -> None:
         env = generate_default_env("demo")
@@ -2004,9 +2005,13 @@ class ServerAgentTests(unittest.TestCase):
             for outbound in config["outbounds"]
             if outbound.get("tag") != "interserver-underlay-hy2"
         ]
-        overlay = {"available": True, "selected": "interserver-underlay-wg", "endpoint": "127.0.0.1:19091"}
-        with patch.object(server_agent, "wireguard_overlay_selection", return_value=overlay):
-            selection = server_agent.transport_selection_snapshot(config, env)
+        relay = {"available": True, "endpoint": "127.0.0.1:19091", "reason": ""}
+        selector = {"available": True, "selected": "interserver-underlay-wg", "reason": ""}
+        with (
+            patch.object(server_agent, "wireguard_overlay_relay", return_value=relay),
+            patch.object(server_agent, "transport_selector_selection", return_value=selector),
+        ):
+            selection = server_agent.transport_selection_snapshot(config, env, "127.0.0.1:19090")
 
         self.assertFalse(selection["available"])
         self.assertFalse(selection["candidates"]["interserver-underlay-hy2"]["configured"])
@@ -2024,11 +2029,10 @@ class ServerAgentTests(unittest.TestCase):
                 "interserver-underlay-wg",
                 {},
                 env=env,
-                target_port=22,
                 observed_at="2026-08-07T12:00:00+00:00",
             )
 
-        probe.assert_called_once_with("interserver-underlay-hy2", 22)
+        probe.assert_called_once_with("interserver-underlay-hy2")
         self.assertEqual(result["interserver-underlay-wg"], failed)
         self.assertEqual(result["interserver-underlay-hy2"], healthy)
 
@@ -2045,7 +2049,6 @@ class ServerAgentTests(unittest.TestCase):
                     }
                 },
                 env=env,
-                target_port=22,
                 observed_at="2026-08-07T12:00:00+00:00",
             )
 
@@ -2060,7 +2063,6 @@ class ServerAgentTests(unittest.TestCase):
                 "interserver-underlay-hy2",
                 {"preferred_probe_at": "2026-08-07T11:59:55+00:00"},
                 env=env,
-                target_port=22,
                 observed_at="2026-08-07T12:00:00+00:00",
             )
 
@@ -2075,11 +2077,10 @@ class ServerAgentTests(unittest.TestCase):
                 "interserver-underlay-hy2",
                 {"preferred_probe_at": "2026-08-07T11:59:49+00:00"},
                 env=env,
-                target_port=22,
                 observed_at="2026-08-07T12:00:00+00:00",
             )
 
-        probe.assert_called_once_with("interserver-underlay-wg", 22)
+        probe.assert_called_once_with("interserver-underlay-wg")
 
     def test_transport_reconcile_does_not_switch_during_install_transaction(self) -> None:
         previous = {"selected": "interserver-underlay-wg", "state": "healthy"}
@@ -2097,38 +2098,64 @@ class ServerAgentTests(unittest.TestCase):
         select.assert_not_called()
 
     def test_transport_candidate_probe_uses_path_specific_local_proxy(self) -> None:
-        connection = MagicMock()
-        connection.__enter__.return_value = connection
-        connection.recv.side_effect = [
-            b"\x05\x00",
-            b"\x05\x00\x00\x01",
-            b"\x00\x00\x00\x00\x00\x00",
-            b"SSH-2.0-OpenSSH_9.6\r\n",
-        ]
-        with patch.object(interserver_transport.socket, "create_connection", return_value=connection) as connect:
-            result = server_agent.transport_candidate_probe("interserver-underlay-hy2", 22)
+        with patch.object(interserver_transport, "_socks_udp_dns_probe") as probe:
+            result = server_agent.transport_candidate_probe("interserver-underlay-hy2")
 
         self.assertTrue(result["ok"])
-        self.assertEqual(result["scope"], "raw-underlay")
-        self.assertEqual(result["target"], "10.75.0.2:22")
-        connect.assert_called_once_with(("127.0.0.1", 19094), timeout=1.2)
-        self.assertEqual(connection.sendall.call_args_list[0].args[0], b"\x05\x01\x00")
-        self.assertTrue(connection.sendall.call_args_list[1].args[0].endswith(b"\x00\x16"))
+        self.assertEqual(result["scope"], "raw-underlay-udp")
+        self.assertEqual(result["target"], "10.75.0.2:1053")
+        probe.assert_called_once_with(19094, "10.75.0.2", 1053, 1.2)
 
-    def test_transport_candidate_probe_rejects_a_local_accept_without_remote_banner(self) -> None:
-        connection = MagicMock()
-        connection.__enter__.return_value = connection
-        connection.recv.side_effect = [
-            b"\x05\x00",
-            b"\x05\x00\x00\x01",
-            b"\x00\x00\x00\x00\x00\x00",
-            b"",
-        ]
-        with patch.object(interserver_transport.socket, "create_connection", return_value=connection):
-            result = server_agent.transport_candidate_probe("interserver-underlay-hy2", 22)
+    def test_transport_candidate_probe_rejects_a_local_accept_without_remote_dns(self) -> None:
+        with patch.object(
+            interserver_transport,
+            "_socks_udp_dns_probe",
+            side_effect=OSError("DNS probe returned no answers"),
+        ):
+            result = server_agent.transport_candidate_probe("interserver-underlay-hy2")
 
         self.assertFalse(result["ok"])
-        self.assertIn("SSH banner", result["error"])
+        self.assertIn("no answers", result["error"])
+
+    def test_socks_udp_probe_validates_the_remote_dns_response(self) -> None:
+        control = MagicMock()
+        control.__enter__.return_value = control
+        control.recv.side_effect = [
+            b"\x05\x00",
+            b"\x05\x00\x00\x01",
+            b"\x7f\x00\x00\x01",
+            (9999).to_bytes(2, "big"),
+        ]
+        datagram = MagicMock()
+        datagram.__enter__.return_value = datagram
+        datagram.getsockname.return_value = ("127.0.0.1", 54321)
+        _query_id, dns_query = interserver_transport._dns_probe_query()
+        dns_response = (
+            bytes.fromhex("565081800001000100000000")
+            + dns_query[12:]
+            + bytes.fromhex("c00c000100010000003c00047f000001")
+        )
+        datagram.recvfrom.return_value = (
+            b"\x00\x00\x00\x01\x0a\x4b\x00\x02" + (1053).to_bytes(2, "big") + dns_response,
+            ("127.0.0.1", 9999),
+        )
+        with (
+            patch.object(interserver_transport.socket, "socket", return_value=datagram),
+            patch.object(interserver_transport.socket, "create_connection", return_value=control),
+        ):
+            interserver_transport._socks_udp_dns_probe(19094, "10.75.0.2", 1053, 1.2)
+
+        self.assertEqual(control.sendall.call_args_list[0].args[0], b"\x05\x01\x00")
+        self.assertTrue(control.sendall.call_args_list[1].args[0].startswith(b"\x05\x03\x00\x01"))
+        self.assertEqual(datagram.sendto.call_args.args[1], ("127.0.0.1", 9999))
+        self.assertIn(b"\x09localhost\x00", datagram.sendto.call_args.args[0])
+
+    def test_dns_probe_rejects_an_answer_count_without_record_data(self) -> None:
+        _query_id, dns_query = interserver_transport._dns_probe_query()
+        forged_response = bytes.fromhex("565081800001000100000000") + dns_query[12:]
+
+        with self.assertRaisesRegex(OSError, "truncated name"):
+            interserver_transport._dns_probe_response(forged_response, 0x5650)
 
     def test_transport_overlay_path_probe_is_independent_of_dns(self) -> None:
         completed = subprocess.CompletedProcess(["ping"], 0, "", "")
@@ -2141,13 +2168,27 @@ class ServerAgentTests(unittest.TestCase):
         self.assertEqual(result["target"], "10.74.0.2")
         self.assertEqual(command.call_args.args[0][0], "ping")
 
-    def test_close_transport_associations_does_not_touch_application_flows(self) -> None:
+    def test_transport_overlay_path_probe_normalizes_packet_loss(self) -> None:
+        completed = subprocess.CompletedProcess(
+            ["ping"],
+            1,
+            "3 packets transmitted, 0 received, 100% packet loss",
+            "",
+        )
+        env = {"WG_INTERFACE": "wg0", "WG_FOREIGN_ADDRESS": "10.74.0.2/24"}
+        with patch.object(server_agent, "run", return_value=completed):
+            result = server_agent.transport_overlay_path_probe(env)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "WireGuard overlay liveness probe timed out")
+
+    def test_transport_relay_reset_does_not_touch_application_flows(self) -> None:
         payload = {
             "connections": [
                 {
                     "id": "relay-id",
-                    "chains": ["interserver-underlay-wg"],
-                    "metadata": {"network": "udp", "type": "direct/interserver-overlay-wg-in"},
+                    "chains": ["interserver-underlay-wg", "interserver-underlay-select"],
+                    "metadata": {"network": "udp", "type": "direct/interserver-overlay-in"},
                 },
                 {
                     "id": "app-id",
@@ -2157,64 +2198,55 @@ class ServerAgentTests(unittest.TestCase):
             ]
         }
         with patch.object(server_agent, "clash_api_json", side_effect=[payload, {}]) as api:
-            closed = server_agent.close_transport_associations("127.0.0.1:19090", "interserver-underlay-wg")
+            closed = server_agent.reset_transport_relay("127.0.0.1:19090")
 
         self.assertEqual(closed, 1)
         self.assertEqual(api.call_args_list[1].args[1], "/connections/relay-id")
         self.assertEqual(api.call_args_list[1].kwargs["method"], "DELETE")
 
-    def test_select_transport_changes_only_the_overlay_peer_endpoint(self) -> None:
+    def test_select_transport_changes_only_the_underlay_selector(self) -> None:
         env = {"WG_INTERFACE": "wg0", "WG_FOREIGN_PUBLIC_KEY": "peer-key", "WG_FOREIGN_ADDRESS": "10.74.0.2/24"}
-        completed = subprocess.CompletedProcess(["wg"], 0, "", "")
         selections = [
-            {"available": True, "selected": "interserver-underlay-wg", "endpoint": "127.0.0.1:19091"},
-            {"available": True, "selected": "interserver-underlay-hy2", "endpoint": "127.0.0.1:19092"},
+            {"available": True, "selected": "interserver-underlay-wg"},
             {"available": True, "selected": "interserver-underlay-hy2"},
         ]
         with (
-            patch.object(server_agent, "wireguard_overlay_selection", side_effect=selections),
-            patch.object(server_agent, "close_transport_associations", return_value=1) as close,
+            patch.object(server_agent, "transport_selector_selection", side_effect=selections),
+            patch.object(server_agent, "clash_api_json") as api,
+            patch.object(server_agent, "reset_transport_relay", return_value=1) as reset,
             patch.object(server_agent, "prove_wireguard_overlay") as proof,
-            patch.object(server_agent, "run", return_value=completed) as command,
-            patch.object(server_agent.time, "sleep"),
         ):
-            proof.side_effect = lambda _env: close.assert_not_called()
-            closed = server_agent.select_transport(env, "127.0.0.1:19090", "interserver-underlay-hy2")
+            result = server_agent.select_transport(env, "127.0.0.1:19090", "interserver-underlay-hy2")
 
-        self.assertEqual(closed, 1)
-        close.assert_called_once_with("127.0.0.1:19090", "interserver-underlay-wg")
+        self.assertIsNone(result)
+        reset.assert_called_once_with("127.0.0.1:19090")
         proof.assert_called_once_with(env)
-        self.assertEqual(command.call_count, 1)
-        self.assertEqual(
-            command.call_args_list[-1].args[0],
-            ["wg", "set", "wg0", "peer", "peer-key", "endpoint", "127.0.0.1:19092"],
-        )
+        self.assertEqual(api.call_args.args[1], "/proxies/interserver-underlay-select")
+        self.assertEqual(api.call_args.kwargs["method"], "PUT")
+        self.assertEqual(api.call_args.kwargs["payload"], {"name": "interserver-underlay-hy2"})
 
-    def test_select_transport_restores_previous_endpoint_on_failed_activation(self) -> None:
+    def test_select_transport_restores_previous_selector_on_failed_activation(self) -> None:
         env = {"WG_INTERFACE": "wg0", "WG_FOREIGN_PUBLIC_KEY": "peer-key", "WG_FOREIGN_ADDRESS": "10.74.0.2/24"}
-        completed = subprocess.CompletedProcess(["wg"], 0, "", "")
         selections = [
-            {"available": True, "selected": "interserver-underlay-wg", "endpoint": "127.0.0.1:19091"},
-            {"available": True, "selected": "interserver-underlay-wg", "endpoint": "127.0.0.1:19091"},
-            {"available": True, "selected": "interserver-underlay-wg", "endpoint": "127.0.0.1:19091"},
+            {"available": True, "selected": "interserver-underlay-wg"},
+            {"available": True, "selected": "interserver-underlay-wg"},
+            {"available": True, "selected": "interserver-underlay-wg"},
         ]
         with (
-            patch.object(server_agent, "wireguard_overlay_selection", side_effect=selections),
-            patch.object(server_agent, "close_transport_associations") as close,
+            patch.object(server_agent, "transport_selector_selection", side_effect=selections),
+            patch.object(server_agent, "clash_api_json") as api,
+            patch.object(server_agent, "reset_transport_relay", return_value=1) as reset,
             patch.object(server_agent, "prove_wireguard_overlay") as proof,
-            patch.object(server_agent, "run", return_value=completed) as command,
-            patch.object(server_agent.time, "sleep"),
         ):
-            with self.assertRaisesRegex(RuntimeError, "previous WireGuard endpoint restored and verified"):
+            with self.assertRaisesRegex(RuntimeError, "previous selector path restored and verified"):
                 server_agent.select_transport(env, "127.0.0.1:19090", "interserver-underlay-hy2")
 
-        self.assertEqual(
-            [call.args[1] for call in close.call_args_list],
-            ["interserver-underlay-hy2"],
-        )
+        self.assertEqual([call.kwargs["payload"] for call in api.call_args_list], [
+            {"name": "interserver-underlay-hy2"},
+            {"name": "interserver-underlay-wg"},
+        ])
+        reset.assert_called_once_with("127.0.0.1:19090")
         proof.assert_called_once_with(env)
-        self.assertEqual(command.call_count, 2)
-        self.assertEqual(command.call_args_list[-1].args[0][-1], "127.0.0.1:19091")
 
     def test_transport_switch_failure_uses_bounded_backoff(self) -> None:
         first = server_agent.next_transport_switch_failure(
@@ -2290,7 +2322,7 @@ class ServerAgentTests(unittest.TestCase):
                 patch.object(
                     server_agent,
                     "select_transport",
-                    side_effect=RuntimeError("activation failed; previous WireGuard endpoint restored and verified"),
+                    side_effect=RuntimeError("activation failed; previous selector path restored and verified"),
                 ) as select,
             ):
                 first = server_agent._reconcile_interserver_transport_unlocked()
@@ -2305,26 +2337,25 @@ class ServerAgentTests(unittest.TestCase):
         self.assertIn("paused until", third["reason"])
         select.assert_called_once()
 
-    def test_select_transport_restores_previous_endpoint_when_overlay_proof_fails(self) -> None:
+    def test_select_transport_restores_previous_selector_when_overlay_proof_fails(self) -> None:
         env = {"WG_INTERFACE": "wg0", "WG_FOREIGN_PUBLIC_KEY": "peer-key", "WG_FOREIGN_ADDRESS": "10.74.0.2/24"}
-        completed = subprocess.CompletedProcess(["wg"], 0, "", "")
         selections = [
-            {"available": True, "selected": "interserver-underlay-wg", "endpoint": "127.0.0.1:19091"},
-            {"available": True, "selected": "interserver-underlay-hy2", "endpoint": "127.0.0.1:19092"},
-            {"available": True, "selected": "interserver-underlay-wg", "endpoint": "127.0.0.1:19091"},
+            {"available": True, "selected": "interserver-underlay-wg"},
+            {"available": True, "selected": "interserver-underlay-hy2"},
+            {"available": True, "selected": "interserver-underlay-wg"},
         ]
-        with patch.object(server_agent, "wireguard_overlay_selection", side_effect=selections), patch.object(
+        with patch.object(server_agent, "transport_selector_selection", side_effect=selections), patch.object(
             server_agent, "prove_wireguard_overlay", side_effect=[RuntimeError("proof failed"), None]
-        ), patch.object(server_agent, "close_transport_associations") as close, patch.object(
-            server_agent, "run", return_value=completed
-        ) as command, patch.object(server_agent.time, "sleep"):
-            with self.assertRaisesRegex(RuntimeError, "previous WireGuard endpoint restored and verified"):
+        ), patch.object(server_agent, "clash_api_json") as api, patch.object(
+            server_agent, "reset_transport_relay", return_value=1
+        ) as reset:
+            with self.assertRaisesRegex(RuntimeError, "previous selector path restored and verified"):
                 server_agent.select_transport(env, "127.0.0.1:19090", "interserver-underlay-hy2")
         self.assertEqual(
-            [call.args[1] for call in close.call_args_list],
-            ["interserver-underlay-hy2"],
+            [call.kwargs["payload"] for call in api.call_args_list],
+            [{"name": "interserver-underlay-hy2"}, {"name": "interserver-underlay-wg"}],
         )
-        self.assertEqual(command.call_args_list[-1].args[0][-1], "127.0.0.1:19091")
+        self.assertEqual(reset.call_count, 2)
 
     def test_transport_reconcile_persists_maintenance_during_install(self) -> None:
         previous = {
@@ -2353,12 +2384,13 @@ class ServerAgentTests(unittest.TestCase):
         ]
         with (
             patch.object(server_agent, "run", side_effect=results) as command,
-            patch.object(server_agent, "transport_overlay_path_probe", return_value={"ok": True}),
         ):
             server_agent.prove_wireguard_overlay(env)
 
         self.assertEqual(command.call_count, 3)
         self.assertEqual(command.call_args_list[1].args[0][0], "ping")
+        self.assertIn("-M", command.call_args_list[1].args[0])
+        self.assertEqual(command.call_args_list[1].args[0][command.call_args_list[1].args[0].index("-c") + 1], "3")
 
     def test_interserver_transport_snapshot_reports_foreign_listener(self) -> None:
         config = {
@@ -2515,10 +2547,15 @@ class ServerAgentTests(unittest.TestCase):
             patch.object(server_agent, "probe_url", return_value={"ok": True}),
             patch.object(server_agent, "probe_identity", side_effect=identity),
             patch.object(server_agent, "probe_private_reject", return_value={"ok": True}),
-            patch.object(server_agent, "transport_candidate_probe", return_value={"ok": False, "error": "timeout"}),
+            patch.object(
+                server_agent,
+                "transport_candidate_probe",
+                return_value={"ok": False, "error": "timeout"},
+            ) as candidate_probe,
         ):
             result = server_agent.run_probes({"WG_INTERFACE": "wg0", "RU_PUBLIC_IP": "203.0.113.10", "FOREIGN_PUBLIC_IP": "198.51.100.20"}, "ru-gateway", "acceptance")
 
+        candidate_probe.assert_called_once_with("interserver-underlay-hy2")
         self.assertFalse(result["requirements"]["hysteria_candidate_reachable"])
         self.assertFalse(result["ok"])
         self.assertTrue(result["release_gate_ok"])

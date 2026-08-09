@@ -171,7 +171,7 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
                     for tag, probe in probes.items()
                     if isinstance(probe, dict)
                     and probe.get("checked") is True
-                    and probe.get("scope") == "raw-underlay"
+                    and probe.get("scope") == "raw-underlay-udp"
                 ),
                 None,
             )

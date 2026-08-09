@@ -12,12 +12,11 @@ from typing import Any
 
 from .common import INSTALL_SCRIPT_PATH, OUT_DIR, ROOT_DIR, ensure_file_parent, print_header, warn, write_text
 from .config import apply_ru_direct_overlays, download_asset, parse_env_text, render_env_text, require_env, split_asset_sources
-from .dns_policy import FOREIGN_DNS_RELAY_PORT
 from .interserver_transport import (
+    FOREIGN_DNS_RELAY_PORT,
     HY2_CLASH_API_LISTEN,
     HY2_PORT,
-    TRANSPORT_RELAY_PORTS,
-    TRANSPORT_WG_TAG,
+    TRANSPORT_RELAY_PORT,
     UNDERLAY_WG_FOREIGN_ADDRESS,
     UNDERLAY_WG_RU_ADDRESS,
     build_ru_transport_topology,
@@ -226,7 +225,10 @@ def render_ru_singbox(env: dict[str, str]) -> str:
             "rules": [*transport["route_rules"], *policy_parts["route_rules"]],
             "final": policy_parts["final_outbound"],
         },
-        "experimental": {"clash_api": {"external_controller": HY2_CLASH_API_LISTEN}},
+        "experimental": {
+            "cache_file": {"enabled": True, "path": "/var/lib/vpn-stack/cache.db"},
+            "clash_api": {"external_controller": HY2_CLASH_API_LISTEN},
+        },
     }
     return render_json(payload)
 
@@ -323,9 +325,8 @@ def render_foreign_singbox(env: dict[str, str]) -> str:
                 {
                     "type": "direct",
                     "tag": "dns-relay-in",
-                    "listen": wg_host_address(env["WG_FOREIGN_ADDRESS"]),
+                    "listen": "0.0.0.0",
                     "listen_port": FOREIGN_DNS_RELAY_PORT,
-                    "network": "tcp",
                     "override_address": "127.0.0.53",
                     "override_port": 53,
                 },
@@ -381,7 +382,7 @@ def render_ru_wg(env: dict[str, str]) -> str:
             f"PublicKey = {env['WG_FOREIGN_PUBLIC_KEY']}",
             f"PresharedKey = {env['WG_PRESHARED_KEY']}",
             "AllowedIPs = 0.0.0.0/0, ::/0",
-            f"Endpoint = 127.0.0.1:{TRANSPORT_RELAY_PORTS[TRANSPORT_WG_TAG]}",
+            f"Endpoint = 127.0.0.1:{TRANSPORT_RELAY_PORT}",
             "PersistentKeepalive = 1",
             "",
         ]
@@ -450,6 +451,9 @@ def render_foreign_nftables(env: dict[str, str], wan_iface: str) -> str:
     lines.append(f"    tcp dport {env['SSH_PORT']} counter accept")
     lines.append(
         f'    iifname "{env["WG_INTERFACE"]}" ip saddr {wg_host_address(env["WG_RU_ADDRESS"])} tcp dport {FOREIGN_DNS_RELAY_PORT} counter accept'
+    )
+    lines.append(
+        f'    iifname "{env["WG_INTERFACE"]}" ip saddr {wg_host_address(UNDERLAY_WG_RU_ADDRESS)} udp dport {FOREIGN_DNS_RELAY_PORT} counter accept'
     )
     forward_rules = [
         f'    iifname "{env["WG_INTERFACE"]}" ip saddr {wg_host_address(UNDERLAY_WG_RU_ADDRESS)} udp dport {env["WG_PORT"]} counter accept',

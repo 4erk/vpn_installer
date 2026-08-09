@@ -6,6 +6,22 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.19.7] - 2026-08-09
+
+### Fixed
+
+- Устранена подтверждённая гонка transport watcher: изменение endpoint единственного kernel WireGuard peer конфликтовало с roaming от пакетов старой relay association. В результате endpoint возвращался назад, switch/rollback не завершался, а в тот же интервал появлялись пачки DNS, domain и IP-literal timeout.
+- Endpoint внутреннего `wg0` теперь неизменно указывает на один localhost relay `127.0.0.1:19091`. Выбор userspace WireGuard или Hysteria2 перенесён под этот relay в штатный sing-box selector; runtime больше не выполняет `wg set` и не меняет identity внутреннего overlay.
+- Учтён handler fast-path sing-box: смена selector сама не закрывала UDP-association, созданную через WireGuard endpoint. Agent удаляет через локальный Clash API только служебную association `direct/interserver-overlay-in`, после чего новый пакет создаёт её на выбранном underlay. Клиентские `router-in`/`to-foreign` соединения фильтру не соответствуют и не закрываются.
+- Cold candidate больше не считается рабочим по TCP/SSH. SOCKS5 UDP probe требует синтетический ответ `localhost A` от управляемого foreign relay через конкретный underlay и не зависит от внешнего DNS, а post-switch proof одним bounded-запросом подтверждает пакет inner WG размером `1280`, MTU и двусторонний рост transfer counters.
+- Acceptance использует тот же UDP probe на foreign DNS relay `:1053`, что и runtime watcher. Старый вызов нового probe с SSH-портом `22` удалён; status показывает новый структурный scope `raw-underlay-udp`.
+
+### Changed
+
+- Transport state schema обновлена до `10`. Выбор selector сохраняется в sing-box cache file; foreign DNS relay принимает прежний TCP inner-WG трафик и UDP health traffic только от выделенного underlay peer, внешний доступ блокирует nftables.
+- Failure-injection lab доказал переключение за `3.109s`: один TCP-поток передал `7.5 MiB` без повторного HTTP-запроса, затем автоматически вернулся на восстановленный preferred WG.
+- Основной `vless-uri.txt`, Reality/Xray front, routing policy, WireGuard MTU `1360`, web-admin и запрет RU-direct fallback не изменены.
+
 ## [0.19.6] - 2026-08-09
 
 ### Fixed

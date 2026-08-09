@@ -163,14 +163,13 @@ class RenderTests(unittest.TestCase):
         env = self.make_env()
         router_payload = json.loads(render.render_ru_singbox(env))
         xray_payload = json.loads(render.render_ru_xray(env))
-        self.assertEqual([inbound["listen_port"] for inbound in router_payload["inbounds"]], [2080, 443, 19091, 19092, 19093, 19094])
+        self.assertEqual([inbound["listen_port"] for inbound in router_payload["inbounds"]], [2080, 443, 19091, 19093, 19094])
         self.assertEqual(
             [inbound["tag"] for inbound in router_payload["inbounds"]],
             [
                 "router-in",
                 "public-hy2-in",
-                "interserver-overlay-wg-in",
-                "interserver-overlay-hy2-in",
+                "interserver-overlay-in",
                 "interserver-probe-wg-in",
                 "interserver-probe-hy2-in",
             ],
@@ -298,21 +297,38 @@ class RenderTests(unittest.TestCase):
         ipv6_index = next(index for index, rule in enumerate(route_rules) if rule.get("ip_version") == 6)
         ipv4_literal_index = next(index for index, rule in enumerate(route_rules) if rule.get("ip_cidr") == ["0.0.0.0/0"])
         raw_ru_geoip_index = next(index for index, rule in enumerate(route_rules) if rule.get("rule_set") == ["ru-geoip"])
-        self.assertEqual(set(outbounds), {"direct-ru", "to-foreign", "interserver-underlay-hy2"})
+        self.assertEqual(
+            set(outbounds),
+            {"direct-ru", "to-foreign", "interserver-underlay-hy2", "interserver-underlay-select"},
+        )
         self.assertEqual(outbounds["to-foreign"]["type"], "direct")
         self.assertEqual(outbounds["to-foreign"]["bind_interface"], env["WG_INTERFACE"])
         self.assertEqual(outbounds["interserver-underlay-hy2"]["server"], env["FOREIGN_PUBLIC_IP"])
         self.assertEqual(outbounds["interserver-underlay-hy2"]["obfs"]["type"], "salamander")
         self.assertNotIn("up_mbps", outbounds["interserver-underlay-hy2"])
         self.assertNotIn("down_mbps", outbounds["interserver-underlay-hy2"])
+        self.assertEqual(
+            outbounds["interserver-underlay-select"],
+            {
+                "type": "selector",
+                "tag": "interserver-underlay-select",
+                "outbounds": ["interserver-underlay-wg", "interserver-underlay-hy2"],
+                "default": "interserver-underlay-wg",
+                "interrupt_exist_connections": True,
+            },
+        )
         endpoints = {endpoint["tag"]: endpoint for endpoint in payload["endpoints"]}
         self.assertEqual(endpoints["interserver-underlay-wg"]["type"], "wireguard")
-        relay_routes = route_rules[:2]
+        relay_routes = route_rules[:3]
         self.assertEqual(
             [rule["outbound"] for rule in relay_routes],
-            ["interserver-underlay-wg", "interserver-underlay-hy2"],
+            ["interserver-underlay-select", "interserver-underlay-wg", "interserver-underlay-hy2"],
         )
         self.assertEqual(payload["experimental"]["clash_api"]["external_controller"], "127.0.0.1:19090")
+        self.assertEqual(
+            payload["experimental"]["cache_file"],
+            {"enabled": True, "path": "/var/lib/vpn-stack/cache.db"},
+        )
         self.assertEqual(route_rules[ipv6_index], {"ip_version": 6, "action": "route", "outbound": "to-foreign"})
         self.assertEqual(route_rules[ipv4_literal_index], {"ip_cidr": ["0.0.0.0/0"], "action": "route", "outbound": "to-foreign"})
         self.assertEqual(payload["route"]["final"], "to-foreign")
@@ -716,13 +732,18 @@ class RenderTests(unittest.TestCase):
         self.assertTrue(inbound["tls"]["certificate"][0].startswith("-----BEGIN CERTIFICATE-----"))
         self.assertTrue(inbound["tls"]["key"][0].startswith("-----BEGIN PRIVATE KEY-----"))
 
-    def test_foreign_dns_relay_is_bound_only_to_inner_wireguard_address(self) -> None:
+    def test_foreign_dns_relay_accepts_inner_tcp_and_underlay_udp(self) -> None:
         env = self.make_env()
         payload = json.loads(render.render_foreign_singbox(env))
         inbound = next(item for item in payload["inbounds"] if item["tag"] == "dns-relay-in")
-        self.assertEqual(inbound["listen"], render.wg_host_address(env["WG_FOREIGN_ADDRESS"]))
-        self.assertEqual(inbound["network"], "tcp")
+        self.assertEqual(inbound["listen"], "0.0.0.0")
+        self.assertNotIn("network", inbound)
         self.assertEqual((inbound["override_address"], inbound["override_port"]), ("127.0.0.53", 53))
+        nftables = render.render_foreign_nftables(env, "eth0")
+        self.assertIn(
+            f'iifname "{env["WG_INTERFACE"]}" ip saddr 10.75.0.1 udp dport 1053 counter accept',
+            nftables,
+        )
 
     def test_render_sshd_hardening_uses_expected_limits(self) -> None:
         env = self.make_env()

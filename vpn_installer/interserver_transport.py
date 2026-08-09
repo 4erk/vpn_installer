@@ -6,6 +6,7 @@ import hmac
 import ipaddress
 import os
 import socket
+import struct
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -16,15 +17,10 @@ HY2_CLASH_API_LISTEN = "127.0.0.1:19090"
 TRANSPORT_OVERLAY_TAG = "to-foreign"
 TRANSPORT_WG_TAG = "interserver-underlay-wg"
 TRANSPORT_HY2_TAG = "interserver-underlay-hy2"
+TRANSPORT_SELECTOR_TAG = "interserver-underlay-select"
 TRANSPORT_CANDIDATE_TAGS = (TRANSPORT_WG_TAG, TRANSPORT_HY2_TAG)
-TRANSPORT_RELAY_INBOUND_TAGS = {
-    TRANSPORT_WG_TAG: "interserver-overlay-wg-in",
-    TRANSPORT_HY2_TAG: "interserver-overlay-hy2-in",
-}
-TRANSPORT_RELAY_PORTS = {
-    TRANSPORT_WG_TAG: 19091,
-    TRANSPORT_HY2_TAG: 19092,
-}
+TRANSPORT_RELAY_INBOUND_TAG = "interserver-overlay-in"
+TRANSPORT_RELAY_PORT = 19091
 TRANSPORT_PROBE_INBOUND_TAGS = {
     TRANSPORT_WG_TAG: "interserver-probe-wg-in",
     TRANSPORT_HY2_TAG: "interserver-probe-hy2-in",
@@ -33,6 +29,7 @@ TRANSPORT_PROBE_PORTS = {
     TRANSPORT_WG_TAG: 19093,
     TRANSPORT_HY2_TAG: 19094,
 }
+FOREIGN_DNS_RELAY_PORT = 1053
 TRANSPORT_CANDIDATE_PROBE_TIMEOUT_MS = 1200
 TRANSPORT_PROBE_INTERVAL_SECONDS = 2
 TRANSPORT_FAILURE_CONFIRMATIONS = 2
@@ -44,7 +41,7 @@ TRANSPORT_PREFERRED_PROBE_INTERVAL_SECONDS = 10
 TRANSPORT_PREFERRED_EVIDENCE_MAX_GAP_SECONDS = TRANSPORT_PREFERRED_PROBE_INTERVAL_SECONDS * 3
 TRANSPORT_SWITCH_RETRY_BASE_SECONDS = 30
 TRANSPORT_SWITCH_RETRY_MAX_SECONDS = 300
-TRANSPORT_STATE_SCHEMA_VERSION = 9
+TRANSPORT_STATE_SCHEMA_VERSION = 10
 UNDERLAY_WG_RU_ADDRESS = "10.75.0.1/32"
 UNDERLAY_WG_FOREIGN_ADDRESS = "10.75.0.2/32"
 UNDERLAY_WG_MTU = 1420
@@ -63,22 +60,129 @@ def _receive_exact(connection: socket.socket, size: int) -> bytes:
     return b"".join(chunks)
 
 
-def _receive_ssh_banner(connection: socket.socket) -> bytes:
-    """Read the remote identification so a local SOCKS accept is not mistaken for path health."""
+def _socks_address(address: str) -> tuple[bytes, bytes]:
+    parsed = ipaddress.ip_address(address)
+    return (b"\x01", parsed.packed) if parsed.version == 4 else (b"\x04", parsed.packed)
 
-    pending = b""
-    for _line in range(8):
-        while b"\n" not in pending and len(pending) < 512:
-            chunk = connection.recv(128)
-            if not chunk:
-                raise OSError("peer closed before the SSH banner")
-            pending += chunk
-        line, separator, pending = pending.partition(b"\n")
-        if not separator:
-            raise OSError("SSH banner is too long")
-        if line.rstrip(b"\r").startswith(b"SSH-"):
-            return line.rstrip(b"\r")
-    raise OSError("remote service returned no SSH banner")
+
+def _receive_socks_address(connection: socket.socket, address_type: int) -> tuple[str, int]:
+    if address_type == 1:
+        raw_address = _receive_exact(connection, 4)
+        host = socket.inet_ntop(socket.AF_INET, raw_address)
+    elif address_type == 4:
+        raw_address = _receive_exact(connection, 16)
+        host = socket.inet_ntop(socket.AF_INET6, raw_address)
+    elif address_type == 3:
+        raw_address = _receive_exact(connection, _receive_exact(connection, 1)[0])
+        host = raw_address.decode("ascii")
+    else:
+        raise OSError("SOCKS5 proxy returned an invalid address type")
+    return host, int.from_bytes(_receive_exact(connection, 2), "big")
+
+
+def _dns_probe_query() -> tuple[int, bytes]:
+    query_id = 0x5650
+    question = b"\x09localhost\x00" + struct.pack("!HH", 1, 1)
+    return query_id, struct.pack("!HHHHHH", query_id, 0x0100, 1, 0, 0, 0) + question
+
+
+def _skip_dns_name(payload: bytes, offset: int) -> int:
+    while True:
+        if offset >= len(payload):
+            raise OSError("DNS probe returned a truncated name")
+        size = payload[offset]
+        offset += 1
+        if size == 0:
+            return offset
+        if size & 0xC0 == 0xC0:
+            if offset >= len(payload):
+                raise OSError("DNS probe returned a truncated name pointer")
+            return offset + 1
+        if size & 0xC0 or offset + size > len(payload):
+            raise OSError("DNS probe returned an invalid name")
+        offset += size
+
+
+def _dns_probe_response(payload: bytes, query_id: int) -> None:
+    if len(payload) < 12:
+        raise OSError("DNS probe returned a truncated response")
+    response_id, flags, questions, answers, _authority, _additional = struct.unpack("!HHHHHH", payload[:12])
+    if response_id != query_id or not flags & 0x8000:
+        raise OSError("DNS probe returned an unrelated response")
+    if flags & 0x0200:
+        raise OSError("DNS probe returned a truncated response")
+    if flags & 0x000F:
+        raise OSError(f"DNS probe returned rcode {flags & 0x000F}")
+    if questions != 1 or answers < 1:
+        raise OSError("DNS probe returned no usable answer")
+    offset = _skip_dns_name(payload, 12)
+    if offset + 4 > len(payload):
+        raise OSError("DNS probe returned a truncated question")
+    offset += 4
+    for _answer in range(answers):
+        offset = _skip_dns_name(payload, offset)
+        if offset + 10 > len(payload):
+            raise OSError("DNS probe returned a truncated answer")
+        record_type, record_class, _ttl, data_size = struct.unpack("!HHIH", payload[offset:offset + 10])
+        offset += 10
+        if offset + data_size > len(payload):
+            raise OSError("DNS probe returned truncated answer data")
+        if record_type == 1 and record_class == 1 and data_size == 4:
+            return
+        offset += data_size
+    raise OSError("DNS probe returned no IPv4 answer")
+
+
+def _socks_udp_dns_probe(proxy_port: int, target_host: str, target_port: int, timeout_seconds: float) -> None:
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as datagram:
+        datagram.bind(("127.0.0.1", 0))
+        datagram.settimeout(timeout_seconds)
+        local_host, local_port = datagram.getsockname()
+        local_type, local_address = _socks_address(local_host)
+        target_type, target_address = _socks_address(target_host)
+        with socket.create_connection(("127.0.0.1", proxy_port), timeout=timeout_seconds) as control:
+            control.settimeout(timeout_seconds)
+            control.sendall(b"\x05\x01\x00")
+            if _receive_exact(control, 2) != b"\x05\x00":
+                raise OSError("SOCKS5 proxy rejected unauthenticated probing")
+            control.sendall(
+                b"\x05\x03\x00" + local_type + local_address + local_port.to_bytes(2, "big")
+            )
+            version, status, _reserved, reply_type = _receive_exact(control, 4)
+            relay_host, relay_port = _receive_socks_address(control, reply_type)
+            if version != 5 or status != 0:
+                raise OSError(f"SOCKS5 UDP ASSOCIATE failed with status {status}")
+            try:
+                relay_address = ipaddress.ip_address(relay_host)
+            except ValueError as exc:
+                raise OSError("SOCKS5 UDP relay returned a non-IP address") from exc
+            if relay_address.version != 4:
+                raise OSError("SOCKS5 UDP relay returned an incompatible address family")
+            if relay_address.is_unspecified:
+                relay_host = "127.0.0.1"
+            query_id, query = _dns_probe_query()
+            request = b"\x00\x00\x00" + target_type + target_address + target_port.to_bytes(2, "big") + query
+            datagram.sendto(request, (relay_host, relay_port))
+            response, _source = datagram.recvfrom(4096)
+            if len(response) < 7 or response[:3] != b"\x00\x00\x00":
+                raise OSError("SOCKS5 UDP relay returned an invalid datagram")
+            offset = 3
+            response_type = response[offset]
+            offset += 1
+            if response_type == 1:
+                offset += 4
+            elif response_type == 4:
+                offset += 16
+            elif response_type == 3:
+                if offset >= len(response):
+                    raise OSError("SOCKS5 UDP relay returned a truncated domain")
+                offset += 1 + response[offset]
+            else:
+                raise OSError("SOCKS5 UDP relay returned an invalid address type")
+            offset += 2
+            if offset > len(response):
+                raise OSError("SOCKS5 UDP relay returned a truncated address")
+            _dns_probe_response(response[offset:], query_id)
 
 
 def _probe_result(scope: str, target: str, started: float, error: str = "") -> dict[str, Any]:
@@ -97,44 +201,23 @@ def _probe_result(scope: str, target: str, started: float, error: str = "") -> d
 
 def transport_candidate_probe(
     tag: str,
-    target_port: int,
     *,
     timeout_ms: int = TRANSPORT_CANDIDATE_PROBE_TIMEOUT_MS,
 ) -> dict[str, Any]:
-    """Prove one raw underlay without depending on DNS or an Internet endpoint."""
+    """Prove UDP carriage and the controlled foreign DNS relay over one underlay."""
 
     started = time.monotonic()
     proxy_port = TRANSPORT_PROBE_PORTS.get(tag)
     target_host = UNDERLAY_WG_FOREIGN_ADDRESS.split("/", 1)[0]
-    target = f"{target_host}:{target_port}"
+    target = f"{target_host}:{FOREIGN_DNS_RELAY_PORT}"
     if proxy_port is None:
-        return _probe_result("raw-underlay", target, started, "unknown transport candidate")
-    if not 1 <= target_port <= 65535:
-        return _probe_result("raw-underlay", target, started, "invalid transport probe target port")
+        return _probe_result("raw-underlay-udp", target, started, "unknown transport candidate")
     timeout_seconds = max(0.001, timeout_ms / 1000)
     try:
-        with socket.create_connection(("127.0.0.1", proxy_port), timeout=timeout_seconds) as connection:
-            connection.settimeout(timeout_seconds)
-            connection.sendall(b"\x05\x01\x00")
-            if _receive_exact(connection, 2) != b"\x05\x00":
-                raise OSError("SOCKS5 proxy rejected unauthenticated probing")
-            address = ipaddress.ip_address(target_host)
-            address_type = b"\x01" if address.version == 4 else b"\x04"
-            connection.sendall(b"\x05\x01\x00" + address_type + address.packed + target_port.to_bytes(2, "big"))
-            version, status, _reserved, reply_type = _receive_exact(connection, 4)
-            if version != 5 or status != 0:
-                raise OSError(f"SOCKS5 CONNECT failed with status {status}")
-            if reply_type == 3:
-                address_size = _receive_exact(connection, 1)[0]
-            elif reply_type in {1, 4}:
-                address_size = 4 if reply_type == 1 else 16
-            else:
-                raise OSError("SOCKS5 proxy returned an invalid address type")
-            _receive_exact(connection, address_size + 2)
-            _receive_ssh_banner(connection)
+        _socks_udp_dns_probe(proxy_port, target_host, FOREIGN_DNS_RELAY_PORT, timeout_seconds)
     except (OSError, ValueError) as exc:
-        return _probe_result("raw-underlay", target, started, str(exc))
-    return _probe_result("raw-underlay", target, started)
+        return _probe_result("raw-underlay-udp", target, started, str(exc))
+    return _probe_result("raw-underlay-udp", target, started)
 
 
 def clamp_x25519_private(private_key: bytes) -> bytes:
@@ -325,30 +408,24 @@ def _hysteria_outbound(env: dict[str, str]) -> dict[str, Any]:
     }
 
 
-def _relay_inbounds() -> list[dict[str, Any]]:
-    return [
-        {
-            "type": "direct",
-            "tag": TRANSPORT_RELAY_INBOUND_TAGS[tag],
-            "listen": "127.0.0.1",
-            "listen_port": TRANSPORT_RELAY_PORTS[tag],
-            "network": "udp",
-        }
-        for tag in TRANSPORT_CANDIDATE_TAGS
-    ]
+def _relay_inbound() -> dict[str, Any]:
+    return {
+        "type": "direct",
+        "tag": TRANSPORT_RELAY_INBOUND_TAG,
+        "listen": "127.0.0.1",
+        "listen_port": TRANSPORT_RELAY_PORT,
+        "network": "udp",
+    }
 
 
-def _relay_rules(env: dict[str, str]) -> list[dict[str, Any]]:
-    return [
-        {
-            "inbound": [TRANSPORT_RELAY_INBOUND_TAGS[tag]],
-            "action": "route",
-            "outbound": tag,
-            "override_address": env["FOREIGN_PUBLIC_IP"],
-            "override_port": int(env["WG_PORT"]),
-        }
-        for tag in TRANSPORT_CANDIDATE_TAGS
-    ]
+def _relay_rule(env: dict[str, str]) -> dict[str, Any]:
+    return {
+        "inbound": [TRANSPORT_RELAY_INBOUND_TAG],
+        "action": "route",
+        "outbound": TRANSPORT_SELECTOR_TAG,
+        "override_address": env["FOREIGN_PUBLIC_IP"],
+        "override_port": int(env["WG_PORT"]),
+    }
 
 
 def _probe_inbounds() -> list[dict[str, Any]]:
@@ -394,11 +471,18 @@ def build_ru_transport_topology(env: dict[str, str]) -> dict[str, Any]:
         ],
         "routing_mark": int(env["WG_TUNNEL_FWMARK"]),
     }
+    selector = {
+        "type": "selector",
+        "tag": TRANSPORT_SELECTOR_TAG,
+        "outbounds": list(TRANSPORT_CANDIDATE_TAGS),
+        "default": TRANSPORT_PREFERRED_TAG,
+        "interrupt_exist_connections": True,
+    }
     return {
         "endpoints": [endpoint],
-        "inbounds": [*_relay_inbounds(), *_probe_inbounds()],
-        "outbounds": [_hysteria_outbound(env)],
-        "route_rules": [*_relay_rules(env), *_probe_rules()],
+        "inbounds": [_relay_inbound(), *_probe_inbounds()],
+        "outbounds": [_hysteria_outbound(env), selector],
+        "route_rules": [_relay_rule(env), *_probe_rules()],
     }
 
 
@@ -428,13 +512,21 @@ def transport_topology_configured(config: dict[str, Any], env: dict[str, str]) -
         stable_overlay = outbounds.get(TRANSPORT_OVERLAY_TAG, {})
         wireguard = by_tag(config.get("endpoints", [])).get(TRANSPORT_WG_TAG, {})
         expected_hysteria = _hysteria_outbound(env)
-        expected_inbounds = [*_relay_inbounds(), *_probe_inbounds()]
-        expected_rules = [*_relay_rules(env), *_probe_rules()]
+        expected_inbounds = [_relay_inbound(), *_probe_inbounds()]
+        expected_rules = [_relay_rule(env), *_probe_rules()]
     except (KeyError, TypeError, ValueError):
         return False
     if stable_overlay.get("type") != "direct" or stable_overlay.get("bind_interface") != env.get("WG_INTERFACE", "wg0"):
         return False
     if outbounds.get(TRANSPORT_HY2_TAG) != expected_hysteria:
+        return False
+    if outbounds.get(TRANSPORT_SELECTOR_TAG) != {
+        "type": "selector",
+        "tag": TRANSPORT_SELECTOR_TAG,
+        "outbounds": list(TRANSPORT_CANDIDATE_TAGS),
+        "default": TRANSPORT_PREFERRED_TAG,
+        "interrupt_exist_connections": True,
+    }:
         return False
     if any(by_tag(config.get("inbounds", [])).get(item["tag"]) != item for item in expected_inbounds):
         return False
@@ -478,7 +570,7 @@ def _probe_failure_reason(probe: dict[str, Any]) -> str:
         ("network_unreachable", ("network is unreachable", "no route to host")),
         ("host_unreachable", ("host is unreachable",)),
         ("tls_failure", ("certificate", "tls")),
-        ("invalid_probe_response", ("delay result is missing",)),
+        ("invalid_probe_response", ("dns probe returned", "socks5 proxy returned", "socks5 udp associate")),
     )
     return next((reason for reason, markers in categories if any(marker in error for marker in markers)), error[:120] or "probe_failed")
 
