@@ -614,7 +614,7 @@ def verify_rollback_role(
 def verify_postcutover(
     deployment_name: str,
     *,
-    throughput_seconds: int = 30,
+    throughput_seconds: int = 0,
     require_native_agent: bool = True,
 ) -> None:
     """Prove the public client contract after every mutating install workflow."""
@@ -948,7 +948,7 @@ def maintain_workflow(
 
     from .verify import verify_live_workflow
 
-    return verify_live_workflow(deployment_name, non_interactive=True)
+    return verify_live_workflow(deployment_name, non_interactive=True, throughput_seconds=0)
 
 
 def routes_workflow(

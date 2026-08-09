@@ -941,7 +941,7 @@ class ServerAgentTests(unittest.TestCase):
             "services": {"wireguard": "active", "nftables": "active", "sing-box": "active"},
             "wireguard": {"interface": "wg0"},
             "artifacts": {"drift": "none"},
-            "network": {"profile_mismatches": ["qdisc_flow_limit"]},
+            "network": {"profile_mismatches": ["overlay_qdisc_flow_limit"]},
         }
         with patch.object(server_agent, "apply_qdisc_profile", return_value={"changed": True}) as apply_mock:
             action = server_agent.recover(current)
@@ -1056,7 +1056,7 @@ class ServerAgentTests(unittest.TestCase):
             )
 
         with patch.object(server_agent, "run", side_effect=fake_run):
-            snapshot = server_agent.tcp_adaptation_snapshot("ens3")
+            snapshot = server_agent.tcp_adaptation_snapshot("ens3", "wg0")
         self.assertEqual(
             snapshot,
             {
@@ -1074,27 +1074,38 @@ class ServerAgentTests(unittest.TestCase):
                 "qdisc_flow_limit": 512,
                 "qdisc_drops": 3,
                 "qdisc_flow_limit_drops": 2,
+                "overlay_qdisc": "fq",
+                "overlay_qdisc_limit": 10000,
+                "overlay_qdisc_flow_limit": 512,
+                "overlay_qdisc_drops": 3,
+                "overlay_qdisc_flow_limit_drops": 2,
             },
         )
 
-    def test_apply_qdisc_profile_replaces_only_a_mismatched_profile(self) -> None:
+    def test_apply_qdisc_profile_manages_public_and_wireguard_interfaces(self) -> None:
         before = {"qdisc": "fq", "qdisc_limit": 10_000, "qdisc_flow_limit": 100, "qdisc_drops": 7, "qdisc_flow_limit_drops": 7}
+        overlay_before = {"qdisc": "noqueue", "qdisc_limit": 0, "qdisc_flow_limit": 0, "qdisc_drops": 0, "qdisc_flow_limit_drops": 0}
         after = {**before, "qdisc_flow_limit": 512, "qdisc_drops": 0, "qdisc_flow_limit_drops": 0}
         completed = subprocess.CompletedProcess(["tc"], 0, "", "")
         with (
             patch.object(server_agent, "default_interface", return_value="eth0"),
-            patch.object(server_agent, "qdisc_snapshot", side_effect=[before, after]),
+            patch.object(server_agent, "parse_env", return_value={"WG_INTERFACE": "wg0"}),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(server_agent, "qdisc_snapshot", side_effect=[before, after, overlay_before, after]),
             patch.object(server_agent, "run", return_value=completed) as run_mock,
         ):
             result = server_agent.apply_qdisc_profile()
         self.assertTrue(result["changed"])
-        run_mock.assert_called_once_with(
-            ["tc", "qdisc", "replace", "dev", "eth0", "root", "fq", "limit", "10000", "flow_limit", "512"],
-            timeout=10,
+        self.assertEqual(result["overlay_qdisc"], "fq")
+        self.assertEqual(
+            [call.args[0][4] for call in run_mock.call_args_list],
+            ["eth0", "wg0"],
         )
 
         with (
             patch.object(server_agent, "default_interface", return_value="eth0"),
+            patch.object(server_agent, "parse_env", return_value={"WG_INTERFACE": "wg0"}),
+            patch.object(Path, "exists", return_value=True),
             patch.object(server_agent, "qdisc_snapshot", return_value=after),
             patch.object(server_agent, "run") as unchanged_run,
         ):
@@ -1166,6 +1177,9 @@ class ServerAgentTests(unittest.TestCase):
                 "qdisc": "fq",
                 "qdisc_limit": 10_000,
                 "qdisc_flow_limit": 512,
+                "overlay_qdisc": "fq",
+                "overlay_qdisc_limit": 10_000,
+                "overlay_qdisc_flow_limit": 512,
             },
         )
         self.assertEqual(
@@ -1180,6 +1194,9 @@ class ServerAgentTests(unittest.TestCase):
                     "qdisc": "fq",
                     "qdisc_limit": 10_000,
                     "qdisc_flow_limit": 512,
+                    "overlay_qdisc": "fq",
+                    "overlay_qdisc_limit": 10_000,
+                    "overlay_qdisc_flow_limit": 512,
                 },
                 expected,
             ),
@@ -1191,10 +1208,30 @@ class ServerAgentTests(unittest.TestCase):
             path = Path(tmp) / "sysctl.conf"
             path.write_text("net.netfilter.nf_conntrack_max=32768\n", encoding="utf-8")
             expected = server_agent.managed_network_profile(path)
-        self.assertEqual(expected, {"conntrack_max": 32768, "qdisc": "fq", "qdisc_limit": 10_000, "qdisc_flow_limit": 512})
+        self.assertEqual(
+            expected,
+            {
+                "conntrack_max": 32768,
+                "qdisc": "fq",
+                "qdisc_limit": 10_000,
+                "qdisc_flow_limit": 512,
+                "overlay_qdisc": "fq",
+                "overlay_qdisc_limit": 10_000,
+                "overlay_qdisc_flow_limit": 512,
+            },
+        )
         self.assertEqual(
             server_agent.network_profile_mismatches(
-                {"conntrack_max": 6144, "qdisc": "fq", "qdisc_limit": 10_000, "qdisc_flow_limit": 512}, expected
+                {
+                    "conntrack_max": 6144,
+                    "qdisc": "fq",
+                    "qdisc_limit": 10_000,
+                    "qdisc_flow_limit": 512,
+                    "overlay_qdisc": "fq",
+                    "overlay_qdisc_limit": 10_000,
+                    "overlay_qdisc_flow_limit": 512,
+                },
+                expected,
             ),
             ["conntrack_max"],
         )
@@ -2083,7 +2120,11 @@ class ServerAgentTests(unittest.TestCase):
         probe.assert_called_once_with("interserver-underlay-wg")
 
     def test_transport_reconcile_does_not_switch_during_install_transaction(self) -> None:
-        previous = {"selected": "interserver-underlay-wg", "state": "healthy"}
+        previous = {
+            "schema_version": server_agent.TRANSPORT_STATE_SCHEMA_VERSION,
+            "selected": "interserver-underlay-wg",
+            "state": "healthy",
+        }
         with (
             patch.object(server_agent, "acquire_install_read_lock", return_value=None),
             patch.object(server_agent, "read_json", return_value=previous),
@@ -2374,6 +2415,22 @@ class ServerAgentTests(unittest.TestCase):
         self.assertEqual(payload["state"], "maintenance")
         self.assertFalse(payload["would_switch"])
         write.assert_called_once_with(server_agent.TRANSPORT_STATE_PATH, payload)
+
+    def test_transport_reconcile_drops_state_from_an_old_schema(self) -> None:
+        previous = {
+            "schema_version": server_agent.TRANSPORT_STATE_SCHEMA_VERSION - 1,
+            "state": "failed",
+            "last_switch_failure": {"reason": "obsolete endpoint mutation failure"},
+        }
+        with (
+            patch.object(server_agent, "acquire_install_read_lock", return_value=None),
+            patch.object(server_agent, "read_json", return_value=previous),
+            patch.object(server_agent, "write_json_atomic"),
+        ):
+            payload = server_agent.reconcile_interserver_transport()
+
+        self.assertEqual(payload["schema_version"], server_agent.TRANSPORT_STATE_SCHEMA_VERSION)
+        self.assertNotIn("last_switch_failure", payload)
 
     def test_overlay_proof_checks_liveness_mtu_and_bidirectional_transfer(self) -> None:
         env = {"WG_INTERFACE": "wg0", "WG_FOREIGN_PUBLIC_KEY": "peer-key", "WG_FOREIGN_ADDRESS": "10.74.0.2/24", "RU_ROUTER_LISTEN_PORT": "2080"}

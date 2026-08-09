@@ -59,6 +59,11 @@ class PackageTests(unittest.TestCase):
         self.assertIn("-name __pycache__ -empty -delete", script)
         self.assertIn('python3 "${source_dir}/vpn-stack-agent.py" --help', script)
         self.assertIn('python3 "${AGENT_SCRIPT_PATH}" network-apply', script)
+        self.assertLess(
+            script.rindex("restart_wireguard_service"),
+            script.rindex('python3 "${AGENT_SCRIPT_PATH}" network-apply'),
+        )
+        self.assertNotIn("capture_preserved_transport_tag", script)
         self.assertIn("activate_staged_release", script)
         self.assertIn("mv -Tf", script)
         self.assertIn("vpn-stack-sync.timer vpn-stack-sync.service", script)
@@ -168,7 +173,7 @@ class PackageTests(unittest.TestCase):
 
     def test_package_exposes_version_via_getattr(self) -> None:
         package = importlib.import_module("vpn_installer")
-        self.assertEqual(package.__version__, "0.19.7")
+        self.assertEqual(package.__version__, "0.19.8")
         with self.assertRaises(AttributeError):
             package.__getattr__("nope")
 

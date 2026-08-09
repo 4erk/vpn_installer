@@ -232,7 +232,6 @@ STAGED_RELEASE_DIR=""
 PUBLISHED_RELEASE_DIR=""
 ACTIVATION_STARTED=0
 ROLLBACK_SUCCEEDED=0
-PRESERVED_TRANSPORT_TAG=""
 NORMALIZED_ENV_FILE="${NORMALIZED_ENV_FILE:-}"
 NORMALIZED_ENV_NUL_FILE="${NORMALIZED_ENV_NUL_FILE:-}"
 
@@ -909,29 +908,6 @@ prepare_transport_supervisor() {
   systemctl reset-failed vpn-stack-transport.service >/dev/null 2>&1 || true
 }
 
-capture_preserved_transport_tag() {
-  [[ "${ROLE}" == "ru-gateway" && -s "${TRANSPORT_STATE_PATH}" ]] || return 0
-  python3 - "${TRANSPORT_STATE_PATH}" <<'PY'
-import json
-import sys
-from datetime import datetime, timezone
-from pathlib import Path
-
-try:
-    state = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-    observed = datetime.fromisoformat(str(state.get("updated_at", "")).replace("Z", "+00:00"))
-    age = (datetime.now(timezone.utc) - observed.astimezone(timezone.utc)).total_seconds()
-except (OSError, TypeError, ValueError):
-    raise SystemExit(0)
-selected = str(state.get("selected", ""))
-if state.get("schema_version") in {6, 7} and age <= 30 and selected in {
-    "interserver-underlay-wg",
-    "interserver-underlay-hy2",
-}:
-    print(selected)
-PY
-}
-
 dpkg_lock_holders() {
   if ! command -v fuser >/dev/null 2>&1; then
     return 0
@@ -1034,7 +1010,7 @@ remove_managed_files() {
 }
 
 reset_install_runtime_state() {
-  rm -f "${LEGACY_DATAPLANE_CACHE_PATH}" "${HEALTH_STATE_PATH}" "/var/lib/vpn-stack/transport-shadow-state.json"
+  rm -f "${LEGACY_DATAPLANE_CACHE_PATH}" "${HEALTH_STATE_PATH}" "${TRANSPORT_STATE_PATH}" "/var/lib/vpn-stack/transport-shadow-state.json"
   if [[ "${ROLE}" == "ru-gateway" ]]; then
     rm -f "${LEGACY_ADAPTIVE_ROUTING_RULES_PATH}"
   fi
@@ -1966,7 +1942,6 @@ validate_staged_release "${ROLE_ARTIFACTS_DIR}"
 publish_staged_release "${ROLE_ARTIFACTS_DIR}"
 ROLE_ARTIFACTS_DIR="${PUBLISHED_RELEASE_DIR}"
 stage_preseed_assets "${ROLE_ARTIFACTS_DIR}/assets"
-PRESERVED_TRANSPORT_TAG="$(capture_preserved_transport_tag)"
 prepare_transport_supervisor
 reset_install_runtime_state
 activate_staged_release "${ROLE_ARTIFACTS_DIR}"
@@ -1983,7 +1958,6 @@ systemd-analyze verify "${SINGBOX_SERVICE_PATH}" >/dev/null
 if [[ "$ROLE" == "ru-gateway" ]]; then
   systemd-analyze verify "${XRAY_SERVICE_PATH}" >/dev/null
 fi
-python3 "${AGENT_SCRIPT_PATH}" network-apply >/dev/null
 disable_legacy_proxy_services
 configure_ssh_daemon_mode
 migrate_legacy_global_nftables
@@ -1993,6 +1967,7 @@ if [[ "$ROLE" == "foreign-exit" ]]; then
   apply_foreign_ru_block_from_local_assets
 fi
 restart_wireguard_service
+python3 "${AGENT_SCRIPT_PATH}" network-apply >/dev/null
 systemctl disable --now vpn-stack-sync.timer vpn-stack-sync.service >/dev/null 2>&1 || true
 systemctl disable --now vpn-stack-guard.timer vpn-stack-guard.service >/dev/null 2>&1 || true
 systemctl enable vpn-stack-health.timer
@@ -2001,10 +1976,6 @@ systemctl reset-failed vpn-stack-health.service >/dev/null 2>&1 || true
 
 systemctl enable sing-box
 systemctl restart sing-box
-
-if [[ "$ROLE" == "ru-gateway" && -n "${PRESERVED_TRANSPORT_TAG}" ]]; then
-  python3 "${AGENT_SCRIPT_PATH}" transport-select --tag "${PRESERVED_TRANSPORT_TAG}" >/dev/null
-fi
 
 if [[ "$ROLE" == "ru-gateway" ]]; then
   systemctl enable vpn-stack-transport.service

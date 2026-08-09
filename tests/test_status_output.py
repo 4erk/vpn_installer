@@ -85,6 +85,11 @@ class StatusOutputTests(unittest.TestCase):
                         "qdisc_flow_limit": 512,
                         "qdisc_drops": 7,
                         "qdisc_flow_limit_drops": 7,
+                        "overlay_qdisc": "fq",
+                        "overlay_qdisc_limit": 10000,
+                        "overlay_qdisc_flow_limit": 512,
+                        "overlay_qdisc_drops": 0,
+                        "overlay_qdisc_flow_limit_drops": 0,
                         "mtu_probing": 1,
                         "mtu_probe_floor": 536,
                         "metrics_save_disabled": 0,
@@ -181,6 +186,7 @@ class StatusOutputTests(unittest.TestCase):
         self.assertIn("domain_to_foreign_timeout present", rendered)
         self.assertIn(
             "tcp adaptation: cc=bbr, qdisc=fq(limit=10000,flow_limit=512,drops=7,flow_limit_drops=7), "
+            "wg_qdisc=fq(limit=10000,flow_limit=512,drops=0,flow_limit_drops=0), "
             "mtu_probing=1, mtu_floor=536, metrics_cache=enabled, probe_interval_s=600",
             rendered,
         )

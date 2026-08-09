@@ -6,6 +6,20 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.19.8] - 2026-08-09
+
+### Fixed
+
+- Автоматическая post-cutover проверка больше не запускает `30s` bulk download сразу после install/reinstall/maintenance. На production этот тест сам насыщал общий зашифрованный underlay: одновременно переставали отвечать малые overlay/DNS probes, появлялись DNS/domain/IP-literal timeout и деградировал публичный VLESS TCP. Автоматическая приёмка теперь доказывает полный функциональный VLESS/Reality и Hysteria2 path без создания искусственной конкурирующей нагрузки; performance-проверка остаётся отдельной явной командой.
+- Managed `fq limit=10000 flow_limit=512` теперь применяется не только к WAN, но и к фактическому внутреннему `wg0`. Виртуальный WireGuard-интерфейс ранее оставался с `noqueue`, потому что `net.core.default_qdisc` к нему не применяется; один bulk flow мог задерживать DNS, health и короткие HTTP-потоки до шифрования. `fq` разделяет потоки и поддерживает pacing без ограничения общей полосы.
+- Qdisc применяется после создания WireGuard-интерфейса, проверяется через structured `tc` snapshot и автоматически восстанавливается только при точном drift managed-профиля. Failure-injection lab дополнительно требует, чтобы реальный трафик прошёл через `fq` на `wg0`.
+- Install удаляет runtime transport-state старой схемы. Удалён неиспользуемый compatibility-код сохранения selector из схем `6/7`, поэтому новый release не показывает старую ошибку переключения как текущую и не содержит мёртвую ветку миграции.
+
+### Changed
+
+- Ручной `vpn verify live` по-прежнему выполняет bounded `30s` performance acceptance по умолчанию; `--throughput-seconds 0` оставляет только функциональные probes. Install/reinstall/maintenance всегда используют функциональный режим.
+- Основной `vless-uri.txt`, Reality/Xray front, routing policy, WireGuard MTU `1360`, transport selector, web-admin и запрет RU-direct fallback не изменены.
+
 ## [0.19.7] - 2026-08-09
 
 ### Fixed

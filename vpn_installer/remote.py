@@ -714,6 +714,11 @@ def bootstrap_from_snapshot(snapshot: dict[str, Any]) -> dict[str, str]:
         "tcp_qdisc_flow_limit": str(tcp_adaptation.get("qdisc_flow_limit", "")),
         "tcp_qdisc_drops": str(tcp_adaptation.get("qdisc_drops", "")),
         "tcp_qdisc_flow_limit_drops": str(tcp_adaptation.get("qdisc_flow_limit_drops", "")),
+        "wg_qdisc": str(tcp_adaptation.get("overlay_qdisc", "")),
+        "wg_qdisc_limit": str(tcp_adaptation.get("overlay_qdisc_limit", "")),
+        "wg_qdisc_flow_limit": str(tcp_adaptation.get("overlay_qdisc_flow_limit", "")),
+        "wg_qdisc_drops": str(tcp_adaptation.get("overlay_qdisc_drops", "")),
+        "wg_qdisc_flow_limit_drops": str(tcp_adaptation.get("overlay_qdisc_flow_limit_drops", "")),
         "tcp_mtu_probing": str(tcp_adaptation.get("mtu_probing", "")),
         "tcp_mtu_probe_floor": str(tcp_adaptation.get("mtu_probe_floor", "")),
         "tcp_metrics_save_disabled": str(tcp_adaptation.get("metrics_save_disabled", "")),
@@ -760,6 +765,9 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
         f"qdisc={preflight.get('tcp_default_qdisc', '-')}"
         f"(limit={preflight.get('tcp_qdisc_limit', '-')},flow_limit={preflight.get('tcp_qdisc_flow_limit', '-')},"
         f"drops={preflight.get('tcp_qdisc_drops', '-')},flow_limit_drops={preflight.get('tcp_qdisc_flow_limit_drops', '-')}), "
+        f"wg_qdisc={preflight.get('wg_qdisc', '-')}"
+        f"(limit={preflight.get('wg_qdisc_limit', '-')},flow_limit={preflight.get('wg_qdisc_flow_limit', '-')},"
+        f"drops={preflight.get('wg_qdisc_drops', '-')},flow_limit_drops={preflight.get('wg_qdisc_flow_limit_drops', '-')}), "
         f"mtu_probing={preflight.get('tcp_mtu_probing', '-')}, mtu_floor={preflight.get('tcp_mtu_probe_floor', '-')}, "
         f"metrics_save_disabled={preflight.get('tcp_metrics_save_disabled', '-')}, "
         f"probe_interval_s={preflight.get('tcp_probe_interval_seconds', '-')}, "

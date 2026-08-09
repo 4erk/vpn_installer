@@ -453,6 +453,17 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(env["DEPLOY_NAME"], "demo")
         write_text_mock.assert_called_once()
 
+    def test_postcutover_verification_is_functional_only(self) -> None:
+        with patch("vpn_installer.verify.verify_live_workflow", return_value=0) as verify:
+            workflows.verify_postcutover("demo")
+
+        verify.assert_called_once_with(
+            "demo",
+            non_interactive=True,
+            throughput_seconds=0,
+            require_native_agent=True,
+        )
+
     def test_run_selected_remote_action_install_orders_roles(self) -> None:
         env = generate_default_env("demo")
         env["RU_PUBLIC_IP"] = "203.0.113.10"

@@ -868,14 +868,11 @@ def qdisc_snapshot(interface: str) -> dict[str, Any]:
     }
 
 
-def apply_qdisc_profile() -> dict[str, Any]:
-    interface = default_interface()
-    if not interface:
-        raise RuntimeError("default interface is unavailable")
+def apply_interface_qdisc(interface: str) -> dict[str, Any]:
     before = qdisc_snapshot(interface)
     expected = {"qdisc": FQ_KIND, "qdisc_limit": FQ_PACKET_LIMIT, "qdisc_flow_limit": FQ_FLOW_LIMIT}
     if all(before.get(name) == value for name, value in expected.items()):
-        return {"interface": interface, "changed": False, **before}
+        return {"changed": False, **before}
     result = run(
         ["tc", "qdisc", "replace", "dev", interface, "root", FQ_KIND, "limit", str(FQ_PACKET_LIMIT), "flow_limit", str(FQ_FLOW_LIMIT)],
         timeout=10,
@@ -886,10 +883,31 @@ def apply_qdisc_profile() -> dict[str, Any]:
     mismatches = [name for name, value in expected.items() if after.get(name) != value]
     if mismatches:
         raise RuntimeError(f"managed qdisc profile did not converge: {','.join(mismatches)}")
-    return {"interface": interface, "changed": True, **after}
+    return {"changed": True, **after}
 
 
-def tcp_adaptation_snapshot(interface: str) -> dict[str, Any]:
+def apply_qdisc_profile() -> dict[str, Any]:
+    interface = default_interface()
+    if not interface:
+        raise RuntimeError("default interface is unavailable")
+    public = apply_interface_qdisc(interface)
+    overlay_interface = parse_env().get("WG_INTERFACE", "").strip() or "wg0"
+    if overlay_interface == interface:
+        overlay = public
+    elif (Path("/sys/class/net") / overlay_interface).exists():
+        overlay = apply_interface_qdisc(overlay_interface)
+    else:
+        overlay = {"changed": False, **qdisc_snapshot("")}
+    return {
+        "interface": interface,
+        "changed": public["changed"] or overlay["changed"],
+        **{name: value for name, value in public.items() if name != "changed"},
+        "overlay_interface": overlay_interface,
+        **{f"overlay_{name}": value for name, value in overlay.items() if name != "changed"},
+    }
+
+
+def tcp_adaptation_snapshot(interface: str, overlay_interface: str = "") -> dict[str, Any]:
     values: dict[str, Any] = {}
     for field, name in (
         ("congestion_control", "net.ipv4.tcp_congestion_control"),
@@ -906,6 +924,8 @@ def tcp_adaptation_snapshot(interface: str) -> dict[str, Any]:
         value = result.stdout.strip()
         values[field] = int(value) if value.isdigit() else value
     values.update(qdisc_snapshot(interface))
+    if overlay_interface:
+        values.update({f"overlay_{name}": value for name, value in qdisc_snapshot(overlay_interface).items()})
     return values
 
 
@@ -933,7 +953,15 @@ def managed_network_profile(path: Path = SYSCTL_PATH) -> dict[str, Any]:
             values[field] = int(raw_value.strip())
         except ValueError:
             continue
-    return {**values, "qdisc": FQ_KIND, "qdisc_limit": FQ_PACKET_LIMIT, "qdisc_flow_limit": FQ_FLOW_LIMIT}
+    return {
+        **values,
+        "qdisc": FQ_KIND,
+        "qdisc_limit": FQ_PACKET_LIMIT,
+        "qdisc_flow_limit": FQ_FLOW_LIMIT,
+        "overlay_qdisc": FQ_KIND,
+        "overlay_qdisc_limit": FQ_PACKET_LIMIT,
+        "overlay_qdisc_flow_limit": FQ_FLOW_LIMIT,
+    }
 
 
 def network_profile_mismatches(actual: dict[str, Any], expected: dict[str, Any]) -> list[str]:
@@ -2011,10 +2039,16 @@ def next_transport_switch_failure(
     }
 
 
+def current_transport_state(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or value.get("schema_version") != TRANSPORT_STATE_SCHEMA_VERSION:
+        return {}
+    return value
+
+
 def reconcile_interserver_transport() -> dict[str, Any]:
     install_lock = acquire_install_read_lock()
     if install_lock is None:
-        previous = read_json(TRANSPORT_STATE_PATH, {})
+        previous = current_transport_state(read_json(TRANSPORT_STATE_PATH, {}))
         payload = {
             **(previous if isinstance(previous, dict) else {}),
             "schema_version": TRANSPORT_STATE_SCHEMA_VERSION,
@@ -2039,8 +2073,7 @@ def _reconcile_interserver_transport_unlocked() -> dict[str, Any]:
         config = read_json(SINGBOX_CONFIG_PATH, {})
         env = parse_env()
         controller = str(config.get("experimental", {}).get("clash_api", {}).get("external_controller", "")) if isinstance(config, dict) else ""
-        previous = read_json(TRANSPORT_STATE_PATH, {})
-        previous_state = previous if isinstance(previous, dict) else {}
+        previous_state = current_transport_state(read_json(TRANSPORT_STATE_PATH, {}))
         if not isinstance(config, dict) or not transport_topology_configured(config, env) or not controller:
             payload = {
                 "schema_version": TRANSPORT_STATE_SCHEMA_VERSION,
@@ -2940,7 +2973,7 @@ def collect_runtime_facts(*, live_probes: bool = False, profile: str = "light", 
     if role == "ru-gateway":
         transport["udp_443_policy"] = udp_443_policy()
         transport["public_client"] = public_hy2_snapshot(port)
-    tcp_adaptation = tcp_adaptation_snapshot(public_iface)
+    tcp_adaptation = tcp_adaptation_snapshot(public_iface, wg_interface)
     resolver = resolver_snapshot()
     root_filesystem = root_filesystem_snapshot()
     conntrack = conntrack_snapshot(full_logs=full_logs)
@@ -3440,7 +3473,9 @@ def recover(current: dict[str, Any]) -> str:
     artifacts_clean = current.get("artifacts", {}).get("drift") == "none"
     network = current.get("network", {})
     profile_mismatches = set(network.get("profile_mismatches", []))
-    if artifacts_clean and profile_mismatches & {"qdisc", "qdisc_limit", "qdisc_flow_limit"}:
+    qdisc_mismatches = profile_mismatches & {"qdisc", "qdisc_limit", "qdisc_flow_limit"}
+    qdisc_mismatches.update(name for name in profile_mismatches if name.startswith("overlay_qdisc"))
+    if artifacts_clean and qdisc_mismatches:
         try:
             applied = apply_qdisc_profile()
             return f"apply:qdisc:{'changed' if applied.get('changed') else 'ok'}"

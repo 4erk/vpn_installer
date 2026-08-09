@@ -251,6 +251,11 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
             runner.docker_exec(foreign_container, "wg-quick up /opt/wg0.conf")
             runner.docker_exec(foreign_container, "nohup sing-box run -c /opt/foreign-singbox.json >/opt/foreign-singbox.log 2>&1 &")
             runner.docker_exec(ru_container, "wg-quick up /opt/wg0.conf")
+            qdisc_profile = json.loads(
+                runner.docker_exec(ru_container, "python3 /opt/agent/vpn-stack-agent.py network-apply").stdout
+            )
+            if qdisc_profile.get("overlay_qdisc") != "fq":
+                raise AuditFailure(f"Managed WireGuard qdisc was not applied: {qdisc_profile}")
             runner.docker_exec(foreign_container, "ip address add 10.0.0.20/32 dev lo && nohup python3 -m http.server 80 --bind 10.0.0.20 >/opt/private-web.log 2>&1 &")
             runner.docker_exec(foreign_container, "nft -f /opt/nftables.conf && nft add element inet vpnstack ru_ipv4 { 203.0.113.0/24 }")
             runner.docker_exec(ru_container, "nft -f /opt/nftables.conf")
@@ -270,6 +275,13 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
             global_resp = runner.lab_curl(client_container, "http://example.com/").stdout
             if "server=global-web" not in global_resp or f"source={LAB_IPS['foreign_wan']}" not in global_resp:
                 raise AuditFailure(f"Global dataplane через foreign не подтверждён:\n{global_resp}")
+            wg_qdisc = next(
+                item
+                for item in json.loads(runner.docker_exec(ru_container, "tc -j -s qdisc show dev wg0").stdout)
+                if item.get("root") is True
+            )
+            if wg_qdisc.get("kind") != "fq" or int(wg_qdisc.get("packets", 0)) < 1:
+                raise AuditFailure(f"WireGuard traffic bypassed the managed qdisc: {wg_qdisc}")
 
             raw_global_resp = runner.lab_curl(client_container, f"http://{LAB_IPS['global_web']}/").stdout
             if "server=global-web" not in raw_global_resp or f"source={LAB_IPS['foreign_wan']}" not in raw_global_resp:
