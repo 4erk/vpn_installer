@@ -41,6 +41,7 @@ from .network_profile import (
     UDP_RMEM_MAX,
     UDP_WMEM_DEFAULT,
     UDP_WMEM_MAX,
+    wireguard_policy_spec,
 )
 from .public_transport import render_public_hy2_inbound
 from .routing_policy import PRIVATE_OR_FAKE_DESTINATION_CIDRS, build_ru_routing_policy
@@ -354,7 +355,13 @@ def render_foreign_singbox(env: dict[str, str]) -> str:
 
 
 def render_ru_wg(env: dict[str, str]) -> str:
-    foreign_v6_host = wg_host_address(env["WG_FOREIGN_ADDRESS_V6"])
+    policy = wireguard_policy_spec(env)
+    interface = str(policy["interface"])
+    route_table = int(policy["table"])
+    route_mark = int(policy["mark"])
+    priority = int(policy["priority"])
+    foreign_v4_host = str(policy["ipv4_peer"])
+    foreign_v6_host = str(policy["ipv6_peer"])
     return "\n".join(
         [
             "[Interface]",
@@ -363,20 +370,20 @@ def render_ru_wg(env: dict[str, str]) -> str:
             f"MTU = {env['WG_MTU']}",
             f"FwMark = {env['WG_TUNNEL_FWMARK']}",
             "Table = off",
-            f"PostUp = ip -4 route replace {wg_host_address(env['WG_FOREIGN_ADDRESS'])}/32 dev {env['WG_INTERFACE']}",
-            f"PostUp = ip -6 route replace {foreign_v6_host}/128 dev {env['WG_INTERFACE']}",
-            f"PostUp = ip -4 route replace default dev {env['WG_INTERFACE']} table {env['WG_ROUTE_TABLE']}",
-            f"PostUp = ip -6 route replace default dev {env['WG_INTERFACE']} table {env['WG_ROUTE_TABLE']}",
-            f"PostUp = ip -4 rule del fwmark {env['APP_ROUTE_MARK']} table {env['WG_ROUTE_TABLE']} priority 10000 2>/dev/null || true",
-            f"PostUp = ip -4 rule add fwmark {env['APP_ROUTE_MARK']} table {env['WG_ROUTE_TABLE']} priority 10000",
-            f"PostUp = ip -6 rule del fwmark {env['APP_ROUTE_MARK']} table {env['WG_ROUTE_TABLE']} priority 10000 2>/dev/null || true",
-            f"PostUp = ip -6 rule add fwmark {env['APP_ROUTE_MARK']} table {env['WG_ROUTE_TABLE']} priority 10000",
-            f"PreDown = ip -6 rule del fwmark {env['APP_ROUTE_MARK']} table {env['WG_ROUTE_TABLE']} priority 10000 2>/dev/null || true",
-            f"PreDown = ip -4 rule del fwmark {env['APP_ROUTE_MARK']} table {env['WG_ROUTE_TABLE']} priority 10000 2>/dev/null || true",
-            f"PreDown = ip -6 route del default dev {env['WG_INTERFACE']} table {env['WG_ROUTE_TABLE']} 2>/dev/null || true",
-            f"PreDown = ip -4 route del default dev {env['WG_INTERFACE']} table {env['WG_ROUTE_TABLE']} 2>/dev/null || true",
-            f"PreDown = ip -6 route del {foreign_v6_host}/128 dev {env['WG_INTERFACE']} 2>/dev/null || true",
-            f"PreDown = ip -4 route del {wg_host_address(env['WG_FOREIGN_ADDRESS'])}/32 dev {env['WG_INTERFACE']} 2>/dev/null || true",
+            f"PostUp = ip -4 route replace {foreign_v4_host}/32 dev {interface}",
+            f"PostUp = ip -6 route replace {foreign_v6_host}/128 dev {interface}",
+            f"PostUp = ip -4 route replace default dev {interface} table {route_table}",
+            f"PostUp = ip -6 route replace default dev {interface} table {route_table}",
+            f"PostUp = ip -4 rule del fwmark {route_mark} table {route_table} priority {priority} 2>/dev/null || true",
+            f"PostUp = ip -4 rule add fwmark {route_mark} table {route_table} priority {priority}",
+            f"PostUp = ip -6 rule del fwmark {route_mark} table {route_table} priority {priority} 2>/dev/null || true",
+            f"PostUp = ip -6 rule add fwmark {route_mark} table {route_table} priority {priority}",
+            f"PreDown = ip -6 rule del fwmark {route_mark} table {route_table} priority {priority} 2>/dev/null || true",
+            f"PreDown = ip -4 rule del fwmark {route_mark} table {route_table} priority {priority} 2>/dev/null || true",
+            f"PreDown = ip -6 route del default dev {interface} table {route_table} 2>/dev/null || true",
+            f"PreDown = ip -4 route del default dev {interface} table {route_table} 2>/dev/null || true",
+            f"PreDown = ip -6 route del {foreign_v6_host}/128 dev {interface} 2>/dev/null || true",
+            f"PreDown = ip -4 route del {foreign_v4_host}/32 dev {interface} 2>/dev/null || true",
             "",
             "[Peer]",
             f"PublicKey = {env['WG_FOREIGN_PUBLIC_KEY']}",

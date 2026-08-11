@@ -89,9 +89,9 @@ except ImportError:  # Installed agent runs as a standalone script.
     )
 
 try:
-    from .network_profile import FQ_FLOW_LIMIT, FQ_KIND, FQ_PACKET_LIMIT
+    from .network_profile import FQ_FLOW_LIMIT, FQ_KIND, FQ_PACKET_LIMIT, wireguard_policy_spec
 except ImportError:  # Installed agent runs as a standalone script.
-    from network_profile import FQ_FLOW_LIMIT, FQ_KIND, FQ_PACKET_LIMIT  # type: ignore[no-redef]
+    from network_profile import FQ_FLOW_LIMIT, FQ_KIND, FQ_PACKET_LIMIT, wireguard_policy_spec  # type: ignore[no-redef]
 
 try:
     from .diagnostics import SCHEMA_VERSION as DIAGNOSTICS_SCHEMA_VERSION, COLLECTOR_NAMES, CollectorState, DiagnosticsSnapshot, LogWindowSnapshot, classify_interserver_adaptation
@@ -843,6 +843,84 @@ def default_interface() -> str:
     return str(routes[0].get("dev", "")) if routes else ""
 
 
+def _wireguard_policy_rule_present(family: int, spec: Mapping[str, str | int]) -> bool:
+    result = run(
+        ["ip", f"-{family}", "rule", "show", "priority", str(spec["priority"])],
+        timeout=3,
+    )
+    mark = f"fwmark {int(spec['mark']):#x}"
+    table = f"lookup {spec['table']}"
+    return result.returncode == 0 and any(mark in line and table in line for line in result.stdout.splitlines())
+
+
+def _wireguard_policy_route_present(
+    family: int,
+    destination: str,
+    spec: Mapping[str, str | int],
+    *,
+    table: int | None = None,
+) -> bool:
+    args = ["ip", f"-{family}", "route", "show"]
+    if table is not None:
+        args.extend(("table", str(table)))
+    args.append(destination)
+    result = run(args, timeout=3)
+    interface = f"dev {spec['interface']}"
+    return result.returncode == 0 and any(interface in line for line in result.stdout.splitlines())
+
+
+def wireguard_policy_snapshot(env: Mapping[str, str], role: str) -> dict[str, Any]:
+    if role != "ru-gateway":
+        return {"managed": False, "ok": True, "checks": {}, "missing": []}
+    try:
+        spec = wireguard_policy_spec(env)
+    except (KeyError, ValueError) as exc:
+        return {"managed": True, "ok": False, "checks": {}, "missing": ["spec"], "error": str(exc)[:240]}
+    checks = {
+        "ipv4_peer_route": _wireguard_policy_route_present(4, f"{spec['ipv4_peer']}/32", spec),
+        "ipv6_peer_route": _wireguard_policy_route_present(6, f"{spec['ipv6_peer']}/128", spec),
+        "ipv4_default_route": _wireguard_policy_route_present(4, "default", spec, table=int(spec["table"])),
+        "ipv6_default_route": _wireguard_policy_route_present(6, "default", spec, table=int(spec["table"])),
+        "ipv4_rule": _wireguard_policy_rule_present(4, spec),
+        "ipv6_rule": _wireguard_policy_rule_present(6, spec),
+    }
+    missing = sorted(name for name, present in checks.items() if not present)
+    return {
+        "managed": True,
+        "ok": not missing,
+        "interface": spec["interface"],
+        "table": spec["table"],
+        "mark": spec["mark"],
+        "priority": spec["priority"],
+        "checks": checks,
+        "missing": missing,
+    }
+
+
+def apply_wireguard_policy(env: Mapping[str, str]) -> dict[str, Any]:
+    spec = wireguard_policy_spec(env)
+    before = wireguard_policy_snapshot(env, "ru-gateway")
+    commands = {
+        "ipv4_peer_route": ["ip", "-4", "route", "replace", f"{spec['ipv4_peer']}/32", "dev", str(spec["interface"])],
+        "ipv6_peer_route": ["ip", "-6", "route", "replace", f"{spec['ipv6_peer']}/128", "dev", str(spec["interface"])],
+        "ipv4_default_route": ["ip", "-4", "route", "replace", "default", "dev", str(spec["interface"]), "table", str(spec["table"])],
+        "ipv6_default_route": ["ip", "-6", "route", "replace", "default", "dev", str(spec["interface"]), "table", str(spec["table"])],
+        "ipv4_rule": ["ip", "-4", "rule", "add", "fwmark", str(spec["mark"]), "table", str(spec["table"]), "priority", str(spec["priority"])],
+        "ipv6_rule": ["ip", "-6", "rule", "add", "fwmark", str(spec["mark"]), "table", str(spec["table"]), "priority", str(spec["priority"])],
+    }
+    for name in before.get("missing", []):
+        command = commands.get(str(name))
+        if command is None:
+            continue
+        result = run(command, timeout=10)
+        if result.returncode != 0:
+            raise RuntimeError(f"unable to apply WireGuard policy {name}: {result.stderr.strip()[:240]}")
+    after = wireguard_policy_snapshot(env, "ru-gateway")
+    if not after.get("ok"):
+        raise RuntimeError(f"WireGuard policy did not converge: {','.join(after.get('missing', []))}")
+    return {**after, "changed": bool(before.get("missing"))}
+
+
 def qdisc_snapshot(interface: str) -> dict[str, Any]:
     if not interface:
         return {"qdisc": "", "qdisc_limit": 0, "qdisc_flow_limit": 0, "qdisc_drops": 0, "qdisc_flow_limit_drops": 0}
@@ -904,6 +982,19 @@ def apply_qdisc_profile() -> dict[str, Any]:
         **{name: value for name, value in public.items() if name != "changed"},
         "overlay_interface": overlay_interface,
         **{f"overlay_{name}": value for name, value in overlay.items() if name != "changed"},
+    }
+
+
+def apply_network_profile() -> dict[str, Any]:
+    qdisc = apply_qdisc_profile()
+    env = parse_env()
+    manifest = read_json(MANIFEST_PATH, {})
+    role = str(manifest.get("role") or env.get("ROLE") or "unknown")
+    policy = apply_wireguard_policy(env) if role == "ru-gateway" else wireguard_policy_snapshot(env, role)
+    return {
+        "changed": bool(qdisc.get("changed") or policy.get("changed")),
+        "qdisc": qdisc,
+        "wireguard_policy": policy,
     }
 
 
@@ -2982,6 +3073,7 @@ def collect_runtime_facts(*, live_probes: bool = False, profile: str = "light", 
     expected_network_profile = managed_network_profile()
     actual_network_profile = {**tcp_adaptation, "conntrack_max": conntrack.get("max", 0)}
     profile_mismatches = network_profile_mismatches(actual_network_profile, expected_network_profile)
+    wireguard_policy = wireguard_policy_snapshot(env, role)
     health_state = read_json(HEALTH_STATE_PATH, {})
     recent_front_interval = recent_observation(
         health_state.get("front_interval", {}),
@@ -2995,6 +3087,8 @@ def collect_runtime_facts(*, live_probes: bool = False, profile: str = "light", 
         reasons.append(f"drift={manifest_data['drift']}")
     if profile_mismatches:
         reasons.append(f"network_profile={','.join(profile_mismatches)}")
+    if wireguard_policy.get("managed") and not wireguard_policy.get("ok"):
+        reasons.append(f"wireguard_policy={','.join(wireguard_policy.get('missing', [])) or 'invalid'}")
     if not resolver.get("managed_stub"):
         reasons.append(f"resolver_stub={resolver.get('resolv_conf_target') or 'missing'}")
     if live_probes and not release_gate_ok(probes):
@@ -3075,6 +3169,7 @@ def collect_runtime_facts(*, live_probes: bool = False, profile: str = "light", 
             "resolver": resolver,
             "managed_profile": expected_network_profile,
             "profile_mismatches": profile_mismatches,
+            "wireguard_policy": wireguard_policy,
             "protocol_counters": protocol_counters_snapshot(),
             "softnet_counters": softnet_counters_snapshot(),
             "recent_health_deltas": health_state.get("network_deltas", {}),
@@ -3472,6 +3567,18 @@ def recover(current: dict[str, Any]) -> str:
         return ";".join(actions)
     artifacts_clean = current.get("artifacts", {}).get("drift") == "none"
     network = current.get("network", {})
+    wireguard_policy = network.get("wireguard_policy", {})
+    if (
+        artifacts_clean
+        and current.get("role") == "ru-gateway"
+        and wireguard_policy.get("managed") is True
+        and wireguard_policy.get("ok") is not True
+    ):
+        try:
+            applied = apply_wireguard_policy(parse_env())
+            return f"apply:wireguard-policy:{'changed' if applied.get('changed') else 'ok'}"
+        except (KeyError, RuntimeError, ValueError):
+            return "apply:wireguard-policy:failed"
     profile_mismatches = set(network.get("profile_mismatches", []))
     qdisc_mismatches = profile_mismatches & {"qdisc", "qdisc_limit", "qdisc_flow_limit"}
     qdisc_mismatches.update(name for name in profile_mismatches if name.startswith("overlay_qdisc"))
@@ -3599,7 +3706,7 @@ def main(argv: list[str] | None = None) -> int:
         select_transport(env, controller, args.tag)
         payload = {"selected": args.tag, "changed": True}
     elif args.command == "network-apply":
-        payload = apply_qdisc_profile()
+        payload = apply_network_profile()
     elif args.command == "routes":
         payload = routes_command(args)
     else:

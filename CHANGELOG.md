@@ -6,6 +6,20 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.19.9] - 2026-08-11
+
+### Fixed
+
+- Межсерверный selector больше не возвращает production-трафик на raw WireGuard только потому, что одиночный ICMP отвечает. Live-замер выявил на этом underlay `3.9%` UDP loss уже при `25 Мбит/с`, `9.6%` при `100 Мбит/с` и тысячи TCP retransmissions, хотя liveness оставался зелёным. Основным underlay стал congestion-controlled Hysteria2; raw WireGuard остаётся независимым автоматическим fallback при двух подтверждённых отказах и не используется как критерий качества.
+- Agent теперь проверяет фактические IPv4/IPv6 policy rules, default route table и peer routes внутреннего WireGuard. Отсутствующее runtime-состояние восстанавливается идемпотентно без рестарта интерфейса; install применяет тот же invariant после запуска `wg0`, а acceptance больше не может принять совпадающий файл при сломанном kernel state.
+- Исправлена причина массовых IPv6 first-load failures: на RU отсутствовали runtime rules `fwmark 48 -> table 51820`, хотя они присутствовали в `wg0.conf`. В результате IPv6 уходил через WAN с ULA source и накопил `2600` ложных `unclassified_error` за сутки. Renderer и agent теперь используют одну нормализованную policy-модель.
+- Ошибки `network is unreachable` на foreign outbound классифицируются как `transport_unavailable`, а не скрываются в `unclassified_error`.
+
+### Changed
+
+- Transport state schema обновлена до `11`; состояние старой схемы не влияет на новый preferred underlay. Hysteria2 продолжает работать без статических bandwidth hints и адаптирует congestion внутри протокола; существующая двухцикловая failover state machine и проверяемый rollback сохранены.
+- Основной `vless-uri.txt`, Xray/Reality front, web-admin, routing policy пользовательского трафика, WireGuard MTU `1360` и локальный VPN-клиент не изменены.
+
 ## [0.19.8] - 2026-08-09
 
 ### Fixed

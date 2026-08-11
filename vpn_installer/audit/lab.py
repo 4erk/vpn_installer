@@ -7,7 +7,7 @@ import time
 
 from ..common import OUT_DIR
 from ..config import load_env_file
-from ..interserver_transport import TRANSPORT_HY2_TAG
+from ..interserver_transport import HY2_PORT, TRANSPORT_CANDIDATE_TAGS, TRANSPORT_HY2_TAG, TRANSPORT_PREFERRED_TAG
 from ..render import (
     render_all_artifacts,
     render_foreign_nftables,
@@ -295,9 +295,11 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
                 ">/opt/stream.time; echo $? >/opt/stream.rc) &",
             )
             time.sleep(1)
+            fallback_tag = next(tag for tag in TRANSPORT_CANDIDATE_TAGS if tag != TRANSPORT_PREFERRED_TAG)
+            fault_port = HY2_PORT if TRANSPORT_PREFERRED_TAG == TRANSPORT_HY2_TAG else int(env["WG_PORT"])
             runner.docker_exec(
                 ru_container,
-                f"nft add table inet underlay_fault; nft 'add chain inet underlay_fault output {{ type filter hook output priority -10; policy accept; }}'; nft add rule inet underlay_fault output ip daddr {LAB_IPS['foreign']} udp dport {env['WG_PORT']} drop",
+                f"nft add table inet underlay_fault; nft 'add chain inet underlay_fault output {{ type filter hook output priority -10; policy accept; }}'; nft add rule inet underlay_fault output ip daddr {LAB_IPS['foreign']} udp dport {fault_port} drop",
             )
             switch_started = time.monotonic()
             suspicion = json.loads(
@@ -305,7 +307,7 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
             )
             if not (
                 suspicion.get("changed") is not True
-                and suspicion.get("selected") != TRANSPORT_HY2_TAG
+                and suspicion.get("selected") == TRANSPORT_PREFERRED_TAG
                 and suspicion.get("state") == "suspect"
             ):
                 raise AuditFailure(f"Transport agent did not retain the selected path for the first failure cycle: {suspicion}")
@@ -314,7 +316,7 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
             )
             if not (
                 transition.get("changed") is True
-                and transition.get("selected") == TRANSPORT_HY2_TAG
+                and transition.get("selected") == fallback_tag
             ):
                 raise AuditFailure(f"Transport agent did not perform the expected failover: {transition}")
             switch_seconds = time.monotonic() - switch_started
@@ -348,9 +350,9 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
                     )
                 )
             if not (
-                all(state.get("changed") is not True and state.get("selected") == TRANSPORT_HY2_TAG for state in recovery[:2])
+                all(state.get("changed") is not True and state.get("selected") == fallback_tag for state in recovery[:2])
                 and recovery[-1].get("changed") is True
-                and recovery[-1].get("selected") != TRANSPORT_HY2_TAG
+                and recovery[-1].get("selected") == TRANSPORT_PREFERRED_TAG
             ):
                 raise AuditFailure(f"Transport agent did not return to the recovered preferred underlay: {recovery}")
             continuity_report = lab_dir / "transport-continuity.json"

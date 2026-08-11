@@ -238,6 +238,10 @@ def classify_line(line: str) -> ClassifiedLogLine | None:
         return ClassifiedLogLine("unclassified_error", destination, source, event_id)
     if any(token in line for token in ("outbound/block[blocked]", "using outbound/block[blocked]", "connection rejected")):
         return ClassifiedLogLine("blocked_private_fake", destination, source, event_id)
+    if any(token in lower_line for token in _TRANSPORT_PATH_ERROR_TOKENS):
+        outbound = _outbound_tag(line)
+        if outbound.startswith("to-foreign"):
+            return ClassifiedLogLine("transport_unavailable", destination, source, event_id)
     if "i/o timeout" in line or "context deadline exceeded" in line:
         outbound = _outbound_tag(line)
         if outbound == "direct-ru":

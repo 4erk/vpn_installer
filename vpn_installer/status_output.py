@@ -122,6 +122,14 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
             f"udp_rmem={tcp_adaptation.get('udp_rmem_default', '-')}/{tcp_adaptation.get('udp_rmem_max', '-')}, "
             f"udp_wmem={tcp_adaptation.get('udp_wmem_default', '-')}/{tcp_adaptation.get('udp_wmem_max', '-')}"
         )
+    wireguard_policy = snapshot.network.get("wireguard_policy", {})
+    if wireguard_policy.get("managed"):
+        lines.append(
+            "wireguard policy: "
+            f"state={'ok' if wireguard_policy.get('ok') else 'drift'}, "
+            f"mark={wireguard_policy.get('mark', '-')}, table={wireguard_policy.get('table', '-')}, "
+            f"missing={','.join(str(value) for value in wireguard_policy.get('missing', [])) or '-'}"
+        )
     conntrack = snapshot.network.get("conntrack", {})
     if conntrack:
         details = [f"{conntrack.get('count', '-')}/{conntrack.get('max', '-')} ({conntrack.get('percent', '-')}%)"]

@@ -948,6 +948,25 @@ class ServerAgentTests(unittest.TestCase):
         self.assertEqual(action, "apply:qdisc:changed")
         apply_mock.assert_called_once_with()
 
+    def test_recovery_repairs_clean_wireguard_policy_without_restart(self) -> None:
+        current = {
+            "role": "ru-gateway",
+            "services": {"wireguard": "active", "nftables": "active", "sing-box": "active", "xray": "active", "transport": "active"},
+            "wireguard": {"interface": "wg0"},
+            "artifacts": {"drift": "none"},
+            "network": {
+                "wireguard_policy": {"managed": True, "ok": False, "missing": ["ipv6_rule"]},
+                "profile_mismatches": [],
+            },
+        }
+        with (
+            patch.object(server_agent, "parse_env", return_value=generate_default_env("demo")),
+            patch.object(server_agent, "apply_wireguard_policy", return_value={"changed": True}) as apply_mock,
+        ):
+            action = server_agent.recover(current)
+        self.assertEqual(action, "apply:wireguard-policy:changed")
+        apply_mock.assert_called_once()
+
     def test_recovery_reloads_clean_nftables_when_bypass_is_missing(self) -> None:
         current = {
             "role": "ru-gateway",
@@ -1021,6 +1040,7 @@ class ServerAgentTests(unittest.TestCase):
                 "tcp_adaptation_snapshot",
                 return_value={"congestion_control": "bbr", "qdisc": "fq", "qdisc_limit": 10_000, "qdisc_flow_limit": 512, "mtu_probing": 1},
             ),
+            patch.object(server_agent, "wireguard_policy_snapshot", return_value={"managed": True, "ok": True, "checks": {}, "missing": []}),
             patch.object(server_agent, "conntrack_snapshot", return_value={}),
             patch.object(server_agent, "xray_conntrack_bypass_snapshot", return_value={"active": True, "ingress": True, "egress": True}),
             patch.object(server_agent, "host_snapshot", return_value={"hostname": "ru-host", "login_user": "root", "is_root": True, "has_sudo": True, "os_id": "ubuntu", "os_version": "24.04", "default_interface": "ens3"}) as host_snapshot,
@@ -1112,6 +1132,39 @@ class ServerAgentTests(unittest.TestCase):
             unchanged = server_agent.apply_qdisc_profile()
         self.assertFalse(unchanged["changed"])
         unchanged_run.assert_not_called()
+
+    def test_wireguard_policy_snapshot_detects_a_missing_ipv6_rule(self) -> None:
+        env = generate_default_env("demo")
+
+        def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            if args[2:4] == ["rule", "show"]:
+                output = "" if args[1] == "-6" else "10000: from all fwmark 0x30 lookup 51820\n"
+                return subprocess.CompletedProcess(args, 0, output, "")
+            destination = args[-1]
+            return subprocess.CompletedProcess(args, 0, f"{destination} dev wg0\n", "")
+
+        with patch.object(server_agent, "run", side_effect=fake_run):
+            snapshot = server_agent.wireguard_policy_snapshot(env, "ru-gateway")
+
+        self.assertFalse(snapshot["ok"])
+        self.assertEqual(snapshot["missing"], ["ipv6_rule"])
+
+    def test_apply_wireguard_policy_repairs_only_missing_state(self) -> None:
+        env = generate_default_env("demo")
+        missing = {"managed": True, "ok": False, "missing": ["ipv6_rule"]}
+        healthy = {"managed": True, "ok": True, "missing": []}
+        completed = subprocess.CompletedProcess(["ip"], 0, "", "")
+        with (
+            patch.object(server_agent, "wireguard_policy_snapshot", side_effect=[missing, healthy]),
+            patch.object(server_agent, "run", return_value=completed) as run_mock,
+        ):
+            result = server_agent.apply_wireguard_policy(env)
+
+        self.assertTrue(result["changed"])
+        run_mock.assert_called_once_with(
+            ["ip", "-6", "rule", "add", "fwmark", "48", "table", "51820", "priority", "10000"],
+            timeout=10,
+        )
 
     def test_conntrack_snapshot_reports_capacity_and_fresh_kernel_events(self) -> None:
         def read_text(path: Path, *_args: object, **_kwargs: object) -> str:
@@ -2097,27 +2150,27 @@ class ServerAgentTests(unittest.TestCase):
             patch.object(server_agent, "transport_candidate_probe", return_value=healthy) as probe,
         ):
             result = server_agent.collect_transport_probes(
-                "interserver-underlay-hy2",
+                "interserver-underlay-wg",
                 {"preferred_probe_at": "2026-08-07T11:59:55+00:00"},
                 env=env,
                 observed_at="2026-08-07T12:00:00+00:00",
             )
 
         probe.assert_not_called()
-        self.assertFalse(result["interserver-underlay-wg"]["checked"])
+        self.assertFalse(result["interserver-underlay-hy2"]["checked"])
 
         with (
             patch.object(server_agent, "transport_overlay_path_probe", return_value=healthy),
             patch.object(server_agent, "transport_candidate_probe", return_value=healthy) as probe,
         ):
             server_agent.collect_transport_probes(
-                "interserver-underlay-hy2",
+                "interserver-underlay-wg",
                 {"preferred_probe_at": "2026-08-07T11:59:49+00:00"},
                 env=env,
                 observed_at="2026-08-07T12:00:00+00:00",
             )
 
-        probe.assert_called_once_with("interserver-underlay-wg")
+        probe.assert_called_once_with("interserver-underlay-hy2")
 
     def test_transport_reconcile_does_not_switch_during_install_transaction(self) -> None:
         previous = {

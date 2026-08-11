@@ -13,11 +13,13 @@ from vpn_installer.interserver_transport import (
     TRANSPORT_CANDIDATE_TAGS,
     TRANSPORT_HY2_TAG,
     TRANSPORT_OVERLAY_TAG,
+    TRANSPORT_PREFERRED_TAG,
     TRANSPORT_PROBE_INBOUND_TAGS,
     TRANSPORT_PROBE_PORTS,
     TRANSPORT_RELAY_INBOUND_TAG,
     TRANSPORT_RELAY_PORT,
     TRANSPORT_SELECTOR_TAG,
+    TRANSPORT_STATE_SCHEMA_VERSION,
     TRANSPORT_WG_TAG,
     build_ru_transport_topology,
     decode_transport_pem,
@@ -112,7 +114,7 @@ class InterserverTransportIdentityTests(unittest.TestCase):
                 "type": "selector",
                 "tag": TRANSPORT_SELECTOR_TAG,
                 "outbounds": list(TRANSPORT_CANDIDATE_TAGS),
-                "default": TRANSPORT_WG_TAG,
+                "default": TRANSPORT_PREFERRED_TAG,
                 "interrupt_exist_connections": True,
             },
         )
@@ -162,25 +164,25 @@ class InterserverTransportIdentityTests(unittest.TestCase):
 
     def test_policy_never_switches_for_latency_advantage(self) -> None:
         state: dict[str, object] = {
-            "schema_version": 6,
+            "schema_version": TRANSPORT_STATE_SCHEMA_VERSION,
             "updated_at": "2026-08-06T11:59:58+00:00",
-            "selected": TRANSPORT_WG_TAG,
-            "latency_candidate": TRANSPORT_HY2_TAG,
+            "selected": TRANSPORT_HY2_TAG,
+            "latency_candidate": TRANSPORT_WG_TAG,
             "latency_confirmations": 999,
         }
         probes = {
-            TRANSPORT_WG_TAG: {"checked": True, "ok": True, "delay_ms": 800},
-            TRANSPORT_HY2_TAG: {"checked": True, "ok": True, "delay_ms": 10},
+            TRANSPORT_HY2_TAG: {"checked": True, "ok": True, "delay_ms": 800},
+            TRANSPORT_WG_TAG: {"checked": True, "ok": True, "delay_ms": 10},
         }
         for second in range(0, 20, 2):
             state = evaluate_transport_policy(
-                selected=TRANSPORT_WG_TAG,
+                selected=TRANSPORT_HY2_TAG,
                 probes=probes,
                 previous=state,
                 observed_at=f"2026-08-06T12:00:{second:02d}+00:00",
             )
             self.assertFalse(state["would_switch"])
-            self.assertEqual(state["recommended"], TRANSPORT_WG_TAG)
+            self.assertEqual(state["recommended"], TRANSPORT_HY2_TAG)
             self.assertEqual(state["latency_confirmations"], 0)
 
     def test_unknown_state_schema_cannot_confirm_a_switch(self) -> None:
@@ -336,16 +338,16 @@ class InterserverTransportIdentityTests(unittest.TestCase):
 
     def test_healthy_fallback_returns_to_preferred_after_three_fresh_probes(self) -> None:
         failure = {
-            TRANSPORT_WG_TAG: {"checked": True, "ok": False, "attempts": 2, "error": "timed out"},
-            TRANSPORT_HY2_TAG: {"checked": True, "ok": True, "delay_ms": 70},
+            TRANSPORT_HY2_TAG: {"checked": True, "ok": False, "attempts": 2, "error": "timed out"},
+            TRANSPORT_WG_TAG: {"checked": True, "ok": True, "delay_ms": 70},
         }
         first = evaluate_transport_policy(
-            selected=TRANSPORT_WG_TAG,
+            selected=TRANSPORT_HY2_TAG,
             probes=failure,
             observed_at="2026-08-06T12:00:00+00:00",
         )
         switch = evaluate_transport_policy(
-            selected=TRANSPORT_WG_TAG,
+            selected=TRANSPORT_HY2_TAG,
             probes=failure,
             previous=first,
             observed_at="2026-08-06T12:00:02+00:00",
@@ -354,42 +356,42 @@ class InterserverTransportIdentityTests(unittest.TestCase):
 
         state: dict[str, object] = {
             **switch,
-            "selected": TRANSPORT_HY2_TAG,
+            "selected": TRANSPORT_WG_TAG,
             "would_switch": False,
             "changed": True,
         }
         healthy = {
-            TRANSPORT_HY2_TAG: {"checked": True, "ok": True, "delay_ms": 90},
             TRANSPORT_WG_TAG: {"checked": True, "ok": True, "delay_ms": 40},
+            TRANSPORT_HY2_TAG: {"checked": True, "ok": True, "delay_ms": 90},
         }
         for second in (4, 14, 24):
             state = evaluate_transport_policy(
-                selected=TRANSPORT_HY2_TAG,
+                selected=TRANSPORT_WG_TAG,
                 probes=healthy,
                 previous=state,
                 observed_at=f"2026-08-06T12:00:{second:02d}+00:00",
             )
         self.assertEqual(state["state"], "recovering")
-        self.assertEqual(state["selected"], TRANSPORT_HY2_TAG)
-        self.assertEqual(state["recommended"], TRANSPORT_WG_TAG)
+        self.assertEqual(state["selected"], TRANSPORT_WG_TAG)
+        self.assertEqual(state["recommended"], TRANSPORT_HY2_TAG)
         self.assertTrue(state["would_switch"])
         self.assertEqual(state["preferred_recovery"]["confirmations"], 3)
         json.dumps(state)
 
     def test_deferred_cycle_preserves_but_does_not_increment_recovery_evidence(self) -> None:
         first = evaluate_transport_policy(
-            selected=TRANSPORT_HY2_TAG,
+            selected=TRANSPORT_WG_TAG,
             probes={
-                TRANSPORT_HY2_TAG: {"checked": True, "ok": True, "delay_ms": 50},
                 TRANSPORT_WG_TAG: {"checked": True, "ok": True, "delay_ms": 20},
+                TRANSPORT_HY2_TAG: {"checked": True, "ok": True, "delay_ms": 50},
             },
             observed_at="2026-08-06T12:00:00+00:00",
         )
         deferred = evaluate_transport_policy(
-            selected=TRANSPORT_HY2_TAG,
+            selected=TRANSPORT_WG_TAG,
             probes={
-                TRANSPORT_HY2_TAG: {"checked": True, "ok": True, "delay_ms": 50},
-                TRANSPORT_WG_TAG: {"checked": False, "ok": False},
+                TRANSPORT_WG_TAG: {"checked": True, "ok": True, "delay_ms": 20},
+                TRANSPORT_HY2_TAG: {"checked": False, "ok": False},
             },
             previous=first,
             observed_at="2026-08-06T12:00:02+00:00",

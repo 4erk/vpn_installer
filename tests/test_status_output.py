@@ -106,6 +106,13 @@ class StatusOutputTests(unittest.TestCase):
                         "front_bypass": {"active": True, "ingress": True, "egress": True},
                         "table_full_events": {"5": 0, "30": 2, "1440": 23},
                     },
+                    "wireguard_policy": {
+                        "managed": True,
+                        "ok": True,
+                        "mark": 48,
+                        "table": 51820,
+                        "missing": [],
+                    },
                     "health_state": "degraded",
                     "health_updated_at": "2026-07-20T08:00:00+00:00",
                     "health_soft_reasons": ["conntrack_table_full_5m=2"],
@@ -192,6 +199,7 @@ class StatusOutputTests(unittest.TestCase):
         )
         self.assertIn("udp_rmem=8388608/16777216", rendered)
         self.assertIn("udp_wmem=8388608/16777216", rendered)
+        self.assertIn("wireguard policy: state=ok, mark=48, table=51820, missing=-", rendered)
         self.assertIn("conntrack: 95/32768 (0.29%)", rendered)
         self.assertIn("xray_front_bypass=active", rendered)
         self.assertIn("table_full=5m:0,30m:2,24h:23", rendered)

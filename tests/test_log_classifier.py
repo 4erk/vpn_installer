@@ -188,6 +188,15 @@ class LogClassifierTests(unittest.TestCase):
         self.assertEqual(disabled.bucket, "disabled_invalid")
         self.assertEqual(invalid.bucket, "invalid_reality")
 
+    def test_foreign_ipv6_route_failure_is_transport_unavailable(self) -> None:
+        classified = classify_line(
+            "ERROR [42 2ms] connection: open connection to [2001:67c:4e8:f002::a]:443 "
+            "using outbound/direct[to-foreign]: dial tcp [2001:67c:4e8:f002::a]:443: connect: network is unreachable"
+        )
+        self.assertIsNotNone(classified)
+        self.assertEqual(classified.bucket, "transport_unavailable")
+        self.assertEqual(classified.destination, "[2001:67c:4e8:f002::a]:443")
+
     def test_summary_counts_and_top_destinations(self) -> None:
         summary = summarize_lines(
             [
