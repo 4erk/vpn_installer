@@ -4,7 +4,7 @@ import getpass
 import os
 from typing import Any
 
-from .common import fail, print_header, sanitize_name, warn
+from .common import error_summary, fail, print_header, sanitize_name, warn
 from .config import (
     find_existing_deployments,
     normalize_identity_path,
@@ -17,6 +17,8 @@ from .config import (
     validate_ssh_user,
 )
 from .models import ROLE_FOREIGN, ROLE_META, ROLE_RU, RemoteTarget
+
+DEFAULT_FIRST_DEPLOYMENT_NAME = "home-vpn"
 
 
 def prompt_value(label: str, default: str | None = None, allow_empty: bool = False) -> str:
@@ -47,7 +49,7 @@ def prompt_validated_value(
         try:
             return validator(value)
         except Exception as exc:  # noqa: BLE001
-            warn(str(exc))
+            warn(error_summary(exc))
 
 
 def prompt_secret(label: str) -> str:
@@ -89,11 +91,13 @@ def prompt_choice(label: str, options: list[tuple[str, str]], default: str) -> s
 
 
 def has_saved_connection(role_state: dict[str, Any]) -> bool:
+    auth_mode = str(role_state.get("auth_mode", "")).strip().lower()
     return bool(
         str(role_state.get("public_ip", "")).strip()
         and str(role_state.get("ssh_host", "")).strip()
         and str(role_state.get("ssh_user", "")).strip()
         and str(role_state.get("ssh_port", "")).strip()
+        and auth_mode in {"key", "password"}
     )
 
 
@@ -122,9 +126,9 @@ def display_target_connection(target: RemoteTarget) -> None:
     print(f"SSH: {target.ssh_user}@{target.ssh_host}:{target.ssh_port}")
     print(f"Вход: {auth_mode_label(target.auth_mode)}")
     if target.auth_mode == "key":
-        print(f"SSH key: {target.identity_path or 'ssh-agent / стандартный ключ'}")
+        print(f"SSH key: {target.identity_path or 'ssh-agent / стандартный ключ'}; password fallback отключён")
     elif target.saved_connection:
-        print("SSH password: будет запрошен заново перед подключением")
+        print("SSH password: будет запрошен заново и передан встроенным backend без запуска ssh.exe")
 
 
 def hydrate_runtime_auth(target: RemoteTarget) -> RemoteTarget:
@@ -156,7 +160,7 @@ def prompt_server_connection(target: RemoteTarget, *, force_prompt: bool = False
         try:
             validate_target_settings(target)
         except Exception as exc:  # noqa: BLE001
-            warn(f"{target.label}: сохранённые SSH-данные повреждены или неполны, нужно ввести заново ({exc})")
+            warn(f"{target.label}: сохранённые SSH-данные повреждены или неполны, нужно ввести заново ({error_summary(exc)})")
             force_prompt = True
         else:
             print("Найдены сохранённые SSH-данные:")
@@ -207,7 +211,7 @@ def prompt_server_connection(target: RemoteTarget, *, force_prompt: bool = False
         target.ssh_host = target.public_ip
     if target.auth_mode == "key":
         target.identity_path = prompt_validated_value(
-            f"{target.label}: путь к SSH key (пусто = ssh-agent / стандартный ключ)",
+            f"{target.label}: SSH key (пусто = авто; имя = ~/.ssh/<имя>; либо полный путь)",
             default=target.identity_path or None,
             allow_empty=True,
             validator=validate_identity_path,
@@ -229,7 +233,7 @@ def select_deployment(cli_name: str | None) -> str:
         return validate_deployment_name(cli_name)
     existing = find_existing_deployments()
     if not existing:
-        return validate_deployment_name(prompt_value("Имя нового deployment"))
+        return validate_deployment_name(prompt_value("Имя новой установки", default=DEFAULT_FIRST_DEPLOYMENT_NAME))
     print_header("Выбор deployment")
     for index, name in enumerate(existing, start=1):
         print(f"{index}. {name}")

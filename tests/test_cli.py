@@ -17,6 +17,11 @@ class CliTests(unittest.TestCase):
         args = parser.parse_args(["install", "--deployment", "demo"])
         self.assertEqual(args.deployment, "demo")
 
+    def test_parser_uses_public_platform_entrypoint(self) -> None:
+        with patch("vpn_installer.cli.cli_entrypoint", return_value=r".\vpn.cmd"):
+            parser = cli.build_parser()
+        self.assertEqual(parser.prog, r".\vpn.cmd")
+
     def test_audit_dispatch(self) -> None:
         with patch("vpn_installer.audit.runner.main", return_value=0) as mocked:
             self.assertEqual(cli.main(["audit", "quick"]), 0)

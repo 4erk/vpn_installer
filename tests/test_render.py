@@ -13,6 +13,7 @@ from unittest.mock import patch
 from vpn_installer.config import generate_default_env
 from vpn_installer import render
 from vpn_installer.client_artifacts import PUBLIC_VLESS_OUTBOUND_TAG
+from vpn_installer.common import cli_command
 import json
 
 
@@ -458,7 +459,7 @@ class RenderTests(unittest.TestCase):
         self.assertIn("v2rayNG", text)
         self.assertIn("Hiddify", text)
         self.assertIn("windows-xray.json", text)
-        self.assertIn("vpn status", text)
+        self.assertIn(cli_command("status"), text)
         self.assertIn("vless-uri.txt", text)
         self.assertIn("hiddify-cross-platform.json", text)
         self.assertIn("hiddify-android.json", text)

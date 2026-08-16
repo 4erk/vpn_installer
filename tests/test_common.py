@@ -8,9 +8,12 @@ from unittest.mock import patch
 
 from vpn_installer.common import (
     AppError,
+    cli_command,
+    cli_entrypoint,
     command_exists,
     ensure_directories,
     env_line,
+    error_summary,
     parse_env_value,
     run_command,
     sanitize_name,
@@ -20,6 +23,15 @@ from vpn_installer.common import (
 
 
 class CommonTests(unittest.TestCase):
+    def test_cli_entrypoint_is_platform_specific(self) -> None:
+        self.assertEqual(cli_entrypoint("nt"), r".\vpn.cmd")
+        self.assertEqual(cli_entrypoint("posix"), "./vpn.sh")
+        self.assertEqual(cli_command("status", platform_name="nt"), r".\vpn.cmd status")
+
+    def test_error_summary_returns_one_bounded_line(self) -> None:
+        self.assertEqual(error_summary(AppError("short reason\ntechnical detail")), "short reason")
+        self.assertEqual(error_summary(AppError("x" * 20), max_length=10), "xxxxxxx...")
+
     def test_sanitize_name_replaces_invalid_chars(self) -> None:
         self.assertEqual(sanitize_name("my vpn/01"), "my-vpn-01")
 
@@ -43,6 +55,14 @@ class CommonTests(unittest.TestCase):
             result = run_command(["echo", "ok"], capture_output=True, input_text="x")
         self.assertEqual(result.stdout, "ok")
         mocked.assert_called_once()
+
+    def test_run_command_can_stream_stdout_while_capturing_stderr(self) -> None:
+        completed = subprocess.CompletedProcess(["demo"], 0, stdout=None, stderr="diagnostic")
+        with patch("vpn_installer.common.subprocess.run", return_value=completed) as mocked:
+            result = run_command(["demo"], capture_stderr=True)
+        self.assertEqual(result.stderr, "diagnostic")
+        self.assertIsNone(mocked.call_args.kwargs["stdout"])
+        self.assertIs(mocked.call_args.kwargs["stderr"], subprocess.PIPE)
 
     def test_run_command_raises_on_missing_binary(self) -> None:
         with patch("vpn_installer.common.subprocess.run", side_effect=FileNotFoundError()):

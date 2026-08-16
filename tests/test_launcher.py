@@ -33,6 +33,14 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("Ошибка: boom", stream.getvalue())
         self.assertIn(str(Path("out/logs/runtime/error.log")), stream.getvalue())
 
+    def test_launcher_hides_multiline_technical_detail(self) -> None:
+        error = AppError("Краткая причина\nOpenSSH debug detail")
+        with patch("vpn_installer.launcher.main", side_effect=error), patch("vpn_installer.launcher.log_exception", return_value=Path("out/logs/runtime/error.log")) as log_mock, patch("sys.stderr", new_callable=StringIO) as stream:
+            self.assertEqual(launcher.run(["status"]), 1)
+        self.assertIn("Ошибка: Краткая причина", stream.getvalue())
+        self.assertNotIn("OpenSSH debug detail", stream.getvalue())
+        self.assertIs(log_mock.call_args.args[1], error)
+
     def test_launcher_returns_1_on_unhandled_error_and_mentions_log(self) -> None:
         with patch("vpn_installer.launcher.main", side_effect=RuntimeError("boom")), patch("vpn_installer.launcher.log_exception", return_value=Path("out/logs/runtime/error.log")), patch("sys.stderr", new_callable=StringIO) as stream:
             self.assertEqual(launcher.run(["install"]), 1)

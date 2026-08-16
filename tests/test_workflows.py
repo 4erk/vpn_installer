@@ -17,6 +17,7 @@ from vpn_installer import workflows
 class WorkflowTests(unittest.TestCase):
     def setUp(self) -> None:
         self.host_key_check = patch("vpn_installer.workflows.ensure_target_host_key").start()
+        self.runtime_error_log = patch("vpn_installer.workflows.log_exception", return_value=None).start()
         self.addCleanup(patch.stopall)
 
     def test_build_target_from_env_without_state(self) -> None:

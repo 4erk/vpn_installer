@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 
+from vpn_installer.common import cli_command
 from vpn_installer.diagnostics import (
     COLLECTOR_NAMES,
     LOG_WINDOW_KEYS,
@@ -35,7 +36,7 @@ class StatusOutputTests(unittest.TestCase):
                 route_probes={"profile": "none", "ok": None},
             )
         )
-        self.assertIn("live probes: not run by read-only status; use vpn verify live for route acceptance", lines)
+        self.assertIn(f"live probes: not run by read-only status; use {cli_command('verify live')} for route acceptance", lines)
 
     def test_formats_snapshot_windows_buckets_destinations_and_reasons(self) -> None:
         windows = collected_windows()

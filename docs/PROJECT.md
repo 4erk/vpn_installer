@@ -30,6 +30,8 @@ Hysteria2 URI ---------------> RU Hysteria2 UDP :443 -----┴-> RU sing-box rout
 - `install.sh` только bootstrap и транзакционная доставка уже rendered artifacts; у него нет собственных routing defaults.
 - `/etc/vpn-stack/render-manifest.json` schema 2 хранит release, policy, env/config hashes, binary digests, OS/kernel и hashes artifacts.
 
+Публичная operator-точка входа зависит от платформы: `.\vpn.cmd` на Windows и `./vpn.sh` на Linux. Прямой запуск `vpn.ps1` или `python -m vpn_installer` является внутренним/dev-сценарием и не должен использоваться в пользовательских инструкциях.
+
 Серверные runtime rules web-admin хранятся отдельно в `/etc/vpn-stack/admin-routing-rules.json`. Это единственный поддерживаемый routing overlay. Автоматических learned-routes, timeout promotion, offload mutation и log-based blocking нет; qdisc является декларативной частью единого managed network profile, а не реакцией на журнальные строки.
 
 ## Network adaptation
@@ -81,7 +83,7 @@ Snapshot schema 3 содержит:
 - problem-записи bounded-обогащаются inbound/DNS INFO-контекстом совпадающего sing-box event ID; парные сообщения одного request ID дедуплицируются, а IP timeout связывается с исходным доменом без полного INFO-сканирования;
 - maintenance state и отдельные `server_path`, `public_front`, `public_quic`, `client_observation`, `closing_churn`, `host_integrity` verdicts.
 
-`vpn status` собирает компактный snapshot за последние 5 минут без live probes и исторического сканирования. `vpn diagnose path` сохраняет полный structured JSON с окнами 5m/30m/24h. `vpn diagnose front` одновременно проверяет публичный listener и свежие RU/WG/router paths. `vpn diagnose client --source <public-ip>` показывает потоки и Xray destinations проблемного источника, не смешивая устройства за одним NAT.
+`.\vpn.cmd status` собирает компактный snapshot за последние 5 минут без live probes и исторического сканирования. `.\vpn.cmd diagnose path` сохраняет полный structured JSON с окнами 5m/30m/24h. `.\vpn.cmd diagnose front` одновременно проверяет публичный listener и свежие RU/WG/router paths. `.\vpn.cmd diagnose client --source <public-ip>` показывает потоки и Xray destinations проблемного источника, не смешивая устройства за одним NAT. На Linux те же команды запускаются через `./vpn.sh`.
 
 ## Health и восстановление
 
@@ -99,13 +101,13 @@ Install/reinstall собирает release во временном катало�
 
 Хранятся последние 10 revision snapshots плюс отдельный baseline. Snapshot текущей транзакции никогда не удаляется её собственным rollback; pruning выполняется до создания нового snapshot.
 
-`vpn maintain` по умолчанию только показывает APT/security/reboot state. С `--apply --yes` роли обновляются последовательно, после каждой выполняется fresh verification. `--refresh-assets` использует тот же транзакционный reinstall workflow; background asset mutation отсутствует.
+`.\vpn.cmd maintain` по умолчанию только показывает APT/security/reboot state. С `--apply --yes` роли обновляются последовательно, после каждой выполняется fresh verification. `--refresh-assets` использует тот же транзакционный reinstall workflow; background asset mutation отсутствует.
 
 Journald ограничивается managed drop-in. APT periodic settings включают unattended security updates, но плановая установка пакетов остаётся явной командой `maintain`.
 
 ## Live verification
 
-`vpn verify live --deployment <name>` обязателен после install/reinstall. Он собирает agent acceptance snapshots на обеих ролях и запускает на внешнем runner два эфемерных sing-box client: первый строится напрямую из `vless-uri.txt` и проходит VLESS/Reality/Xray, второй независимо проходит публичный Hysteria2 ingress. Оба затем используют одну RU routing policy и выбранный межсерверный Hysteria2/WireGuard transport, проверяя egress identity, GitHub, Google, UDP DNS, TCP IPv6 literal, быстрый SOCKS reject private/fake destinations и девять first-load GET.
+`.\vpn.cmd verify live --deployment <name>` обязателен после install/reinstall. Он собирает agent acceptance snapshots на обеих ролях и запускает на внешнем runner два эфемерных sing-box client: первый строится напрямую из `vless-uri.txt` и проходит VLESS/Reality/Xray, второй независимо проходит публичный Hysteria2 ingress. Оба затем используют одну RU routing policy и выбранный межсерверный Hysteria2/WireGuard transport, проверяя egress identity, GitHub, Google, UDP DNS, TCP IPv6 literal, быстрый SOCKS reject private/fake destinations и девять first-load GET.
 
 Дополнительно проверяются DNS, direct/domain routes, IPv4 literal, IPv6 literal и reject private/fake. Итог только один из `verified`, `degraded`, `failed`, `inconclusive`; зелёный `status` не является acceptance доказательством.
 
@@ -129,9 +131,9 @@ Server-side route acceptance использует HTTP `HEAD`: его задач
 ## Проверки релиза
 
 1. `python tests/run_tests.py` (на Windows с bundled runtime: `& .\.runtime\python\windows\python.exe tests\run_tests.py`). Runner сам добавляет repo root до discovery, поэтому portable embedded Python не зависит от `PYTHONPATH`.
-2. `vpn audit quick`, затем `vpn audit all`.
+2. `.\vpn.cmd audit quick`, затем `.\vpn.cmd audit all` (на Linux: `./vpn.sh ...`).
 3. Reinstall foreign, затем RU только штатным workflow.
-4. `vpn verify live --deployment <name> --non-interactive`. Acceptance подтверждает первую ошибку обязательного route-инварианта повторным циклом; Telegram и другие проблемные направления выводятся отдельно как observations.
+4. `.\vpn.cmd verify live --deployment <name> --non-interactive`. Acceptance подтверждает первую ошибку обязательного route-инварианта повторным циклом; Telegram и другие проблемные направления выводятся отдельно как observations.
 5. Проверить 30-minute fresh logs, front retransmit telemetry, manifest drift, идентичности обоих egress и проблемные destinations.
 
 Локальный audit не доказывает provider path, конкретную сеть клиента или IPv6 availability. Такие ограничения фиксируются как `degraded`/`inconclusive`, а не маскируются restart или timeout override.

@@ -157,7 +157,10 @@ class AuditModuleTests(unittest.TestCase):
             (client / "hiddify-android.json").write_text("{}\n", encoding="utf-8")
             (client / "hiddify-uri.txt").write_text("vless://demo\n", encoding="utf-8")
             (client / "v2rayn-uri.txt").write_text("vless://demo\n", encoding="utf-8")
-            (out_dir / "NEXT-STEPS.txt").write_text("VLESS URI\nv2rayNG\nandroid-v2rayng-xray.json\nvpn status\n", encoding="utf-8")
+            (out_dir / "NEXT-STEPS.txt").write_text(
+                f"VLESS URI\nv2rayNG\nandroid-v2rayng-xray.json\n{audit_quick.cli_command('status')}\n",
+                encoding="utf-8",
+            )
             for name in ("ru-gateway.tar.gz", "foreign-exit.tar.gz"):
                 with tarfile.open(bundle / name, "w:gz") as archive:
                     keep = out_dir / f"{name}.txt"
@@ -175,8 +178,7 @@ class AuditModuleTests(unittest.TestCase):
 
                 return subprocess.CompletedProcess(["pwsh"], 0, stdout="VPN Installer\nВыбери действие\nЗавершено.\n", stderr="")
 
-        with patch("vpn_installer.audit.quick.powershell_executable", return_value="powershell"):
-            result = audit_quick.test_vpn_menu_exit(Runner())
+        result = audit_quick.test_vpn_menu_exit(Runner())
         self.assertIn("launcher", result)
 
     def test_docker_run_registers_checks(self) -> None:
@@ -197,6 +199,20 @@ class AuditModuleTests(unittest.TestCase):
         }
         client_cfg = audit_lab.build_lab_client_config(env)
         self.assertIn('"server": "198.18.0.10"', client_cfg)
+
+    def test_lab_network_apply_validation_uses_nested_agent_contract(self) -> None:
+        audit_lab.validate_network_apply_result(
+            {
+                "qdisc": {
+                    "overlay_qdisc": "fq",
+                    "overlay_qdisc_limit": 10_000,
+                    "overlay_qdisc_flow_limit": 512,
+                },
+                "wireguard_policy": {"managed": True, "ok": True},
+            }
+        )
+        with self.assertRaises(AuditFailure):
+            audit_lab.validate_network_apply_result({"overlay_qdisc": "fq"})
 
     def test_lab_run_registers_dataplane_check(self) -> None:
         runner = FakeRunner()

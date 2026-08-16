@@ -8,6 +8,7 @@ import time
 from ..common import OUT_DIR
 from ..config import load_env_file
 from ..interserver_transport import HY2_PORT, TRANSPORT_CANDIDATE_TAGS, TRANSPORT_HY2_TAG, TRANSPORT_PREFERRED_TAG
+from ..network_profile import FQ_FLOW_LIMIT, FQ_KIND, FQ_PACKET_LIMIT
 from ..render import (
     render_all_artifacts,
     render_foreign_nftables,
@@ -44,6 +45,19 @@ LAB_STREAM_BYTES = LAB_STREAM_CHUNK_BYTES * LAB_STREAM_CHUNKS
 def run(runner: AuditRunner) -> None:
     runner.ensure_audit_image()
     runner.record("lab-dataplane", lambda: test_lab_dataplane(runner))
+
+
+def validate_network_apply_result(result: dict[str, object]) -> None:
+    qdisc = result.get("qdisc")
+    policy = result.get("wireguard_policy")
+    if not isinstance(qdisc, dict) or (
+        qdisc.get("overlay_qdisc") != FQ_KIND
+        or qdisc.get("overlay_qdisc_limit") != FQ_PACKET_LIMIT
+        or qdisc.get("overlay_qdisc_flow_limit") != FQ_FLOW_LIMIT
+    ):
+        raise AuditFailure(f"Managed WireGuard qdisc was not applied: {result}")
+    if not isinstance(policy, dict) or policy.get("managed") is not True or policy.get("ok") is not True:
+        raise AuditFailure(f"Managed WireGuard policy was not applied: {result}")
 
 
 def build_lab_client_config(env: dict[str, str]) -> str:
@@ -190,6 +204,7 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
             geoip_source = lab_dir / "geoip-ru.json"
             lab_transport_policy = lab_dir / "interserver_transport.py"
             agent_dir = out_dir / "preview" / "ru"
+            ru_manifest = agent_dir / "render-manifest.json"
             ru_assets.mkdir(parents=True, exist_ok=True)
             shutil.copy2(out_dir / "assets" / "geosite-ru.srs", ru_assets / "geosite-ru.srs")
             shutil.copy2(out_dir / "assets" / "geoip-ru.srs", ru_assets / "geoip-ru.srs")
@@ -215,6 +230,7 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
                 (foreign_container, foreign_nft, "/opt/nftables.conf"),
                 (ru_container, ru_cfg, "/opt/ru-singbox.json"),
                 (ru_container, ru_cfg, "/etc/sing-box/config.json"),
+                (ru_container, ru_manifest, "/etc/vpn-stack/render-manifest.json"),
                 (foreign_container, foreign_cfg, "/opt/foreign-singbox.json"),
                 (client_container, client_cfg, "/opt/client-singbox.json"),
                 (dns_container, dns_conf, "/opt/dnsmasq.conf"),
@@ -251,11 +267,10 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
             runner.docker_exec(foreign_container, "wg-quick up /opt/wg0.conf")
             runner.docker_exec(foreign_container, "nohup sing-box run -c /opt/foreign-singbox.json >/opt/foreign-singbox.log 2>&1 &")
             runner.docker_exec(ru_container, "wg-quick up /opt/wg0.conf")
-            qdisc_profile = json.loads(
+            network_profile = json.loads(
                 runner.docker_exec(ru_container, "python3 /opt/agent/vpn-stack-agent.py network-apply").stdout
             )
-            if qdisc_profile.get("overlay_qdisc") != "fq":
-                raise AuditFailure(f"Managed WireGuard qdisc was not applied: {qdisc_profile}")
+            validate_network_apply_result(network_profile)
             runner.docker_exec(foreign_container, "ip address add 10.0.0.20/32 dev lo && nohup python3 -m http.server 80 --bind 10.0.0.20 >/opt/private-web.log 2>&1 &")
             runner.docker_exec(foreign_container, "nft -f /opt/nftables.conf && nft add element inet vpnstack ru_ipv4 { 203.0.113.0/24 }")
             runner.docker_exec(ru_container, "nft -f /opt/nftables.conf")

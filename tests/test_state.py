@@ -38,7 +38,7 @@ class StateTests(unittest.TestCase):
                         "RU_SSH_HOST=\"203.0.113.10\"",
                         "RU_SSH_PORT=\"22\"",
                         "RU_SSH_USER=\"root\"",
-                        "RU_AUTH_MODE=\"key\"",
+                        "RU_AUTH_MODE=\"password\"",
                     ]
                 )
                 + "\n",
@@ -47,6 +47,18 @@ class StateTests(unittest.TestCase):
             with patch.object(state, "STATE_DIR", state_dir):
                 payload = state.load_state("legacy")
         self.assertEqual(payload[ROLE_RU]["ssh_user"], "root")
+        self.assertEqual(payload[ROLE_RU]["auth_mode"], "password")
+
+    def test_load_legacy_state_without_auth_mode_requires_fresh_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp)
+            (state_dir / "legacy.env").write_text(
+                'RU_PUBLIC_IP="203.0.113.10"\nRU_SSH_HOST="203.0.113.10"\nRU_SSH_PORT="22"\nRU_SSH_USER="root"\n',
+                encoding="utf-8",
+            )
+            with patch.object(state, "STATE_DIR", state_dir):
+                payload = state.load_state("legacy")
+        self.assertEqual(payload[ROLE_RU]["auth_mode"], "")
 
     def test_load_state_returns_empty_when_no_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

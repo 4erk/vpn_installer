@@ -2,18 +2,16 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import shlex
 import shutil
 import textwrap
 import time
-import traceback
 from pathlib import Path
 from typing import Any
 
 from .clipboard import copy_to_clipboard
 from .client_drift import find_client_drift
-from .common import DEPLOYMENTS_DIR, OUT_DIR, RUNTIME_DIR, INSTALL_SCRIPT_PATH, ensure_directories, fail, print_header, sanitize_name, warn, write_text
+from .common import DEPLOYMENTS_DIR, OUT_DIR, RUNTIME_DIR, INSTALL_SCRIPT_PATH, cli_command, ensure_directories, error_summary, fail, print_header, sanitize_name, warn, write_text
 from .config import (
     apply_ru_direct_overlays,
     critical_env_view,
@@ -150,7 +148,8 @@ def verify_target_interactively(
     force_prompt = not target.saved_connection
     while True:
         target = prompt_server_connection(target, force_prompt=force_prompt, confirm_existing=confirm_existing_connection)
-        print(f"Проверяю подключение к {target.label}: {target.ssh_user}@{target.ssh_host}:{target.ssh_port}")
+        backend = "встроенный password backend" if target.auth_mode == "password" else "OpenSSH publickey-only"
+        print(f"Проверяю подключение к {target.label}: {target.ssh_user}@{target.ssh_host}:{target.ssh_port} ({backend})")
         try:
             if enforce_safe_route:
                 assert_server_route_not_self_tunneled(target, env)
@@ -174,7 +173,10 @@ def verify_target_interactively(
                 ensure_remote_privilege(target, preflight, prompt_yes_no=prompt_yes_no, prompt_secret=prompt_secret)
             return target, preflight
         except Exception as exc:  # noqa: BLE001
-            warn(str(exc))
+            log_path = log_exception("ssh.preflight", exc, extra={"role": target.role, "host": target.ssh_host})
+            warn(error_summary(exc))
+            if log_path:
+                print(f"Технические детали: {log_path}")
             action = prompt_choice(
                 f"{target.label}: подключение или preflight не прошли. Что делать?",
                 [("edit", "Исправить параметры сервера"), ("retry", "Повторить с теми же параметрами"), ("cancel", "Отменить операцию")],
@@ -214,7 +216,8 @@ def verify_target_non_interactively(
             f"{target.label}: для non-interactive password-входа нужен env "
             f"{role_env_prefix(target.role)}_SSH_PASSWORD или VPN_SSH_PASSWORD."
         )
-    print(f"Проверяю подключение к {target.label}: {target.ssh_user}@{target.ssh_host}:{target.ssh_port}")
+    backend = "встроенный password backend" if target.auth_mode == "password" else "OpenSSH publickey-only"
+    print(f"Проверяю подключение к {target.label}: {target.ssh_user}@{target.ssh_host}:{target.ssh_port} ({backend})")
     if enforce_safe_route:
         assert_server_route_not_self_tunneled(target, env)
     ensure_target_host_key(target, allow_enroll=False)
@@ -317,7 +320,8 @@ def cleanup_remote_workdir(target: RemoteTarget, remote_root: str) -> None:
     try:
         ssh_stream(target, f"rm -rf {shlex.quote(remote_root)}")
     except Exception as exc:  # noqa: BLE001
-        warn(f"Не удалось очистить временную папку на {target.label}: {exc}")
+        log_exception("ssh.cleanup", exc, extra={"role": target.role, "host": target.ssh_host})
+        warn(f"Не удалось очистить временную папку на {target.label}: {error_summary(exc)}")
 
 
 def is_recoverable_remote_disconnect(exc: Exception) -> bool:
@@ -685,12 +689,12 @@ def finalize_install_output(env: dict[str, str], deployment_name: str) -> None:
     print("Что делать дальше:")
     print(f"1. Сначала импортируй простой {paths['vless_uri'].name}. Это основной контракт: обычный VLESS/Reality tunnel, маршрутизация на сервере.")
     print(f"2. JSON-файлы используй только как fallback, если конкретный клиент не умеет нормально импортировать URI.")
-    print("3. Если клиент отправляет private/fake IP вместо домена, vpn status покажет это в bucket blocked_private_fake.")
+    print(f"3. Если клиент отправляет private/fake IP вместо домена, {cli_command('status')} покажет это в bucket blocked_private_fake.")
     print(f"4. В JSON-профилях multiplex явно выключен, чтобы независимые загрузки не делили один outer TCP stream; URI {paths['hiddify_uri_compat'].name} остаётся основным совместимым VLESS-контрактом.")
     print(f"5. Для импорта QUIC как отдельного узла в Hiddify/v2rayN используй {paths['hysteria2_uri'].name}.")
-    print(f"6. Если сайты висят, сначала проверь серверные группы ошибок: vpn status --deployment {deployment_name} --role ru-gateway")
+    print(f"6. Если сайты висят, сначала проверь серверные группы ошибок: {cli_command(f'status --deployment {deployment_name} --role ru-gateway')}")
     print(f"7. Если включён TUN/full VPN и client-check показывает self-tunnel, запусти PowerShell от администратора: .\\{paths['windows_route_bypass'].name}")
-    print(f"8. После install/reinstall запусти live-приёмку: vpn verify live --deployment {deployment_name}")
+    print(f"8. После install/reinstall запусти live-приёмку: {cli_command(f'verify live --deployment {deployment_name}')}")
 
 
 def load_env_for_render(env_path: Path) -> dict[str, str]:
@@ -848,7 +852,8 @@ def status_workflow(deployment: str | None, role: str, *, non_interactive: bool 
         try:
             snapshot = DiagnosticsSnapshot.from_agent(remote_agent_snapshot(target, compact=True))
         except Exception as exc:  # noqa: BLE001
-            warn(f"{target.label}: structured snapshot unavailable: {exc}")
+            log_exception("status.snapshot", exc, extra={"role": target.role, "host": target.ssh_host})
+            warn(f"{target.label}: structured snapshot unavailable: {error_summary(exc)}")
             exit_code = 1
             continue
         print_header(f"Snapshot {target.label}")
@@ -903,7 +908,7 @@ def maintain_workflow(
                 f"security={maintenance.get('security_upgradable', 'unknown')}, "
                 f"reboot_required={maintenance.get('reboot_required', 'unknown')}"
             )
-        print("Для применения обновлений используй vpn maintain --apply --yes; для rule assets добавь --refresh-assets.")
+        print(f"Для применения обновлений используй {cli_command('maintain --apply --yes')}; для rule assets добавь --refresh-assets.")
         return 0
 
     if not yes and not prompt_yes_no("Применить выбранное обслуживание по очереди с live acceptance после каждой роли?", default=False):
@@ -1109,27 +1114,25 @@ def run_menu_action(action: Any, *, return_to: str) -> None:
         if isinstance(result, int) and result != 0:
             warn(f"Действие завершилось с кодом {result}.")
     except UserCancelled as exc:
-        warn(str(exc) or "Операция отменена пользователем.")
+        warn(error_summary(exc) if str(exc) else "Операция отменена пользователем.")
     except KeyboardInterrupt:
         warn("Остановлено пользователем.")
     except EOFError:
         warn(f"Ввод прерван. Возврат в {return_to}.")
     except AppError as exc:
         log_path = log_exception("menu.app_error", exc, extra={"return_to": return_to})
-        warn(f"Ошибка: {exc}")
+        warn(f"Ошибка: {error_summary(exc)}")
         if log_path:
             print(f"Лог ошибки: {log_path}")
         print(f"Возврат в {return_to}.")
     except Exception as exc:  # noqa: BLE001
         if is_audit_failure(exc):
-            warn(f"Самопроверка завершилась с ошибкой: {exc}")
+            warn(f"Самопроверка завершилась с ошибкой: {error_summary(exc)}")
             print("Смотри summary и логи в out/audit/<run_id>/.")
             print(f"Возврат в {return_to}.")
             return
         log_path = log_exception("menu.unhandled", exc, extra={"return_to": return_to})
-        if os.environ.get("VPN_DEBUG"):
-            traceback.print_exc()
-        warn(f"Непредвиденная ошибка: {exc}")
+        warn(f"Непредвиденная ошибка: {error_summary(exc)}")
         if log_path:
             print(f"Лог ошибки: {log_path}")
         print(f"Возврат в {return_to}.")

@@ -25,24 +25,17 @@ def load_state(deployment_name: str) -> dict[str, Any]:
     if not legacy_path.exists():
         return {}
     legacy = load_env_file(legacy_path)
-    return {
-        ROLE_RU: {
-            "public_ip": legacy.get("RU_PUBLIC_IP", ""),
-            "ssh_host": legacy.get("RU_SSH_HOST", ""),
-            "ssh_port": legacy.get("RU_SSH_PORT", "22"),
-            "ssh_user": legacy.get("RU_SSH_USER", "root"),
-            "auth_mode": "key",
-            "identity_path": legacy.get("RU_IDENTITY_PATH", ""),
-        },
-        ROLE_FOREIGN: {
-            "public_ip": legacy.get("FOREIGN_PUBLIC_IP", ""),
-            "ssh_host": legacy.get("FOREIGN_SSH_HOST", ""),
-            "ssh_port": legacy.get("FOREIGN_SSH_PORT", "22"),
-            "ssh_user": legacy.get("FOREIGN_SSH_USER", "root"),
-            "auth_mode": "key",
-            "identity_path": legacy.get("FOREIGN_IDENTITY_PATH", ""),
-        },
-    }
+    def legacy_role(prefix: str) -> dict[str, str]:
+        return {
+            "public_ip": legacy.get(f"{prefix}_PUBLIC_IP", ""),
+            "ssh_host": legacy.get(f"{prefix}_SSH_HOST", ""),
+            "ssh_port": legacy.get(f"{prefix}_SSH_PORT", "22"),
+            "ssh_user": legacy.get(f"{prefix}_SSH_USER", "root"),
+            "auth_mode": legacy.get(f"{prefix}_AUTH_MODE", "") or legacy.get(f"{prefix}_SSH_AUTH_MODE", ""),
+            "identity_path": legacy.get(f"{prefix}_IDENTITY_PATH", ""),
+        }
+
+    return {ROLE_RU: legacy_role("RU"), ROLE_FOREIGN: legacy_role("FOREIGN")}
 
 
 def write_state(deployment_name: str, targets: list[RemoteTarget], existing_state: dict[str, Any] | None = None) -> None:

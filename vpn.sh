@@ -8,7 +8,7 @@ show_vpn_help() {
 Использование:
   ./vpn.sh
   ./vpn.sh install
-  ./vpn.sh status --deployment my-vpn
+  ./vpn.sh status --deployment home-vpn
 
 Если запустить без аргументов:
   откроется пошаговое меню с действиями:

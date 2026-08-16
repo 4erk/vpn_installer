@@ -512,7 +512,11 @@ def normalize_identity_path(raw_path: str) -> str:
     if not raw_path:
         return ""
     path = Path(raw_path).expanduser()
-    path = (Path.cwd() / path).resolve() if not path.is_absolute() else path.resolve()
+    if not path.is_absolute() and len(path.parts) == 1:
+        path = Path.home() / ".ssh" / path
+    elif not path.is_absolute():
+        path = Path.cwd() / path
+    path = path.resolve()
     return str(path)
 
 

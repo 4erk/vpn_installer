@@ -232,6 +232,7 @@ class AuditRunnerTests(unittest.TestCase):
         runner = self.make_runner()
         with runner.temp_repo_copy("repo-copy") as copied:
             self.assertTrue((copied / "vpn.ps1").exists())
+            self.assertTrue((copied / "vpn.cmd").exists())
             self.assertTrue((copied / "vpn_installer").is_dir())
 
     def test_ensure_quick_env_rewrites_ips(self) -> None:

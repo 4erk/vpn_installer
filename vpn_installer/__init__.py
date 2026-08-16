@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 __all__ = ["main"]
-VERSION = "0.19.9"
+VERSION = "0.19.10"
 
 
 def main(argv: list[str] | None = None) -> int:

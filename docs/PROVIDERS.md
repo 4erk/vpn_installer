@@ -2,6 +2,13 @@
 
 Ниже — практический shortlist для схемы `клиент -> российский сервер -> зарубежный сервер`.
 
+## Предпочтительная проверенная пара
+
+- российский сервер: [FirstByte](https://firstbyte.pro/?from=242253);
+- зарубежный сервер: [iHor](https://ihor.online/?from=439652).
+
+Эта пара использовалась автором лично. Названия ссылок не содержат referral ID, но сами URL включают referral-параметры. Рекомендация не отменяет проверку конкретного тарифа: нужен публичный IPv4, Ubuntu 24.04, root/sudo, доступные TCP/UDP `443` и WireGuard/SSH порты.
+
 Как читать таблицы:
 
 - цены взяты с официальных страниц провайдеров на `2026-04-12`
@@ -48,6 +55,7 @@
 
 | Сценарий | Российский сервер | Зарубежный сервер | Итого | Почему так |
 | --- | --- | --- | --- | --- |
+| Лично проверенная пара | [FirstByte](https://firstbyte.pro/?from=242253) | [iHor](https://ihor.online/?from=439652) | По актуальным тарифам | Предпочтительный вариант, на котором контур использовался лично |
 | Минимум цены в рублях | [FirstByte](https://firstbyte.pro/?from=242253) | [FirstByte](https://firstbyte.pro/?from=242253) | `75 ₽ + 259 ₽ = 334 ₽/мес` | Самый дешёвый старт, если хватает минимальных ресурсов |
 | Баланс удобства и цены | [Timeweb Cloud](https://timeweb.cloud/?i=141135) | [ProfitServer](https://profitserver.net/) | `477 ₽ + $1.9/мес` | Удобный российский узел с нормальной документацией и очень дешёвый foreign |
 | Нужна частая замена страны | [Timeweb Cloud](https://timeweb.cloud/?i=141135) | [THE.Hosting](https://the.hosting/?from=1028494) | `477 ₽ + €1/мес` | Российский узел стабилен, зарубежный легко ротировать по странам |
@@ -72,6 +80,7 @@
 - [THE.Hosting: конфигуратор](https://the.hosting/en/vps-configurator?from=1028494)
 - [ProfitServer: VPS](https://profitserver.net/)
 - [FirstByte: дешёвые VPS](https://firstbyte.ru/vps-vds/cheap/?from=242253)
+- [iHor](https://ihor.online/?from=439652)
 - [RuWeb: VPS/VDS](https://ruweb.net/vds?ref=169921)
 - [RuWeb: VPS в Европе](https://ruweb.net/vps-europe?ref=169921)
 - [RuWeb: VPS для VPN](https://ruweb.net/vps-vpn?ref=169921)

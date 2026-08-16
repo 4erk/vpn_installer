@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from .common import OUT_DIR, print_header, warn, write_text
+from .common import OUT_DIR, error_summary, print_header, warn, write_text
 from .config import load_existing_deployment_env
 from .log_classifier import BUCKETS, summarize_lines
 from .localnet import local_route_to_server, route_uses_self_tunnel
@@ -292,7 +292,7 @@ def diagnose_path_workflow(deployment: str | None, role: str, *, iperf: bool = F
                 report = future.result()
             except AppError as exc:
                 report = f"diagnose_error={exc}\n"
-                warn(f"{target.label}: диагностика завершилась неполно: {exc}")
+                warn(f"{target.label}: диагностика завершилась неполно: {error_summary(exc)}")
             try:
                 snapshot = _decode_agent_snapshot(report, f"{target.role} path")
                 rendered = json.dumps(snapshot, ensure_ascii=False, indent=2, sort_keys=True) + "\n"

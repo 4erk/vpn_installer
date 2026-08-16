@@ -185,10 +185,22 @@ def use_python_ssh_backend(target: RemoteTarget) -> bool:
     return target.auth_mode == "password" or not (command_exists("ssh") and command_exists("scp"))
 
 
+def system_key_auth_args() -> list[str]:
+    options = (
+        "BatchMode=yes",
+        "PasswordAuthentication=no",
+        "KbdInteractiveAuthentication=no",
+        "PreferredAuthentications=publickey",
+        "LogLevel=ERROR",
+    )
+    return [item for option in options for item in ("-o", option)]
+
+
 def ssh_base_args(target: RemoteTarget) -> list[str]:
     known_hosts = ensure_known_hosts_file()
     args = [
         "ssh",
+        *system_key_auth_args(),
         "-o",
         "StrictHostKeyChecking=yes",
         "-o",
@@ -208,6 +220,7 @@ def scp_base_args(target: RemoteTarget) -> list[str]:
     known_hosts = ensure_known_hosts_file()
     args = [
         "scp",
+        *system_key_auth_args(),
         "-o",
         "StrictHostKeyChecking=yes",
         "-o",
@@ -453,8 +466,6 @@ def paramiko_stream(
             if channel.recv_stderr_ready():
                 text = channel.recv_stderr(4096).decode("utf-8", errors="replace")
                 if text:
-                    sys.stderr.write(text)
-                    sys.stderr.flush()
                     err_tail.append(text)
                     err_tail[:] = err_tail[-20:]
             if channel.exit_status_ready() and not channel.recv_ready() and not channel.recv_stderr_ready():
@@ -472,7 +483,11 @@ def paramiko_stream(
                     f"{detail}"
                 )
             time.sleep(0.05)
-        return channel.recv_exit_status()
+        exit_status = channel.recv_exit_status()
+        if exit_status != 0:
+            detail = "".join(err_tail).strip() or "".join(out_tail).strip()
+            raise AppError(f"Удалённая команда завершилась с ошибкой на {target.label}.\n{detail or exit_status}")
+        return exit_status
     finally:
         client.close()
 
@@ -490,6 +505,27 @@ def paramiko_upload(target: RemoteTarget, local_path: Path, remote_path: str) ->
         raise AppError(f"Не удалось загрузить {local_path} на {target.label}: {exc}") from exc
     finally:
         client.close()
+
+
+def raise_for_system_ssh_failure(
+    target: RemoteTarget,
+    returncode: int,
+    stdout: str | None,
+    stderr: str | None,
+    *,
+    action: str,
+) -> None:
+    if returncode == 0:
+        return
+    detail = (stderr or stdout).strip()
+    if returncode == 255:
+        summary = (
+            f"{target.label}: вход по SSH key не выполнен. "
+            "Проверь имя/путь ключа и authorized_keys либо выбери SSH password."
+        )
+    else:
+        summary = f"{target.label}: {action.lower()} завершилась с кодом {returncode}."
+    raise AppError(f"{summary}\n{detail}" if detail else summary)
 
 
 def ssh_capture(target: RemoteTarget, command_body: str, *, as_root: bool = False, command_timeout: int = SSH_COMMAND_TIMEOUT) -> str:
@@ -511,8 +547,10 @@ def ssh_capture(target: RemoteTarget, command_body: str, *, as_root: bool = Fals
         ssh_base_args(target) + [remote_command],
         capture_output=True,
         input_text=input_text,
+        check=False,
         timeout=local_timeout if local_timeout > 0 else None,
     )
+    raise_for_system_ssh_failure(target, completed.returncode, completed.stdout, completed.stderr, action="Удалённая команда")
     return completed.stdout
 
 
@@ -536,21 +574,27 @@ def ssh_stream(
         if exit_status != 0:
             raise AppError(f"Удалённая команда завершилась с ошибкой на {target.label}.\n{exit_status}")
         return
-    run_command(
+    completed = run_command(
         ssh_base_args(target) + [remote_command],
         input_text=input_text,
+        capture_stderr=True,
+        check=False,
         timeout=local_timeout if local_timeout > 0 else None,
     )
+    raise_for_system_ssh_failure(target, completed.returncode, completed.stdout, completed.stderr, action="Удалённая команда")
 
 
 def scp_upload(target: RemoteTarget, local_path: Path, remote_path: str) -> None:
     if use_python_ssh_backend(target):
         paramiko_upload(target, local_path, remote_path)
         return
-    run_command(
+    completed = run_command(
         scp_base_args(target) + [str(local_path), f"{target.ssh_user}@{target.ssh_host}:{remote_path}"],
+        capture_output=True,
+        check=False,
         timeout=SSH_UPLOAD_TIMEOUT,
     )
+    raise_for_system_ssh_failure(target, completed.returncode, completed.stdout, completed.stderr, action="Загрузка файла")
 
 
 def parse_kv_output(payload: str) -> dict[str, str]:

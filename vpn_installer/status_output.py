@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .common import cli_command
 from .diagnostics import LOG_WINDOW_KEYS, CollectorState, DiagnosticsSnapshot, LogWindowSnapshot
 
 
@@ -54,7 +55,7 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
         ),
     ]
     if snapshot.verdict == "inconclusive" and snapshot.route_probes.get("profile") == "none":
-        lines.append("live probes: not run by read-only status; use vpn verify live for route acceptance")
+        lines.append(f"live probes: not run by read-only status; use {cli_command('verify live')} for route acceptance")
     for window_name in LOG_WINDOW_KEYS:
         lines.extend(_format_log_window(window_name, snapshot.log_windows[window_name]))
     if snapshot.migration:

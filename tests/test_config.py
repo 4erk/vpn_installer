@@ -50,12 +50,22 @@ class ConfigTests(unittest.TestCase):
     def test_validate_identity_path_allows_empty(self) -> None:
         self.assertEqual(config.validate_identity_path(""), "")
 
-    def test_normalize_identity_path_resolves_relative(self) -> None:
+    def test_normalize_identity_path_resolves_bare_name_in_standard_ssh_dir(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            key_path = Path(tmp) / "id_ed25519"
+            home = Path(tmp)
+            key_path = home / ".ssh" / "id_ed25519"
+            key_path.parent.mkdir()
             key_path.write_text("key", encoding="utf-8")
-            with patch("pathlib.Path.cwd", return_value=Path(tmp)):
+            with patch("pathlib.Path.home", return_value=home):
                 normalized = config.normalize_identity_path("id_ed25519")
+        self.assertEqual(Path(normalized), key_path.resolve())
+
+    def test_normalize_identity_path_preserves_explicit_relative_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            key_path = root / "keys" / "operator"
+            with patch("pathlib.Path.cwd", return_value=root):
+                normalized = config.normalize_identity_path("keys/operator")
         self.assertEqual(Path(normalized), key_path.resolve())
 
     def test_default_reality_keys_are_urlsafe_without_padding(self) -> None:

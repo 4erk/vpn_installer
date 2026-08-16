@@ -98,6 +98,9 @@ class RemoteTests(unittest.TestCase):
         self.assertTrue(any(value.startswith("UserKnownHostsFile=") for value in scp_args))
         self.assertIn("StrictHostKeyChecking=yes", ssh_args)
         self.assertIn("StrictHostKeyChecking=yes", scp_args)
+        for option in ("BatchMode=yes", "PasswordAuthentication=no", "KbdInteractiveAuthentication=no", "PreferredAuthentications=publickey", "LogLevel=ERROR"):
+            self.assertIn(option, ssh_args)
+            self.assertIn(option, scp_args)
 
     def test_ssh_and_scp_base_args_include_explicit_bind_address(self) -> None:
         target = RemoteTarget(role=ROLE_RU, ssh_host="203.0.113.10", ssh_bind_address="192.168.0.101")
@@ -106,14 +109,28 @@ class RemoteTests(unittest.TestCase):
 
     def test_ssh_capture_passes_timeout_to_system_ssh_backend(self) -> None:
         target = RemoteTarget(role=ROLE_RU, ssh_host="203.0.113.10", ssh_user="root", auth_mode="key")
-        completed = SimpleNamespace(stdout="ok")
+        completed = SimpleNamespace(returncode=0, stdout="ok", stderr="")
         with (
             patch("vpn_installer.remote.command_exists", return_value=True),
             patch("vpn_installer.remote.run_command", return_value=completed) as run_mock,
         ):
             self.assertEqual(ssh_capture(target, "echo ok", command_timeout=12), "ok")
         self.assertEqual(run_mock.call_args.kwargs["timeout"], 22)
+        self.assertFalse(run_mock.call_args.kwargs["check"])
         self.assertIn("timeout --signal=TERM --kill-after=5s 12s", run_mock.call_args.args[0][-1])
+
+    def test_ssh_capture_reports_key_failure_without_password_fallback(self) -> None:
+        target = RemoteTarget(role=ROLE_RU, ssh_host="203.0.113.10", ssh_user="root", auth_mode="key")
+        completed = SimpleNamespace(returncode=255, stdout="", stderr="Permission denied (publickey).")
+        with (
+            patch("vpn_installer.remote.command_exists", return_value=True),
+            patch("vpn_installer.remote.run_command", return_value=completed),
+        ):
+            with self.assertRaises(AppError) as ctx:
+                ssh_capture(target, "echo ok")
+        lines = str(ctx.exception).splitlines()
+        self.assertIn("вход по SSH key не выполнен", lines[0])
+        self.assertEqual(lines[1], "Permission denied (publickey).")
 
     def test_ssh_capture_passes_timeout_to_paramiko_backend(self) -> None:
         target = RemoteTarget(role=ROLE_RU, ssh_host="203.0.113.10", ssh_user="root", auth_mode="password")
@@ -404,8 +421,29 @@ class RemoteTests(unittest.TestCase):
             code = paramiko_stream(target, "echo test", input_text="secret\n")
         self.assertEqual(code, 0)
         self.assertIn("out", out_stream.getvalue())
-        self.assertIn("err", err_stream.getvalue())
+        self.assertEqual(err_stream.getvalue(), "")
         client.exec_command.assert_called_once_with("echo test", get_pty=False)
+        client.close.assert_called_once()
+
+    def test_paramiko_stream_hides_stderr_and_raises_with_detail(self) -> None:
+        channel = Mock()
+        channel.recv_ready.side_effect = [False, False, False]
+        channel.recv_stderr_ready.side_effect = [True, False, False]
+        channel.exit_status_ready.side_effect = [False, True, True]
+        channel.recv_stderr.return_value = b"remote failure\n"
+        channel.recv_exit_status.return_value = 7
+        stdout = Mock(channel=channel)
+        stderr = Mock(channel=channel)
+        client = Mock()
+        client.exec_command.return_value = (Mock(), stdout, stderr)
+        with (
+            patch("vpn_installer.remote.paramiko_connect", return_value=client),
+            patch("vpn_installer.remote.time.sleep"),
+            patch("sys.stderr", new_callable=io.StringIO) as err_stream,
+        ):
+            with self.assertRaisesRegex(AppError, "remote failure"):
+                paramiko_stream(RemoteTarget(role=ROLE_RU), "false")
+        self.assertEqual(err_stream.getvalue(), "")
         client.close.assert_called_once()
 
     def test_paramiko_upload_wraps_error(self) -> None:
@@ -437,9 +475,12 @@ class RemoteTests(unittest.TestCase):
 
     def test_ssh_stream_uses_system_ssh_for_key_mode(self) -> None:
         target = RemoteTarget(role=ROLE_RU, ssh_host="203.0.113.10", ssh_user="root", auth_mode="key")
-        with patch("vpn_installer.remote.command_exists", return_value=True), patch("vpn_installer.remote.run_command") as mocked:
+        completed = SimpleNamespace(returncode=0, stdout="", stderr="")
+        with patch("vpn_installer.remote.command_exists", return_value=True), patch("vpn_installer.remote.run_command", return_value=completed) as mocked:
             ssh_stream(target, "echo ok", as_root=False)
         mocked.assert_called_once()
+        self.assertTrue(mocked.call_args.kwargs["capture_stderr"])
+        self.assertNotIn("capture_output", mocked.call_args.kwargs)
 
     def test_ssh_stream_prints_paramiko_output(self) -> None:
         target = RemoteTarget(role=ROLE_RU, auth_mode="password", ssh_password="secret")
@@ -459,7 +500,8 @@ class RemoteTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             local = Path(tmp) / "bundle.tar.gz"
             local.write_text("bundle", encoding="utf-8")
-            with patch("vpn_installer.remote.command_exists", return_value=True), patch("vpn_installer.remote.run_command") as mocked:
+            completed = SimpleNamespace(returncode=0, stdout="", stderr="")
+            with patch("vpn_installer.remote.command_exists", return_value=True), patch("vpn_installer.remote.run_command", return_value=completed) as mocked:
                 scp_upload(target, local, "/tmp/bundle.tar.gz")
         mocked.assert_called_once()
 

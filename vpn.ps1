@@ -20,9 +20,7 @@ function Show-VpnHelp {
 Использование:
   .\vpn.cmd
   .\vpn.cmd install
-  powershell -ExecutionPolicy Bypass -File .\vpn.ps1
-  powershell -ExecutionPolicy Bypass -File .\vpn.ps1 install
-  powershell -ExecutionPolicy Bypass -File .\vpn.ps1 status --deployment my-vpn
+  .\vpn.cmd status --deployment home-vpn
 
 Если запустить без аргументов:
   откроется пошаговое меню с действиями:
@@ -50,7 +48,7 @@ function Show-VpnHelp {
 Подсказка:
   Enter в вопросах с дефолтом оставляет текущее значение.
   При ошибке подробный лог сохраняется в out\logs\runtime\latest-error.log
-  Для Windows по умолчанию лучше запускать vpn.cmd: он держит окно открытым и пишет отдельный console log.
+  Публичная точка входа Windows: vpn.cmd. vpn.ps1 является внутренним bootstrap-файлом.
 '@ | Write-Host
 }
 
@@ -218,6 +216,9 @@ function Resolve-Python {
 Start-VpnTranscript
 
 try {
+  if (-not $env:VPN_WINDOWS_ENTRYPOINT) {
+    Write-Warning "vpn.ps1 является внутренним bootstrap-файлом. Для штатного Windows-запуска используй .\vpn.cmd."
+  }
   if ($ScriptArgs.Count -gt 0 -and $ScriptArgs[0] -in @('--help', '-h', 'help')) {
     Show-VpnHelp
   } else {
@@ -241,21 +242,28 @@ try {
       Write-Host ""
       Write-Host "Команда завершилась с ошибкой (код $ExitCode)." -ForegroundColor Red
       Write-Host "Проверь сообщение выше. Обычно дальше помогает:" -ForegroundColor Yellow
-      Write-Host "  powershell -ExecutionPolicy Bypass -File .\vpn.ps1 status --deployment <имя>"
+      Write-Host "  .\vpn.cmd status --deployment <имя>"
     }
   }
 } catch {
   $ExitCode = 1
   $LogPath = Write-VpnErrorLog -Context 'powershell-launcher' -ErrorObject $_
+  $Message = [string]$_.Exception.Message
+  $ShortMessage = $Message -split '\r?\n' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -First 1
+  if ([string]::IsNullOrWhiteSpace($ShortMessage)) {
+    $ShortMessage = $_.Exception.GetType().Name
+  } elseif ($ShortMessage.Length -gt 240) {
+    $ShortMessage = $ShortMessage.Substring(0, 237).TrimEnd() + '...'
+  }
   Write-Host ""
-  Write-Host "Запуск завершился с ошибкой: $($_.Exception.Message)" -ForegroundColor Red
+  Write-Host "Запуск завершился с ошибкой: $ShortMessage" -ForegroundColor Red
   if ($LogPath) {
     Write-Host "Подробности сохранены в: $LogPath" -ForegroundColor Yellow
   }
-  Write-Host "Проверь сообщение выше и затем попробуй снова через .\vpn.ps1." -ForegroundColor Yellow
+  Write-Host "Проверь сообщение выше и затем попробуй снова через .\vpn.cmd." -ForegroundColor Yellow
 } finally {
   Stop-VpnTranscript
-  if (-not $env:VPN_NO_PAUSE) {
+  if (-not $env:VPN_NO_PAUSE -and -not $env:VPN_WINDOWS_ENTRYPOINT) {
     Write-Host ""
     Read-Host "Нажми Enter, чтобы закрыть окно" | Out-Null
   }

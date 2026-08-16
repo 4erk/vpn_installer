@@ -1,288 +1,152 @@
 # VPN Installer
 
-Self-hosted VPN для личного использования и своего круга людей. Этот проект поднимает приватный контур из двух узлов: российский сервер даёт российский IP для российских сайтов, а зарубежный сервер выпускает остальной трафик через зарубежный IP. Это закрывает типовые проблемы публичных VPN: нестабильность, блокировки, зависимость от чужого сервиса и отсутствие контроля над своей инфраструктурой.
+VPN Installer разворачивает личный VPN на двух серверах:
 
-Важно: решение рассчитано на приватное использование. Чем шире и бесконтрольнее его распространять, тем выше риск блокировок, компрометации доступа и лишнего внимания к контуру.
+```text
+устройство -> российский сервер -> зарубежный сервер
+```
 
-- [Как выбрать серверы](./docs/PROVIDERS.md)
-- [Что внутри проекта](./docs/PROJECT.md)
-- [История версий](./CHANGELOG.md)
+Один основной профиль `VLESS/Reality` открывает российские ресурсы через российский IP, а остальной трафик выводит через зарубежный сервер. Главный клиентский файл после установки: `out/home-vpn/client/vless-uri.txt`.
 
-## Что нужно заранее
+В примерах `home-vpn` — наглядное имя установки. При первой установке оно уже предложено: нажми `Enter`, чтобы принять его, или введи другое имя.
 
-- один `российский сервер` с `Ubuntu 24.04`, публичным `IPv4` и доступом по `SSH`
-- один `зарубежный сервер` с `Ubuntu 24.04`, публичным `IPv4` и доступом по `SSH`
-- установленный клиент, который умеет `VLESS/Reality`
+## Быстрый старт
 
-Подходят оба варианта доступа:
+Потребуются:
 
-- `SSH key`
-- `SSH password`
+- российский сервер с `Ubuntu 24.04`, публичным IPv4 и SSH-доступом;
+- зарубежный сервер с `Ubuntu 24.04`, публичным IPv4 и SSH-доступом;
+- пользователь `root` либо пользователь с `sudo`;
+- клиент с поддержкой `VLESS/Reality`.
 
-Если вход не под `root`, нужен `sudo`.
+Проверенная пара провайдеров:
 
-Рекомендуемые клиенты:
+- российский сервер: [FirstByte](https://firstbyte.pro/?from=242253);
+- зарубежный сервер: [iHor](https://ihor.online/?from=439652).
 
-- Android: `v2rayNG` или `NekoBox`
-- Windows / Linux: любой клиент с поддержкой `VLESS/Reality`; `Hiddify` остаётся совместимым вариантом, но не обязательным
-- `Hiddify`-артефакты по-прежнему генерируются, но считаются вторичным удобным путём
+Другие варианты и требования к VPS: [как выбрать серверы](./docs/PROVIDERS.md).
 
-## Запуск
+Популярные совместимые клиенты:
 
-Windows:
+- все основные платформы: [Happ](https://www.happ.su/main) или [Hiddify](https://hiddify.com/);
+- Windows, macOS и Linux: [v2rayN](https://github.com/2dust/v2rayN);
+- Android: [v2rayNG](https://github.com/2dust/v2rayNG), [NekoBox](https://github.com/MatsuriDayo/NekoBoxForAndroid), Happ или Hiddify;
+- iPhone и iPad: [Streisand](https://apps.apple.com/app/streisand/id6450534064), Happ, Hiddify или платный [Shadowrocket](https://apps.apple.com/app/shadowrocket/id932747118).
+
+Конкретное приложение не является частью серверного контракта: для основного подключения клиент должен уметь импортировать `vless://` с `Reality` и `XTLS Vision`. Используй актуальную версию выбранного клиента.
+
+### Windows
+
+Открой PowerShell в каталоге проекта и запусти:
 
 ```powershell
 .\vpn.cmd
 ```
 
-Запуск через ярлык или двойной клик на Windows тоже лучше делать именно через `vpn.cmd`.
+`vpn.cmd` является основной точкой входа для установки, обновления, проверки и удаления VPN.
 
-Linux:
+При выборе SSH-ключа можно указать:
+
+- пустое значение, чтобы использовать ssh-agent и стандартные ключи;
+- имя файла, например `id_ed25519`, чтобы использовать `%USERPROFILE%\.ssh\id_ed25519`;
+- полный или относительный путь к ключу.
+
+Вместо ключа можно явно выбрать вход по SSH-паролю. Подробности: [запуск и диагностика на Windows](./docs/WINDOWS.md).
+
+### Linux
 
 ```bash
 chmod +x ./vpn.sh
 ./vpn.sh
 ```
 
-Если нужно сразу открыть установку без меню:
-
-```powershell
-.\vpn.cmd install
-```
+Для запуска конкретной команды без меню:
 
 ```bash
-./vpn.sh install
+./vpn.sh install --deployment home-vpn
+./vpn.sh status --deployment home-vpn --role all
 ```
 
-Если нужно переустановить без вопросов из консоли, используй штатный CLI, а не временные скрипты:
+## Подключение
+
+После успешной установки открой каталог `out/home-vpn/client`.
+
+1. Импортируй `vless-uri.txt` в VPN-клиент. Это основной и обязательный профиль подключения.
+2. Если клиенту нужен файл конфигурации, используй подходящий JSON из того же каталога.
+3. `hiddify-uri.txt` и `v2rayn-uri.txt` содержат тот же основной VLESS URI и нужны только для удобства.
+4. `hysteria2-uri.txt` предоставляет дополнительный вариант подключения для клиентов, которые его поддерживают; основной контракт остаётся в `vless-uri.txt`.
+
+Краткие инструкции для конкретной установки записываются в `out/home-vpn/NEXT-STEPS.txt`.
+
+## Основные команды
+
+На Windows:
 
 ```powershell
-$env:VPN_RU_SSH_PASSWORD="пароль-российского-сервера"
-$env:VPN_FOREIGN_SSH_PASSWORD="пароль-зарубежного-сервера"
-$env:VPN_NO_PAUSE="1"
-.\vpn.cmd reinstall --deployment 1 --role all --non-interactive --yes
-.\vpn.cmd status --deployment 1 --role all --non-interactive
+.\vpn.cmd install --deployment home-vpn
+.\vpn.cmd reinstall --deployment home-vpn --role all
+.\vpn.cmd status --deployment home-vpn --role all
+.\vpn.cmd verify live --deployment home-vpn
+.\vpn.cmd diagnose path --deployment home-vpn
+.\vpn.cmd maintain --deployment home-vpn
 ```
 
-Пароли из этих переменных используются только в текущем запуске и не сохраняются в `deployments` или `state`.
-
-Если активный TUN направляет IP серверов в самого себя, но у компьютера есть физический интернет-адрес, можно оставить VPN-клиент нетронутым и привязать только SSH control plane к нему:
+На Linux используй те же аргументы с `./vpn.sh` вместо `.\vpn.cmd`. Полный список доступен через:
 
 ```powershell
-$env:VPN_SSH_BIND_ADDRESS="192.168.0.101"
-.\vpn.cmd reinstall --deployment 1 --role all --non-interactive --yes
+.\vpn.cmd --help
 ```
 
-Переменная действует только на текущий запуск и не меняет серверный dataplane, профиль клиента или таблицу маршрутов Windows.
+## Веб-панель
 
-## Что спросит мастер
-
-Сначала всегда проверяется `российский сервер`, потом `зарубежный сервер`.
-
-Для каждого сервера мастер спрашивает:
-
-- `Public IP`
-- `SSH port`
-- `SSH user`
-- способ входа: `key` или `password`
-
-Примеры:
-
-- `Public IP`: `203.0.113.10`
-- `SSH port`: `22`
-- `SSH user`: `root` или `ubuntu`
-- путь к ключу: `C:\Users\you\.ssh\id_ed25519` или `~/.ssh/id_ed25519`
-
-Если `SSH host` отличается от публичного IP, мастер спросит его отдельно.
-
-Подсказки:
-
-- `Enter` оставляет показанное значение
-- пароль не сохраняется на диск
-- на Windows лучше запускать `vpn.cmd`: он держит окно открытым и пишет отдельный console log
-- `vpn.ps1` тоже можно запускать вручную из PowerShell; он сам поднимет portable Python, если его нет
-- на Linux нужен локально установленный `python3`
-
-## Что получится в конце
-
-После успешной установки появятся:
-
-- `out/<deployment>/client/vless-uri.txt`
-- `out/<deployment>/client/android-v2rayng-xray.json`
-- `out/<deployment>/client/windows-xray.json`
-- `out/<deployment>/client/hiddify-cross-platform.json`
-- `out/<deployment>/client/hysteria2-uri.txt`
-- `out/<deployment>/client/hiddify-android.json`
-- `out/<deployment>/client/hiddify-uri.txt`
-- `out/<deployment>/client/linux-sing-box.json`
-- `out/<deployment>/NEXT-STEPS.txt`
-
-Главный результат:
-
-- простой `VLESS URI` копируется в буфер обмена и считается основным профилем
-- `vless-uri.txt` — главный низкоуровневый артефакт для клиентов с поддержкой `VLESS/Reality`
-- `windows-xray.json` и `android-v2rayng-xray.json` — JSON fallback, если конкретный клиент не умеет нормально импортировать URI
-- `hiddify-cross-platform.json` — route-safe VLESS/Reality-профиль с явно выключенным multiplex
-- `hysteria2-uri.txt` — стандартный дополнительный QUIC URI для импорта в Hiddify/v2rayN
-- `hiddify-android.json` — Android-safe вариант того же mux-free VLESS-профиля
-- `hiddify-uri.txt` — совместимый alias того же `VLESS URI` для старых сценариев
-- `v2rayn-uri.txt` — удобный alias того же `VLESS URI` для v2rayN
-
-## Как подключить клиент
-
-1. Сначала импортируй простой `vless-uri.txt`
-2. Если клиент поддерживает JSON, `hiddify-cross-platform.json` и `hiddify-android.json` задают тот же VLESS/Reality-контракт, route bypass и `multiplex.enabled=false`; это исключает TCP head-of-line blocking между независимыми загрузками
-3. Для отдельного QUIC-узла в Hiddify/v2rayN используй `hysteria2-uri.txt`; сертификат проверяется SHA-256 pin, а `vless-uri.txt` остаётся основным контрактом
-4. Ручное переключение клиентского VLESS/Hysteria2 узла применяется только к новым соединениям; серверный межсерверный failover работает ниже TCP внутри стабильного WireGuard overlay и не повторяет application payload
-5. Для v2rayN скопируй URI из `v2rayn-uri.txt` и выбери импорт share link из буфера; отдельный custom-config слой не добавляется
-6. Клиентский multiplex для VLESS должен оставаться выключенным: он сокращает handshakes, но объединяет независимые загрузки в один TCP-поток; `vpn diagnose client` показывает такое объединение по активному outer socket
-7. Если сайты висят, сначала смотри `vpn status --deployment <name> --role ru-gateway`, затем запускай свежую acceptance-проверку `vpn verify live --deployment <name>`
-8. `vpn status` выводит отдельные счётчики DNS, domain, IPv4-literal, IPv6-literal и private/fake ошибок за свежее и историческое окна
-9. Если включён TUN/full VPN и `client-check` показывает self-tunnel, используй route bypass helper ниже
-
-Основной публичный вход принимает обычный VLESS/Reality tunnel через Xray TCP `:443` и передаёт трафик во внутренний `sing-box` router. Клиентский SNI остаётся частью стабильного URI, а серверный camouflage target версионируется в коде и не является runtime env-переключателем. `status` показывает фактический target и число Xray handshake, застрявших в `SYN-SENT`. На UDP того же порта работает дополнительный Hysteria2 ingress для стандартного `hysteria2://` URI; он использует ту же routing policy. Если клиент отправляет private/fake IP вроде `fdfd::...` без домена, такие случаи явно группируются в `status/diagnose`.
-
-Внешняя подписка с сервера больше не считается штатным путём; локальные JSON остаются управляемым вариантом.
-
-Сервер остаётся источником истины для split-маршрутизации: клиенту не нужно знать, что считать российским или зарубежным трафиком. Он просто даёт туннель до `российского сервера`, а сама логика маршрутов живёт на серверной стороне.
-
-Между серверами foreign-трафик идёт внутри одного стабильного kernel WireGuard overlay. Endpoint `wg0` всегда указывает на один localhost relay, а штатный sing-box selector под relay выбирает Hysteria2 или userspace WireGuard. Congestion-controlled Hysteria2 является основным underlay; raw WireGuard остаётся независимым fallback для отказа QUIC. Agent проверяет фактический overlay малым ICMP. После двух свежих отказов альтернативный underlay обязан вернуть синтетический UDP DNS-ответ `localhost A` от управляемого foreign relay без зависимости от внешнего resolver, CDN, SSH или публичного health URL. Agent меняет selector, закрывает только служебную UDP-association relay и подтверждает новый путь MTU-safe inner-WG пакетом и двусторонними counters. При ошибке selector возвращается назад и проверяется rollback; Xray, sing-box, `wg0` и уже открытые клиентские TCP-потоки не перезапускаются. После восстановления preferred Hysteria2 возвращается после трёх успешных проверок с интервалом `10s`; колебания отдельных RTT/throughput samples маршрутом не управляют. Оба underlay заканчиваются на одном зарубежном VPS, поэтому это transport redundancy, а не второй независимый egress. Публичный клиентский контракт остаётся тем же VLESS/Reality URI; дополнительно выпускаются mux-free VLESS JSON и стандартный `hysteria2://` URI.
-
-Системные DNS-запросы серверов проходят через локальный cache `systemd-resolved`. DNS клиентского foreign-трафика идёт отдельным TCP relay через стабильный межсерверный overlay и проверяется live-запросами `A` и `AAAA`; IPv4 предпочитается, но IPv6 глобально не подавляется. Resolver, relay binding и их конфиги входят в manifest и откатываются вместе с release.
-
-В локальных JSON-профилях IP самих `российского` и `зарубежного` серверов автоматически исключаются из клиентского туннеля. Это нужно, чтобы можно было запускать `vpn status/reinstall/remove` с того же компьютера даже при уже активном VPN-подключении. Сырой `VLESS URI` сам по себе такие исключения не кодирует; если клиент в TUN/full VPN заворачивает IP сервера в свой же туннель, используй JSON-профиль или добавь bypass/direct rule в клиенте.
-
-Быстрая проверка этой проблемы:
-
-```powershell
-.\vpn.cmd client-check --deployment 1
-```
-
-Если команда пишет `BAD: self-tunnel`, сначала попробуй временно задать `VPN_SSH_BIND_ADDRESS` на IPv4 физического интерфейса. Если отдельного физического пути нет, отключи VPN перед обслуживанием серверов или используй route-safe JSON из `out/<deployment>/client`.
-
-Если нужно быстро починить именно Windows TUN/full VPN маршрут, запусти PowerShell от администратора:
-
-```powershell
-.\out\1\client\windows-route-bypass.ps1
-.\vpn.cmd client-check --deployment 1
-```
-
-Скрипт добавляет только active `/32` routes до IP серверов через физический gateway Windows. После перезагрузки Windows такие routes исчезают.
-
-Если нужно локально добавить ещё домены или CIDR, которые должны идти через `российский сервер`, не редактируй клиент: создай рядом с `deployments/<name>.env` один или несколько файлов:
-
-- `deployments/<name>.ru-direct-domains.txt`
-- `deployments/<name>.ru-direct-suffixes.txt`
-- `deployments/<name>.ru-direct-cidrs.txt`
-
-В них можно держать по одному значению на строку, пустые строки и строки с `#` игнорируются. Эти overlay-файлы мерджатся в server-side routing на следующем `reinstall` роли `российского сервера`.
-
-## Веб-интерфейс исключений
-
-После установки на `российском сервере` поднимается простой web admin для изменения server-side исключений без ручного редактирования env-файлов. По умолчанию он слушает `0.0.0.0:11333`, но firewall и приложение пускают только текущих активных VPN-клиентов.
-
-Открой, когда VPN уже подключён:
+При подключённом VPN открой:
 
 ```text
 http://<ip-российского-сервера>:11333
 ```
 
-Стартовый доступ: `user` / `password`. Сразу поменяй его на странице `Доступ`.
+Начальный логин и пароль: `user` / `password`. Сразу измени их на странице `Доступ`. В панели можно добавлять серверные правила маршрутизации для доменов и IP-сетей.
 
-В разделе `Исключения` можно добавить домен, `*.example.com` или CIDR и выбрать, через какой сервер открывать: `российский сервер` или `зарубежный сервер`. После сохранения правило проверяется и применяется на сервере сразу.
+Типовые случаи:
 
-Как работает доступ:
+- российский онлайн-кинотеатр запрещает просмотр с зарубежного IP — направь его домен через `российский сервер`;
+- банк, государственный сервис, маркетплейс, доставка или локальное медиа требует российский IP — выбери `российский сервер`;
+- зарубежный сайт или сервис недоступен через российский выход — выбери `зарубежный сервер`;
+- сервис использует несколько поддоменов — добавь `*.example.com` или включи поддомены.
 
-- `ADMIN_WEB_ACTIVE_CLIENT_REQUIRED=1` — порт доступен только IP-адресам с активной Xray/TCP-сессией или подтверждённой Hysteria2/QUIC-сессией к VPN-порту российского сервера; одиночный неаутентифицированный UDP-пакет доступ не открывает.
-- `ADMIN_WEB_ALLOW_TUNNEL_CLIENTS=1` — если браузер пришёл в админку через VPN/hairpin и сервер видит source как свой или соседний серверный IP, такой вход разрешён только пока есть хотя бы один активный VPN-клиент.
-- `ADMIN_WEB_ALLOWED_CIDR` и `ADMIN_WEB_ALLOW_WG` остаются аварийными ручными allowlist-настройками.
+Правила применяются на сервере для всех клиентов этого VPN и не требуют повторного импорта профиля. При сохранении серверный router перезапускается, поэтому текущая загрузка может кратко переподключиться. Форматы правил, примеры и CLI-команды: [веб-панель маршрутизации](./docs/ADMIN.md).
 
-SSH-туннель остаётся запасным способом администрирования: `ssh -L 11333:127.0.0.1:11333 root@<ip-российского-сервера>` и затем `http://127.0.0.1:11333`.
+## Если возникла ошибка
 
-## Если что-то не сработало
-
-Проверь:
-
-- оба сервера действительно на `Ubuntu 24.04`
-- у обоих серверов есть публичный `IPv4`
-- `SSH` работает вручную теми же данными
-- у пользователя есть `root` или `sudo`
-- путь к ключу указан правильно
-
-Если установка дошла до конца, смотри:
-
-- `out/<deployment>/NEXT-STEPS.txt`
-- `out/<deployment>/client/vless-uri.txt`
-
-Если сценарий упал или окно закрылось слишком быстро, смотри лог ошибки:
-
-- `out/logs/runtime/latest-error.log`
-- `out/logs/runtime/latest-transcript.log`
-- `out/logs/runtime/latest-console.log`
-
-Где что смотреть:
-
-- `latest-transcript.log` — основной подробный лог запуска на Windows
-- `latest-error.log` — traceback и детали необработанной ошибки
-- `latest-console.log` — краткий wrapper-log от `vpn.cmd`
-
-Для быстрой структурной проверки после установки:
+Сначала проверь состояние и полный пользовательский путь:
 
 ```powershell
-.\vpn.cmd status --deployment my-vpn
+.\vpn.cmd status --deployment home-vpn --role all
+.\vpn.cmd verify live --deployment home-vpn
+.\vpn.cmd diagnose path --deployment home-vpn
 ```
 
-```bash
-./vpn.sh status --deployment my-vpn
-```
+Интерфейс показывает краткую причину. Подробная информация сохраняется в:
 
-Для обязательной live-приёмки после `install/reinstall`:
+- `out/logs/runtime/latest-error.log`;
+- `out/logs/runtime/latest-transcript.log`;
+- `out/diagnostics/`.
 
-```powershell
-.\vpn.cmd verify live --deployment my-vpn --non-interactive
-```
+Разбор SSH-доступа и логов на Windows: [docs/WINDOWS.md](./docs/WINDOWS.md).
 
-`status` читает services, manifest, WireGuard, оба public transport и журналы без нагрузочных скачиваний. `verify live` дополнительно запускает свежие DNS/domain/literal probes и два эфемерных внешних sing-box client: канонический из `vless-uri.txt` проходит Reality/TCP, второй проходит Hysteria2/QUIC. Каждый подтверждает HTTP, UDP DNS, TCP IPv6 literal, обе egress identity и девять независимых first-load запросов. Только эта команда может подтвердить dataplane после переустановки.
+## Документация
 
-Автоматическая приёмка install/reinstall/maintenance проверяет полный VLESS path только функционально и не создаёт конкурирующую bulk-нагрузку на рабочем туннеле. Явный `verify live` по умолчанию дополнительно измеряет путь в течение `30s`; для более длинного ручного окна укажи `60s`. Runner по кругу использует два Hetzner endpoint и независимый Cloudflare payload. Hard gate требует sustained goodput не ниже `10 Mbit/s`, минимум два реально передающих источника, полный интервал без transfer failures и без пауз прогресса длиннее budget. Лучший peak сравнивается с reference `50 Mbit/s` только как диагностика: скорость отдельного CDN не вызывает rollback исправного VPN. Global lock исключает конкурирующие запуски, а controller lease и target-side deadline завершают process group при потере управляющей команды. Для явной функциональной проверки без нагрузки укажи `--throughput-seconds 0`:
+- [Выбор и требования к серверам](./docs/PROVIDERS.md)
+- [Windows: запуск, SSH и логи](./docs/WINDOWS.md)
+- [Веб-панель и правила маршрутизации](./docs/ADMIN.md)
+- [Архитектура, маршрутизация, восстановление и проверка](./docs/PROJECT.md)
+- [История изменений](./CHANGELOG.md)
 
-```powershell
-.\vpn.cmd verify live --deployment my-vpn --non-interactive --throughput-seconds 60
-```
+## Преимущества двухсерверной схемы
 
-Если начались потери, высокий ping или просадка скорости, собери структурный snapshot:
-
-```powershell
-.\vpn.cmd diagnose path --deployment my-vpn
-```
-
-Отчёт сохраняется в `out/diagnostics` как JSON. Для конкретного устройства используй `vpn diagnose client --source <public-ip>`: он группирует TCP socket state, retransmitted bytes/ratio, PMTU, MSS, cwnd, delivery rate, reordering и Xray events именно по этому source IP. IPv4-mapped IPv6 из kernel `ss` нормализуется к тому же IPv4 ключу. Активные `ESTAB` flows и closing states учитываются раздельно: накопленная потеря активного сокета выводится как `loss_observed`, свежая потеря считается по монотонным дельтам того же kernel socket ID, а `FIN-WAIT` churn не подменяет собой потерю данных. Только измеренная потеря текущего интервала или подтверждённый RTT/RTO stall дают `client_specific/degraded`; agent не закрывает потоки и не меняет маршрут по этому soft signal.
-
-Для самопроверки на обычном пользовательском ПК:
-
-- `quick` — это пользовательская быстрая проверка, без unit/coverage, Docker и lab-контуров
-- `quick` можно запускать без `docker`
-- dev-only проверки в `quick` будут помечены как `skipped`, а не как ошибка
-- полный контур для разработки и регрессий — это `vpn audit all`
-
-`vpn status` печатает состояние сервисов и последние наблюдения:
-
-- observed public IPv4 на `зарубежном сервере`
-- observed public IPv4 для `российского сервера` через `wg0`
-- возраст `WireGuard` handshake
-- выбранный межсерверный transport, результат последней проверки выбранного пути и состояние failover/recovery
-- состояние server DNS stub/cache и список managed upstreams
-- root filesystem: ext4 state/error counters, загрузочный `fsck` и отдельный `host_integrity`
-- отдельные verdict: `server_path`, `public_front`, `client_observation`, `host_integrity`
-- debt/maintenance: доступные security updates и reboot-required
-
-Если локальный `deployments/<name>.env` разъехался с уже установленным сервером, lifecycle-команды сначала подтянут живой `/etc/vpn-stack/deployment.env`. Read-only `status`, `verify` и `diagnose` не меняют локальные клиентские артефакты.
-
-Плановое обслуживание серверов отделено от runtime health:
-
-```powershell
-.\vpn.cmd maintain --deployment my-vpn
-.\vpn.cmd maintain --deployment my-vpn --apply --yes --non-interactive
-```
-
-`maintain` сначала только показывает обновления. Применение идёт по ролям и после каждой роли требует свежую verification; web-admin и его явные rules при этом сохраняются.
+- **Один профиль для всех маршрутов.** Клиент подключается к российскому серверу по одному VLESS URI, а выбор российского или зарубежного выхода выполняется на серверах.
+- **Российский и зарубежный IP одновременно.** Российские сервисы сохраняют доступ с российского адреса, а внешние ресурсы используют зарубежный выход без ручного переключения профилей.
+- **Стабильная клиентская точка входа.** Изменения маршрутов и межсерверного транспорта не требуют заново настраивать каждое устройство, пока адрес и ключи российского входа остаются прежними.
+- **Разделение ролей.** Российский сервер принимает клиентские подключения и применяет правила маршрутизации, зарубежный отвечает за внешний выход. Каждую часть можно обслуживать и проверять отдельно.
+- **Резервирование связи между серверами.** Межсерверный путь поддерживает два транспорта и может восстановиться без изменения основного клиентского URI.
+- **Полный контроль.** Конфигурация, журналы, диагностика и правила находятся на собственных серверах, а не у публичного VPN-провайдера.

@@ -18,6 +18,7 @@ set "CONSOLE_LOG=%LOG_DIR%\latest-console.log"
 >> "%BOOT_LOG%" echo.
 
 > "%CONSOLE_LOG%" echo [%date% %time%] vpn.cmd start
+set "VPN_WINDOWS_ENTRYPOINT=vpn.cmd"
 powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%REPO_ROOT%\vpn.ps1" %*
 set "EXITCODE=%ERRORLEVEL%"
 >> "%CONSOLE_LOG%" echo.

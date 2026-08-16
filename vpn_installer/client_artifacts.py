@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlencode
 
-from .common import OUT_DIR, write_text
+from .common import OUT_DIR, cli_command, write_text
 from .config import require_env
 from .interserver_transport import HY2_SERVER_NAME
 from .models import REQUIRED_ENV_VARS
@@ -330,6 +330,8 @@ def prepare_client_artifact_dir(client_dir: Path) -> None:
 
 def render_next_steps(env: dict[str, str], *, out_dir: Path | None = None) -> str:
     paths = client_artifact_paths(env, out_dir=out_dir)
+    status_command = cli_command(f"status --deployment {env['DEPLOY_NAME']} --role ru-gateway")
+    verify_command = cli_command(f"verify live --deployment {env['DEPLOY_NAME']}")
     return "\n".join(
         [
             f"Deployment: {env['DEPLOY_NAME']}",
@@ -350,13 +352,13 @@ def render_next_steps(env: dict[str, str], *, out_dir: Path | None = None) -> st
             f"1. Сначала импортируй простой {paths['vless_uri'].name}. Это основной контракт: клиент делает обычный VLESS/Reality tunnel, а маршрутизация остаётся на сервере.",
             f"2. Для v2rayN скопируй строку из {paths['v2rayn_uri'].name} и выбери импорт share link из буфера; это тот же канонический VLESS URI без custom-config слоя.",
             f"3. Если клиенту нужен JSON-импорт, используй {paths['hiddify_json'].name}, {paths['windows_xray_json'].name} или {paths['android_xray_json'].name}. В них multiplex явно выключен: большие загрузки не делят один outer TCP stream.",
-            f"4. Если клиентский JSON/TUN начинает отправлять на сервер private/fake IP вместо домена, `vpn status` покажет это в отдельном bucket `blocked_private_fake`.",
-            f"5. Если импортированный URI переиспользует один TCP socket для разных сайтов, `vpn diagnose client` покажет multiplex. Для VLESS используй mux-free JSON; не включай Mux в глобальных настройках клиента.",
+            f"4. Если клиентский JSON/TUN начинает отправлять на сервер private/fake IP вместо домена, `{cli_command('status')}` покажет это в отдельном bucket `blocked_private_fake`.",
+            f"5. Если импортированный URI переиспользует один TCP socket для разных сайтов, `{cli_command('diagnose client')}` покажет multiplex. Для VLESS используй mux-free JSON; не включай Mux в глобальных настройках клиента.",
             f"6. Для импорта QUIC как обычного узла в Hiddify/v2rayN используй {paths['hysteria2_uri'].name}; VLESS URI остаётся основным вариантом для сетей без UDP.",
             f"7. Ручная смена клиентского VLESS/Hysteria2 узла действует только на новые соединения. Серверный underlay failover сохраняет открытые потоки внутри WireGuard overlay, но не может восстановить уже оборванный участок клиент -> RU.",
-            f"8. Если сайты висят, сначала смотри серверные группы ошибок: vpn status --deployment {env['DEPLOY_NAME']} --role ru-gateway",
+            f"8. Если сайты висят, сначала смотри серверные группы ошибок: {status_command}",
             f"9. Если включён TUN/full VPN и client-check показывает self-tunnel, запусти PowerShell от администратора: .\\{paths['windows_route_bypass'].name}",
-            f"10. После install/reinstall запусти live-приёмку: vpn verify live --deployment {env['DEPLOY_NAME']}",
+            f"10. После install/reinstall запусти live-приёмку: {verify_command}",
         ]
     ) + "\n"
 

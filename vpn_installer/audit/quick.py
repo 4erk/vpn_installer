@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 from unittest.mock import patch
 
-from ..common import OUT_DIR, ROOT_DIR, RUNTIME_SITE_PACKAGES
+from ..common import OUT_DIR, ROOT_DIR, RUNTIME_SITE_PACKAGES, cli_command
 from ..client_artifacts import PUBLIC_VLESS_OUTBOUND_TAG
 from ..config import load_env_file
 from ..dns_policy import GLOBAL_FOREIGN_DOMAINS, GLOBAL_FOREIGN_DOMAIN_SUFFIXES
@@ -22,7 +22,7 @@ from ..render import render_all_artifacts
 from ..runtime_deps import ensure_python_package
 from ..targets import build_target
 from ..vless_verify import render_live_route_probe
-from .runner import AUDIT_IMAGE, VALID_GEOIP_SRS, VALID_GEOSITE_SRS, VPN_PS1, AuditFailure, AuditRunner, powershell_executable, python_cmd, write_bytes
+from .runner import AUDIT_IMAGE, VALID_GEOIP_SRS, VALID_GEOSITE_SRS, VPN_CMD, AuditFailure, AuditRunner, python_cmd, write_bytes
 
 COVERAGE_THRESHOLD = 80
 COVERAGE_OMIT = "vpn_installer/audit/*"
@@ -145,13 +145,13 @@ def run(runner: AuditRunner) -> None:
         or None,
     )
     if full_mode and windows_host and powershell_available:
-        runner.record("quick-vpn-ps1-help", lambda: runner.run_powershell("vpn-ps1-help", ["-File", str(VPN_PS1), "--help"], env=ps_env) or None)
-        runner.record("quick-vpn-ps1-install-help", lambda: runner.run_powershell("vpn-ps1-install-help", ["-File", str(VPN_PS1), "install", "--help"], env=ps_env) or None)
+        runner.record("quick-vpn-cmd-help", lambda: runner.run_command("vpn-cmd-help", [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/c", str(VPN_CMD), "--help"], env=ps_env) or None)
+        runner.record("quick-vpn-cmd-install-help", lambda: runner.run_command("vpn-cmd-install-help", [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/c", str(VPN_CMD), "install", "--help"], env=ps_env) or None)
         runner.record("quick-vpn-menu-exit", lambda: test_vpn_menu_exit(runner))
         runner.record("quick-windows-clean-room", lambda: test_windows_clean_room(runner))
     elif full_mode and windows_host:
-        runner.skip("quick-vpn-ps1-help", "PowerShell не найден, Windows launcher help пропущен")
-        runner.skip("quick-vpn-ps1-install-help", "PowerShell не найден, Windows install help пропущен")
+        runner.skip("quick-vpn-cmd-help", "PowerShell не найден, Windows launcher help пропущен")
+        runner.skip("quick-vpn-cmd-install-help", "PowerShell не найден, Windows install help пропущен")
         runner.skip("quick-vpn-menu-exit", "PowerShell не найден, menu smoke пропущен")
         runner.skip("quick-windows-clean-room", "PowerShell не найден, Windows clean-room пропущен")
     if full_mode and not windows_host and bash_available:
@@ -245,6 +245,8 @@ def test_install_ux_helpers() -> dict[str, str]:
     answers = iter(["", "my new vpn"])
     with patch("vpn_installer.prompts.find_existing_deployments", return_value=existing), patch.object(builtins, "input", side_effect=lambda _prompt="": next(answers)):
         selected = select_deployment(None)
+    with patch("vpn_installer.prompts.find_existing_deployments", return_value=[]), patch.object(builtins, "input", return_value=""):
+        first_selected = select_deployment(None)
 
     env_only_target = build_target(ROLE_RU, {"RU_PUBLIC_IP": "1.2.3.4", "SSH_PORT": "22"}, {})
     answers = iter(["1.2.3.4", "22", "root", "1", "n", ""])
@@ -268,6 +270,8 @@ def test_install_ux_helpers() -> dict[str, str]:
 
     if selected != "my-new-vpn":
         raise AuditFailure("select_deployment не нормализовал имя нового deployment")
+    if first_selected != "home-vpn":
+        raise AuditFailure("первая установка не предлагает home-vpn по умолчанию")
     if env_only_target.saved_connection:
         raise AuditFailure("env без state не должен считаться сохранённым подключением")
     if prompted_target.ssh_host != "1.2.3.4" or prompted_target.auth_mode != "key":
@@ -276,6 +280,7 @@ def test_install_ux_helpers() -> dict[str, str]:
         raise AuditFailure("не прошёл reuse password-flow для prompt_server_connection")
     return {
         "selected": selected,
+        "first_selected": first_selected,
         "prompted_host": prompted_target.ssh_host,
         "prompted_auth_mode": prompted_target.auth_mode,
         "reused_auth_mode": reused_target.auth_mode,
@@ -285,16 +290,16 @@ def test_install_ux_helpers() -> dict[str, str]:
 def test_vpn_menu_exit(runner: AuditRunner) -> dict[str, str]:
     completed = runner.run_command(
         "vpn-menu-exit",
-        [powershell_executable(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(VPN_PS1)],
+        [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/c", str(VPN_CMD)],
         input_text="8\n",
         env={"VPN_NO_PAUSE": "1"},
     )
     output = completed.stdout + completed.stderr
     if "VPN Installer" not in output or "Выбери действие" not in output:
-        raise AuditFailure("vpn.ps1 без аргументов не показал главное меню")
+        raise AuditFailure("vpn.cmd без аргументов не показал главное меню")
     if "Завершено." not in output:
-        raise AuditFailure("vpn.ps1 меню не завершилось через пункт Выход")
-    return {"launcher": str(VPN_PS1)}
+        raise AuditFailure("vpn.cmd меню не завершилось через пункт Выход")
+    return {"launcher": str(VPN_CMD)}
 
 
 def seed_quick_asset_cache(env: dict[str, str], out_dir: Path) -> None:
@@ -407,7 +412,7 @@ def test_user_artifacts(out_dir: Path) -> dict[str, str]:
     if sniffing.get("enabled") is not True or sniffing.get("routeOnly") is not False or set(sniffing.get("destOverride", [])) != {"http", "tls", "quic"}:
         raise AuditFailure("Android/v2rayNG Xray JSON не содержит ожидаемый sniffing http/tls/quic с routeOnly=false")
     next_steps_text = next_steps.read_text(encoding="utf-8")
-    if "VLESS URI" not in next_steps_text or "vpn status" not in next_steps_text or "v2rayNG" not in next_steps_text or "android-v2rayng-xray.json" not in next_steps_text:
+    if "VLESS URI" not in next_steps_text or cli_command("status") not in next_steps_text or "v2rayNG" not in next_steps_text or "android-v2rayng-xray.json" not in next_steps_text:
         raise AuditFailure("NEXT-STEPS.txt не содержит ожидаемых Android/v2rayNG инструкций")
     return {
         "vless_uri": str(vless_uri_path),
@@ -646,7 +651,7 @@ def test_interserver_hysteria_runtime(runner: AuditRunner, out_dir: Path) -> dic
         with runner.docker_container(server, AUDIT_IMAGE, network=network, ip=server_ip):
             with runner.docker_container(client, AUDIT_IMAGE, network=network, ip=client_ip):
                 runner.docker_exec(server, "mkdir -p /work /srv/probe && printf 'hysteria transport ok\\n' >/srv/probe/index.html")
-                runner.docker_exec(client, "mkdir -p /work")
+                runner.docker_exec(client, "mkdir -p /work /var/lib/vpn-stack")
                 runner.docker_copy(server, server_config_path, "/work/server.json")
                 runner.docker_copy(client, client_config_path, "/work/client.json")
                 runner.docker_exec(server, "sing-box check -c /work/server.json")
@@ -976,7 +981,7 @@ def test_bundle_render_only(runner: AuditRunner, out_dir: Path) -> dict[str, str
 
 def test_windows_clean_room(runner: AuditRunner) -> dict[str, str]:
     if os.name != "nt":
-        return {"skipped": "vpn.ps1 clean-room проверяется только на Windows"}
+        return {"skipped": "vpn.cmd clean-room проверяется только на Windows"}
     with runner.temp_repo_copy("windows-clean-room") as repo_copy:
         portable_downloads = ROOT_DIR / ".runtime" / "downloads"
         env = os.environ.copy()
@@ -985,15 +990,15 @@ def test_windows_clean_room(runner: AuditRunner) -> dict[str, str]:
             zips = sorted(portable_downloads.glob("python-*-embeddable-*.zip"))
             if zips:
                 env["VPN_BOOTSTRAP_PYTHON_URL"] = zips[-1].resolve().as_uri()
-        runner.run_powershell(
+        runner.run_command(
             "windows-clean-room",
-            ["-File", str(repo_copy / "vpn.ps1"), "install", "--help"],
+            [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/c", str(repo_copy / "vpn.cmd"), "install", "--help"],
             cwd=repo_copy,
             env=env,
         )
         portable = repo_copy / ".runtime" / "python" / "windows" / "python.exe"
         if not portable.is_file():
-            raise AuditFailure("Clean-room vpn.ps1 не поднял portable Python")
+            raise AuditFailure("Clean-room vpn.cmd не поднял portable Python")
         return {"portable_python": str(portable)}
 
 
@@ -1034,5 +1039,5 @@ def test_linux_launcher_with_python(runner: AuditRunner) -> dict[str, str]:
         runner.docker_exec(container, "mkdir -p /work")
         runner.docker_copy(container, repo_copy / "vpn.sh", "/work/vpn.sh")
         runner.docker_copy(container, repo_copy / "vpn_installer", "/work/vpn_installer")
-        runner.docker_exec(container, "cd /work && chmod +x ./vpn.sh && ./vpn.sh install --help | grep -q 'usage: vpn install'")
+        runner.docker_exec(container, "cd /work && chmod +x ./vpn.sh && ./vpn.sh install --help | grep -q 'usage: ./vpn.sh install'")
     return {"status": "help-ok"}

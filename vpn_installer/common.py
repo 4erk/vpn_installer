@@ -21,6 +21,20 @@ RUNTIME_SITE_PACKAGES = RUNTIME_DIR / "python-packages"
 INSTALL_SCRIPT_PATH = ROOT_DIR / "install.sh"
 
 
+def cli_entrypoint(platform_name: str | None = None) -> str:
+    return r".\vpn.cmd" if (platform_name or os.name) == "nt" else "./vpn.sh"
+
+
+def cli_command(command: str = "", *, platform_name: str | None = None) -> str:
+    entrypoint = cli_entrypoint(platform_name)
+    return f"{entrypoint} {command}" if command else entrypoint
+
+
+def error_summary(error: BaseException, *, max_length: int = 240) -> str:
+    line = next((line.strip() for line in str(error).splitlines() if line.strip()), type(error).__name__)
+    return line if len(line) <= max_length else line[: max_length - 3].rstrip() + "..."
+
+
 def print_header(title: str) -> None:
     print(f"\n== {title} ==")
 
@@ -91,6 +105,7 @@ def run_command(
     args: list[str],
     *,
     capture_output: bool = False,
+    capture_stderr: bool = False,
     input_text: str | None = None,
     cwd: Path | None = None,
     env: dict[str, str] | None = None,
@@ -102,7 +117,8 @@ def run_command(
             args,
             input=input_text,
             text=True,
-            capture_output=capture_output,
+            stdout=subprocess.PIPE if capture_output else None,
+            stderr=subprocess.PIPE if capture_output or capture_stderr else None,
             cwd=str(cwd) if cwd else None,
             env=env,
             check=False,
@@ -112,14 +128,14 @@ def run_command(
         raise AppError(f"Не найдена команда: {args[0]}") from exc
     except subprocess.TimeoutExpired as exc:
         detail = ""
-        if capture_output:
+        if capture_output or capture_stderr:
             stdout = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
             stderr = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
             detail = (stderr or stdout or "").strip()
         suffix = f"\n{detail}" if detail else ""
         raise AppError(f"Команда не завершилась за {timeout} сек.: {' '.join(args)}{suffix}") from exc
     if check and completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout or "").strip() if capture_output else ""
+        detail = (completed.stderr or completed.stdout or "").strip() if capture_output or capture_stderr else ""
         if detail:
             raise AppError(f"Команда завершилась с ошибкой: {' '.join(args)}\n{detail}")
         raise AppError(f"Команда завершилась с ошибкой (код {completed.returncode}): {' '.join(args)}")

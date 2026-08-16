@@ -56,7 +56,8 @@ class PromptTests(unittest.TestCase):
 
     def test_has_saved_connection_requires_core_fields(self) -> None:
         self.assertFalse(has_saved_connection({}))
-        self.assertTrue(has_saved_connection({"public_ip": "1.1.1.1", "ssh_host": "1.1.1.1", "ssh_port": "22", "ssh_user": "root"}))
+        self.assertFalse(has_saved_connection({"public_ip": "1.1.1.1", "ssh_host": "1.1.1.1", "ssh_port": "22", "ssh_user": "root"}))
+        self.assertTrue(has_saved_connection({"public_ip": "1.1.1.1", "ssh_host": "1.1.1.1", "ssh_port": "22", "ssh_user": "root", "auth_mode": "password"}))
 
     def test_prompt_server_connection_key_flow(self) -> None:
         target = RemoteTarget(role=ROLE_RU, public_ip="203.0.113.10")
@@ -89,6 +90,17 @@ class PromptTests(unittest.TestCase):
             with patch.object(builtins, "input", side_effect=lambda _prompt="": next(answers)):
                 selected = select_deployment(None)
         self.assertEqual(selected, "my-new-vpn")
+
+    def test_select_deployment_prefills_first_install_name(self) -> None:
+        with patch("vpn_installer.prompts.find_existing_deployments", return_value=[]), patch.object(builtins, "input", return_value="") as mocked:
+            selected = select_deployment(None)
+        self.assertEqual(selected, "home-vpn")
+        self.assertIn("Enter = home-vpn", mocked.call_args.args[0])
+
+    def test_select_deployment_first_install_accepts_custom_name(self) -> None:
+        with patch("vpn_installer.prompts.find_existing_deployments", return_value=[]), patch.object(builtins, "input", return_value="family vpn"):
+            selected = select_deployment(None)
+        self.assertEqual(selected, "family-vpn")
 
     def test_display_target_connection_for_saved_password_mode(self) -> None:
         target = RemoteTarget(role=ROLE_RU, public_ip="203.0.113.10", ssh_host="203.0.113.10", ssh_user="root", auth_mode="password", saved_connection=True)
