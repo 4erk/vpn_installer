@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- Linux release gate снова является исполняемым контрактом: dev-зависимость `cryptography` объявлена явно, POSIX-тест блокировки проверяет фактическую сериализацию `flock -w 60`, а nft-тест больше не требует удаления чужих legacy `nat`-таблиц. Это устраняет ложные падения публикации, из-за которых теги после `0.16.2` не превращались в GitHub Releases.
 - Полный release gate создаёт production runtime-каталог для ephemeral Hysteria2 и проверяет вложенный результат `network-apply` вместе с RU manifest. Docker interop/lab больше не падают из-за отсутствующего cache-каталога или чтения устаревшей плоской схемы qdisc.
 - Windows-режим `SSH key` теперь всегда запускает OpenSSH как `publickey-only`: включены `BatchMode`, запрет password/keyboard-interactive fallback и краткий уровень логирования. Ошибка ключа больше не превращается в скрытый ручной запрос `root@host's password`; полный stderr сохраняется в runtime error log.
 - Legacy state больше не объявляется входом по ключу, если способ аутентификации ранее не был записан. Сохранённые `RU_AUTH_MODE`/`FOREIGN_AUTH_MODE` мигрируются явно, а неполный state заставляет заново выбрать `SSH key` или `SSH password`.

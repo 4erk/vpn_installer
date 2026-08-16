@@ -855,7 +855,6 @@ class RenderTests(unittest.TestCase):
             fake_bin = root / "bin"
             fake_bin.mkdir()
             state = root / "state"
-            legacy_marker = root / "legacy-nat-owned"
             log = root / "nft.log"
             config = root / "nftables.conf"
             apply_script = root / "nft-apply.sh"
@@ -885,13 +884,11 @@ class RenderTests(unittest.TestCase):
                 "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
                 "NFT_TEST_LOG": str(log),
                 "NFT_TEST_STATE": str(state),
-                "VPNSTACK_LEGACY_NFTABLES_NAT_MARKER": str(legacy_marker),
             }
             subprocess.run(["sh", str(apply_script), str(config)], check=True, env=env)
             subprocess.run(["sh", str(apply_script), str(config)], check=True, env=env)
             with state.open("a", encoding="utf-8") as handle:
                 handle.write("ip nat\nip6 nat\n")
-            legacy_marker.touch()
             subprocess.run(["sh", str(apply_script), str(config)], check=True, env=env)
             calls = log.read_text(encoding="utf-8")
             call_lines = calls.splitlines()
@@ -900,9 +897,8 @@ class RenderTests(unittest.TestCase):
             self.assertIn("delete table inet vpnstack", calls)
             self.assertIn("delete table ip vpnstack_nat4", calls)
             self.assertIn("delete table ip6 vpnstack_nat6", calls)
-            self.assertIn("delete table ip nat", calls)
-            self.assertIn("delete table ip6 nat", calls)
-            self.assertFalse(legacy_marker.exists())
+            self.assertNotIn("delete table ip nat", calls)
+            self.assertNotIn("delete table ip6 nat", calls)
 
     def test_render_sysctl_reserves_conntrack_capacity_without_timeout_tuning(self) -> None:
         for role in (render.ROLE_RU, render.ROLE_FOREIGN):

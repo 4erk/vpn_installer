@@ -132,11 +132,9 @@ class PackageTests(unittest.TestCase):
         self.assertIn('manifest_binary_field "${source_dir}" sing-box archive_sha256', script)
         self.assertNotIn("sing-box.sagernet.org/installation/tools/install.sh | bash", script)
 
-    def test_installer_lock_rejects_a_concurrent_writer(self) -> None:
+    @unittest.skipIf(os.name == "nt", "POSIX flock behavior is exercised on Linux CI")
+    def test_installer_lock_serializes_concurrent_writers(self) -> None:
         bash = shutil.which("bash")
-        if os.name == "nt":
-            git_bash = Path(r"C:\Program Files\Git\bin\bash.exe")
-            bash = str(git_bash) if git_bash.is_file() else None
         if not bash:
             self.skipTest("bash is unavailable")
         if subprocess.run([bash, "-lc", "command -v flock"], capture_output=True).returncode != 0:
@@ -147,10 +145,14 @@ class PackageTests(unittest.TestCase):
             root = Path(tmp)
             harness = root / "lock-test.sh"
             lock_path = root / "install.lock"
+            events_path = root / "events.log"
             harness.write_text(
                 "#!/usr/bin/env bash\nset -euo pipefail\n"
                 + lock_function
-                + "\nINSTALL_LOCK_PATH=$1\nacquire_install_lock\nsleep 1\n",
+                + "\nINSTALL_LOCK_PATH=$1\nacquire_install_lock\n"
+                + "printf '%s-start\\n' \"$2\" >>\"$3\"\n"
+                + "sleep \"$4\"\n"
+                + "printf '%s-end\\n' \"$2\" >>\"$3\"\n",
                 encoding="utf-8",
             )
 
@@ -160,16 +162,31 @@ class PackageTests(unittest.TestCase):
                     return f"/{value[0].lower()}{value[2:]}"
                 return value
 
-            first = subprocess.Popen([bash, shell_path(harness), shell_path(lock_path)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            first = subprocess.Popen(
+                [bash, shell_path(harness), shell_path(lock_path), "first", shell_path(events_path), "0.5"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
             deadline = time.monotonic() + 2
-            while not lock_path.exists() and time.monotonic() < deadline:
+            while (not events_path.exists() or "first-start" not in events_path.read_text(encoding="utf-8")) and time.monotonic() < deadline:
                 time.sleep(0.02)
-            time.sleep(0.05)
-            second = subprocess.run([bash, shell_path(harness), shell_path(lock_path)], capture_output=True, text=True, timeout=2)
+            first_events = events_path.read_text(encoding="utf-8") if events_path.exists() else ""
+            self.assertIn("first-start", first_events, "first writer did not acquire the lock")
+            second = subprocess.Popen(
+                [bash, shell_path(harness), shell_path(lock_path), "second", shell_path(events_path), "0"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            time.sleep(0.1)
+            self.assertNotIn("second-start", events_path.read_text(encoding="utf-8"))
             first_stdout, first_stderr = first.communicate(timeout=2)
+            second_stdout, second_stderr = second.communicate(timeout=2)
+            events = events_path.read_text(encoding="utf-8").splitlines()
         self.assertEqual(first.returncode, 0, first_stdout + first_stderr)
-        self.assertEqual(second.returncode, 75, second.stdout + second.stderr)
-        self.assertIn("already running", second.stderr)
+        self.assertEqual(second.returncode, 0, second_stdout + second_stderr)
+        self.assertEqual(events, ["first-start", "first-end", "second-start", "second-end"])
 
     def test_package_exposes_version_via_getattr(self) -> None:
         package = importlib.import_module("vpn_installer")
