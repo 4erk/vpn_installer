@@ -3,32 +3,38 @@
 ## Контракт и границы
 
 ```text
-клиент с vless-uri.txt ------> RU Xray/Reality TCP :443 --┐
-Hysteria2 URI ---------------> RU Hysteria2 UDP :443 -----┴-> RU sing-box routing policy
-                                                              -> direct-ru
-                                                              -> stable kernel WireGuard overlay
-                                                                 -> local relay -> Hysteria2 -> foreign egress
-                                                                                -> WireGuard  -> foreign egress
+single: клиент -> gateway Xray/Reality -> sing-box -> local egress
+
+dual:   клиент -> RU gateway Xray/Reality -> sing-box routing policy
+                                                -> direct-ru
+                                                -> WireGuard overlay
+                                                   -> foreign exit -> foreign egress
 ```
 
 - `out/<deployment>/client/vless-uri.txt` является главным и неизменным клиентским контрактом.
-- Xray владеет основным публичным VLESS/Reality TCP front. RU `sing-box` владеет локальным router и дополнительным публичным Hysteria2/UDP ingress; оба входа завершаются одной routing policy.
+- Xray на узле `gateway` владеет основным публичным VLESS/Reality TCP front. Gateway `sing-box` владеет router; в `dual` он дополнительно использует межсерверный overlay, а в `single` отправляет трафик через локальный egress.
 - Routing policy, health и проверка не меняют локальные VPN-клиенты и их профили.
-- Web-admin на RU сохраняется. Он управляет только явными operator rules; rules проходят validation и применяются атомарно.
+- Web-admin на `gateway` сохраняется. Он управляет только явными operator rules и показывает лишь выходы, скомпилированные для выбранной топологии; rules проходят validation и применяются атомарно.
 - `VPN_SSH_BIND_ADDRESS` - временный control-plane input, не часть deployment env. Он привязывает SSH/SFTP к физическому локальному адресу, когда default route клиента находится в TUN, и не меняет client/server dataplane.
 
-Роли:
+Узлы:
 
-- `ru-gateway`: public Xray front, локальный sing-box, peer WireGuard.
-- `foreign-exit`: Hysteria2 endpoint, peer WireGuard, NAT и foreign egress.
+- `gateway`: публичный Xray front, sing-box router, web-admin и локальный egress; находится в России или за рубежом.
+- `exit`: существует только в `dual`; WireGuard peer, NAT и зарубежный egress.
 
 ## Источники истины
 
 - `deployments/<name>.env` - декларативный input deployment.
-- `DeploymentSpec`, `RoleSpec` и `RoutingPolicy` - единственная Python-модель конфигурации и traffic classes.
+- `DeploymentSpec`, `TopologySpec`, `NodeSpec`, `NodePlan` и `RoutingPolicy` - единственная Python-модель topology, capabilities и traffic classes.
 - renderer сериализует эту модель в sing-box, Xray, WireGuard, nftables, systemd и managed OS drop-ins. Он не принимает route decisions.
 - `install.sh` только bootstrap и транзакционная доставка уже rendered artifacts; у него нет собственных routing defaults.
-- `/etc/vpn-stack/render-manifest.json` schema 2 хранит release, policy, env/config hashes, binary digests, OS/kernel и hashes artifacts.
+- `/etc/vpn-stack/render-manifest.json` schema 3 хранит topology, node capabilities, install plan, policy, hashes, pinned binaries и runtime facts. Каждый node получает только собственный `node.env` и принадлежащие ему secrets/artifacts.
+
+Target-side render не объединяет `node.env` с общими defaults и не генерирует ключи. Он принимает только точную schema-2 проекцию capability, отклоняет неизвестные поля и cross-node secrets, затем сверяет полученный payload с manifest/install-plan. Legacy full deployment env нормализуется только локальным контроллером перед сборкой и отдельным schema-2 install adapter при первом обновлении.
+
+`single` не компилирует и не устанавливает WireGuard, interserver transport, его пакеты, сервисы, secrets или probes. `dual` устанавливает interserver capability только на оба участвующих узла. Отсутствующая capability имеет состояние `not_applicable`, а не ложное `healthy`.
+
+Topology и физическое расположение gateway неизменяемы внутри существующего deployment. Смена состава серверов выполняется новым deployment с отдельной acceptance-проверкой; старый удаляется только после успешного полного VLESS verify. Это предотвращает частичный cross-server cutover и потерю rollback target.
 
 Публичная operator-точка входа зависит от платформы: `.\vpn.cmd` на Windows и `./vpn.sh` на Linux. Прямой запуск `vpn.ps1` или `python -m vpn_installer` является внутренним/dev-сценарием и не должен использоваться в пользовательских инструкциях.
 
@@ -72,7 +78,7 @@ Foreign-классы всегда остаются на `to-foreign`. Health и 
 
 `vpn-stack-agent` - stdlib-only серверный executable. Он предоставляет operator-команды `snapshot`, `probe`, `health`, `front`, `client`, `routes` и `assets`; внутренние `transport-reconcile`/`transport-watch` управляют только endpoint стабильного overlay. Transport probe проверяет внутренний WG независимо от DNS, а холодный relay подтверждается ответом удалённого SSH, а не локальным SOCKS accept. Старую association agent закрывает только после proof нового пути; ошибка активации атомарно возвращает старый endpoint и открывает bounded circuit breaker. Нормализация log buckets вынесена в отдельный `log_classifier.py`, который поставляется и хешируется вместе с agent.
 
-Snapshot schema 3 содержит:
+Snapshot schema 4 содержит:
 
 - service state, manifest drift и hashes всех managed artifacts, включая resolver drop-in и состояние `/etc/resolv.conf` stub;
 - root filesystem source/type, ext4 state и runtime error counters, время последней проверки и `fs_passno` загрузочного `fsck`;
@@ -83,7 +89,7 @@ Snapshot schema 3 содержит:
 - problem-записи bounded-обогащаются inbound/DNS INFO-контекстом совпадающего sing-box event ID; парные сообщения одного request ID дедуплицируются, а IP timeout связывается с исходным доменом без полного INFO-сканирования;
 - maintenance state и отдельные `server_path`, `public_front`, `public_quic`, `client_observation`, `closing_churn`, `host_integrity` verdicts.
 
-`.\vpn.cmd status` собирает компактный snapshot за последние 5 минут без live probes и исторического сканирования. `.\vpn.cmd diagnose path` сохраняет полный structured JSON с окнами 5m/30m/24h. `.\vpn.cmd diagnose front` одновременно проверяет публичный listener и свежие RU/WG/router paths. `.\vpn.cmd diagnose client --source <public-ip>` показывает потоки и Xray destinations проблемного источника, не смешивая устройства за одним NAT. На Linux те же команды запускаются через `./vpn.sh`.
+`.\vpn.cmd status` собирает компактный snapshot за последние 5 минут без live probes и исторического сканирования. `.\vpn.cmd diagnose path` сохраняет полный structured JSON с окнами 5m/30m/24h. `.\vpn.cmd diagnose front` одновременно проверяет публичный listener gateway и все обязательные для topology router/interserver paths. `.\vpn.cmd diagnose client --source <public-ip>` показывает потоки и Xray destinations проблемного источника, не смешивая устройства за одним NAT. На Linux те же команды запускаются через `./vpn.sh`.
 
 ## Health и восстановление
 
@@ -99,15 +105,17 @@ Health выполняется раз в две минуты и имеет сос
 
 Install/reinstall собирает release во временном каталоге внутри `/etc/vpn-stack/releases`, проверяет sing-box, Xray, nftables, WireGuard, systemd, manifest и assets, затем публикует immutable content-addressed tree и атомарно переключает `current`. Target-side acceptance дополнительно требует чистый ext4 root и включённую загрузочную проверку. Revision snapshot охватывает manifest, configs, rules/assets, resolver drop-in и `/etc/resolv.conf`, runtime health state, admin auth, `current`/`previous` и состояния всех затрагиваемых сервисов. Неудачные service start, drift или core route acceptance возвращают весь этот набор; уже опубликованный release не перезаписывается повторной установкой. Внешние capability probes выводятся отдельно: временный отказ raw IPv6 при исправном core path даёт `degraded` и проваливает полный live verify, но не откатывает тот же конфиг, который не может изменить состояние внешнего endpoint.
 
+APT-пакеты устанавливаются до managed snapshot и считаются монотонными prerequisites хоста: автоматический rollback не удаляет пакеты и не пытается откатывать версии через APT. Транзакционная гарантия начинается после успешной подготовки prerequisites и охватывает только явно принадлежащие проекту artifacts, links, services и runtime-state.
+
 Хранятся последние 10 revision snapshots плюс отдельный baseline. Snapshot текущей транзакции никогда не удаляется её собственным rollback; pruning выполняется до создания нового snapshot.
 
-`.\vpn.cmd maintain` по умолчанию только показывает APT/security/reboot state. С `--apply --yes` роли обновляются последовательно, после каждой выполняется fresh verification. `--refresh-assets` использует тот же транзакционный reinstall workflow; background asset mutation отсутствует.
+`.\vpn.cmd maintain` по умолчанию только показывает APT/security/reboot state. С `--apply --yes` узлы обновляются последовательно, после каждого выполняется fresh verification. `--refresh-assets` использует тот же транзакционный reinstall workflow; background asset mutation отсутствует.
 
 Journald ограничивается managed drop-in. APT periodic settings включают unattended security updates, но плановая установка пакетов остаётся явной командой `maintain`.
 
 ## Live verification
 
-`.\vpn.cmd verify live --deployment <name>` обязателен после install/reinstall. Он собирает agent acceptance snapshots на обеих ролях и запускает на внешнем runner два эфемерных sing-box client: первый строится напрямую из `vless-uri.txt` и проходит VLESS/Reality/Xray, второй независимо проходит публичный Hysteria2 ingress. Оба затем используют одну RU routing policy и выбранный межсерверный Hysteria2/WireGuard transport, проверяя egress identity, GitHub, Google, UDP DNS, TCP IPv6 literal, быстрый SOCKS reject private/fake destinations и девять first-load GET.
+`.\vpn.cmd verify live --deployment <name>` обязателен после install/reinstall. Он собирает agent acceptance snapshots со всех настроенных узлов и всегда запускает эфемерный клиент непосредственно из `vless-uri.txt` через публичный VLESS/Reality/Xray front. Public Hysteria2 listener и firewall проверяются gateway-agent в обеих схемах; в `dual` отдельный клиент дополнительно доказывает его end-to-end и выбранный межсерверный Hysteria2/WireGuard transport. В `single` независимого exit-runner нет, поэтому отдельный Hysteria2 client path не выдаётся за внешнее доказательство, а отсутствующие межсерверные capabilities получают `not_applicable`. Проверка охватывает egress identity, GitHub, Google, UDP DNS, TCP IPv6 literal, быстрый SOCKS reject private/fake destinations и девять first-load GET.
 
 Дополнительно проверяются DNS, direct/domain routes, IPv4 literal, IPv6 literal и reject private/fake. Итог только один из `verified`, `degraded`, `failed`, `inconclusive`; зелёный `status` не является acceptance доказательством.
 
@@ -117,7 +125,7 @@ Server-side route acceptance использует HTTP `HEAD`: его задач
 
 Автоматическая post-cutover приёмка install/reinstall/maintenance вызывает `verify live` с `--throughput-seconds 0`: она доказывает полный публичный контракт, но не насыщает production-туннель собственным bulk download. Явный `verify live` по умолчанию выполняет `30s` throughput acceptance канонического VLESS/TCP; `--throughput-seconds 60` задаёт более длинное ручное окно, а `0` оставляет только функциональные probes. Runner циклически использует Hetzner FSN, Hetzner NBG и независимый Cloudflare payload. Hard gate требует sustained goodput не ниже `10 Mbit/s`, минимум два успешных источника, полный requested interval, отсутствие transfer failures и пауз прогресса длиннее budget. Peak сравнивается с reference `50 Mbit/s` и сохраняется как telemetry, но CDN-зависимый sample не вызывает rollback. Публичный Hysteria2 проходит отдельный функциональный контракт без автоматической throughput-нагрузки. Один global lock сериализует runner-профили; target-side deadline и SSH controller lease завершают process group при исчезновении локального процесса. Проверка не входит в health timer.
 
-Проверяющий runner сейчас запускается на foreign role, поэтому он проверяет полный публичный VLESS path и server capacity, но не измеряет маршрут конкретного пользователя до RU. Одновременный `client_specific/degraded` не маскируется успешным runner: это два разных component verdict.
+В `dual` проверяющий runner запускается на независимом `exit`, а в `single` - на том же `gateway` со scope `same-node`. Он проверяет публичный VLESS path и server capacity, но не измеряет маршрут конкретного пользователя до gateway. Одновременный `client_specific/degraded` не маскируется успешным runner: это два разных component verdict.
 
 ## CLI
 
@@ -132,7 +140,7 @@ Server-side route acceptance использует HTTP `HEAD`: его задач
 
 1. `python tests/run_tests.py` (на Windows с bundled runtime: `& .\.runtime\python\windows\python.exe tests\run_tests.py`). Runner сам добавляет repo root до discovery, поэтому portable embedded Python не зависит от `PYTHONPATH`.
 2. `.\vpn.cmd audit quick`, затем `.\vpn.cmd audit all` (на Linux: `./vpn.sh ...`).
-3. Reinstall foreign, затем RU только штатным workflow.
+3. В `dual` выполнить reinstall сначала `exit`, затем `gateway`; в `single` - только `gateway`, всегда штатным workflow.
 4. `.\vpn.cmd verify live --deployment <name> --non-interactive`. Acceptance подтверждает первую ошибку обязательного route-инварианта повторным циклом; Telegram и другие проблемные направления выводятся отдельно как observations.
 5. Проверить 30-minute fresh logs, front retransmit telemetry, manifest drift, идентичности обоих egress и проблемные destinations.
 

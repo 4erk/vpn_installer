@@ -35,6 +35,22 @@ try:
         split_endpoint,
         summarize_lines,
     )
+except ImportError:  # Installed agent runs as a standalone script.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from log_classifier import (  # type: ignore[no-redef]
+        BUCKETS,
+        accepted_destination_from_line,
+        event_id_from_line,
+        inbound_destination_from_line,
+        inbound_tag_from_line,
+        normalize_source,
+        source_endpoint_from_line,
+        source_from_line,
+        split_endpoint,
+        summarize_lines,
+    )
+
+try:
     from .interserver_transport import (
         HY2_PORT,
         TRANSPORT_CANDIDATE_TAGS,
@@ -54,39 +70,53 @@ try:
         transport_candidate_probe,
         transport_topology_configured,
     )
-except ImportError:  # Installed agent runs as a standalone script.
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from log_classifier import (  # type: ignore[no-redef]
-        BUCKETS,
-        accepted_destination_from_line,
-        event_id_from_line,
-        inbound_destination_from_line,
-        inbound_tag_from_line,
-        normalize_source,
-        source_endpoint_from_line,
-        source_from_line,
-        split_endpoint,
-        summarize_lines,
-    )
-    from interserver_transport import (  # type: ignore[no-redef]
-        HY2_PORT,
-        TRANSPORT_CANDIDATE_TAGS,
-        TRANSPORT_FAILURE_CONFIRMATIONS,
-        TRANSPORT_HY2_TAG,
-        TRANSPORT_PREFERRED_PROBE_INTERVAL_SECONDS,
-        TRANSPORT_PREFERRED_TAG,
-        TRANSPORT_PROBE_INTERVAL_SECONDS,
-        TRANSPORT_RELAY_INBOUND_TAG,
-        TRANSPORT_RELAY_PORT,
-        TRANSPORT_SELECTOR_TAG,
-        TRANSPORT_STATE_SCHEMA_VERSION,
-        TRANSPORT_SWITCH_RETRY_BASE_SECONDS,
-        TRANSPORT_SWITCH_RETRY_MAX_SECONDS,
-        TRANSPORT_WG_TAG,
-        evaluate_transport_policy,
-        transport_candidate_probe,
-        transport_topology_configured,
-    )
+    TRANSPORT_MODULE_AVAILABLE = True
+except ImportError:  # Optional on nodes without an interserver capability.
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from interserver_transport import (  # type: ignore[no-redef]
+            HY2_PORT,
+            TRANSPORT_CANDIDATE_TAGS,
+            TRANSPORT_FAILURE_CONFIRMATIONS,
+            TRANSPORT_HY2_TAG,
+            TRANSPORT_PREFERRED_PROBE_INTERVAL_SECONDS,
+            TRANSPORT_PREFERRED_TAG,
+            TRANSPORT_PROBE_INTERVAL_SECONDS,
+            TRANSPORT_RELAY_INBOUND_TAG,
+            TRANSPORT_RELAY_PORT,
+            TRANSPORT_SELECTOR_TAG,
+            TRANSPORT_STATE_SCHEMA_VERSION,
+            TRANSPORT_SWITCH_RETRY_BASE_SECONDS,
+            TRANSPORT_SWITCH_RETRY_MAX_SECONDS,
+            TRANSPORT_WG_TAG,
+            evaluate_transport_policy,
+            transport_candidate_probe,
+            transport_topology_configured,
+        )
+        TRANSPORT_MODULE_AVAILABLE = True
+    except ImportError:
+        HY2_PORT = 18443
+        TRANSPORT_WG_TAG = "interserver-underlay-wg"
+        TRANSPORT_HY2_TAG = "interserver-underlay-hy2"
+        TRANSPORT_CANDIDATE_TAGS = (TRANSPORT_WG_TAG, TRANSPORT_HY2_TAG)
+        TRANSPORT_FAILURE_CONFIRMATIONS = 2
+        TRANSPORT_PREFERRED_PROBE_INTERVAL_SECONDS = 10
+        TRANSPORT_PREFERRED_TAG = TRANSPORT_HY2_TAG
+        TRANSPORT_PROBE_INTERVAL_SECONDS = 2
+        TRANSPORT_RELAY_INBOUND_TAG = "interserver-overlay-in"
+        TRANSPORT_RELAY_PORT = 19091
+        TRANSPORT_SELECTOR_TAG = "interserver-underlay-select"
+        TRANSPORT_STATE_SCHEMA_VERSION = 11
+        TRANSPORT_SWITCH_RETRY_BASE_SECONDS = 30
+        TRANSPORT_SWITCH_RETRY_MAX_SECONDS = 300
+        TRANSPORT_MODULE_AVAILABLE = False
+
+        def _missing_transport_module(*_args: Any, **_kwargs: Any) -> Any:
+            raise RuntimeError("interserver transport capability is not installed on this node")
+
+        evaluate_transport_policy = _missing_transport_module
+        transport_candidate_probe = _missing_transport_module
+        transport_topology_configured = _missing_transport_module
 
 try:
     from .network_profile import FQ_FLOW_LIMIT, FQ_KIND, FQ_PACKET_LIMIT, wireguard_policy_spec
@@ -97,6 +127,11 @@ try:
     from .diagnostics import SCHEMA_VERSION as DIAGNOSTICS_SCHEMA_VERSION, COLLECTOR_NAMES, CollectorState, DiagnosticsSnapshot, LogWindowSnapshot, classify_interserver_adaptation
 except ImportError:  # Installed agent runs as a standalone script.
     from diagnostics import SCHEMA_VERSION as DIAGNOSTICS_SCHEMA_VERSION, COLLECTOR_NAMES, CollectorState, DiagnosticsSnapshot, LogWindowSnapshot, classify_interserver_adaptation  # type: ignore[no-redef]
+
+try:
+    from .release_integrity import release_tree_digest
+except ImportError:  # Installed agent runs as a standalone script.
+    from release_integrity import release_tree_digest  # type: ignore[no-redef]
 
 try:
     import fcntl
@@ -178,6 +213,248 @@ PROC_MOUNTS_PATH = Path("/proc/self/mounts")
 EXT4_SYSFS_ROOT = Path("/sys/fs/ext4")
 SYS_DEV_BLOCK_ROOT = Path("/sys/dev/block")
 
+MANIFEST_CAPABILITY_SCHEMA_VERSION = 3
+LEGACY_RUNTIME_REMOVE_IN = "0.20.1"
+TOPOLOGY_SINGLE = "single"
+TOPOLOGY_DUAL = "dual"
+NODE_GATEWAY = "gateway"
+NODE_EXIT = "exit"
+LOCATION_RU = "ru"
+LOCATION_FOREIGN = "foreign"
+CAP_PUBLIC_FRONT = "public-front"
+CAP_ROUTER = "router"
+CAP_WEB_ADMIN = "web-admin"
+CAP_LOCAL_EGRESS = "local-egress"
+CAP_RU_SPLIT_ROUTING = "ru-split-routing"
+CAP_INTERSERVER_CLIENT = "interserver-client"
+CAP_INTERSERVER_SERVER = "interserver-server"
+CAP_NAT_EXIT = "nat-exit"
+INTERSERVER_CAPABILITIES = frozenset({CAP_INTERSERVER_CLIENT, CAP_INTERSERVER_SERVER})
+LEGACY_ROLE_GATEWAY = "ru-gateway"
+LEGACY_ROLE_EXIT = "foreign-exit"
+SERVICE_UNIT_DEFAULTS = {
+    "wireguard": "wg-quick@{wg_interface}.service",
+    "nftables": NFTABLES_SERVICE,
+    "sing-box": "sing-box.service",
+    "resolver": "systemd-resolved.service",
+    "xray": "vpn-stack-xray.service",
+    "admin": "vpn-stack-admin.service",
+    "health_timer": "vpn-stack-health.timer",
+    "transport": "vpn-stack-transport.service",
+}
+
+
+def _string_array(value: object, field: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
+        raise RuntimeError(f"manifest {field} must be an array of non-empty strings")
+    if len(value) != len(set(value)):
+        raise RuntimeError(f"manifest {field} must not contain duplicates")
+    return tuple(value)
+
+
+def _expected_capabilities(
+    topology: str,
+    node_id: str,
+    *,
+    admin_web_enabled: bool = True,
+) -> frozenset[str]:
+    if node_id == NODE_GATEWAY:
+        capabilities = {CAP_PUBLIC_FRONT, CAP_ROUTER, CAP_LOCAL_EGRESS}
+        if admin_web_enabled:
+            capabilities.add(CAP_WEB_ADMIN)
+        if topology == TOPOLOGY_DUAL:
+            capabilities.update({CAP_RU_SPLIT_ROUTING, CAP_INTERSERVER_CLIENT})
+        return frozenset(capabilities)
+    if topology == TOPOLOGY_DUAL and node_id == NODE_EXIT:
+        return frozenset({CAP_INTERSERVER_SERVER, CAP_NAT_EXIT})
+    raise RuntimeError(f"node {node_id!r} is invalid for {topology!r} topology")
+
+
+def _expected_required_services(capabilities: frozenset[str]) -> tuple[str, ...]:
+    services = ["nftables", "sing-box", "resolver", "health_timer"]
+    if CAP_PUBLIC_FRONT in capabilities:
+        services.append("xray")
+    if CAP_WEB_ADMIN in capabilities:
+        services.append("admin")
+    if capabilities & INTERSERVER_CAPABILITIES:
+        services.append("wireguard")
+    if CAP_INTERSERVER_CLIENT in capabilities:
+        services.append("transport")
+    return tuple(services)
+
+
+def _compatibility_role_for_node(node_id: str) -> str:
+    return LEGACY_ROLE_GATEWAY if node_id == NODE_GATEWAY else LEGACY_ROLE_EXIT
+
+
+def _adapt_legacy_runtime_manifest(manifest: Mapping[str, Any], env: Mapping[str, str]) -> dict[str, Any] | None:
+    """Boundary adapter for schema 1/2 manifests. Remove in 0.20.1."""
+
+    raw_schema = manifest.get("schema_version")
+    try:
+        schema = int(raw_schema)
+    except (TypeError, ValueError):
+        schema = 0
+    if schema not in {0, 1, 2}:
+        return None
+    role = str(manifest.get("role") or env.get("ROLE") or "")
+    if schema == 0 and role not in {LEGACY_ROLE_GATEWAY, LEGACY_ROLE_EXIT}:
+        return None
+
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, Mapping) or not artifacts:
+        legacy_hashes = manifest.get("artifact_sha256", {})
+        artifacts = {
+            str(name): {"sha256": str(digest), "install_path": ""}
+            for name, digest in legacy_hashes.items()
+        } if isinstance(legacy_hashes, Mapping) else {}
+
+    if role == LEGACY_ROLE_GATEWAY:
+        node_id = NODE_GATEWAY
+        location = LOCATION_RU
+        capabilities = _expected_capabilities(TOPOLOGY_DUAL, node_id)
+        required_services = ("wireguard", "nftables", "sing-box", "resolver", "xray", "admin", "health_timer", "transport")
+    elif role == LEGACY_ROLE_EXIT:
+        node_id = NODE_EXIT
+        location = LOCATION_FOREIGN
+        capabilities = _expected_capabilities(TOPOLOGY_DUAL, node_id)
+        required_services = ("wireguard", "nftables", "sing-box", "resolver", "health_timer")
+    else:
+        return {
+            "contract": None,
+            "artifacts": dict(artifacts),
+            "drift_manifest_valid": schema >= 2,
+            "error": "legacy manifest does not identify a supported role",
+        }
+    return {
+        "contract": {
+            "topology": TOPOLOGY_DUAL,
+            "node_id": node_id,
+            "location": location,
+            "capabilities": capabilities,
+            "required_services": required_services,
+            "service_units": {
+                name: SERVICE_UNIT_DEFAULTS[name]
+                for name in required_services
+            },
+            "role": role,
+            "migration": {
+                "state": "deprecated",
+                "source_schema": schema,
+                "target_schema": MANIFEST_CAPABILITY_SCHEMA_VERSION,
+                "remove_in": LEGACY_RUNTIME_REMOVE_IN,
+                "message": "legacy role manifest is accepted only at the runtime boundary",
+            },
+        },
+        "artifacts": dict(artifacts),
+        "drift_manifest_valid": schema >= 2,
+    }
+
+
+def runtime_contract(manifest: Mapping[str, Any], env: Mapping[str, str]) -> dict[str, Any]:
+    """Validate the installed node contract without importing installer code."""
+
+    legacy = _adapt_legacy_runtime_manifest(manifest, env)
+    if legacy is not None:
+        if not isinstance(legacy.get("contract"), Mapping):
+            raise RuntimeError(str(legacy.get("error") or "legacy manifest is invalid"))
+        return dict(legacy["contract"])
+    raw_schema = manifest.get("schema_version")
+    try:
+        schema = int(raw_schema)
+    except (TypeError, ValueError):
+        schema = 0
+    if schema != MANIFEST_CAPABILITY_SCHEMA_VERSION:
+        raise RuntimeError(f"unsupported render manifest schema: {raw_schema!r}")
+
+    topology = str(manifest.get("topology", ""))
+    node_id = str(manifest.get("node_id", ""))
+    location = str(manifest.get("location", ""))
+    if topology not in {TOPOLOGY_SINGLE, TOPOLOGY_DUAL}:
+        raise RuntimeError(f"unsupported manifest topology: {topology!r}")
+    if node_id not in {NODE_GATEWAY, NODE_EXIT}:
+        raise RuntimeError(f"unsupported manifest node: {node_id!r}")
+    if location not in {LOCATION_RU, LOCATION_FOREIGN}:
+        raise RuntimeError(f"unsupported manifest location: {location!r}")
+    if topology == TOPOLOGY_SINGLE and node_id != NODE_GATEWAY:
+        raise RuntimeError("single topology cannot install an exit node")
+    if topology == TOPOLOGY_DUAL and ((node_id == NODE_GATEWAY and location != LOCATION_RU) or (node_id == NODE_EXIT and location != LOCATION_FOREIGN)):
+        raise RuntimeError("dual topology node location does not match the contract")
+
+    capabilities = frozenset(_string_array(manifest.get("capabilities"), "capabilities"))
+    admin_web_enabled = str(env.get("ADMIN_WEB_ENABLED", "1")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    expected_capabilities = _expected_capabilities(
+        topology,
+        node_id,
+        admin_web_enabled=admin_web_enabled,
+    )
+    if capabilities != expected_capabilities:
+        raise RuntimeError("manifest capabilities do not match topology and node")
+    required_services = _string_array(manifest.get("required_services"), "required_services")
+    if required_services != _expected_required_services(capabilities):
+        raise RuntimeError("manifest required services do not match node capabilities")
+    node = manifest.get("node")
+    if not isinstance(node, Mapping):
+        raise RuntimeError("manifest node descriptor is missing")
+    node_contract = (
+        str(node.get("id", "")),
+        str(node.get("location", "")),
+        frozenset(_string_array(node.get("capabilities"), "node.capabilities")),
+        _string_array(node.get("required_services"), "node.required_services"),
+    )
+    if node_contract != (node_id, location, capabilities, required_services):
+        raise RuntimeError("manifest node descriptor conflicts with canonical fields")
+
+    install_plan = manifest.get("install_plan")
+    if not isinstance(install_plan, Mapping):
+        raise RuntimeError("manifest install plan is missing")
+    for field, expected in (("topology", topology), ("node_id", node_id), ("location", location)):
+        if str(install_plan.get(field, "")) != expected:
+            raise RuntimeError(f"install plan {field} conflicts with manifest")
+    if frozenset(_string_array(install_plan.get("capabilities"), "install_plan.capabilities")) != capabilities:
+        raise RuntimeError("install plan capabilities conflict with manifest")
+    if _string_array(install_plan.get("required_services"), "install_plan.required_services") != required_services:
+        raise RuntimeError("install plan required services conflict with manifest")
+    raw_services = install_plan.get("services")
+    if not isinstance(raw_services, list) or not all(isinstance(item, Mapping) for item in raw_services):
+        raise RuntimeError("install plan services must be an array of objects")
+    service_units: dict[str, str] = {}
+    for item in raw_services:
+        name = str(item.get("name", ""))
+        unit = str(item.get("unit", ""))
+        if not name or not unit or name in service_units:
+            raise RuntimeError("install plan contains an invalid service entry")
+        service_units[name] = unit
+    if tuple(service_units) != required_services:
+        raise RuntimeError("install plan service entries conflict with required services")
+    if capabilities & INTERSERVER_CAPABILITIES and not TRANSPORT_MODULE_AVAILABLE:
+        raise RuntimeError("interserver transport module is missing for an interserver-capable node")
+
+    return {
+        "topology": topology,
+        "node_id": node_id,
+        "location": location,
+        "capabilities": capabilities,
+        "required_services": required_services,
+        "service_units": service_units,
+        "role": _compatibility_role_for_node(node_id),
+        "migration": {"state": "native", "source_schema": schema, "target_schema": schema},
+    }
+
+
+def contract_has(contract: Mapping[str, Any], capability: str) -> bool:
+    return capability in contract.get("capabilities", ())
+
+
+def installed_runtime_contract() -> dict[str, Any]:
+    manifest = read_json(MANIFEST_PATH, {})
+    return runtime_contract(manifest if isinstance(manifest, Mapping) else {}, parse_env())
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -229,6 +506,20 @@ def recent_observation(payload: Any, *, max_age_seconds: int) -> dict[str, Any]:
     return payload if age is not None and age <= max_age_seconds else {}
 
 
+def release_scoped_observation(payload: dict[str, Any], installed_at: str) -> dict[str, Any]:
+    """Exclude health evidence collected before the active release was installed."""
+
+    if not payload or not installed_at:
+        return payload
+    observed = parse_iso_datetime(str(payload.get("observed_at", "")))
+    release_started = parse_iso_datetime(installed_at)
+    if release_started is None:
+        return payload
+    if observed is None or observed < release_started:
+        return {}
+    return payload
+
+
 def run(args: list[str], *, timeout: int = 15, check: bool = False, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(args, input=input_text, text=True, capture_output=True, timeout=timeout, check=check)
@@ -269,32 +560,6 @@ def sha256_file(path: Path) -> str:
                 digest.update(chunk)
     except OSError:
         return ""
-    return digest.hexdigest()
-
-
-def release_tree_digest(path: Path) -> str:
-    """Match install.sh's digest while excluding derived Python bytecode."""
-    try:
-        files = sorted(
-            (
-                entry
-                for entry in path.rglob("*")
-                if entry.is_file()
-                and not entry.is_symlink()
-                and entry.suffix not in {".pyc", ".pyo"}
-                and "__pycache__" not in entry.parts
-            ),
-            key=lambda entry: entry.relative_to(path).as_posix().encode("utf-8"),
-        )
-    except OSError:
-        return ""
-    digest = hashlib.sha256()
-    for entry in files:
-        file_digest = sha256_file(entry)
-        if not file_digest:
-            return ""
-        relative = entry.relative_to(path).as_posix()
-        digest.update(f"{file_digest}  ./{relative}\n".encode("utf-8"))
     return digest.hexdigest()
 
 
@@ -474,7 +739,7 @@ def journal_problem_events(minutes: int) -> tuple[list[tuple[float, str]], str]:
     return events, ""
 
 
-def _private_reject_policy(config: Any, manifest: dict[str, Any]) -> dict[str, Any]:
+def _private_reject_policy(config: Any, manifest: dict[str, Any], contract: Mapping[str, Any]) -> dict[str, Any]:
     rules = config.get("route", {}).get("rules", []) if isinstance(config, dict) else []
     if not isinstance(rules, list):
         rules = []
@@ -497,13 +762,13 @@ def _private_reject_policy(config: Any, manifest: dict[str, Any]) -> dict[str, A
         and rule.get("method") == "default"
         and rule.get("no_drop") is True
     ]
-    role = str(manifest.get("manifest", {}).get("role", ""))
     drift = str(manifest.get("drift", "unknown"))
     ordered = any(index < catchall_index for index in guard_indexes)
-    verified = role == "ru-gateway" and drift == "none" and ordered
+    has_router = contract_has(contract, CAP_ROUTER)
+    verified = has_router and drift == "none" and ordered
     reason = ""
-    if role != "ru-gateway":
-        reason = f"installed role is {role or 'unknown'}"
+    if not has_router:
+        reason = f"installed role is {contract.get('role') or 'unknown'}"
     elif drift != "none":
         reason = f"installed drift is {drift}"
     elif not ordered:
@@ -544,7 +809,12 @@ def private_reject_correlations(since: str, inbound: str, targets: Iterable[str]
         raise ValueError("at least one private reject target is required")
 
     manifest = manifest_snapshot()
-    policy = _private_reject_policy(read_json(SINGBOX_CONFIG_PATH, {}), manifest)
+    raw_manifest = manifest.get("manifest", {})
+    try:
+        contract = runtime_contract(raw_manifest if isinstance(raw_manifest, Mapping) else {}, parse_env())
+    except RuntimeError:
+        contract = {}
+    policy = _private_reject_policy(read_json(SINGBOX_CONFIG_PATH, {}), manifest, contract)
     evidence = {
         target: {"target": target, "correlated": False, "correlation_id": ""}
         for target in normalized_targets
@@ -658,10 +928,12 @@ def fresh_log_since() -> tuple[str, int]:
 
 
 def installed_at_value() -> str:
-    try:
-        return (ROOT / "installed_at").read_text(encoding="utf-8").strip()
-    except OSError:
-        return ""
+    for name in ("installed-at", "installed_at"):
+        try:
+            return (ROOT / name).read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+    return ""
 
 
 def service_exec_path(service: str) -> str:
@@ -674,10 +946,15 @@ def service_exec_path(service: str) -> str:
 
 def manifest_snapshot() -> dict[str, Any]:
     manifest = read_json(MANIFEST_PATH, {})
-    entries = manifest.get("artifacts", {}) if isinstance(manifest, dict) else {}
-    if not entries and isinstance(manifest, dict):
-        legacy = manifest.get("artifact_sha256", {})
-        entries = {name: {"sha256": digest, "install_path": ""} for name, digest in legacy.items()}
+    manifest_mapping = manifest if isinstance(manifest, Mapping) else {}
+    env = parse_env()
+    legacy = _adapt_legacy_runtime_manifest(manifest_mapping, env)
+    try:
+        legacy_contract = legacy.get("contract") if legacy is not None else None
+        contract = dict(legacy_contract) if isinstance(legacy_contract, Mapping) else runtime_contract(manifest_mapping, env)
+    except RuntimeError:
+        contract = {}
+    entries = legacy["artifacts"] if legacy is not None else manifest_mapping.get("artifacts", {})
     checked: dict[str, dict[str, str]] = {}
     mismatches: list[str] = []
     for name, raw_entry in sorted(entries.items()):
@@ -735,9 +1012,10 @@ def manifest_snapshot() -> dict[str, Any]:
     if release_tree["state"] != "ok":
         mismatches.append("release-tree")
 
-    role = str(manifest.get("role", "")) if isinstance(manifest, dict) else ""
+    manifest_capabilities = frozenset(str(value) for value in contract.get("capabilities", ()))
+    has_operator_state = CAP_WEB_ADMIN in manifest_capabilities
     operator: dict[str, Any] = {"state": "not-applicable"}
-    if role == "ru-gateway":
+    if has_operator_state:
         operator_manifest = read_json(OPERATOR_MANIFEST_PATH, {})
         actual_hashes = {
             "base_sha256": sha256_file(ROOT / "sing-box.base.json"),
@@ -757,7 +1035,7 @@ def manifest_snapshot() -> dict[str, Any]:
         }
         if operator["state"] != "ok":
             mismatches.append("operator-state")
-    elif role == "foreign-exit":
+    elif contract.get("node_id") == NODE_EXIT:
         expected_config = str(manifest.get("config_sha256", ""))
         active_config = sha256_file(SINGBOX_CONFIG_PATH)
         operator = {
@@ -766,7 +1044,7 @@ def manifest_snapshot() -> dict[str, Any]:
         }
         if operator["state"] != "ok":
             mismatches.append("effective-config")
-    manifest_valid = bool(manifest) and int(manifest.get("schema_version", 0)) >= 2
+    manifest_valid = bool(legacy.get("drift_manifest_valid")) if legacy is not None else bool(contract)
     return {
         "manifest": manifest,
         "files": checked,
@@ -869,8 +1147,8 @@ def _wireguard_policy_route_present(
     return result.returncode == 0 and any(interface in line for line in result.stdout.splitlines())
 
 
-def wireguard_policy_snapshot(env: Mapping[str, str], role: str) -> dict[str, Any]:
-    if role != "ru-gateway":
+def wireguard_policy_snapshot(env: Mapping[str, str], *, managed: bool) -> dict[str, Any]:
+    if not managed:
         return {"managed": False, "ok": True, "checks": {}, "missing": []}
     try:
         spec = wireguard_policy_spec(env)
@@ -899,7 +1177,7 @@ def wireguard_policy_snapshot(env: Mapping[str, str], role: str) -> dict[str, An
 
 def apply_wireguard_policy(env: Mapping[str, str]) -> dict[str, Any]:
     spec = wireguard_policy_spec(env)
-    before = wireguard_policy_snapshot(env, "ru-gateway")
+    before = wireguard_policy_snapshot(env, managed=True)
     commands = {
         "ipv4_peer_route": ["ip", "-4", "route", "replace", f"{spec['ipv4_peer']}/32", "dev", str(spec["interface"])],
         "ipv6_peer_route": ["ip", "-6", "route", "replace", f"{spec['ipv6_peer']}/128", "dev", str(spec["interface"])],
@@ -915,7 +1193,7 @@ def apply_wireguard_policy(env: Mapping[str, str]) -> dict[str, Any]:
         result = run(command, timeout=10)
         if result.returncode != 0:
             raise RuntimeError(f"unable to apply WireGuard policy {name}: {result.stderr.strip()[:240]}")
-    after = wireguard_policy_snapshot(env, "ru-gateway")
+    after = wireguard_policy_snapshot(env, managed=True)
     if not after.get("ok"):
         raise RuntimeError(f"WireGuard policy did not converge: {','.join(after.get('missing', []))}")
     return {**after, "changed": bool(before.get("missing"))}
@@ -964,11 +1242,18 @@ def apply_interface_qdisc(interface: str) -> dict[str, Any]:
     return {"changed": True, **after}
 
 
-def apply_qdisc_profile() -> dict[str, Any]:
+def apply_qdisc_profile(*, include_overlay: bool = True) -> dict[str, Any]:
     interface = default_interface()
     if not interface:
         raise RuntimeError("default interface is unavailable")
     public = apply_interface_qdisc(interface)
+    result = {
+        "interface": interface,
+        "changed": public["changed"],
+        **{name: value for name, value in public.items() if name != "changed"},
+    }
+    if not include_overlay:
+        return result
     overlay_interface = parse_env().get("WG_INTERFACE", "").strip() or "wg0"
     if overlay_interface == interface:
         overlay = public
@@ -976,21 +1261,26 @@ def apply_qdisc_profile() -> dict[str, Any]:
         overlay = apply_interface_qdisc(overlay_interface)
     else:
         overlay = {"changed": False, **qdisc_snapshot("")}
-    return {
-        "interface": interface,
-        "changed": public["changed"] or overlay["changed"],
-        **{name: value for name, value in public.items() if name != "changed"},
-        "overlay_interface": overlay_interface,
-        **{f"overlay_{name}": value for name, value in overlay.items() if name != "changed"},
-    }
+    result.update(
+        {
+            "changed": public["changed"] or overlay["changed"],
+            "overlay_interface": overlay_interface,
+            **{f"overlay_{name}": value for name, value in overlay.items() if name != "changed"},
+        }
+    )
+    return result
 
 
 def apply_network_profile() -> dict[str, Any]:
-    qdisc = apply_qdisc_profile()
     env = parse_env()
     manifest = read_json(MANIFEST_PATH, {})
-    role = str(manifest.get("role") or env.get("ROLE") or "unknown")
-    policy = apply_wireguard_policy(env) if role == "ru-gateway" else wireguard_policy_snapshot(env, role)
+    contract = runtime_contract(manifest if isinstance(manifest, Mapping) else {}, env)
+    has_interserver = bool(contract.get("capabilities", frozenset()) & INTERSERVER_CAPABILITIES)
+    qdisc = apply_qdisc_profile(include_overlay=has_interserver)
+    if contract_has(contract, CAP_INTERSERVER_CLIENT):
+        policy = apply_wireguard_policy(env)
+    else:
+        policy = {"managed": False, "ok": True, "not_applicable": True}
     return {
         "changed": bool(qdisc.get("changed") or policy.get("changed")),
         "qdisc": qdisc,
@@ -1020,7 +1310,7 @@ def tcp_adaptation_snapshot(interface: str, overlay_interface: str = "") -> dict
     return values
 
 
-def managed_network_profile(path: Path = SYSCTL_PATH) -> dict[str, Any]:
+def managed_network_profile(path: Path = SYSCTL_PATH, *, include_overlay: bool = True) -> dict[str, Any]:
     field_names = {
         "net.core.rmem_default": "udp_rmem_default",
         "net.core.rmem_max": "udp_rmem_max",
@@ -1044,15 +1334,21 @@ def managed_network_profile(path: Path = SYSCTL_PATH) -> dict[str, Any]:
             values[field] = int(raw_value.strip())
         except ValueError:
             continue
-    return {
+    profile = {
         **values,
         "qdisc": FQ_KIND,
         "qdisc_limit": FQ_PACKET_LIMIT,
         "qdisc_flow_limit": FQ_FLOW_LIMIT,
-        "overlay_qdisc": FQ_KIND,
-        "overlay_qdisc_limit": FQ_PACKET_LIMIT,
-        "overlay_qdisc_flow_limit": FQ_FLOW_LIMIT,
     }
+    if include_overlay:
+        profile.update(
+            {
+                "overlay_qdisc": FQ_KIND,
+                "overlay_qdisc_limit": FQ_PACKET_LIMIT,
+                "overlay_qdisc_flow_limit": FQ_FLOW_LIMIT,
+            }
+        )
+    return profile
 
 
 def network_profile_mismatches(actual: dict[str, Any], expected: dict[str, Any]) -> list[str]:
@@ -2304,11 +2600,11 @@ def transport_state_snapshot(path: Path = TRANSPORT_STATE_PATH) -> dict[str, Any
     }
 
 
-def interserver_transport_snapshot(role: str, env: dict[str, str]) -> dict[str, Any]:
+def interserver_transport_snapshot(contract: Mapping[str, Any], env: dict[str, str]) -> dict[str, Any]:
     config = read_json(SINGBOX_CONFIG_PATH, {})
     if not isinstance(config, dict):
         return {"configured": False, "reason": "sing-box config is unreadable"}
-    if role == "ru-gateway":
+    if contract_has(contract, CAP_INTERSERVER_CLIENT):
         outbounds = {
             str(item.get("tag", "")): item
             for item in config.get("outbounds", [])
@@ -2349,7 +2645,7 @@ def interserver_transport_snapshot(role: str, env: dict[str, str]) -> dict[str, 
             "selection": selection,
             "adaptive_state": adaptive_state,
         }
-    if role == "foreign-exit":
+    if contract_has(contract, CAP_INTERSERVER_SERVER):
         inbound = next(
             (item for item in config.get("inbounds", []) if isinstance(item, dict) and item.get("tag") == "interserver-hy2-in"),
             {},
@@ -2375,9 +2671,9 @@ def interserver_transport_snapshot(role: str, env: dict[str, str]) -> dict[str, 
             "mode": "hysteria2-egress",
             "port": port,
             "listening": listening,
-            "source_restricted_to": env.get("RU_PUBLIC_IP", ""),
+            "source_restricted_to": env.get("GATEWAY_PUBLIC_IP", ""),
         }
-    return {"configured": False, "reason": f"unsupported role: {role}"}
+    return {"configured": False, "reason": "interserver transport is not required by node capabilities"}
 
 
 def public_front_snapshot(minutes: int, source: str | None = None, *, live_probes: bool = False) -> dict[str, Any]:
@@ -2390,6 +2686,9 @@ def public_front_snapshot(minutes: int, source: str | None = None, *, live_probe
         except ValueError as exc:
             raise ValueError("source must be an IP address") from exc
     env = parse_env()
+    contract = installed_runtime_contract()
+    if not contract_has(contract, CAP_PUBLIC_FRONT):
+        raise RuntimeError("public front diagnostics are not applicable to this node")
     port = int(env.get("RU_LISTEN_PORT", "443") or 443)
     xray_lines = journal_filtered_lines("vpn-stack-xray.service", minutes, XRAY_FRONT_LOG_GREP)
     accepted_tcp = sum("accepted tcp:" in line for line in xray_lines)
@@ -2407,7 +2706,7 @@ def public_front_snapshot(minutes: int, source: str | None = None, *, live_probe
     services = {"xray": service_state("vpn-stack-xray.service"), "nftables": service_state(NFTABLES_SERVICE)}
     observation = front_observation(front)
     front_verdict = public_front_verdict(services["xray"], front)
-    probes = run_probes(env, "ru-gateway", "light") if live_probes else {"profile": "none", "ok": None, "requirements": {}}
+    probes = run_probes(env, contract, "light") if live_probes else {"profile": "none", "ok": None, "requirements": {}}
     path_verdict = "verified" if probes.get("ok") is True else "failed" if probes.get("ok") is False else "inconclusive"
     overall = "failed" if "failed" in {front_verdict, path_verdict} else "degraded" if front_verdict == "degraded" else front_verdict
     payload = {
@@ -2701,7 +3000,17 @@ def release_gate_ok(probes: dict[str, Any]) -> bool:
     return probes.get("ok") is True
 
 
-def run_probes(env: dict[str, str], role: str, profile: str) -> dict[str, Any]:
+def _configured_node_ip(env: Mapping[str, str], contract: Mapping[str, Any], node_id: str) -> str:
+    if node_id == NODE_EXIT:
+        return str(env.get("EXIT_PUBLIC_IP") or "")
+    return str(env.get("GATEWAY_PUBLIC_IP") or "")
+
+
+def run_probes(env: dict[str, str], contract: Mapping[str, Any], profile: str) -> dict[str, Any]:
+    topology = str(contract.get("topology", TOPOLOGY_DUAL))
+    node_id = str(contract.get("node_id", ""))
+    has_router = contract_has(contract, CAP_ROUTER)
+    has_interserver_client = contract_has(contract, CAP_INTERSERVER_CLIENT)
     wg_interface = env.get("WG_INTERFACE", "wg0")
     targets = ["https://www.google.com/generate_204"]
     required_targets = tuple(targets)
@@ -2711,9 +3020,9 @@ def run_probes(env: dict[str, str], role: str, profile: str) -> dict[str, Any]:
         observed_targets = ACCEPTANCE_OBSERVED_TARGETS
         targets = [*required_targets, *observed_targets]
     paths = {"direct": {}}
-    if role == "ru-gateway":
+    if has_router:
         paths["router"] = {"proxy": "socks5h://127.0.0.1:2080"}
-        if profile == "acceptance":
+        if profile == "acceptance" and has_interserver_client:
             paths["via_wg"] = {"interface": wg_interface}
     domain_matrix = probe_url_matrix([(url, {}) for url in targets], paths)
     direct = domain_matrix["direct"]
@@ -2742,9 +3051,10 @@ def run_probes(env: dict[str, str], role: str, profile: str) -> dict[str, Any]:
         "router": router,
     }
     if profile != "acceptance":
-        if role == "ru-gateway":
-            required_paths = {"foreign_domains_via_router": router}
-            if not all(item["ok"] for item in router):
+        if has_router:
+            router_requirement = "foreign_domains_via_router" if has_interserver_client else "domains_via_router"
+            required_paths = {router_requirement: router}
+            if has_interserver_client and not all(item["ok"] for item in router):
                 via_wg = probe_url_matrix(
                     [(url, {}) for url in required_targets],
                     {"via_wg": {"interface": wg_interface}},
@@ -2752,9 +3062,9 @@ def run_probes(env: dict[str, str], role: str, profile: str) -> dict[str, Any]:
                 result["via_wg"] = via_wg
                 required_paths["foreign_domains_via_wg"] = via_wg
         else:
-            required_paths = {"foreign_direct": direct}
+            required_paths = {"egress_direct": direct}
         result["requirements"] = {name: all(item["ok"] for item in items) for name, items in required_paths.items()}
-        required_names = {"foreign_direct"} if role != "ru-gateway" else {"foreign_domains_via_router"}
+        required_names = {"egress_direct"} if not has_router else {router_requirement}
         result["ok"] = all(result["requirements"].get(name) is True for name in required_names)
         return result
     ipv4_literal_url = "https://1.1.1.1/cdn-cgi/trace"
@@ -2774,14 +3084,19 @@ def run_probes(env: dict[str, str], role: str, profile: str) -> dict[str, Any]:
         matches = bool(expected_ip) and observed_ip == expected_ip
         return {**probe, "expected_ip": expected_ip, "identity_match": matches, "ok": probe.get("ok") is True and matches}
 
-    direct_expected = env.get("RU_PUBLIC_IP", "") if role == "ru-gateway" else env.get("FOREIGN_PUBLIC_IP", "")
+    direct_expected = _configured_node_ip(env, contract, node_id)
     identities: dict[str, dict[str, Any]] = {"direct": expected_identity(probe_identity(), direct_expected)}
-    if role == "ru-gateway":
-        foreign_ip = env.get("FOREIGN_PUBLIC_IP", "")
-        identities["via_wg"] = expected_identity(probe_identity(interface=wg_interface), foreign_ip)
-        identities["router"] = expected_identity(probe_identity(proxy="socks5h://127.0.0.1:2080"), foreign_ip)
-    private_reject = probe_private_reject("socks5h://127.0.0.1:2080") if role == "ru-gateway" else {"ok": True, "not_applicable": True}
-    if role == "ru-gateway":
+    if has_router:
+        routed_egress_ip = (
+            _configured_node_ip(env, contract, NODE_EXIT)
+            if topology == TOPOLOGY_DUAL
+            else _configured_node_ip(env, contract, NODE_GATEWAY)
+        )
+        identities["router"] = expected_identity(probe_identity(proxy="socks5h://127.0.0.1:2080"), routed_egress_ip)
+        if has_interserver_client:
+            identities["via_wg"] = expected_identity(probe_identity(interface=wg_interface), routed_egress_ip)
+    private_reject = probe_private_reject("socks5h://127.0.0.1:2080") if has_router else {"ok": True, "not_applicable": True}
+    if has_interserver_client:
         hysteria_candidate = transport_candidate_probe(TRANSPORT_HY2_TAG)
         required_paths: dict[str, list[dict[str, Any]]] = {
             "ru_direct_identity": [identities["direct"]],
@@ -2795,12 +3110,21 @@ def run_probes(env: dict[str, str], role: str, profile: str) -> dict[str, Any]:
             "hysteria_candidate_reachable": [hysteria_candidate],
             "private_fake_reject": [private_reject],
         }
+    elif has_router:
+        required_paths = {
+            "gateway_direct_identity": [identities["direct"]],
+            "domains_via_router": required_domain_results(router),
+            "ipv4_literal_via_router": [literal_router[0]],
+            "ipv6_literal_via_router": [literal_router[1]],
+            "egress_identities": [identities["router"]],
+            "private_fake_reject": [private_reject],
+        }
     else:
         required_paths = {
-            "foreign_domains": required_domain_results(direct),
+            "egress_domains": required_domain_results(direct),
             "ipv4_literal": [literal_direct[0]],
             "ipv6_literal": [literal_direct[1]],
-            "foreign_identity": [identities["direct"]],
+            "egress_identity": [identities["direct"]],
         }
     requirements = {name: all(item["ok"] for item in items) for name, items in required_paths.items()}
     gate_requirements = release_gate_requirements(requirements)
@@ -2824,15 +3148,15 @@ def run_probes(env: dict[str, str], role: str, profile: str) -> dict[str, Any]:
     return result
 
 
-def run_confirmed_probes(env: dict[str, str], role: str, profile: str) -> dict[str, Any]:
+def run_confirmed_probes(env: dict[str, str], contract: Mapping[str, Any], profile: str) -> dict[str, Any]:
     """Confirm an acceptance failure before it can reject or roll back a release."""
 
-    first = run_probes(env, role, profile)
+    first = run_probes(env, contract, profile)
     if profile != "acceptance" or release_gate_ok(first):
         first["confirmation"] = {"cycles": 1, "confirmed_failure": False, "recovered_on_retry": False}
         return first
     time.sleep(PROBE_CONFIRMATION_DELAY_SECONDS)
-    retry = run_probes(env, role, profile)
+    retry = run_probes(env, contract, profile)
     retry_passed = release_gate_ok(retry)
     retry["confirmation"] = {
         "cycles": 2,
@@ -3039,99 +3363,130 @@ def collect_runtime_facts(*, live_probes: bool = False, profile: str = "light", 
     env = parse_env()
     manifest_data = manifest_snapshot()
     manifest = manifest_data.get("manifest", {})
-    role = str(manifest.get("role") or env.get("ROLE") or "unknown")
+    contract_error = ""
+    try:
+        contract = runtime_contract(manifest if isinstance(manifest, Mapping) else {}, env)
+    except RuntimeError as exc:
+        contract_error = str(exc)
+        contract = {
+            "topology": "",
+            "node_id": "",
+            "location": "",
+            "capabilities": frozenset(),
+            "required_services": (),
+            "service_units": {},
+            "role": "unknown",
+            "migration": {"state": "invalid", "message": contract_error},
+        }
+    topology = str(contract.get("topology", ""))
+    node_id = str(contract.get("node_id", ""))
+    location = str(contract.get("location", ""))
+    capabilities = frozenset(str(value) for value in contract.get("capabilities", ()))
+    role = str(contract.get("role", "unknown"))
+    has_interserver = bool(capabilities & INTERSERVER_CAPABILITIES)
+    has_interserver_client = CAP_INTERSERVER_CLIENT in capabilities
+    has_interserver_server = CAP_INTERSERVER_SERVER in capabilities
+    has_public_front = CAP_PUBLIC_FRONT in capabilities
     wg_interface = env.get("WG_INTERFACE", "wg0")
     public_iface = default_interface()
     port = int(env.get("RU_LISTEN_PORT", "443") or 443)
-    services = {
-        "wireguard": service_state(f"wg-quick@{wg_interface}.service"),
-        "nftables": service_state(NFTABLES_SERVICE),
-        "sing-box": service_state("sing-box.service"),
-        "resolver": service_state("systemd-resolved.service"),
-        "xray": service_state("vpn-stack-xray.service"),
-        "admin": service_state("vpn-stack-admin.service"),
-        "health_timer": service_state("vpn-stack-health.timer"),
-        "transport": service_state("vpn-stack-transport.service"),
-    }
+
+    services = {name: "not-applicable" for name in SERVICE_UNIT_DEFAULTS}
+    service_units = contract.get("service_units", {}) if isinstance(contract.get("service_units"), Mapping) else {}
+    for name in contract.get("required_services", ()):
+        unit = str(service_units.get(name, SERVICE_UNIT_DEFAULTS.get(name, ""))).format(wg_interface=wg_interface)
+        services[str(name)] = service_state(unit) if unit else "unknown"
+
     fresh_since, fresh_window_minutes = fresh_log_since()
     if not full_logs and fresh_window_minutes > 5:
         fresh_since, fresh_window_minutes = "5 minutes ago", 5
     maintenance = maintenance_snapshot() if include_maintenance else {}
     logs, fresh_logs, logs_collector_error = summarize_problem_windows(full_logs=full_logs, fresh_since=fresh_since)
-    front = tcp_front_snapshot(port) if role == "ru-gateway" else {}
-    probes = run_confirmed_probes(env, role, profile) if live_probes else {"profile": "none", "ok": None}
-    transport = {"interserver": interserver_transport_snapshot(role, env)}
-    if role == "ru-gateway":
+    front = tcp_front_snapshot(port) if has_public_front else {}
+    probes = run_confirmed_probes(env, contract, profile) if live_probes and not contract_error else {"profile": "none", "ok": None}
+    transport: dict[str, Any] = {}
+    if has_interserver:
+        transport["interserver"] = interserver_transport_snapshot(contract, env)
+    if has_public_front:
         transport["udp_443_policy"] = udp_443_policy()
         transport["public_client"] = public_hy2_snapshot(port)
-    tcp_adaptation = tcp_adaptation_snapshot(public_iface, wg_interface)
+    tcp_adaptation = tcp_adaptation_snapshot(public_iface, wg_interface if has_interserver else "")
     resolver = resolver_snapshot()
     root_filesystem = root_filesystem_snapshot()
     conntrack = conntrack_snapshot(full_logs=full_logs)
-    if role == "ru-gateway":
+    if has_public_front:
         conntrack["front_bypass"] = xray_conntrack_bypass_snapshot(port)
-    expected_network_profile = managed_network_profile()
+    expected_network_profile = managed_network_profile(include_overlay=has_interserver)
     actual_network_profile = {**tcp_adaptation, "conntrack_max": conntrack.get("max", 0)}
     profile_mismatches = network_profile_mismatches(actual_network_profile, expected_network_profile)
-    wireguard_policy = wireguard_policy_snapshot(env, role)
-    health_state = read_json(HEALTH_STATE_PATH, {})
-    recent_front_interval = recent_observation(
-        health_state.get("front_interval", {}),
-        max_age_seconds=300,
+    wireguard_policy = (
+        wireguard_policy_snapshot(env, managed=True)
+        if has_interserver_client
+        else {"managed": False, "ok": True, "not_applicable": True}
     )
+    health_state = read_json(HEALTH_STATE_PATH, {})
+    recent_front_interval = recent_observation(health_state.get("front_interval", {}), max_age_seconds=300)
+    release_installed_at = installed_at_value()
+    recent_front_interval = release_scoped_observation(recent_front_interval, release_installed_at)
     if front and recent_front_interval:
         front["recent_interval"] = recent_front_interval
-    required = ["wireguard", "nftables", "sing-box", "resolver"] + (["xray", "transport"] if role == "ru-gateway" else [])
-    reasons = [f"{name}={services[name]}" for name in required if services.get(name) != "active"]
-    if manifest_data["drift"] != "none":
-        reasons.append(f"drift={manifest_data['drift']}")
+
+    reasons = ([f"contract={contract_error}"] if contract_error else [])
+    reasons.extend(
+        f"{name}={services.get(name, 'unknown')}"
+        for name in contract.get("required_services", ())
+        if services.get(name) != "active"
+    )
+    if manifest_data.get("drift") != "none":
+        reasons.append(f"drift={manifest_data.get('drift', 'unknown')}")
     if profile_mismatches:
         reasons.append(f"network_profile={','.join(profile_mismatches)}")
     if wireguard_policy.get("managed") and not wireguard_policy.get("ok"):
         reasons.append(f"wireguard_policy={','.join(wireguard_policy.get('missing', [])) or 'invalid'}")
     if not resolver.get("managed_stub"):
         reasons.append(f"resolver_stub={resolver.get('resolv_conf_target') or 'missing'}")
-    if live_probes and not release_gate_ok(probes):
+    if live_probes and not contract_error and not release_gate_ok(probes):
         failed = ",".join(failed_requirements(probes))
         reasons.append(f"live_probes_failed:{failed}" if failed else "live_probes_failed")
-    if role == "ru-gateway" and transport.get("udp_443_policy") != "routed":
+    if has_public_front and transport.get("udp_443_policy") != "routed":
         reasons.append(f"udp_443_policy={transport.get('udp_443_policy')}")
     public_client_transport = transport.get("public_client", {})
-    if role == "ru-gateway":
+    if has_public_front:
         for requirement in ("configured", "listening", "firewall"):
             if public_client_transport.get(requirement) is not True:
                 reasons.append(f"public_hy2_{requirement}=false")
-    if role == "ru-gateway" and not conntrack.get("front_bypass", {}).get("active"):
-        reasons.append("xray_conntrack_bypass=inactive")
+        if not conntrack.get("front_bypass", {}).get("active"):
+            reasons.append("xray_conntrack_bypass=inactive")
     interserver = transport.get("interserver", {})
-    if not interserver.get("configured"):
+    if has_interserver and not interserver.get("configured"):
         reasons.append("interserver_transport=not-configured")
-    if role == "foreign-exit" and not interserver.get("listening"):
+    if has_interserver_server and not interserver.get("listening"):
         reasons.append("interserver_transport=not-listening")
-    if role == "ru-gateway" and not interserver.get("selection", {}).get("available"):
+    if has_interserver_client and not interserver.get("selection", {}).get("available"):
         reasons.append("interserver_overlay_endpoint=unavailable")
-    adaptive_state = interserver.get("adaptive_state", {})
-    adaptation_failure, adaptation_degradation = classify_interserver_adaptation(adaptive_state)
-    if role == "ru-gateway" and adaptation_failure:
-        reasons.append(adaptation_failure)
+    adaptation_failure = adaptation_degradation = ""
+    if has_interserver_client:
+        adaptation_failure, adaptation_degradation = classify_interserver_adaptation(interserver.get("adaptive_state", {}))
+        if adaptation_failure:
+            reasons.append(adaptation_failure)
+
     capability_failures = [name for name in failed_requirements(probes) if name in EXTERNAL_CAPABILITY_REQUIREMENTS] if live_probes else []
     transport_failures = [name for name in failed_requirements(probes) if name in OPTIONAL_TRANSPORT_REQUIREMENTS] if live_probes else []
     server_path = "failed" if reasons else "verified" if live_probes else "inconclusive"
     host_integrity = str(root_filesystem.get("verdict", "inconclusive"))
     client_observation = front_observation(front, recent_front_interval) if front else "not-applicable"
     closing_churn = closing_churn_observation(front) if front else "not-applicable"
-    public_front = "not-applicable"
-    public_quic = "not-applicable"
-    if role == "ru-gateway":
-        public_front = public_front_verdict(services["xray"], front, recent_front_interval)
-        public_quic = "verified" if all(public_client_transport.get(name) is True for name in ("configured", "listening", "firewall")) else "failed"
+    public_front = public_front_verdict(services["xray"], front, recent_front_interval) if has_public_front else "not-applicable"
+    public_quic = (
+        "verified" if all(public_client_transport.get(name) is True for name in ("configured", "listening", "firewall")) else "failed"
+    ) if has_public_front else "not-applicable"
     external_capabilities = "degraded" if capability_failures else "verified" if live_probes else "inconclusive"
     degradations = ([f"external_capabilities_failed:{','.join(capability_failures)}"] if capability_failures else [])
     if public_front == "degraded":
         degradations.append(f"public_front={client_observation}")
     if transport_failures:
         degradations.append(f"transport_capability_failed:{','.join(transport_failures)}")
-    if role == "ru-gateway" and adaptation_degradation:
+    if adaptation_degradation:
         degradations.append(adaptation_degradation)
     if host_integrity in {"degraded", "inconclusive"}:
         degradations.append(f"host_integrity={host_integrity}:{root_filesystem.get('reason') or 'unknown'}")
@@ -3140,30 +3495,36 @@ def collect_runtime_facts(*, live_probes: bool = False, profile: str = "light", 
     if recent_conntrack_full:
         degradations.append(f"conntrack_table_full_5m={recent_conntrack_full}")
     overall = "failed" if "failed" in {server_path, public_front, public_quic, host_integrity} else "degraded" if degradations or client_observation in {"client_specific", "degraded"} else "verified" if server_path == "verified" else "inconclusive"
-    healthy_exits = int(
-        services.get("sing-box") == "active"
-        and (not live_probes or release_gate_ok(probes))
-    )
+    healthy_exits = int(services.get("sing-box") == "active" and (not live_probes or release_gate_ok(probes)))
+    interface_names = (public_iface, wg_interface) if has_interserver else (public_iface,)
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": utc_now(),
         "deployment": env.get("DEPLOY_NAME", ""),
+        "topology": topology,
+        "node_id": node_id,
+        "location": location,
+        "capabilities": sorted(capabilities),
         "role": role,
+        "migration": dict(contract.get("migration", {})),
+        "contract_error": contract_error,
+        "required_services": list(contract.get("required_services", ())),
+        "service_units": dict(service_units),
         "release": {
-            "version": manifest.get("version", ""),
-            "release_id": manifest.get("release_id", ""),
-            "policy_version": manifest.get("policy_version", ""),
-            "manifest_schema": manifest.get("schema_version", 0),
-            "runtime": manifest.get("runtime", {}),
-            "installed_at": installed_at_value(),
+            "version": manifest.get("version", "") if isinstance(manifest, Mapping) else "",
+            "release_id": manifest.get("release_id", "") if isinstance(manifest, Mapping) else "",
+            "policy_version": manifest.get("policy_version", "") if isinstance(manifest, Mapping) else "",
+            "manifest_schema": manifest.get("schema_version", 0) if isinstance(manifest, Mapping) else 0,
+            "runtime": manifest.get("runtime", {}) if isinstance(manifest, Mapping) else {},
+            "installed_at": release_installed_at,
         },
         "host": host_snapshot(public_iface),
         "storage": {"root_filesystem": root_filesystem},
         "services": services,
         "artifacts": manifest_data,
-        "wireguard": wireguard_snapshot(wg_interface),
+        "wireguard": wireguard_snapshot(wg_interface) if has_interserver else {},
         "network": {
-            "interfaces": interface_counters((public_iface, wg_interface)),
+            "interfaces": interface_counters(interface_names),
             "conntrack": conntrack,
             "tcp_adaptation": tcp_adaptation,
             "resolver": resolver,
@@ -3189,13 +3550,24 @@ def collect_runtime_facts(*, live_probes: bool = False, profile: str = "light", 
         },
         "maintenance": maintenance,
         "redundancy": {
-            "egress": {"available": False, "healthy_exits": healthy_exits, "reason": "single foreign egress configured"},
+            "egress": {"available": False, "healthy_exits": healthy_exits, "reason": "one egress node configured"},
             "transport": {
-                "available": bool(interserver.get("configured")),
+                "available": bool(interserver.get("configured")) if has_interserver else False,
                 "selected": selected_transport or (TRANSPORT_HY2_TAG if interserver.get("listening") else ""),
+                "not_applicable": not has_interserver,
             },
         },
-        "verdicts": {"server_path": server_path, "public_front": public_front, "public_quic": public_quic, "client_observation": client_observation, "closing_churn": closing_churn, "host_integrity": host_integrity, "external_capabilities": external_capabilities, "overall": overall, "reasons": reasons + degradations + ([f"host_integrity=failed:{root_filesystem.get('reason') or 'unknown'}"] if host_integrity == "failed" else [])},
+        "verdicts": {
+            "server_path": server_path,
+            "public_front": public_front,
+            "public_quic": public_quic,
+            "client_observation": client_observation,
+            "closing_churn": closing_churn,
+            "host_integrity": host_integrity,
+            "external_capabilities": external_capabilities,
+            "overall": overall,
+            "reasons": reasons + degradations + ([f"host_integrity=failed:{root_filesystem.get('reason') or 'unknown'}"] if host_integrity == "failed" else []),
+        },
     }
 
 
@@ -3221,6 +3593,16 @@ def diagnostics_snapshot(**snapshot_options: Any) -> dict[str, Any]:
     facts = collect_runtime_facts(**snapshot_options)
     generated_at = str(facts["generated_at"])
     role = str(facts.get("role", ""))
+    topology = str(facts.get("topology", ""))
+    node_id = str(facts.get("node_id", ""))
+    location = str(facts.get("location", ""))
+    raw_capabilities = facts.get("capabilities", ())
+    capabilities = tuple(str(value) for value in raw_capabilities) if isinstance(raw_capabilities, (list, tuple, set, frozenset)) else ()
+    migration = facts.get("migration", {}) if isinstance(facts.get("migration"), Mapping) else {}
+    capability_set = frozenset(capabilities)
+    has_interserver = bool(capability_set & INTERSERVER_CAPABILITIES)
+    has_public_front = CAP_PUBLIC_FRONT in capability_set
+    contract_error = str(facts.get("contract_error", ""))
     live_probes = bool(snapshot_options.get("live_probes", False))
     full_logs = bool(snapshot_options.get("full_logs", True))
     include_maintenance = bool(snapshot_options.get("include_maintenance", True))
@@ -3238,13 +3620,17 @@ def diagnostics_snapshot(**snapshot_options: Any) -> dict[str, Any]:
     transport = facts.get("transport", {}) if isinstance(facts.get("transport"), Mapping) else {}
     maintenance = facts.get("maintenance", {}) if isinstance(facts.get("maintenance"), Mapping) else {}
     collectors = {
-        "services": _collector_state(bool(services) and "unknown" not in services.values(), generated_at, "service state is unavailable"),
+        "services": _collector_state(bool(services) and not contract_error and "unknown" not in services.values(), generated_at, contract_error or "service state is unavailable"),
         "artifacts": _collector_state(
             isinstance(artifacts.get("manifest"), Mapping) and bool(artifacts.get("manifest")),
             generated_at,
             "render manifest is unavailable",
         ),
-        "wireguard": _collector_state(bool(wireguard.get("interface")) and wireguard.get("state") in {"up", "down"}, generated_at, "WireGuard state is unavailable"),
+        "wireguard": (
+            _collector_state(bool(wireguard.get("interface")) and wireguard.get("state") in {"up", "down"}, generated_at, "WireGuard state is unavailable")
+            if has_interserver
+            else CollectorState.not_applicable("node plan has no interserver overlay")
+        ),
         "route_probes": (
             _collector_state(probes.get("profile") not in {None, "none"}, generated_at, "live route probes were not collected")
             if live_probes
@@ -3257,8 +3643,16 @@ def diagnostics_snapshot(**snapshot_options: Any) -> dict[str, Any]:
             generated_at,
             "network state is incomplete",
         ),
-        "front": _collector_state(role != "ru-gateway" or "listening" in front, generated_at, "public front state is unavailable"),
-        "transport": _collector_state(isinstance(transport.get("interserver"), Mapping) and bool(transport.get("interserver")), generated_at, "interserver transport state is unavailable"),
+        "front": (
+            _collector_state("listening" in front, generated_at, "public front state is unavailable")
+            if has_public_front
+            else CollectorState.not_applicable("node plan has no public front")
+        ),
+        "transport": (
+            _collector_state(isinstance(transport.get("interserver"), Mapping) and bool(transport.get("interserver")), generated_at, "interserver transport state is unavailable")
+            if has_interserver
+            else CollectorState.not_applicable("node plan has no interserver transport")
+        ),
         "maintenance": (
             _collector_state(bool(maintenance) and not maintenance.get("collector_error"), generated_at, str(maintenance.get("collector_error") or "maintenance state was not collected"))
             if include_maintenance
@@ -3295,6 +3689,10 @@ def diagnostics_snapshot(**snapshot_options: Any) -> dict[str, Any]:
     payload = DiagnosticsSnapshot(
         generated_at=generated_at,
         deployment=str(facts.get("deployment", "")),
+        topology=topology,
+        node_id=node_id,
+        location=location,
+        capabilities=capabilities,
         role=role,
         host=dict(facts.get("host", {})),
         collectors=collectors,
@@ -3318,6 +3716,7 @@ def diagnostics_snapshot(**snapshot_options: Any) -> dict[str, Any]:
         maintenance=dict(maintenance),
         redundancy=dict(facts.get("redundancy", {})),
         component_verdicts={str(key): str(value) for key, value in verdicts.items() if key not in {"overall", "reasons"}},
+        migration=dict(migration),
     )
     return payload.to_dict()
 
@@ -3548,19 +3947,20 @@ def recovery_action_succeeded(action: str) -> bool:
 def recover(current: dict[str, Any]) -> str:
     services = current.get("services", {})
     interface = str(current.get("wireguard", {}).get("interface", "wg0"))
+    raw_capabilities = current.get("capabilities", ())
+    capabilities = frozenset(str(value) for value in raw_capabilities) if isinstance(raw_capabilities, (list, tuple, set, frozenset)) else frozenset()
+    required_services = current.get("required_services")
+    if not isinstance(required_services, list):
+        required_services = []
+    required = {str(name) for name in required_services}
+    configured_units = current.get("service_units", {}) if isinstance(current.get("service_units"), Mapping) else {}
     actions: list[str] = []
-    for key, unit in (
-        ("wireguard", f"wg-quick@{interface}.service"),
-        ("nftables", NFTABLES_SERVICE),
-        ("resolver", "systemd-resolved.service"),
-        ("sing-box", "sing-box.service"),
-        ("xray", "vpn-stack-xray.service"),
-        ("transport", "vpn-stack-transport.service"),
-    ):
-        allowed = {None, "active"}
-        if key in {"xray", "transport"} and current.get("role") == "foreign-exit":
-            allowed.add("inactive")
-        if services.get(key) not in allowed:
+    service_order = ("wireguard", "nftables", "resolver", "sing-box", "xray", "admin", "health_timer", "transport")
+    for key in service_order:
+        if key not in required or key not in services:
+            continue
+        unit = str(configured_units.get(key, SERVICE_UNIT_DEFAULTS[key])).format(wg_interface=interface)
+        if services.get(key) != "active":
             result = run(["systemctl", "restart", unit], timeout=30)
             actions.append(f"restart:{unit}:{'ok' if result.returncode == 0 else 'failed'}")
     if actions:
@@ -3570,7 +3970,7 @@ def recover(current: dict[str, Any]) -> str:
     wireguard_policy = network.get("wireguard_policy", {})
     if (
         artifacts_clean
-        and current.get("role") == "ru-gateway"
+        and CAP_INTERSERVER_CLIENT in capabilities
         and wireguard_policy.get("managed") is True
         and wireguard_policy.get("ok") is not True
     ):
@@ -3584,7 +3984,11 @@ def recover(current: dict[str, Any]) -> str:
     qdisc_mismatches.update(name for name in profile_mismatches if name.startswith("overlay_qdisc"))
     if artifacts_clean and qdisc_mismatches:
         try:
-            applied = apply_qdisc_profile()
+            applied = (
+                apply_qdisc_profile()
+                if capabilities & INTERSERVER_CAPABILITIES
+                else apply_qdisc_profile(include_overlay=False)
+            )
             return f"apply:qdisc:{'changed' if applied.get('changed') else 'ok'}"
         except RuntimeError:
             return "apply:qdisc:failed"
@@ -3592,16 +3996,20 @@ def recover(current: dict[str, Any]) -> str:
         result = run(["sysctl", "--load", str(SYSCTL_PATH)], timeout=30)
         return f"reload:sysctl:{'ok' if result.returncode == 0 else 'failed'}"
     bypass = network.get("conntrack", {}).get("front_bypass", {})
-    if artifacts_clean and current.get("role") == "ru-gateway" and not bypass.get("active"):
+    if artifacts_clean and CAP_PUBLIC_FRONT in capabilities and not bypass.get("active"):
         if not NFTABLES_CONFIG_PATH.is_file():
             return "reload:vpn-stack-nftables.service:invalid-config"
         result = run(["systemctl", "reload", NFTABLES_SERVICE], timeout=30)
         return f"reload:{NFTABLES_SERVICE}:{'ok' if result.returncode == 0 else 'failed'}"
-    if current.get("role") == "ru-gateway":
+    if CAP_ROUTER in capabilities:
         probes = current.get("probes", {})
-        wireguard_path_ok = probe_path_ok(probes, "via_wg", "foreign_domains_via_wg")
-        router_path_ok = probe_path_ok(probes, "router", "foreign_domains_via_router")
-        if wireguard_path_ok and not router_path_ok:
+        router_path_ok = probe_path_ok(probes, "foreign_domains_via_router", "domains_via_router")
+        if CAP_INTERSERVER_CLIENT in capabilities:
+            independent_path_ok = probe_path_ok(probes, "via_wg", "foreign_domains_via_wg")
+        else:
+            direct = probes.get("direct", [])
+            independent_path_ok = bool(direct) and all(isinstance(item, Mapping) and item.get("ok") is True for item in direct)
+        if independent_path_ok and not router_path_ok:
             result = run(["systemctl", "restart", "sing-box.service"], timeout=30)
             return f"restart:sing-box.service:{'ok' if result.returncode == 0 else 'failed'}"
     return "none"
@@ -3683,7 +4091,7 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "probe":
         env = parse_env()
         manifest = read_json(MANIFEST_PATH, {})
-        payload = run_confirmed_probes(env, str(manifest.get("role", "unknown")), args.profile)
+        payload = run_confirmed_probes(env, runtime_contract(manifest if isinstance(manifest, Mapping) else {}, env), args.profile)
     elif args.command == "client":
         payload = front_client_snapshot(args.source, args.since)
     elif args.command == "front":
@@ -3693,11 +4101,17 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "health":
         payload = health()
     elif args.command == "transport-reconcile":
+        if not contract_has(installed_runtime_contract(), CAP_INTERSERVER_CLIENT):
+            raise RuntimeError("interserver transport control is not applicable to this node")
         payload = reconcile_interserver_transport()
     elif args.command == "transport-watch":
+        if not contract_has(installed_runtime_contract(), CAP_INTERSERVER_CLIENT):
+            raise RuntimeError("interserver transport control is not applicable to this node")
         watch_interserver_transport()
         return 0
     elif args.command == "transport-select":
+        if not contract_has(installed_runtime_contract(), CAP_INTERSERVER_CLIENT):
+            raise RuntimeError("interserver transport control is not applicable to this node")
         env = parse_env()
         config = read_json(SINGBOX_CONFIG_PATH, {})
         controller = str(config.get("experimental", {}).get("clash_api", {}).get("external_controller", ""))

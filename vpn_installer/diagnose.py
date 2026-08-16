@@ -11,17 +11,49 @@ from .common import OUT_DIR, error_summary, print_header, warn, write_text
 from .config import load_existing_deployment_env
 from .log_classifier import BUCKETS, summarize_lines
 from .localnet import local_route_to_server, route_uses_self_tunnel
-from .models import ROLE_FOREIGN, ROLE_RU, AppError, RemoteTarget
+from .models import AppError, RemoteTarget
 from .prompts import select_existing_deployment
 from .remote import ssh_capture
 from .state import load_state
 from .client_artifacts import client_artifact_paths
 from .roles import requested_roles
 from .targets import build_target
+from .topology import NODE_EXIT, NODE_GATEWAY, NodePlan, TopologySpec, normalize_node_id
 from .workflows import prepare_remote_session
 
 _SOURCE_IP_RE = re.compile(r"^[0-9A-Fa-f:.]+$")
 PATH_DIAGNOSE_COMMAND_TIMEOUT = 180
+
+
+def _topology_from_env(env: dict[str, str]) -> TopologySpec:
+    try:
+        return TopologySpec.from_env(env)
+    except ValueError as exc:
+        raise AppError(f"Некорректная topology deployment: {exc}") from exc
+
+
+def _selected_node_plans(topology: TopologySpec, node_arg: str) -> tuple[NodePlan, ...]:
+    if node_arg == "all":
+        return tuple(topology.plan(node.node_id) for node in topology.nodes)
+    try:
+        return (topology.plan(normalize_node_id(node_arg)),)
+    except ValueError as exc:
+        raise AppError(str(exc)) from exc
+
+
+def _target_for_plan(plan: NodePlan, targets: list[RemoteTarget]) -> RemoteTarget:
+    matches = [target for target in targets if target.node_id == plan.node_id]
+    if len(matches) != 1:
+        raise AppError(
+            f"Диагностика ожидала один target для node={plan.node_id}, получено {len(matches)}."
+        )
+    return matches[0]
+
+
+def _node_label(plan: NodePlan) -> str:
+    if plan.node_id == NODE_GATEWAY:
+        return f"VPN gateway ({plan.location})"
+    return f"VPN exit ({plan.location})"
 
 
 def _diagnostic_run_dir(deployment_name: str) -> Path:
@@ -44,9 +76,9 @@ def diagnose_front_workflow(deployment: str | None, *, source_ip: str | None = N
         return diagnose_server_client_workflow(deployment, source_ip=source_ip, minutes=minutes, non_interactive=non_interactive)
     if not 5 <= minutes <= 1440:
         raise AppError("--minutes должен быть в диапазоне 5..1440")
-    deployment_name, _env_path, _env, _state, targets, _preflights = prepare_remote_session(
+    deployment_name, _env_path, env, _state, targets, _preflights = prepare_remote_session(
         deployment,
-        roles=[ROLE_RU],
+        roles=requested_roles(NODE_GATEWAY),
         require_privilege=True,
         validate_os=False,
         allow_create=False,
@@ -55,15 +87,17 @@ def diagnose_front_workflow(deployment: str | None, *, source_ip: str | None = N
         non_interactive=non_interactive,
         enforce_safe_route=False,
     )
+    gateway_plan = _topology_from_env(env).plan(NODE_GATEWAY)
+    gateway = _target_for_plan(gateway_plan, targets)
     report = ssh_capture(
-        targets[0],
+        gateway,
         f"/usr/bin/python3 /usr/local/lib/vpn-stack/vpn-stack-agent.py front --since {minutes} --live-probes",
         as_root=True,
     )
     payload = _decode_agent_snapshot(report, "front")
     output_dir = _diagnostic_run_dir(deployment_name)
     output_dir.mkdir(parents=True, exist_ok=True)
-    report_path = output_dir / "front-ru-gateway.json"
+    report_path = output_dir / f"front-{gateway_plan.node_id}.json"
     write_text(report_path, json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
     front = payload.get("front", {})
     events = payload.get("events", {})
@@ -115,9 +149,9 @@ def diagnose_server_client_workflow(deployment: str | None, *, source_ip: str, m
         raise AppError(f"Некорректный source IP: {source_ip}")
     if not 5 <= minutes <= 1440:
         raise AppError("--since должен быть в диапазоне 5..1440")
-    deployment_name, _env_path, _env, _state, targets, _preflights = prepare_remote_session(
+    deployment_name, _env_path, env, _state, targets, _preflights = prepare_remote_session(
         deployment,
-        roles=[ROLE_RU],
+        roles=requested_roles(NODE_GATEWAY),
         require_privilege=True,
         validate_os=False,
         allow_create=False,
@@ -126,8 +160,10 @@ def diagnose_server_client_workflow(deployment: str | None, *, source_ip: str, m
         non_interactive=non_interactive,
         enforce_safe_route=False,
     )
+    gateway_plan = _topology_from_env(env).plan(NODE_GATEWAY)
+    gateway = _target_for_plan(gateway_plan, targets)
     report = ssh_capture(
-        targets[0],
+        gateway,
         "/usr/bin/python3 /usr/local/lib/vpn-stack/vpn-stack-agent.py client "
         f"--source {shlex.quote(source_ip)} --since {minutes}",
         as_root=True,
@@ -135,7 +171,7 @@ def diagnose_server_client_workflow(deployment: str | None, *, source_ip: str, m
     payload = _decode_agent_snapshot(report, "client")
     output_dir = _diagnostic_run_dir(deployment_name)
     output_dir.mkdir(parents=True, exist_ok=True)
-    report_path = output_dir / "client-front-ru-gateway.json"
+    report_path = output_dir / f"client-front-{gateway_plan.node_id}.json"
     write_text(report_path, json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
     events = payload.get("events", {})
     client = payload.get("front", {}).get("client", {})
@@ -195,9 +231,9 @@ def diagnose_server_client_workflow(deployment: str | None, *, source_ip: str, m
     print(f"report: {report_path}")
     return 1 if payload.get("verdict") in {"degraded", "rejected_by_front", "tcp_reached_no_xray_accept", "not_seen_on_server"} else 0
 
-def _cleanup_iperf_rules(foreign: RemoteTarget) -> None:
+def _cleanup_iperf_rules(exit_target: RemoteTarget) -> None:
     ssh_capture(
-        foreign,
+        exit_target,
         "nft -a list chain inet vpnstack input 2>/dev/null | "
         "awk '/vpnstack-diag-iperf/ {print $NF}' | "
         "while read -r handle; do nft delete rule inet vpnstack input handle \"$handle\" 2>/dev/null || true; done; "
@@ -207,13 +243,16 @@ def _cleanup_iperf_rules(foreign: RemoteTarget) -> None:
     )
 
 
-def _run_iperf_smoke(output_dir: Path, targets: list[RemoteTarget]) -> None:
-    target_map = {target.role: target for target in targets}
-    if ROLE_RU not in target_map or ROLE_FOREIGN not in target_map:
-        warn("iperf-проба требует обе роли, пропускаю.")
+def _run_iperf_smoke(output_dir: Path, topology: TopologySpec, targets: list[RemoteTarget]) -> None:
+    if not topology.is_dual:
+        warn("Interserver iperf неприменим для single topology, пропускаю.")
         return
-    ru = target_map[ROLE_RU]
-    foreign = target_map[ROLE_FOREIGN]
+    gateway_plan = topology.plan(NODE_GATEWAY)
+    exit_plan = topology.plan(NODE_EXIT)
+    if not gateway_plan.requires_wireguard or not exit_plan.requires_wireguard:
+        raise AppError("Dual topology не содержит обязательный interserver transport.")
+    gateway = _target_for_plan(gateway_plan, targets)
+    exit_target = _target_for_plan(exit_plan, targets)
     tests = [
         ("tcp-ru-to-foreign-p1", "-t 8 -P 1"),
         ("tcp-foreign-to-ru-p1", "-t 8 -P 1 -R"),
@@ -225,16 +264,16 @@ def _run_iperf_smoke(output_dir: Path, targets: list[RemoteTarget]) -> None:
         ("udp-foreign-to-ru-100m", "-u -b 100M -l 1200 -t 8 -R"),
     ]
     try:
-        _cleanup_iperf_rules(foreign)
+        _cleanup_iperf_rules(exit_target)
         ssh_capture(
-            foreign,
+            exit_target,
             "nft add rule inet vpnstack input iifname wg0 tcp dport 5201 counter accept comment vpnstack-diag-iperf; "
             "nft add rule inet vpnstack input iifname wg0 udp dport 5201 counter accept comment vpnstack-diag-iperf",
             as_root=True,
         )
         for name, args in tests:
             ssh_capture(
-                foreign,
+                exit_target,
                 "systemctl stop vpnstack-iperf3.service >/dev/null 2>&1 || true; "
                 "systemctl reset-failed vpnstack-iperf3.service >/dev/null 2>&1 || true; "
                 "rm -f /tmp/vpnstack-iperf3.log; "
@@ -246,21 +285,20 @@ def _run_iperf_smoke(output_dir: Path, targets: list[RemoteTarget]) -> None:
             )
             time.sleep(1.0)
             client = ssh_capture(
-                ru,
+                gateway,
                 f"timeout 35 iperf3 -c 10.74.0.2 -B 10.74.0.1 -p 5201 {args} 2>&1 || true",
                 as_root=True,
             )
-            server = ssh_capture(foreign, "cat /tmp/vpnstack-iperf3.log 2>/dev/null || true", as_root=True)
+            server = ssh_capture(exit_target, "cat /tmp/vpnstack-iperf3.log 2>/dev/null || true", as_root=True)
             write_text(output_dir / f"iperf-{name}.txt", f"## client\n{client}\n## server\n{server}\n")
     finally:
-        _cleanup_iperf_rules(foreign)
+        _cleanup_iperf_rules(exit_target)
 
 
 def diagnose_path_workflow(deployment: str | None, role: str, *, iperf: bool = False, non_interactive: bool = False) -> int:
-    roles = requested_roles(role)
     deployment_name, _env_path, env, _state, targets, _preflights = prepare_remote_session(
         deployment,
-        roles=roles,
+        roles=requested_roles(role),
         require_privilege=True,
         validate_os=False,
         allow_create=False,
@@ -269,14 +307,17 @@ def diagnose_path_workflow(deployment: str | None, role: str, *, iperf: bool = F
         non_interactive=non_interactive,
         enforce_safe_route=False,
     )
+    topology = _topology_from_env(env)
+    plans = _selected_node_plans(topology, role)
     output_dir = _diagnostic_run_dir(deployment_name)
     output_dir.mkdir(parents=True, exist_ok=True)
     print_header("Path diagnostics")
-    with ThreadPoolExecutor(max_workers=max(1, len(targets))) as executor:
-        future_to_target = {}
-        for target in targets:
-            print(f"{target.label}: собираю диагностику")
-            future_to_target[
+    with ThreadPoolExecutor(max_workers=max(1, len(plans))) as executor:
+        future_to_node: dict[object, tuple[NodePlan, RemoteTarget]] = {}
+        for plan in plans:
+            target = _target_for_plan(plan, targets)
+            print(f"{_node_label(plan)}: собираю диагностику")
+            future_to_node[
                 executor.submit(
                     ssh_capture,
                     target,
@@ -285,24 +326,23 @@ def diagnose_path_workflow(deployment: str | None, role: str, *, iperf: bool = F
                     as_root=True,
                     command_timeout=PATH_DIAGNOSE_COMMAND_TIMEOUT,
                 )
-            ] = target
-        for future in as_completed(future_to_target):
-            target = future_to_target[future]
+            ] = (plan, target)
+        for future in as_completed(future_to_node):
+            plan, target = future_to_node[future]
             try:
                 report = future.result()
             except AppError as exc:
                 report = f"diagnose_error={exc}\n"
-                warn(f"{target.label}: диагностика завершилась неполно: {error_summary(exc)}")
+                warn(f"{_node_label(plan)}: диагностика завершилась неполно: {error_summary(exc)}")
             try:
-                snapshot = _decode_agent_snapshot(report, f"{target.role} path")
+                snapshot = _decode_agent_snapshot(report, f"{plan.node_id} path")
                 rendered = json.dumps(snapshot, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
             except AppError:
                 rendered = report
-            write_text(output_dir / f"{target.role}.json", rendered)
+            write_text(output_dir / f"{plan.node_id}.json", rendered)
 
     if iperf:
-        print("Запускаю bounded iperf smoke через wg0.")
-        _run_iperf_smoke(output_dir, targets)
+        _run_iperf_smoke(output_dir, topology, targets)
 
     if not any(output_dir.iterdir()):
         raise AppError("Диагностика не собрала ни одного файла.")
@@ -355,20 +395,21 @@ def diagnose_client_log_workflow(log_path: str, deployment: str | None = None, r
 
     deployment_name = select_existing_deployment(deployment)
     env_path, env = load_existing_deployment_env(deployment_name)
+    topology = _topology_from_env(env)
     state = load_state(deployment_name)
     route_failed = False
     print_header("Client route diagnostics")
-    for selected_role in requested_roles(role):
-        target = build_target(selected_role, env, state)
+    for plan in _selected_node_plans(topology, role):
+        target = build_target(plan.node_id, env, state)
         route_info = local_route_to_server(target)
-        public_ip = target.public_ip or target.ssh_host or "-"
+        public_ip = plan.public_ip or target.ssh_host or "-"
         if route_info is None:
-            print(f"{target.label}: route check unavailable; ip={public_ip}")
+            print(f"{_node_label(plan)}: route check unavailable; ip={public_ip}")
             continue
         self_tunnel = route_uses_self_tunnel(route_info, client_tun_name=env.get("CLIENT_TUN_NAME", ""))
         verdict = "BAD: self-tunnel" if self_tunnel else "OK"
         print(
-            f"{target.label}: {verdict}; ip={route_info.target_ip}; "
+            f"{_node_label(plan)}: {verdict}; ip={route_info.target_ip}; "
             f"iface={route_info.interface_alias or '-'}; source={route_info.source_address or '-'}; next-hop={route_info.next_hop or '-'}"
         )
         route_failed = route_failed or self_tunnel

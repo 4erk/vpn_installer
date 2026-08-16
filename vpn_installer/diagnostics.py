@@ -12,8 +12,11 @@ except ImportError:  # Installed beside vpn-stack-agent.py as a standalone modul
     from log_classifier import BUCKETS  # type: ignore[no-redef]
 
 
-SCHEMA_VERSION = 3
-COLLECTOR_STATUSES = frozenset({"ok", "error", "stale", "skipped"})
+SCHEMA_VERSION = 4
+COLLECTOR_STATUSES = frozenset({"ok", "error", "stale", "skipped", "not_applicable"})
+TOPOLOGIES = frozenset({"single", "dual"})
+NODE_IDS = frozenset({"gateway", "exit"})
+LOCATIONS = frozenset({"ru", "foreign"})
 LOG_WINDOW_KEYS = ("5m", "30m", "24h", "since_release")
 COLLECTOR_NAMES = (
     "services",
@@ -73,7 +76,7 @@ class CollectorState:
             raise TypeError("collector observed_at must be a string or null")
         if not isinstance(self.message, str):
             raise TypeError("collector message must be a string")
-        if self.status in {"error", "skipped"} and not self.message:
+        if self.status in {"error", "skipped", "not_applicable"} and not self.message:
             raise ValueError(f"{self.status} collector status requires a message")
         if self.status in {"ok", "stale"} and not self.observed_at:
             raise ValueError(f"{self.status} collector status requires observed_at")
@@ -93,6 +96,10 @@ class CollectorState:
     @classmethod
     def skipped(cls, message: str) -> "CollectorState":
         return cls("skipped", message=message)
+
+    @classmethod
+    def not_applicable(cls, message: str) -> "CollectorState":
+        return cls("not_applicable", message=message)
 
     @classmethod
     def from_dict(cls, value: object) -> "CollectorState":
@@ -132,7 +139,7 @@ class LogWindowSnapshot:
                 raise TypeError(f"log window {name} must be a string or null")
         if self.collector.status in {"ok", "stale"} and self.counts is None:
             raise ValueError(f"{self.collector.status} log window requires counts")
-        if self.collector.status in {"error", "skipped"} and self.counts is not None:
+        if self.collector.status in {"error", "skipped", "not_applicable"} and self.counts is not None:
             raise ValueError(f"{self.collector.status} log window cannot contain counts")
         if self.counts is not None:
             if set(self.counts) != set(BUCKETS):
@@ -202,6 +209,10 @@ class LogWindowSnapshot:
         return cls(collector=CollectorState.skipped(message))
 
     @classmethod
+    def not_applicable(cls, message: str) -> "LogWindowSnapshot":
+        return cls(collector=CollectorState.not_applicable(message))
+
+    @classmethod
     def from_dict(cls, value: object) -> "LogWindowSnapshot":
         if not isinstance(value, Mapping):
             raise TypeError("log window must be an object")
@@ -243,6 +254,10 @@ class DiagnosticsSnapshot:
     schema_version: int = SCHEMA_VERSION
     generated_at: str = field(default_factory=_utc_now)
     deployment: str = ""
+    topology: str = ""
+    node_id: str = ""
+    location: str = ""
+    capabilities: tuple[str, ...] = ()
     role: str = ""
     host: dict[str, Any] = field(default_factory=dict)
     collectors: dict[str, CollectorState] = field(default_factory=_default_collectors)
@@ -274,8 +289,31 @@ class DiagnosticsSnapshot:
             raise ValueError("unsupported diagnostics snapshot schema")
         if not isinstance(self.generated_at, str) or not self.generated_at:
             raise ValueError("generated_at must be a non-empty string")
+        for name, value, supported in (
+            ("topology", self.topology, TOPOLOGIES),
+            ("node_id", self.node_id, NODE_IDS),
+            ("location", self.location, LOCATIONS),
+        ):
+            if not isinstance(value, str):
+                raise TypeError(f"{name} must be a string")
+            if value and value not in supported:
+                raise ValueError(f"unsupported diagnostics {name}: {value!r}")
+        if not isinstance(self.capabilities, (list, tuple, set, frozenset)):
+            raise TypeError("capabilities must be an array of strings")
+        if not all(isinstance(value, str) and value for value in self.capabilities):
+            raise ValueError("capabilities must contain non-empty strings")
+        if len(self.capabilities) != len(set(self.capabilities)):
+            raise ValueError("capabilities must be unique")
+        self.capabilities = tuple(sorted(self.capabilities))
+        contract_values = (self.topology, self.node_id, self.location, self.capabilities)
+        if any(bool(value) for value in contract_values) and not all(bool(value) for value in contract_values):
+            raise ValueError("canonical diagnostics contract must include topology, node_id, location, and capabilities")
+        if self.topology == "single" and self.node_id == "exit":
+            raise ValueError("single topology cannot contain an exit node")
+        if not isinstance(self.role, str):
+            raise TypeError("legacy role must be a string")
         if set(self.collectors) != set(COLLECTOR_NAMES):
-            raise ValueError("collector names must match the V3 contract")
+            raise ValueError("collector names must match the V4 contract")
         if not all(isinstance(value, CollectorState) for value in self.collectors.values()):
             raise TypeError("collectors must contain CollectorState values")
         self.collectors = {name: self.collectors[name] for name in COLLECTOR_NAMES}
@@ -312,16 +350,28 @@ class DiagnosticsSnapshot:
     @property
     def collector_status(self) -> str:
         statuses = {state.status for state in self.collectors.values()}
-        if "error" in statuses:
+        applicable = statuses - {"not_applicable"}
+        if not applicable:
+            return "not_applicable"
+        if "error" in applicable:
             return "error"
-        if "stale" in statuses:
+        if "stale" in applicable:
             return "stale"
-        if "skipped" in statuses:
+        if "skipped" in applicable:
             return "skipped"
         return "ok"
 
+    @property
+    def has_capability_contract(self) -> bool:
+        return bool(self.topology and self.node_id and self.location and self.capabilities)
+
+    def has_capability(self, capability: str) -> bool:
+        return capability in self.capabilities
+
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        payload["capabilities"] = list(self.capabilities)
+        return payload
 
     def to_json(self) -> str:
         return json.dumps(self.to_dict(), ensure_ascii=False, sort_keys=True)
@@ -348,6 +398,10 @@ class DiagnosticsSnapshot:
         payload = dict(value)
         payload["collectors"] = {str(name): CollectorState.from_dict(state) for name, state in collectors_value.items()}
         payload["log_windows"] = {str(name): LogWindowSnapshot.from_dict(window) for name, window in windows_value.items()}
+        capabilities = value.get("capabilities")
+        if not isinstance(capabilities, list):
+            raise TypeError("capabilities must be an array")
+        payload["capabilities"] = tuple(capabilities)
         return cls(**payload)
 
     @classmethod
@@ -360,9 +414,105 @@ class DiagnosticsSnapshot:
         schema_version = payload.get("schema_version")
         if schema_version == SCHEMA_VERSION:
             return cls.from_dict(payload)
-        if schema_version == 2:
-            return cls.migrate_agent_v2(payload)
+        if schema_version == 3:
+            return cls.migrate_agent_v3(payload)
         raise ValueError("unsupported vpn-stack-agent snapshot schema")
+
+    @staticmethod
+    def _legacy_contract(role: str) -> tuple[str, str, str, tuple[str, ...]]:
+        if role == "ru-gateway":
+            return (
+                "dual",
+                "gateway",
+                "ru",
+                (
+                    "interserver-client",
+                    "local-egress",
+                    "public-front",
+                    "router",
+                    "ru-split-routing",
+                    "web-admin",
+                ),
+            )
+        if role == "foreign-exit":
+            return "dual", "exit", "foreign", ("interserver-server", "nat-exit")
+        return "", "", "", ()
+
+    @classmethod
+    def migrate_agent_v3(cls, payload: Mapping[str, Any]) -> "DiagnosticsSnapshot":
+        """Convert V3 evidence without treating it as native or fresh."""
+
+        if payload.get("schema_version") != 3:
+            raise ValueError("migration boundary accepts only agent schema 3")
+        generated_at = payload.get("generated_at")
+        if not isinstance(generated_at, str) or not generated_at:
+            raise ValueError("legacy agent snapshot is missing generated_at")
+        v4_fields = {item.name for item in fields(cls)}
+        v3_fields = v4_fields - {"topology", "node_id", "location", "capabilities"}
+        unknown = set(payload) - v3_fields
+        missing = v3_fields - set(payload)
+        if unknown:
+            raise ValueError(f"unknown diagnostics snapshot fields: {sorted(unknown)}")
+        if missing:
+            raise ValueError(f"missing diagnostics snapshot fields: {sorted(missing)}")
+        collectors_value = payload.get("collectors")
+        windows_value = payload.get("log_windows")
+        if not isinstance(collectors_value, Mapping):
+            raise TypeError("collectors must be an object")
+        if not isinstance(windows_value, Mapping):
+            raise TypeError("log_windows must be an object")
+
+        migration_message = "migrated from schema 3; canonical collector applicability was not encoded"
+        collectors: dict[str, CollectorState] = {}
+        for name, raw_state in collectors_value.items():
+            state = CollectorState.from_dict(raw_state)
+            if state.status in {"ok", "stale"}:
+                message = "; ".join(value for value in (state.message, migration_message) if value)
+                state = CollectorState.stale(state.observed_at or generated_at, message)
+            collectors[str(name)] = state
+
+        log_windows: dict[str, LogWindowSnapshot] = {}
+        for name, raw_window in windows_value.items():
+            window = LogWindowSnapshot.from_dict(raw_window)
+            if window.collector.status in {"ok", "stale"}:
+                message = "; ".join(value for value in (window.collector.message, migration_message) if value)
+                window = LogWindowSnapshot(
+                    collector=CollectorState.stale(window.collector.observed_at or generated_at, message),
+                    since=window.since,
+                    until=window.until,
+                    counts=window.counts,
+                    top_destinations=window.top_destinations,
+                    top_sources=window.top_sources,
+                    samples=window.samples,
+                )
+            log_windows[str(name)] = window
+
+        role = str(payload.get("role", ""))
+        topology, node_id, location, capabilities = cls._legacy_contract(role)
+        normalized = dict(payload)
+        legacy_verdict = str(normalized.get("verdict", "inconclusive"))
+        legacy_reasons = list(normalized.get("reasons", [])) if isinstance(normalized.get("reasons"), list) else []
+        normalized.update(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "topology": topology,
+                "node_id": node_id,
+                "location": location,
+                "capabilities": capabilities,
+                "collectors": collectors,
+                "log_windows": log_windows,
+                "verdict": "inconclusive",
+                "reasons": ["schema 3 diagnostics require a native schema 4 snapshot"],
+                "migration": {
+                    "source_schema_version": 3,
+                    "boundary": "DiagnosticsSnapshot.migrate_agent_v3",
+                    "warnings": [migration_message],
+                    "legacy_verdict": legacy_verdict,
+                    "legacy_reasons": legacy_reasons,
+                },
+            }
+        )
+        return cls(**normalized)
 
     @classmethod
     def migrate_agent_v2(cls, payload: Mapping[str, Any]) -> "DiagnosticsSnapshot":
@@ -470,10 +620,16 @@ class DiagnosticsSnapshot:
         if legacy_verdict == "verified":
             legacy_verdict = "inconclusive"
             reasons.append("schema 2 collector state is unknown; migrated evidence is stale")
+        legacy_role = str(payload.get("role", ""))
+        topology, node_id, location, capabilities = cls._legacy_contract(legacy_role)
         return cls(
             generated_at=generated_at,
             deployment=str(payload.get("deployment", "")),
-            role=str(payload.get("role", "")),
+            topology=topology,
+            node_id=node_id,
+            location=location,
+            capabilities=capabilities,
+            role=legacy_role,
             host=_mapping(payload.get("host")),
             collectors=collectors,
             log_windows=log_windows,

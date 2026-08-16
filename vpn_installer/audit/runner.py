@@ -17,8 +17,9 @@ from pathlib import Path
 from typing import Callable
 
 from ..common import INSTALL_SCRIPT_PATH, OUT_DIR, ROOT_DIR, RUNTIME_SITE_PACKAGES, ensure_file_parent
-from ..config import generate_default_env, load_env_file, render_env_text
+from ..config import generate_default_env, render_env_text
 from ..manifest import SING_BOX_LINUX_AMD64_ARCHIVE_SHA256, SING_BOX_LINUX_AMD64_BINARY_SHA256, SING_BOX_VERSION
+from ..topology import LOCATION_RU, TOPOLOGY_DUAL, TopologySpec
 
 AUDIT_ROOT = OUT_DIR / "audit"
 AUDIT_SINGBOX_REQUIRED_VERSION = SING_BOX_VERSION
@@ -478,14 +479,30 @@ class AuditRunner:
         )
         self.base_image_ready = True
 
-    def create_env(self, name: str, overrides: dict[str, str] | None = None) -> tuple[Path, dict[str, str]]:
+    def create_env(
+        self,
+        name: str,
+        overrides: dict[str, str] | None = None,
+        *,
+        topology: str = TOPOLOGY_DUAL,
+        gateway_location: str = LOCATION_RU,
+    ) -> tuple[Path, dict[str, str]]:
         deploy_name = re.sub(r"[^A-Za-z0-9._-]+", "-", f"{self.run_id}-{name}").strip("-")
-        env = generate_default_env(deploy_name)
-        env["RU_PUBLIC_IP"] = "203.0.113.10"
-        env["FOREIGN_PUBLIC_IP"] = "198.51.100.20"
+        requested = dict(overrides or {})
+        topology = requested.pop("TOPOLOGY", topology)
+        gateway_location = requested.pop("GATEWAY_LOCATION", gateway_location)
+        env = generate_default_env(
+            deploy_name,
+            topology=topology,
+            gateway_location=gateway_location,
+        )
+        env["GATEWAY_PUBLIC_IP"] = (
+            "203.0.113.10" if gateway_location == LOCATION_RU else "198.51.100.10"
+        )
+        env["EXIT_PUBLIC_IP"] = "198.51.100.20" if topology == TOPOLOGY_DUAL else ""
         env["WAN_INTERFACE"] = "eth1"
-        if overrides:
-            env.update(overrides)
+        env.update(requested)
+        TopologySpec.from_env(env)
         env_path = self.work_dir / "env" / f"{deploy_name}.env"
         write_text(env_path, render_env_text(env))
         return env_path, env
@@ -527,12 +544,7 @@ class AuditRunner:
         yield target
 
     def ensure_quick_env(self) -> tuple[Path, Path]:
-        env_path, _ = self.create_env("quick")
-        env = load_env_file(env_path)
-        env["RU_PUBLIC_IP"] = "203.0.113.10"
-        env["FOREIGN_PUBLIC_IP"] = "198.51.100.20"
-        env["WAN_INTERFACE"] = "eth1"
-        write_text(env_path, render_env_text(env))
+        env_path, env = self.create_env("quick")
         return env_path, OUT_DIR / env["DEPLOY_NAME"]
 
     def seed_foreign_block_cache(self, deploy_name: str) -> Path:

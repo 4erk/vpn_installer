@@ -3,14 +3,18 @@ from __future__ import annotations
 import unittest
 
 from vpn_installer.config import generate_default_env
-from vpn_installer.routing_policy import TRAFFIC_CLASSES, build_ru_routing_policy
+from vpn_installer.routing_policy import (
+    TRAFFIC_CLASSES,
+    build_gateway_routing_policy,
+    build_ru_routing_policy,
+)
 
 
 class RoutingPolicyTests(unittest.TestCase):
     def make_env(self) -> dict[str, str]:
         env = generate_default_env("demo")
-        env["RU_PUBLIC_IP"] = "203.0.113.10"
-        env["FOREIGN_PUBLIC_IP"] = "198.51.100.20"
+        env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
+        env["EXIT_PUBLIC_IP"] = "198.51.100.20"
         return env
 
     def test_policy_declares_every_traffic_class(self) -> None:
@@ -172,6 +176,32 @@ class RoutingPolicyTests(unittest.TestCase):
             set(legacy.deprecated_overrides),
             {"RU_LITERAL_POLICY", "RU_IPV6_LITERAL_POLICY", "TO_FOREIGN_CONNECT_TIMEOUT", "RU_BLOCK_QUIC"},
         )
+
+    def test_single_gateway_has_only_local_egress(self) -> None:
+        for location in ("ru", "foreign"):
+            with self.subTest(location=location):
+                env = generate_default_env("demo", topology="single", gateway_location=location)
+                env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
+                policy = build_gateway_routing_policy(env)
+                parts = policy.singbox_parts()
+
+                self.assertEqual(set(policy.classes), set(TRAFFIC_CLASSES))
+                self.assertEqual(parts["outbounds"], [
+                    {
+                        "type": "direct",
+                        "tag": "local-egress",
+                        "domain_resolver": {"server": "dns-local", "strategy": "prefer_ipv4"},
+                    }
+                ])
+                self.assertEqual(policy.final_outbound, "local-egress")
+                self.assertFalse(any("wg0" in str(value) for value in parts.values()))
+                self.assertFalse(any("to-foreign" in str(value) for value in parts.values()))
+
+    def test_dual_only_policy_rejects_single_topology(self) -> None:
+        env = generate_default_env("demo", topology="single", gateway_location="ru")
+        env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
+        with self.assertRaisesRegex(ValueError, "requires dual topology"):
+            build_ru_routing_policy(env)
 
 
 if __name__ == "__main__":

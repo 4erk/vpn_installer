@@ -6,6 +6,7 @@ from typing import Any, Iterable
 
 from .dns_policy import GLOBAL_FOREIGN_DOMAINS, GLOBAL_FOREIGN_DOMAIN_SUFFIXES, CONNECTIVITY_CHECK_IPV6_ONLY_DOMAINS
 from .interserver_transport import TRANSPORT_OVERLAY_TAG
+from .topology import TopologySpec
 
 POLICY_VERSION = "0.18.0"
 
@@ -202,6 +203,11 @@ def _reject_rule(**match: Any) -> dict[str, Any]:
 
 
 def build_ru_routing_policy(env: dict[str, str]) -> RoutingPolicy:
+    """Compile the dual RU-gateway policy retained by the canonical dual topology."""
+
+    topology = TopologySpec.from_env(env)
+    if not topology.is_dual:
+        raise ValueError("RU split routing requires dual topology")
     sniff_timeout = env.get("RU_SNIFF_TIMEOUT", "250ms").strip() or "250ms"
     ipv6_only_domains = {domain.lower() for domain in CONNECTIVITY_CHECK_IPV6_ONLY_DOMAINS}
     foreign_domains = {domain.lower() for domain in GLOBAL_FOREIGN_DOMAINS}
@@ -217,8 +223,8 @@ def build_ru_routing_policy(env: dict[str, str]) -> RoutingPolicy:
         if suffix.lower() not in foreign_suffixes
     ]
     direct_cidrs = _env_list(env, "RU_FORCE_DIRECT_IP_CIDR")
-    if env.get("RU_PUBLIC_IP", "").strip():
-        public_cidr = f"{env['RU_PUBLIC_IP'].strip()}/32"
+    if topology.gateway.public_ip:
+        public_cidr = f"{topology.gateway.public_ip}/32"
         if public_cidr not in direct_cidrs:
             direct_cidrs.append(public_cidr)
     blocked_cidrs = _env_list(env, "RU_BLOCK_IP_CIDR")
@@ -329,3 +335,76 @@ def build_ru_routing_policy(env: dict[str, str]) -> RoutingPolicy:
     if missing:
         raise ValueError(f"routing policy is incomplete: {', '.join(sorted(missing))}")
     return policy
+
+
+def build_single_gateway_routing_policy(env: dict[str, str]) -> RoutingPolicy:
+    """Compile one local egress without synthetic interserver dependencies."""
+
+    topology = TopologySpec.from_env(env)
+    if topology.is_dual:
+        raise ValueError("single gateway routing requires single topology")
+    sniff_timeout = env.get("RU_SNIFF_TIMEOUT", "250ms").strip() or "250ms"
+    blocked_cidrs = _env_list(env, "RU_BLOCK_IP_CIDR")
+    local_outbound = "local-egress"
+    local_resolver = "dns-local"
+    traffic = (
+        _traffic_class(
+            "global_foreign", local_outbound, local_resolver, "system", "local_egress_timeout", "blocked"
+        ),
+        _traffic_class(
+            "ru_direct_domain", local_outbound, local_resolver, "system", "local_egress_timeout", "blocked"
+        ),
+        _traffic_class(
+            "dns_global", local_outbound, local_resolver, "system", "dns_failed", "none"
+        ),
+        _traffic_class(
+            "domain_foreign", local_outbound, local_resolver, "system", "local_egress_timeout", "blocked",
+            pre_routes=({"domain_regex": ["^[^:]*[A-Za-z][^:]*$"], "action": "resolve", "strategy": "prefer_ipv4"},),
+            routes=({"domain_regex": ["^[^:]*[A-Za-z][^:]*$"], "action": "route"},),
+        ),
+        _traffic_class(
+            "blocked", "reject", "none", "none", "blocked_private_fake", "none",
+            guards=(_reject_rule(ip_cidr=blocked_cidrs),) if blocked_cidrs else (),
+        ),
+        _traffic_class(
+            "private_or_fake", "reject", "none", "none", "blocked_private_fake", "none",
+            guards=(_reject_rule(ip_is_private=True),),
+        ),
+        _traffic_class(
+            "ru_direct_ip", local_outbound, local_resolver, "system", "local_egress_timeout", "none"
+        ),
+        _traffic_class(
+            "ipv6_literal_foreign", local_outbound, "none", "system", "local_egress_timeout", "none",
+            routes=({"ip_version": 6, "action": "route"},),
+        ),
+        _traffic_class(
+            "ipv4_literal_foreign", local_outbound, "none", "system", "local_egress_timeout", "none",
+            routes=({"ip_cidr": ["0.0.0.0/0"], "action": "route"},),
+        ),
+    )
+    policy = RoutingPolicy(
+        POLICY_VERSION,
+        traffic,
+        (
+            {"inbound": ["router-in"], "action": "sniff", "timeout": sniff_timeout},
+            {"action": "route-options", "udp_disable_domain_unmapping": True},
+            {"inbound": ["public-hy2-in"], "port": 53, "action": "route", "outbound": local_outbound},
+        ),
+        (
+            {
+                "type": "direct",
+                "tag": local_outbound,
+                "domain_resolver": {"server": local_resolver, "strategy": "prefer_ipv4"},
+            },
+        ),
+        local_outbound,
+    )
+    missing = set(TRAFFIC_CLASSES) - set(policy.classes)
+    if missing:
+        raise ValueError(f"routing policy is incomplete: {', '.join(sorted(missing))}")
+    return policy
+
+
+def build_gateway_routing_policy(env: dict[str, str]) -> RoutingPolicy:
+    topology = TopologySpec.from_env(env)
+    return build_ru_routing_policy(env) if topology.is_dual else build_single_gateway_routing_policy(env)

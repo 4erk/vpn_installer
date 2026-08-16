@@ -6,6 +6,40 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+## [0.20.0] - 2026-08-17
+
+### Added
+
+- Установка теперь поддерживает три самостоятельных варианта: один российский gateway, один зарубежный gateway либо прежнюю двойную схему с российским gateway и зарубежным exit. Основной клиентский контракт во всех вариантах остаётся тем же `out/<deployment>/client/vless-uri.txt`.
+- Введены canonical topology/node contracts: config schema 2, manifest и install-plan schema 3, diagnostics schema 4. Из единого `TopologySpec` компилируются capabilities, сервисы, пакеты, маршруты, probes, bundles и acceptance.
+- Добавлен полный matrix-gate для `single-ru`, `single-foreign`, dual gateway и dual exit, включая Linux schema-2 migration, interrupted install, rollback, node mismatch и отказ при изменённом managed payload.
+
+### Changed
+
+- Одноузловой bundle не устанавливает WireGuard, межсерверный transport, связанные unit-файлы, probes, assets или секреты. Двухузловая установка передаёт каждому серверу только его минимальный `node.env` и capability-owned artifacts.
+- CLI и сгенерированные команды используют `--node gateway|exit|all`. Старые role/IP/state/manifest readers изолированы на одной миграционной границе и удаляются в `0.20.1`; точный список опубликован в `docs/DEPRECATIONS.md`.
+- Parameterized SSH использует `VPN_GATEWAY_*`/`VPN_EXIT_*`; прежние `VPN_RU_*`/`VPN_FOREIGN_*` остаются только одно-релизным входным адаптером и не записываются в state или deployment env.
+- Web-admin сохранён на gateway. В single доступны только правила локального выхода; недоступный outbound не переназначается молча и сохраняется отключённым конфликтом для аудита.
+- Web-admin больше не открывает публичный HTTP-порт: процесс слушает только server loopback, а `vpn admin` создаёт локальный SSH tunnel с существующей проверкой host key. Route compiler и `vpn routes` относятся к gateway router и продолжают работать независимо от включения HTTP UI.
+- Install сначала запускает новый capability-plan и только затем останавливает устаревшие сервисы. `current` переключается атомарно, а acceptance доказывает свежий публичный VLESS/Xray path и canonical agent contract.
+- APT package set считается монотонным prerequisite хоста и подготавливается до managed transaction snapshot. Rollback не пытается опасно удалять пакеты или откатывать их версии; он восстанавливает только принадлежащие проекту artifacts, links, service states и runtime-state.
+
+### Fixed
+
+- Публикация immutable release и runtime drift-check используют один канонический digest из `release_integrity.py`. Это устраняет production-only ложный `release-tree` drift, который до cutover корректно откатывал первый schema-3 релиз, хотя все управляемые файлы совпадали.
+- Контроллер больше не запускает повторный rollback, если target-side транзакция уже доказуемо восстановила прежний `current`. Штатные `rollback`, `remove` и `purge` получают минимальный self-contained support-bundle с Python dependency closure вместо одного неработоспособного `install.sh`.
+- Target-side acceptance допускает только точное штатное `interserver_adaptation=maintenance`, возникающее из-за install-lock после уже успешных обязательных probes; любая дополнительная причина деградации блокирует cutover. После освобождения lock контроллер принудительно подтверждает возврат gateway selector в `healthy`.
+- Rollback после восстановления сервисов повторно применяет управляемый network profile и отдельно проверяет `fq` на WireGuard. Проверка восстановленного старого релиза требует положительный полный VLESS-путь, но не требует диагностическую корреляцию private-reject, которой у старого agent может не быть; явное принятие private/fake адреса остаётся ошибкой.
+- Install orchestration больше не путает короткий shared read-lock штатного agent/transport-watch с параллельной установкой: controller ограниченно ждёт завершения read-cycle, а target installer сериализует exclusive transaction через `flock -w 60`. Действительно зависший writer по-прежнему завершает операцию ошибкой по истечении границы.
+- Release acceptance больше не переносит client-specific TCP interval, измеренный до текущего installed-at, в verdict нового релиза. При реальном отказе полный diagnostics snapshot сохраняется как last-failed-acceptance.json после rollback, а временные acceptance-файлы ограниченно очищаются следующей проверкой.
+- Controller и installer теперь используют единый marker `/etc/vpn-stack/last-acceptance.json`; успешная установка больше не может быть ошибочно принята за неподтверждённую и откатиться.
+- Rollback корректно проверяет как schema 3, так и первый переход с schema 2; single topology не требует отсутствующий WireGuard. Замена exit на gateway того же deployment запрещена без нового deployment.
+- Controller после любой ошибки, включая `SIGKILL`/exit 137, сверяет lock, новый transaction snapshot, `current` и acceptance. Повторная установка того же content-addressed release также распознаётся как начатая транзакция; первая неудачная установка возвращается в состояние `installed=0`, а сервисы восстанавливаются в точные `enabled/active` состояния snapshot.
+- Перед перезаписью managed path проверяется фактический прежний symlink или digest. Изменённый оператором файл, неизвестный объект либо чужой node останавливают транзакцию до удаления данных.
+- Upload workspace, deployment/state env, server previews, cloud-init, bundles и клиентские profiles публикуются атомарно с закрытыми правами; распакованные временные bundle-копии не остаются в `out`. Canonical metadata `node-id` и `installed-at` одинаково читаются installer, agent и bootstrap-preflight.
+- Target-side renderer принимает только точную schema-2 capability-проекцию `node.env`: он не достраивает общие defaults, не генерирует отсутствующие identity другого узла и отклоняет cross-node secret. Cloud-init не передаёт фиктивный `assets` path узлу без требуемых assets; автономные cloud-init и tar bundle проходят фактический Linux render-only gate.
+- Single-node `verify live` больше не выдаёт локальный hairpin probe за независимую проверку пользовательского ingress: отчёт остаётся `inconclusive`; только внутренний post-install gate может принять этот результат вместе со всеми native agent checks, не меняя опубликованный verdict.
+
 ## [0.19.10] - 2026-08-16
 
 ### Fixed

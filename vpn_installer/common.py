@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -73,8 +74,31 @@ def write_text(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8", newline="\n")
 
 
+def write_private_text(path: Path, content: str) -> None:
+    """Atomically publish local credentials without a world-readable creation window."""
+
+    ensure_file_parent(path)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            descriptor = -1
+            handle.write(content)
+        os.replace(temporary, path)
+        if os.name != "nt":
+            path.chmod(0o600)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
+
+
 def write_json(path: Path, payload: Any) -> None:
     write_text(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+
+
+def write_private_json(path: Path, payload: Any) -> None:
+    write_private_text(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
 
 
 def shell_env_quote(value: str) -> str:

@@ -3,7 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Mapping
 
-from .models import REQUIRED_ENV_VARS, ROLE_FOREIGN, ROLE_RU
+from .config import DUAL_REQUIRED_ENV_VARS
+from .models import REQUIRED_ENV_VARS
+from .topology import TopologySpec, normalize_node_id
 
 
 # The public SNI stays in client state; server-side target exceptions are versioned.
@@ -26,7 +28,13 @@ class DeploymentSpec:
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> "DeploymentSpec":
         values = {str(key): str(value) for key, value in env.items()}
-        missing = [key for key in REQUIRED_ENV_VARS if not values.get(key, "").strip()]
+        topology = TopologySpec.from_env(values)
+        values.update(topology.canonical_env_values())
+        missing = [
+            key
+            for key in (*REQUIRED_ENV_VARS, *(DUAL_REQUIRED_ENV_VARS if topology.is_dual else ()))
+            if not values.get(key, "").strip()
+        ]
         if missing:
             raise ValueError(f"missing required deployment values: {', '.join(missing)}")
         return cls(values)
@@ -35,18 +43,27 @@ class DeploymentSpec:
     def name(self) -> str:
         return self.values["DEPLOY_NAME"]
 
-    def for_role(self, role: str) -> "RoleSpec":
-        return RoleSpec(deployment=self, role=role)
+    @property
+    def topology(self) -> TopologySpec:
+        return TopologySpec.from_env(self.values)
+
+    def for_role(self, role: str) -> "NodeDeploymentSpec":
+        """One-release compatibility adapter; new code must use for_node()."""
+
+        return self.for_node(role)
+
+    def for_node(self, node_id: str) -> "NodeDeploymentSpec":
+        return NodeDeploymentSpec(deployment=self, node_id=normalize_node_id(node_id))
 
 
 @dataclass(frozen=True)
-class RoleSpec:
+class NodeDeploymentSpec:
     deployment: DeploymentSpec
-    role: str
+    node_id: str
 
     def __post_init__(self) -> None:
-        if self.role not in {ROLE_RU, ROLE_FOREIGN}:
-            raise ValueError(f"unsupported role: {self.role}")
+        object.__setattr__(self, "node_id", normalize_node_id(self.node_id))
+        self.deployment.topology.node(self.node_id)
 
     @property
     def values(self) -> dict[str, str]:
@@ -54,9 +71,12 @@ class RoleSpec:
 
     @property
     def requires_xray(self) -> bool:
-        return self.role == ROLE_RU
+        return self.plan.requires_xray
+
+    @property
+    def plan(self):
+        return self.deployment.topology.plan(self.node_id)
 
     @property
     def required_services(self) -> tuple[str, ...]:
-        base = ("wireguard", "nftables", "resolver")
-        return ("sing-box", "xray", "transport", *base) if self.requires_xray else ("sing-box", *base)
+        return self.plan.required_services

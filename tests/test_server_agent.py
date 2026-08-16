@@ -18,18 +18,190 @@ from vpn_installer.render import render_ru_singbox
 
 
 class ServerAgentTests(unittest.TestCase):
+    def test_installed_at_prefers_canonical_hyphenated_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "installed-at").write_text("2026-08-16T12:00:00Z\n", encoding="utf-8")
+            (root / "installed_at").write_text("legacy\n", encoding="utf-8")
+            with patch.object(server_agent, "ROOT", root):
+                self.assertEqual(server_agent.installed_at_value(), "2026-08-16T12:00:00Z")
+
+    @staticmethod
+    def gateway_contract(*, topology: str = "dual") -> dict[str, object]:
+        capabilities = {"public-front", "router", "web-admin", "local-egress"}
+        if topology == "dual":
+            capabilities.update({"ru-split-routing", "interserver-client"})
+        required_services = ["nftables", "sing-box", "resolver", "health_timer", "xray", "admin"]
+        if topology == "dual":
+            required_services.extend(["wireguard", "transport"])
+        return {
+            "topology": topology,
+            "node_id": "gateway",
+            "location": "ru" if topology == "dual" else "foreign",
+            "capabilities": frozenset(capabilities),
+            "required_services": required_services,
+            "service_units": {
+                name: server_agent.SERVICE_UNIT_DEFAULTS[name].format(wg_interface="wg0")
+                for name in required_services
+            },
+        }
+
+    @staticmethod
+    def exit_contract() -> dict[str, object]:
+        required_services = ["nftables", "sing-box", "resolver", "health_timer", "wireguard"]
+        return {
+            "topology": "dual",
+            "node_id": "exit",
+            "location": "foreign",
+            "capabilities": frozenset({"interserver-server", "nat-exit"}),
+            "required_services": required_services,
+            "service_units": {
+                name: server_agent.SERVICE_UNIT_DEFAULTS[name].format(wg_interface="wg0")
+                for name in required_services
+            },
+        }
+
+    @staticmethod
+    def single_manifest() -> dict[str, object]:
+        capabilities = ["local-egress", "public-front", "router", "web-admin"]
+        required = ["nftables", "sing-box", "resolver", "health_timer", "xray", "admin"]
+        services = [
+            {"name": name, "unit": server_agent.SERVICE_UNIT_DEFAULTS[name].format(wg_interface="wg0")}
+            for name in required
+        ]
+        node = {
+            "id": "gateway",
+            "location": "foreign",
+            "capabilities": capabilities,
+            "required_services": required,
+        }
+        return {
+            "schema_version": 3,
+            "topology": "single",
+            "node_id": "gateway",
+            "location": "foreign",
+            "capabilities": capabilities,
+            "required_services": required,
+            "node": node,
+            "install_plan": {
+                "schema_version": 3,
+                "topology": "single",
+                "node_id": "gateway",
+                "location": "foreign",
+                "capabilities": capabilities,
+                "required_services": required,
+                "services": services,
+            },
+        }
+
+    def test_runtime_contract_is_fail_closed_and_accepts_native_single_gateway(self) -> None:
+        contract = server_agent.runtime_contract(self.single_manifest(), {})
+
+        self.assertEqual(contract["topology"], "single")
+        self.assertEqual(contract["node_id"], "gateway")
+        self.assertNotIn("interserver-client", contract["capabilities"])
+        self.assertEqual(contract["migration"]["state"], "native")
+        with self.assertRaisesRegex(RuntimeError, "unsupported render manifest schema"):
+            server_agent.runtime_contract({"schema_version": 99}, {})
+
+    def test_runtime_contract_accepts_canonical_disabled_web_admin(self) -> None:
+        manifest = self.single_manifest()
+        capabilities = ["local-egress", "public-front", "router"]
+        required = ["nftables", "sing-box", "resolver", "health_timer", "xray"]
+        manifest.update(capabilities=capabilities, required_services=required)
+        manifest["node"] = {
+            **manifest["node"],  # type: ignore[misc]
+            "capabilities": capabilities,
+            "required_services": required,
+        }
+        manifest["install_plan"] = {
+            **manifest["install_plan"],  # type: ignore[misc]
+            "capabilities": capabilities,
+            "required_services": required,
+            "services": [
+                {"name": name, "unit": server_agent.SERVICE_UNIT_DEFAULTS[name].format(wg_interface="wg0")}
+                for name in required
+            ],
+        }
+
+        contract = server_agent.runtime_contract(manifest, {"ADMIN_WEB_ENABLED": "0"})
+
+        self.assertNotIn("web-admin", contract["capabilities"])
+        self.assertNotIn("admin", contract["required_services"])
+
+    def test_runtime_contract_rejects_capability_and_install_plan_drift(self) -> None:
+        manifest = self.single_manifest()
+        manifest["install_plan"] = {**manifest["install_plan"], "capabilities": ["local-egress"]}  # type: ignore[index]
+
+        with self.assertRaisesRegex(RuntimeError, "install plan capabilities conflict"):
+            server_agent.runtime_contract(manifest, {})
+
+    def test_schema_three_ignores_legacy_role_and_uses_canonical_identity(self) -> None:
+        manifest = {**self.single_manifest(), "role": "foreign-exit"}
+
+        contract = server_agent.runtime_contract(manifest, {"ROLE": "foreign-exit"})
+
+        self.assertEqual(contract["node_id"], "gateway")
+        self.assertEqual(contract["location"], "foreign")
+        self.assertIn("router", contract["capabilities"])
+        self.assertEqual(contract["role"], "ru-gateway")
+        self.assertEqual(contract["migration"], {"state": "native", "source_schema": 3, "target_schema": 3})
+
+    def test_legacy_runtime_boundary_is_explicit_and_expires_in_0201(self) -> None:
+        for schema, role, node_id in ((1, "ru-gateway", "gateway"), (2, "foreign-exit", "exit")):
+            with self.subTest(schema=schema, role=role):
+                contract = server_agent.runtime_contract({"schema_version": schema, "role": role}, {})
+
+                self.assertEqual(contract["topology"], "dual")
+                self.assertEqual(contract["node_id"], node_id)
+                self.assertEqual(contract["migration"]["state"], "deprecated")
+                self.assertEqual(contract["migration"]["source_schema"], schema)
+                self.assertEqual(contract["migration"]["remove_in"], "0.20.1")
+                boundary = server_agent._adapt_legacy_runtime_manifest(
+                    {"schema_version": schema, "role": role},
+                    {},
+                )
+                self.assertIsNotNone(boundary)
+                self.assertEqual(boundary["drift_manifest_valid"], schema >= 2)  # type: ignore[index]
+
+        with self.assertRaisesRegex(RuntimeError, "does not identify a supported role"):
+            server_agent.runtime_contract({"schema_version": 2}, {})
+
+    def test_single_recovery_never_touches_interserver_services(self) -> None:
+        current = {
+            **self.gateway_contract(topology="single"),
+            "required_services": ["nftables", "sing-box", "resolver", "health_timer", "xray", "admin"],
+            "services": {
+                "nftables": "active",
+                "sing-box": "active",
+                "resolver": "active",
+                "health_timer": "active",
+                "xray": "active",
+                "admin": "active",
+                "wireguard": "failed",
+                "transport": "failed",
+            },
+            "artifacts": {"drift": "server-mutated"},
+        }
+        with patch.object(server_agent, "run") as run_mock:
+            action = server_agent.recover(current)
+
+        self.assertEqual(action, "none")
+        run_mock.assert_not_called()
+
     def test_agent_emits_native_diagnostics_v3_end_to_end(self) -> None:
         generated_at = "2026-08-06T18:00:00+00:00"
         installed_at = "2026-08-06T17:59:00+00:00"
         empty_logs = server_agent.summarize_lines([])
         facts = {
+            **self.gateway_contract(),
             "generated_at": generated_at,
             "deployment": "demo",
             "role": "ru-gateway",
             "host": {"hostname": "ru", "login_user": "root", "is_root": True},
             "release": {"release_id": "release-1", "installed_at": installed_at},
             "services": {name: "active" for name in ("wireguard", "nftables", "sing-box", "resolver", "xray", "admin", "health_timer", "transport")},
-            "artifacts": {"manifest": {"schema_version": 2, "release_id": "release-1"}, "drift": "none", "files": {"sing-box.json": {"actual_sha256": "a", "expected_sha256": "a"}}},
+            "artifacts": {"manifest": {"schema_version": 3, "release_id": "release-1"}, "drift": "none", "files": {"sing-box.json": {"actual_sha256": "a", "expected_sha256": "a"}}},
             "wireguard": {"interface": "wg0", "state": "up", "peers": []},
             "probes": {"profile": "acceptance", "ok": True},
             "storage": {"root_filesystem": {"source": "/dev/vda1", "verdict": "verified"}},
@@ -49,7 +221,7 @@ class ServerAgentTests(unittest.TestCase):
             payload = server_agent.diagnostics_snapshot(live_probes=True, full_logs=True, include_maintenance=True)
 
         snapshot = DiagnosticsSnapshot.from_agent(payload)
-        self.assertEqual(snapshot.schema_version, 3)
+        self.assertEqual(snapshot.schema_version, 4)
         self.assertEqual(snapshot.collector_status, "ok")
         self.assertEqual(snapshot.host["login_user"], "root")
         self.assertEqual(snapshot.log_windows["since_release"].counts["dns_timeout"], 0)
@@ -58,13 +230,14 @@ class ServerAgentTests(unittest.TestCase):
         generated_at = "2026-08-06T18:00:00+00:00"
         empty_logs = server_agent.summarize_lines([])
         facts = {
+            **self.gateway_contract(),
             "generated_at": generated_at,
             "deployment": "demo",
             "role": "ru-gateway",
             "host": {},
             "release": {"installed_at": generated_at},
             "services": {name: "active" for name in ("wireguard", "nftables", "sing-box", "resolver", "xray")},
-            "artifacts": {"manifest": {"schema_version": 2}, "drift": "none", "files": {}},
+            "artifacts": {"manifest": {"schema_version": 3}, "drift": "none", "files": {}},
             "wireguard": {"interface": "wg0", "state": "up"},
             "probes": {"profile": "none", "ok": None},
             "storage": {"root_filesystem": {"verdict": "verified"}},
@@ -104,6 +277,7 @@ class ServerAgentTests(unittest.TestCase):
         self.assertEqual(fresh["counts"]["dns_timeout"], 0)
 
         facts = {
+            **self.exit_contract(),
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "role": "foreign-exit",
             "release": {},
@@ -276,7 +450,7 @@ class ServerAgentTests(unittest.TestCase):
                 patch.object(
                     server_agent,
                     "manifest_snapshot",
-                    return_value={"drift": "none", "manifest": {"role": "ru-gateway"}},
+                    return_value={"drift": "none", "manifest": self.single_manifest()},
                 ),
                 patch.object(server_agent, "run", return_value=journal) as run,
             ):
@@ -309,7 +483,7 @@ class ServerAgentTests(unittest.TestCase):
                 patch.object(
                     server_agent,
                     "manifest_snapshot",
-                    return_value={"drift": "none", "manifest": {"role": "ru-gateway"}},
+                    return_value={"drift": "none", "manifest": self.single_manifest()},
                 ),
                 patch.object(server_agent, "run") as run,
             ):
@@ -336,7 +510,7 @@ class ServerAgentTests(unittest.TestCase):
                 patch.object(
                     server_agent,
                     "manifest_snapshot",
-                    return_value={"drift": "none", "manifest": {"role": "ru-gateway"}},
+                    return_value={"drift": "none", "manifest": self.single_manifest()},
                 ),
                 patch.object(
                     server_agent,
@@ -868,7 +1042,7 @@ class ServerAgentTests(unittest.TestCase):
 
     def test_recovery_never_routes_foreign_traffic_through_ru(self) -> None:
         current = {
-            "role": "ru-gateway",
+            **self.gateway_contract(),
             "services": {"wireguard": "active", "nftables": "active", "sing-box": "active", "xray": "active"},
             "wireguard": {"interface": "wg0"},
             "probes": {"requirements": {"ru_direct": True, "via_wg": False, "router": False}},
@@ -880,7 +1054,7 @@ class ServerAgentTests(unittest.TestCase):
 
     def test_recovery_restarts_router_when_acceptance_wg_fallback_is_healthy(self) -> None:
         current = {
-            "role": "ru-gateway",
+            **self.gateway_contract(),
             "services": {"wireguard": "active", "nftables": "active", "sing-box": "active", "xray": "active"},
             "wireguard": {"interface": "wg0"},
             "artifacts": {"drift": "none"},
@@ -901,7 +1075,7 @@ class ServerAgentTests(unittest.TestCase):
 
     def test_recovery_restarts_all_failed_required_services_including_transport(self) -> None:
         current = {
-            "role": "ru-gateway",
+            **self.gateway_contract(),
             "services": {
                 "wireguard": "inactive",
                 "nftables": "inactive",
@@ -924,7 +1098,7 @@ class ServerAgentTests(unittest.TestCase):
 
     def test_recovery_reapplies_clean_managed_network_profile(self) -> None:
         current = {
-            "role": "ru-gateway",
+            **self.gateway_contract(),
             "services": {"wireguard": "active", "nftables": "active", "sing-box": "active", "xray": "active"},
             "wireguard": {"interface": "wg0"},
             "artifacts": {"drift": "none"},
@@ -937,7 +1111,7 @@ class ServerAgentTests(unittest.TestCase):
 
     def test_recovery_reapplies_clean_managed_qdisc_profile(self) -> None:
         current = {
-            "role": "foreign-exit",
+            **self.exit_contract(),
             "services": {"wireguard": "active", "nftables": "active", "sing-box": "active"},
             "wireguard": {"interface": "wg0"},
             "artifacts": {"drift": "none"},
@@ -950,7 +1124,7 @@ class ServerAgentTests(unittest.TestCase):
 
     def test_recovery_repairs_clean_wireguard_policy_without_restart(self) -> None:
         current = {
-            "role": "ru-gateway",
+            **self.gateway_contract(),
             "services": {"wireguard": "active", "nftables": "active", "sing-box": "active", "xray": "active", "transport": "active"},
             "wireguard": {"interface": "wg0"},
             "artifacts": {"drift": "none"},
@@ -969,7 +1143,7 @@ class ServerAgentTests(unittest.TestCase):
 
     def test_recovery_reloads_clean_nftables_when_bypass_is_missing(self) -> None:
         current = {
-            "role": "ru-gateway",
+            **self.gateway_contract(),
             "services": {"wireguard": "active", "nftables": "active", "sing-box": "active", "xray": "active"},
             "wireguard": {"interface": "wg0"},
             "artifacts": {"drift": "none"},
@@ -989,7 +1163,7 @@ class ServerAgentTests(unittest.TestCase):
 
     def test_recovery_never_applies_mutated_managed_artifacts(self) -> None:
         current = {
-            "role": "ru-gateway",
+            **self.gateway_contract(),
             "services": {"wireguard": "active", "nftables": "active", "sing-box": "active", "xray": "active"},
             "wireguard": {"interface": "wg0"},
             "artifacts": {"drift": "server-mutated"},
@@ -1144,7 +1318,7 @@ class ServerAgentTests(unittest.TestCase):
             return subprocess.CompletedProcess(args, 0, f"{destination} dev wg0\n", "")
 
         with patch.object(server_agent, "run", side_effect=fake_run):
-            snapshot = server_agent.wireguard_policy_snapshot(env, "ru-gateway")
+            snapshot = server_agent.wireguard_policy_snapshot(env, managed=True)
 
         self.assertFalse(snapshot["ok"])
         self.assertEqual(snapshot["missing"], ["ipv6_rule"])
@@ -1725,6 +1899,7 @@ class ServerAgentTests(unittest.TestCase):
         completed = subprocess.CompletedProcess(["nft"], 0, "", "")
         with (
             patch.object(server_agent, "parse_env", return_value={"RU_LISTEN_PORT": "443"}),
+            patch.object(server_agent, "installed_runtime_contract", return_value=self.gateway_contract()),
             patch.object(server_agent, "journal_filtered_lines", return_value=["from [::ffff:203.0.113.20]:50123 accepted tcp:example.org:443"]),
             patch.object(server_agent, "tcp_front_snapshot", return_value=front),
             patch.object(server_agent, "service_state", return_value="active"),
@@ -1765,6 +1940,20 @@ class ServerAgentTests(unittest.TestCase):
         front = {"listening": True, "degraded_sources": [], "fin_wait_1_sources": []}
         interval = {"degraded_sources": ["203.0.113.20"], "observation": "client_specific"}
         self.assertEqual(server_agent.public_front_verdict("active", front, interval), "degraded")
+
+    def test_release_scoped_observation_excludes_previous_release_interval(self) -> None:
+        previous = {
+            "observed_at": "2026-08-16T22:22:43+00:00",
+            "degraded_sources": ["203.0.113.20"],
+        }
+        current = {
+            "observed_at": "2026-08-16T22:23:43+00:00",
+            "degraded_sources": ["203.0.113.20"],
+        }
+        installed_at = "2026-08-16T22:23:00+00:00"
+        self.assertEqual(server_agent.release_scoped_observation(previous, installed_at), {})
+        self.assertIs(server_agent.release_scoped_observation(current, installed_at), current)
+        self.assertIs(server_agent.release_scoped_observation(current, ""), current)
 
     def test_public_front_ignores_degraded_lifetime_metrics_after_flow_is_idle(self) -> None:
         front = {
@@ -1879,6 +2068,7 @@ class ServerAgentTests(unittest.TestCase):
     def test_front_live_diagnostics_fail_when_downstream_path_fails(self) -> None:
         with (
             patch.object(server_agent, "parse_env", return_value={"RU_LISTEN_PORT": "443"}),
+            patch.object(server_agent, "installed_runtime_contract", return_value=self.gateway_contract()),
             patch.object(server_agent, "journal_filtered_lines", return_value=[]),
             patch.object(server_agent, "tcp_front_snapshot", return_value={"listening": True, "clients": {}, "flows": {}}),
             patch.object(server_agent, "service_state", return_value="active"),
@@ -1941,6 +2131,7 @@ class ServerAgentTests(unittest.TestCase):
         completed = subprocess.CompletedProcess(["nft"], 0, "", "")
         with (
             patch.object(server_agent, "parse_env", return_value={"RU_LISTEN_PORT": "443"}),
+            patch.object(server_agent, "installed_runtime_contract", return_value=self.gateway_contract()),
             patch.object(server_agent, "journal_filtered_lines", return_value=["from 203.0.113.20:50123 accepted tcp:example.org:443"]),
             patch.object(server_agent, "tcp_front_snapshot", return_value=front),
             patch.object(server_agent, "service_state", return_value="active"),
@@ -1968,6 +2159,7 @@ class ServerAgentTests(unittest.TestCase):
         ]
         with (
             patch.object(server_agent, "parse_env", return_value={"RU_LISTEN_PORT": "443"}),
+            patch.object(server_agent, "installed_runtime_contract", return_value=self.gateway_contract()),
             patch.object(server_agent, "journal_filtered_lines", return_value=lines),
             patch.object(server_agent, "tcp_front_snapshot", return_value=front),
             patch.object(server_agent, "service_state", return_value="active"),
@@ -2001,6 +2193,7 @@ class ServerAgentTests(unittest.TestCase):
         ]
         with (
             patch.object(server_agent, "parse_env", return_value={"RU_LISTEN_PORT": "443"}),
+            patch.object(server_agent, "installed_runtime_contract", return_value=self.gateway_contract()),
             patch.object(server_agent, "journal_filtered_lines", return_value=lines),
             patch.object(server_agent, "tcp_front_snapshot", return_value=front),
             patch.object(server_agent, "service_state", return_value="active"),
@@ -2043,7 +2236,7 @@ class ServerAgentTests(unittest.TestCase):
 
     def test_interserver_transport_snapshot_reports_stable_wireguard_overlay(self) -> None:
         env = generate_default_env("demo")
-        env["FOREIGN_PUBLIC_IP"] = "132.243.21.108"
+        env.update({"GATEWAY_PUBLIC_IP": "94.232.248.35", "EXIT_PUBLIC_IP": "132.243.21.108"})
         config = json.loads(render_ru_singbox(env))
         sockets = subprocess.CompletedProcess(
             ["ss"],
@@ -2063,7 +2256,7 @@ class ServerAgentTests(unittest.TestCase):
             patch.object(server_agent, "transport_selection_snapshot", return_value=selection),
             patch.object(server_agent, "transport_state_snapshot", return_value={"state": "healthy", "fresh": True}),
         ):
-            transport = server_agent.interserver_transport_snapshot("ru-gateway", env)
+            transport = server_agent.interserver_transport_snapshot(self.gateway_contract(), env)
 
         self.assertTrue(transport["configured"])
         self.assertTrue(transport["hysteria_session_active"])
@@ -2072,6 +2265,7 @@ class ServerAgentTests(unittest.TestCase):
 
     def test_transport_selection_snapshot_reports_configured_topology_without_urltest_history(self) -> None:
         env = generate_default_env("demo")
+        env.update({"GATEWAY_PUBLIC_IP": "94.232.248.35", "EXIT_PUBLIC_IP": "132.243.21.108"})
         config = json.loads(render_ru_singbox(env))
         relay = {"available": True, "endpoint": "127.0.0.1:19091", "reason": ""}
         selector = {"available": True, "selected": "interserver-underlay-hy2", "reason": ""}
@@ -2089,6 +2283,7 @@ class ServerAgentTests(unittest.TestCase):
 
     def test_transport_selection_rejects_an_incomplete_topology(self) -> None:
         env = generate_default_env("demo")
+        env.update({"GATEWAY_PUBLIC_IP": "94.232.248.35", "EXIT_PUBLIC_IP": "132.243.21.108"})
         config = json.loads(render_ru_singbox(env))
         config["outbounds"] = [
             outbound
@@ -2518,7 +2713,7 @@ class ServerAgentTests(unittest.TestCase):
         }
         sockets = subprocess.CompletedProcess(["ss"], 0, "UNCONN 0 0 0.0.0.0:18443 0.0.0.0:*\n", "")
         with patch.object(server_agent, "read_json", return_value=config), patch.object(server_agent, "run", return_value=sockets):
-            transport = server_agent.interserver_transport_snapshot("foreign-exit", {"RU_PUBLIC_IP": "94.232.248.35"})
+            transport = server_agent.interserver_transport_snapshot(self.exit_contract(), {"GATEWAY_PUBLIC_IP": "94.232.248.35"})
 
         self.assertTrue(transport["configured"])
         self.assertTrue(transport["listening"])
@@ -2534,7 +2729,23 @@ class ServerAgentTests(unittest.TestCase):
             shutil.copy2(source_root / "log_classifier.py", target / "log_classifier.py")
             shutil.copy2(source_root / "interserver_transport.py", target / "interserver_transport.py")
             shutil.copy2(source_root / "network_profile.py", target / "network_profile.py")
+            shutil.copy2(source_root / "release_integrity.py", target / "release_integrity.py")
             result = subprocess.run([sys.executable, str(agent), "--help"], text=True, capture_output=True, check=False, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("vpn-stack-agent", result.stdout)
+
+    def test_standalone_single_agent_does_not_require_interserver_module(self) -> None:
+        source_root = Path(__file__).resolve().parents[1] / "vpn_installer"
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            agent = target / "vpn-stack-agent.py"
+            shutil.copy2(source_root / "server_agent.py", agent)
+            shutil.copy2(source_root / "diagnostics.py", target / "diagnostics.py")
+            shutil.copy2(source_root / "log_classifier.py", target / "log_classifier.py")
+            shutil.copy2(source_root / "network_profile.py", target / "network_profile.py")
+            shutil.copy2(source_root / "release_integrity.py", target / "release_integrity.py")
+            result = subprocess.run([sys.executable, str(agent), "--help"], text=True, capture_output=True, check=False, timeout=10)
+
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("vpn-stack-agent", result.stdout)
 
@@ -2548,6 +2759,7 @@ class ServerAgentTests(unittest.TestCase):
         completed = subprocess.CompletedProcess(["nft"], 0, "", "")
         with (
             patch.object(server_agent, "parse_env", return_value={"RU_LISTEN_PORT": "443"}),
+            patch.object(server_agent, "installed_runtime_contract", return_value=self.gateway_contract()),
             patch.object(server_agent, "journal_filtered_lines", return_value=["from 203.0.113.20:50123 accepted tcp:example.org:443"]),
             patch.object(server_agent, "tcp_front_snapshot", return_value=front),
             patch.object(server_agent, "service_state", return_value="active"),
@@ -2577,7 +2789,7 @@ class ServerAgentTests(unittest.TestCase):
             patch.object(server_agent, "probe_private_reject", return_value={"ok": True}),
             patch.object(server_agent, "transport_candidate_probe", return_value={"ok": True}),
         ):
-            result = server_agent.run_probes({"WG_INTERFACE": "wg0", "RU_PUBLIC_IP": "203.0.113.10", "FOREIGN_PUBLIC_IP": "198.51.100.20"}, "ru-gateway", "acceptance")
+            result = server_agent.run_probes({"WG_INTERFACE": "wg0", "GATEWAY_PUBLIC_IP": "203.0.113.10", "EXIT_PUBLIC_IP": "198.51.100.20"}, self.gateway_contract(), "acceptance")
 
         telegram = next(item for item in result["direct"] if item["target"] == "https://telegram.org/")
         self.assertFalse(telegram["ok"])
@@ -2599,7 +2811,7 @@ class ServerAgentTests(unittest.TestCase):
             return {"target": url, "ok": True}
 
         with patch.object(server_agent, "probe_url", side_effect=probe):
-            result = server_agent.run_probes({"WG_INTERFACE": "wg0"}, "ru-gateway", "light")
+            result = server_agent.run_probes({"WG_INTERFACE": "wg0"}, self.gateway_contract(), "light")
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["via_wg"], [])
@@ -2619,7 +2831,7 @@ class ServerAgentTests(unittest.TestCase):
             patch.object(server_agent, "probe_private_reject", return_value={"ok": True}),
             patch.object(server_agent, "transport_candidate_probe", return_value={"ok": True}),
         ):
-            result = server_agent.run_probes({"WG_INTERFACE": "wg0", "RU_PUBLIC_IP": "203.0.113.10", "FOREIGN_PUBLIC_IP": "198.51.100.20"}, "ru-gateway", "acceptance")
+            result = server_agent.run_probes({"WG_INTERFACE": "wg0", "GATEWAY_PUBLIC_IP": "203.0.113.10", "EXIT_PUBLIC_IP": "198.51.100.20"}, self.gateway_contract(), "acceptance")
 
         self.assertFalse(result["requirements"]["ipv6_literal_via_router"])
         self.assertFalse(result["ok"])
@@ -2643,7 +2855,7 @@ class ServerAgentTests(unittest.TestCase):
             patch.object(server_agent, "probe_private_reject", return_value={"ok": True}),
             patch.object(server_agent, "transport_candidate_probe", return_value={"ok": True}),
         ):
-            result = server_agent.run_probes({"WG_INTERFACE": "wg0", "RU_PUBLIC_IP": "203.0.113.10", "FOREIGN_PUBLIC_IP": "198.51.100.20"}, "ru-gateway", "acceptance")
+            result = server_agent.run_probes({"WG_INTERFACE": "wg0", "GATEWAY_PUBLIC_IP": "203.0.113.10", "EXIT_PUBLIC_IP": "198.51.100.20"}, self.gateway_contract(), "acceptance")
 
         self.assertFalse(result["requirements"]["foreign_domains_via_wg"])
         self.assertFalse(result["requirements"]["wireguard_candidate_identity"])
@@ -2664,7 +2876,7 @@ class ServerAgentTests(unittest.TestCase):
                 return_value={"ok": False, "error": "timeout"},
             ) as candidate_probe,
         ):
-            result = server_agent.run_probes({"WG_INTERFACE": "wg0", "RU_PUBLIC_IP": "203.0.113.10", "FOREIGN_PUBLIC_IP": "198.51.100.20"}, "ru-gateway", "acceptance")
+            result = server_agent.run_probes({"WG_INTERFACE": "wg0", "GATEWAY_PUBLIC_IP": "203.0.113.10", "EXIT_PUBLIC_IP": "198.51.100.20"}, self.gateway_contract(), "acceptance")
 
         candidate_probe.assert_called_once_with("interserver-underlay-hy2")
         self.assertFalse(result["requirements"]["hysteria_candidate_reachable"])
@@ -2756,7 +2968,7 @@ class ServerAgentTests(unittest.TestCase):
             "requirements": {"foreign_domains_via_router": True, "foreign_domains_via_wg": False},
         }
         with patch.object(server_agent, "run_probes", side_effect=[failed, recovered]), patch.object(server_agent.time, "sleep") as sleep:
-            result = server_agent.run_confirmed_probes({}, "ru-gateway", "acceptance")
+            result = server_agent.run_confirmed_probes({}, self.gateway_contract(), "acceptance")
 
         self.assertFalse(result["ok"])
         self.assertTrue(result["release_gate_ok"])
@@ -2777,7 +2989,7 @@ class ServerAgentTests(unittest.TestCase):
             "requirements": {"foreign_domains_via_router": False},
         }
         with patch.object(server_agent, "run_probes", side_effect=[failed, failed]), patch.object(server_agent.time, "sleep"):
-            result = server_agent.run_confirmed_probes({}, "ru-gateway", "acceptance")
+            result = server_agent.run_confirmed_probes({}, self.gateway_contract(), "acceptance")
 
         self.assertFalse(result["ok"])
         self.assertEqual(result["confirmation"]["cycles"], 2)

@@ -17,10 +17,19 @@ from ..common import OUT_DIR, ROOT_DIR, RUNTIME_SITE_PACKAGES, cli_command
 from ..client_artifacts import PUBLIC_VLESS_OUTBOUND_TAG
 from ..config import load_env_file
 from ..dns_policy import GLOBAL_FOREIGN_DOMAINS, GLOBAL_FOREIGN_DOMAIN_SUFFIXES
-from ..manifest import XRAY_VERSION
+from ..manifest import XRAY_VERSION, required_asset_names
 from ..render import render_all_artifacts
 from ..runtime_deps import ensure_python_package
 from ..targets import build_target
+from ..topology import (
+    LOCATION_FOREIGN,
+    LOCATION_RU,
+    NODE_EXIT,
+    NODE_GATEWAY,
+    TOPOLOGY_DUAL,
+    TOPOLOGY_SINGLE,
+    TopologySpec,
+)
 from ..vless_verify import render_live_route_probe
 from .runner import AUDIT_IMAGE, VALID_GEOIP_SRS, VALID_GEOSITE_SRS, VPN_CMD, AuditFailure, AuditRunner, python_cmd, write_bytes
 
@@ -32,6 +41,11 @@ QUICK_ASSET_FIXTURES = {
     "ru-ipv4.zone": b"203.0.113.0/24\n",
     "ru-ipv6.zone": b"2001:db8::/32\n",
 }
+TOPOLOGY_AUDIT_CASES = (
+    ("single-ru", TOPOLOGY_SINGLE, LOCATION_RU),
+    ("single-foreign", TOPOLOGY_SINGLE, LOCATION_FOREIGN),
+    ("dual", TOPOLOGY_DUAL, LOCATION_RU),
+)
 
 
 def coverage_command(*args: str) -> list[str]:
@@ -170,9 +184,10 @@ def run(runner: AuditRunner) -> None:
             refresh_assets=False,
         ),
     )
-    runner.record("quick-validate-json", lambda: test_validate_json(out_dir))
+    runner.record("quick-topology-matrix", lambda: test_topology_matrix(runner))
+    runner.record("quick-validate-json", lambda: test_validate_json(out_dir, env))
     runner.record("quick-user-artifacts", lambda: test_user_artifacts(out_dir))
-    runner.record("quick-validate-bundle", lambda: test_validate_bundle(out_dir))
+    runner.record("quick-validate-bundle", lambda: test_validate_bundle(out_dir, env))
     if full_mode and docker_available:
         runner.record("quick-singbox-runtime-ru", lambda: test_ru_singbox_runtime_smoke(runner, out_dir))
         runner.record("quick-interserver-hysteria-runtime", lambda: test_interserver_hysteria_runtime(runner, out_dir))
@@ -182,9 +197,9 @@ def run(runner: AuditRunner) -> None:
 
     if full_mode and docker_available:
         runner.record("quick-xray-reality-interop", lambda: test_xray_reality_interop(runner, out_dir))
-        runner.record("quick-cloud-init-schema", lambda: test_cloud_init_schema(runner, out_dir))
-        runner.record("quick-cloud-init-render-only", lambda: test_cloud_init_render_only(runner, out_dir))
-        runner.record("quick-bundle-render-only", lambda: test_bundle_render_only(runner, out_dir))
+        runner.record("quick-cloud-init-schema", lambda: test_cloud_init_schema(runner, out_dir, env))
+        runner.record("quick-cloud-init-render-only", lambda: test_cloud_init_render_only(runner, out_dir, env))
+        runner.record("quick-bundle-render-only", lambda: test_bundle_render_only(runner, out_dir, env))
         runner.record("quick-linux-launcher-no-python", lambda: test_linux_launcher_no_python(runner))
         runner.record("quick-linux-launcher-python", lambda: test_linux_launcher_with_python(runner))
     elif full_mode:
@@ -238,7 +253,6 @@ def test_coverage(runner: AuditRunner) -> dict[str, str]:
 def test_install_ux_helpers() -> dict[str, str]:
     import getpass
 
-    from ..models import ROLE_RU
     from ..prompts import prompt_server_connection, select_deployment
 
     existing = ["alpha", "beta"]
@@ -248,22 +262,49 @@ def test_install_ux_helpers() -> dict[str, str]:
     with patch("vpn_installer.prompts.find_existing_deployments", return_value=[]), patch.object(builtins, "input", return_value=""):
         first_selected = select_deployment(None)
 
-    env_only_target = build_target(ROLE_RU, {"RU_PUBLIC_IP": "1.2.3.4", "SSH_PORT": "22"}, {})
+    env_only_target = build_target(
+        NODE_GATEWAY,
+        {
+            "CONFIG_SCHEMA": "2",
+            "TOPOLOGY": TOPOLOGY_SINGLE,
+            "GATEWAY_LOCATION": LOCATION_RU,
+            "GATEWAY_PUBLIC_IP": "1.2.3.4",
+            "EXIT_PUBLIC_IP": "",
+            "SSH_PORT": "22",
+        },
+        {},
+    )
     answers = iter(["1.2.3.4", "22", "root", "1", "n", ""])
     with patch.object(builtins, "input", side_effect=lambda _prompt="": next(answers)):
         prompted_target = prompt_server_connection(env_only_target, force_prompt=not env_only_target.saved_connection, confirm_existing=True)
 
     saved_state = {
-        ROLE_RU: {
-            "public_ip": "5.6.7.8",
-            "ssh_host": "5.6.7.8",
-            "ssh_port": "2222",
-            "ssh_user": "root",
-            "auth_mode": "password",
-            "identity_path": "",
-        }
+        "schema_version": 2,
+        "topology": TOPOLOGY_SINGLE,
+        "nodes": {
+            NODE_GATEWAY: {
+                "location": LOCATION_RU,
+                "public_ip": "5.6.7.8",
+                "ssh_host": "5.6.7.8",
+                "ssh_port": "2222",
+                "ssh_user": "root",
+                "auth_mode": "password",
+                "identity_path": "",
+            }
+        },
     }
-    saved_target = build_target(ROLE_RU, {"RU_PUBLIC_IP": "9.9.9.9", "SSH_PORT": "22"}, saved_state)
+    saved_target = build_target(
+        NODE_GATEWAY,
+        {
+            "CONFIG_SCHEMA": "2",
+            "TOPOLOGY": TOPOLOGY_SINGLE,
+            "GATEWAY_LOCATION": LOCATION_RU,
+            "GATEWAY_PUBLIC_IP": "9.9.9.9",
+            "EXIT_PUBLIC_IP": "",
+            "SSH_PORT": "22",
+        },
+        saved_state,
+    )
     answers = iter(["1"])
     with patch.object(builtins, "input", side_effect=lambda _prompt="": next(answers)), patch.object(getpass, "getpass", return_value="secret"):
         reused_target = prompt_server_connection(saved_target, force_prompt=False, confirm_existing=True)
@@ -325,15 +366,95 @@ def test_render_all(
     return {"out_dir": str(out_dir)}
 
 
-def test_validate_json(out_dir: Path) -> dict[str, str]:
+def validate_topology_artifacts(env: dict[str, str], out_dir: Path) -> dict[str, object]:
+    topology = TopologySpec.from_env(env)
+    expected_nodes = {node.node_id for node in topology.nodes}
+    actual_preview_nodes = {path.name for path in (out_dir / "preview").iterdir() if path.is_dir()}
+    actual_server_nodes = {path.stem for path in (out_dir / "server").glob("*.env")}
+    actual_cloud_nodes = {path.stem for path in (out_dir / "cloud-init").glob("*.yaml")}
+    actual_bundle_nodes = {path.name.removesuffix(".tar.gz") for path in (out_dir / "bundle").glob("*.tar.gz")}
+    for label, actual in (
+        ("preview", actual_preview_nodes),
+        ("server env", actual_server_nodes),
+        ("cloud-init", actual_cloud_nodes),
+        ("bundle", actual_bundle_nodes),
+    ):
+        if actual != expected_nodes:
+            raise AuditFailure(f"{label} nodes mismatch: expected={sorted(expected_nodes)}, actual={sorted(actual)}")
+
+    matrix: dict[str, object] = {}
+    for node in topology.nodes:
+        plan = topology.plan(node.node_id)
+        node_dir = out_dir / "preview" / node.node_id
+        manifest_path = node_dir / "render-manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        expected_capabilities = sorted(plan.capabilities)
+        if manifest.get("topology") != topology.mode:
+            raise AuditFailure(f"{node.node_id}: manifest topology mismatch")
+        if manifest.get("node_id") != node.node_id or manifest.get("location") != node.location:
+            raise AuditFailure(f"{node.node_id}: manifest node descriptor mismatch")
+        if manifest.get("capabilities") != expected_capabilities:
+            raise AuditFailure(f"{node.node_id}: manifest capabilities mismatch")
+
+        wireguard_path = node_dir / f"{env.get('WG_INTERFACE', 'wg0')}.conf"
+        component_presence = {
+            "wireguard": wireguard_path.is_file(),
+            "xray": (node_dir / "xray.json").is_file(),
+            "interserver": (node_dir / "interserver_transport.py").is_file(),
+        }
+        expected_presence = {
+            "wireguard": plan.requires_wireguard,
+            "xray": plan.requires_xray,
+            "interserver": plan.has_interserver,
+        }
+        if component_presence != expected_presence:
+            raise AuditFailure(
+                f"{node.node_id}: capability artifacts mismatch: "
+                f"expected={expected_presence}, actual={component_presence}"
+            )
+        node_env = load_env_file(node_dir / "node.env")
+        if node_env.get("CONFIG_SCHEMA") != "2" or node_env.get("NODE_ID") != node.node_id:
+            raise AuditFailure(f"{node.node_id}: node.env is not canonical schema 2")
+        if not topology.is_dual and "EXIT_PUBLIC_IP" in node_env:
+            raise AuditFailure("single topology leaked EXIT_PUBLIC_IP into node.env")
+        matrix[node.node_id] = {
+            "location": node.location,
+            "capabilities": expected_capabilities,
+            **component_presence,
+        }
+    return {"topology": topology.mode, "nodes": matrix}
+
+
+def test_topology_matrix(runner: AuditRunner) -> dict[str, str]:
+    results: dict[str, str] = {}
+    for case_name, topology, gateway_location in TOPOLOGY_AUDIT_CASES:
+        env_path, env = runner.create_env(
+            f"topology-{case_name}",
+            topology=topology,
+            gateway_location=gateway_location,
+        )
+        out_dir = OUT_DIR / env["DEPLOY_NAME"]
+        seed_quick_asset_cache(env, out_dir)
+        render_all_artifacts(env_path, env, fetch_assets_first=False)
+        result = validate_topology_artifacts(env, out_dir)
+        test_validate_json(out_dir, env)
+        test_validate_bundle(out_dir, env)
+        results[case_name] = json.dumps(result, ensure_ascii=False, sort_keys=True)
+    return results
+
+
+def test_validate_json(out_dir: Path, env: dict[str, str]) -> dict[str, str]:
+    topology = TopologySpec.from_env(env)
     json_paths = [
-        out_dir / "preview" / "ru" / "sing-box.json",
-        out_dir / "preview" / "ru" / "xray.json",
-        out_dir / "preview" / "foreign" / "sing-box.json",
         out_dir / "client" / "hiddify-cross-platform.json",
         out_dir / "client" / "linux-sing-box.json",
         out_dir / "client" / "android-v2rayng-xray.json",
     ]
+    for node in topology.nodes:
+        node_dir = out_dir / "preview" / node.node_id
+        json_paths.append(node_dir / "sing-box.json")
+        if topology.plan(node.node_id).requires_xray:
+            json_paths.append(node_dir / "xray.json")
     for path in json_paths:
         if not path.is_file():
             raise AuditFailure(f"Не найден JSON-артефакт: {path}")
@@ -426,27 +547,28 @@ def test_user_artifacts(out_dir: Path) -> dict[str, str]:
     }
 
 
-def test_validate_bundle(out_dir: Path) -> dict[str, str]:
+def test_validate_bundle(out_dir: Path, env: dict[str, str]) -> dict[str, str]:
+    topology = TopologySpec.from_env(env)
     bundle_dir = out_dir / "bundle"
-    tarballs = [bundle_dir / "ru-gateway.tar.gz", bundle_dir / "foreign-exit.tar.gz"]
-    expected = {
-        "ru-gateway.tar.gz": {
-            "install.sh",
-            "deployment.env",
-            "assets/geosite-ru.srs",
-            "assets/geoip-ru.srs",
-            "vpn_installer/install_support.py",
-            "vpn_installer/render.py",
-            "vpn_installer/server_agent.py",
-        },
-        "foreign-exit.tar.gz": {
+    tarballs = [bundle_dir / f"{node.node_id}.tar.gz" for node in topology.nodes]
+    expected: dict[str, set[str]] = {}
+    for node in topology.nodes:
+        plan = topology.plan(node.node_id)
+        expected_files = {
             "install.sh",
             "deployment.env",
             "vpn_installer/install_support.py",
             "vpn_installer/render.py",
             "vpn_installer/server_agent.py",
-        },
-    }
+        }
+        expected_files.update(
+            f"assets/{name}"
+            for name in required_asset_names(
+                plan,
+                foreign_block_ru=env.get("FOREIGN_BLOCK_RU", "0") == "1",
+            )
+        )
+        expected[node.node_id] = expected_files
     for tarball in tarballs:
         if not tarball.is_file():
             raise AuditFailure(f"Не найден bundle: {tarball}")
@@ -456,7 +578,7 @@ def test_validate_bundle(out_dir: Path) -> dict[str, str]:
         if duplicates:
             raise AuditFailure(f"Bundle {tarball.name} содержит дубли: {', '.join(duplicates)}")
         names = set(member_names)
-        missing = sorted(expected[tarball.name] - names)
+        missing = sorted(expected[tarball.name.removesuffix(".tar.gz")] - names)
         if missing:
             raise AuditFailure(f"Bundle {tarball.name} не содержит: {', '.join(missing)}")
         legacy = sorted(name for name in names if name == "rendered" or name.startswith("rendered/"))
@@ -475,7 +597,7 @@ def test_validate_bundle(out_dir: Path) -> dict[str, str]:
 
 def test_ru_singbox_runtime_smoke(runner: AuditRunner, out_dir: Path) -> dict[str, str]:
     container = f"audit-singbox-runtime-ru-{runner.run_id}"
-    config_path = out_dir / "preview" / "ru" / "sing-box.json"
+    config_path = out_dir / "preview" / NODE_GATEWAY / "sing-box.json"
     client_configs = [
         out_dir / "client" / "linux-sing-box.json",
     ]
@@ -610,10 +732,10 @@ def test_interserver_hysteria_runtime(runner: AuditRunner, out_dir: Path) -> dic
     work_dir = runner.work_dir / "interserver-hysteria-runtime"
     work_dir.mkdir(parents=True, exist_ok=True)
     client_config_path = work_dir / "client.json"
-    rendered_server_config_path = out_dir / "preview" / "foreign" / "sing-box.json"
+    rendered_server_config_path = out_dir / "preview" / NODE_EXIT / "sing-box.json"
     server_config_path = work_dir / "server.json"
 
-    ru_config = json.loads((out_dir / "preview" / "ru" / "sing-box.json").read_text(encoding="utf-8"))
+    ru_config = json.loads((out_dir / "preview" / NODE_GATEWAY / "sing-box.json").read_text(encoding="utf-8"))
     hysteria_candidate = next(
         (item for item in ru_config.get("outbounds", []) if item.get("tag") == "interserver-underlay-hy2"),
         None,
@@ -690,7 +812,7 @@ def test_xray_reality_interop(runner: AuditRunner, out_dir: Path) -> dict[str, s
     xray_server_config_path = work_dir / "xray-server.json"
     client_config_path = work_dir / "xray-client.json"
 
-    router_config = json.loads((out_dir / "preview" / "ru" / "sing-box.json").read_text(encoding="utf-8"))
+    router_config = json.loads((out_dir / "preview" / NODE_GATEWAY / "sing-box.json").read_text(encoding="utf-8"))
     router_config["inbounds"][0]["listen"] = "0.0.0.0"
     router_config["log"] = {"level": "debug", "timestamp": True}
     router_config["dns"] = {
@@ -711,7 +833,7 @@ def test_xray_reality_interop(runner: AuditRunner, out_dir: Path) -> dict[str, s
         {"type": "direct", "tag": "direct-ru"},
         {"type": "direct", "tag": "to-foreign"},
     ]
-    xray_server_config = json.loads((out_dir / "preview" / "ru" / "xray.json").read_text(encoding="utf-8"))
+    xray_server_config = json.loads((out_dir / "preview" / NODE_GATEWAY / "xray.json").read_text(encoding="utf-8"))
     xray_server_config["log"] = {"loglevel": "debug"}
     xray_server_config["inbounds"][0]["listen"] = "0.0.0.0"
     xray_server_config["inbounds"][0]["port"] = 443
@@ -923,56 +1045,61 @@ def test_xray_reality_interop(runner: AuditRunner, out_dir: Path) -> dict[str, s
     return {"xray_server_config": str(xray_server_config_path), "router_config": str(router_config_path), "client_config": str(client_config_path)}
 
 
-def test_cloud_init_schema(runner: AuditRunner, out_dir: Path) -> dict[str, str]:
+def test_cloud_init_schema(runner: AuditRunner, out_dir: Path, env: dict[str, str]) -> dict[str, str]:
+    topology = TopologySpec.from_env(env)
     container = f"audit-cloudinit-{runner.run_id}"
     with runner.docker_container(container, AUDIT_IMAGE):
         runner.docker_exec(container, "mkdir -p /work")
-        for role in ("ru", "foreign"):
-            yaml_path = out_dir / "cloud-init" / f"{role}.yaml"
-            runner.docker_copy(container, yaml_path, f"/work/{role}.yaml")
-            runner.docker_exec(container, f"cloud-init schema --config-file /work/{role}.yaml")
+        for node in topology.nodes:
+            yaml_path = out_dir / "cloud-init" / f"{node.node_id}.yaml"
+            runner.docker_copy(container, yaml_path, f"/work/{node.node_id}.yaml")
+            runner.docker_exec(container, f"cloud-init schema --config-file /work/{node.node_id}.yaml")
     return {"cloud_init_dir": str(out_dir / "cloud-init")}
 
 
-def test_cloud_init_render_only(runner: AuditRunner, out_dir: Path) -> dict[str, str]:
+def test_cloud_init_render_only(runner: AuditRunner, out_dir: Path, env: dict[str, str]) -> dict[str, str]:
+    topology = TopologySpec.from_env(env)
     artifacts_dir = runner.work_dir / "cloud-init-render"
     container = f"audit-cloudinit-render-{runner.run_id}"
     with runner.docker_container(container, AUDIT_IMAGE):
         runner.docker_exec(container, "mkdir -p /work")
-        for role in ("ru", "foreign"):
-            yaml_path = out_dir / "cloud-init" / f"{role}.yaml"
+        for node in topology.nodes:
+            node_id = node.node_id
+            yaml_path = out_dir / "cloud-init" / f"{node_id}.yaml"
             files, _ = runner.parse_cloud_init_payload(yaml_path)
-            role_dir = artifacts_dir / role
+            node_dir = artifacts_dir / node_id
             for file_path, content in files.items():
                 relative = Path(file_path.lstrip("/"))
-                write_bytes(role_dir / relative, content)
-            role_name = "ru-gateway" if role == "ru" else "foreign-exit"
-            payload_root = role_dir / "root" / "vpn-stack"
-            runner.docker_copy(container, payload_root, f"/work/{role}")
+                write_bytes(node_dir / relative, content)
+            payload_root = node_dir / "root" / "vpn-stack"
+            assets_argument = " --assets-dir ./assets" if (payload_root / "assets").is_dir() else ""
+            runner.docker_copy(container, payload_root, f"/work/{node_id}")
             runner.docker_exec(
                 container,
-                f"cd /work/{role} && bash ./install.sh --role {role_name} --env-file ./deployment.env --assets-dir ./assets --render-only --output-dir ./rendered && test -s ./rendered/sing-box.json",
+                f"cd /work/{node_id} && bash ./install.sh --node {node_id} --env-file ./deployment.env{assets_argument} --render-only --output-dir ./rendered && test -s ./rendered/sing-box.json",
             )
     return {"artifacts_dir": str(artifacts_dir)}
 
 
-def test_bundle_render_only(runner: AuditRunner, out_dir: Path) -> dict[str, str]:
+def test_bundle_render_only(runner: AuditRunner, out_dir: Path, env: dict[str, str]) -> dict[str, str]:
+    topology = TopologySpec.from_env(env)
     container = f"audit-bundle-{runner.run_id}"
     with runner.docker_container(container, AUDIT_IMAGE):
         runner.docker_exec(container, "mkdir -p /work")
-        for role in ("ru-gateway", "foreign-exit"):
-            tarball = out_dir / "bundle" / f"{role}.tar.gz"
-            runner.docker_copy(container, tarball, f"/work/{role}.tar.gz")
+        for node in topology.nodes:
+            node_id = node.node_id
+            tarball = out_dir / "bundle" / f"{node_id}.tar.gz"
+            runner.docker_copy(container, tarball, f"/work/{node_id}.tar.gz")
             runner.docker_exec(
                 container,
                 textwrap.dedent(
                     f"""\
                     set -euo pipefail
-                    mkdir -p /work/{role}
-                    tar -xzf /work/{role}.tar.gz -C /work/{role}
-                    cd /work/{role}
-                    bash ./install.sh --role {role} --env-file ./deployment.env --assets-dir ./assets --render-only --output-dir /work/{role}/preview
-                    test -s /work/{role}/preview/sing-box.json
+                    mkdir -p /work/{node_id}
+                    tar -xzf /work/{node_id}.tar.gz -C /work/{node_id}
+                    cd /work/{node_id}
+                    bash ./install.sh --node {node_id} --env-file ./deployment.env --assets-dir ./assets --render-only --output-dir /work/{node_id}/preview
+                    test -s /work/{node_id}/preview/sing-box.json
                     """
                 ),
             )

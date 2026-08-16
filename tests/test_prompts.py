@@ -10,14 +10,16 @@ from vpn_installer.prompts import (
     ask_install_action,
     display_target_connection,
     has_saved_connection,
+    hydrate_runtime_auth,
     prompt_choice,
     prompt_server_connection,
+    prompt_topology,
     prompt_validated_value,
     prompt_yes_no,
     prompt_value,
     select_deployment,
     select_existing_deployment,
-    select_role_for_menu,
+    select_node_for_menu,
 )
 
 
@@ -54,6 +56,15 @@ class PromptTests(unittest.TestCase):
         with self.assertRaises(AppError):
             prompt_choice("mode", [("key", "SSH key")], default="password")
 
+    def test_prompt_topology_collects_single_location(self) -> None:
+        with patch("vpn_installer.prompts.prompt_choice", side_effect=["single", "foreign"]):
+            self.assertEqual(prompt_topology(), ("single", "foreign"))
+
+    def test_prompt_topology_dual_has_fixed_ru_gateway(self) -> None:
+        with patch("vpn_installer.prompts.prompt_choice", return_value="dual") as choose:
+            self.assertEqual(prompt_topology(current_location="foreign"), ("dual", "ru"))
+        choose.assert_called_once()
+
     def test_has_saved_connection_requires_core_fields(self) -> None:
         self.assertFalse(has_saved_connection({}))
         self.assertFalse(has_saved_connection({"public_ip": "1.1.1.1", "ssh_host": "1.1.1.1", "ssh_port": "22", "ssh_user": "root"}))
@@ -83,6 +94,22 @@ class PromptTests(unittest.TestCase):
                 updated = prompt_server_connection(target, force_prompt=False, confirm_existing=True)
         self.assertEqual(updated.ssh_password, "secret")
         self.assertEqual(updated.auth_mode, "password")
+
+    def test_runtime_password_prefers_canonical_node_env_names(self) -> None:
+        gateway = RemoteTarget(role=ROLE_RU, auth_mode="password")
+        exit_target = RemoteTarget(role=ROLE_FOREIGN, auth_mode="password")
+        with patch.dict(
+            "os.environ",
+            {
+                "VPN_GATEWAY_SSH_PASSWORD": "gateway-secret",
+                "VPN_RU_SSH_PASSWORD": "legacy-gateway-secret",
+                "VPN_EXIT_SSH_PASSWORD": "exit-secret",
+                "VPN_FOREIGN_SSH_PASSWORD": "legacy-exit-secret",
+            },
+            clear=True,
+        ):
+            self.assertEqual(hydrate_runtime_auth(gateway).ssh_password, "gateway-secret")
+            self.assertEqual(hydrate_runtime_auth(exit_target).ssh_password, "exit-secret")
 
     def test_select_deployment_blank_prefers_new(self) -> None:
         answers = iter(["", "my new vpn"])
@@ -127,10 +154,10 @@ class PromptTests(unittest.TestCase):
             self.assertEqual(ask_install_action(ROLE_RU, "demo", {"installed": "1", "role": ROLE_FOREIGN, "deployment_name": "other"}), "skip")
         mocked.assert_called_once()
 
-    def test_select_role_for_menu_prompts_only_for_role_aware_commands(self) -> None:
-        self.assertEqual(select_role_for_menu("install"), "all")
-        with patch("vpn_installer.prompts.prompt_choice", return_value=ROLE_RU):
-            self.assertEqual(select_role_for_menu("status"), ROLE_RU)
+    def test_select_node_for_menu_prompts_only_for_node_aware_commands(self) -> None:
+        self.assertEqual(select_node_for_menu("install"), "all")
+        with patch("vpn_installer.prompts.prompt_choice", return_value="gateway"):
+            self.assertEqual(select_node_for_menu("status"), "gateway")
 
 
 if __name__ == "__main__":

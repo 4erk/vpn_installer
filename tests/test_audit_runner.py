@@ -10,6 +10,14 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from vpn_installer.audit import runner as audit_runner
+from vpn_installer.config import load_env_file
+from vpn_installer.topology import (
+    LOCATION_FOREIGN,
+    LOCATION_RU,
+    TOPOLOGY_DUAL,
+    TOPOLOGY_SINGLE,
+    TopologySpec,
+)
 
 
 def completed(code: int, stdout: str = "", stderr: str = "") -> subprocess.CompletedProcess[str]:
@@ -200,9 +208,37 @@ class AuditRunnerTests(unittest.TestCase):
         runner = self.make_runner()
         env_path, env = runner.create_env("demo", {"WAN_INTERFACE": "eth9"})
         self.assertTrue(env_path.is_file())
+        self.assertEqual(env["CONFIG_SCHEMA"], "2")
+        self.assertEqual(env["TOPOLOGY"], TOPOLOGY_DUAL)
+        self.assertEqual(env["GATEWAY_PUBLIC_IP"], "203.0.113.10")
+        self.assertEqual(env["EXIT_PUBLIC_IP"], "198.51.100.20")
         self.assertEqual(env["WAN_INTERFACE"], "eth9")
         assets = runner.seed_foreign_block_cache(env["DEPLOY_NAME"])
         self.assertTrue((assets / "ru-ipv4.zone").is_file())
+
+    def test_create_env_covers_canonical_topology_matrix(self) -> None:
+        runner = self.make_runner()
+        cases = (
+            ("single-ru", TOPOLOGY_SINGLE, LOCATION_RU, "203.0.113.10", ""),
+            ("single-foreign", TOPOLOGY_SINGLE, LOCATION_FOREIGN, "198.51.100.10", ""),
+            ("dual", TOPOLOGY_DUAL, LOCATION_RU, "203.0.113.10", "198.51.100.20"),
+        )
+        for name, topology, location, gateway_ip, exit_ip in cases:
+            with self.subTest(name=name):
+                env_path, env = runner.create_env(
+                    name,
+                    topology=topology,
+                    gateway_location=location,
+                )
+                loaded = load_env_file(env_path)
+                self.assertEqual(loaded, env)
+                self.assertEqual(env["CONFIG_SCHEMA"], "2")
+                self.assertEqual(env["GATEWAY_PUBLIC_IP"], gateway_ip)
+                self.assertEqual(env["EXIT_PUBLIC_IP"], exit_ip)
+                spec = TopologySpec.from_env(env)
+                self.assertEqual(spec.mode, topology)
+                self.assertEqual(spec.gateway.location, location)
+                self.assertEqual(len(spec.nodes), 2 if topology == TOPOLOGY_DUAL else 1)
 
     def test_parse_cloud_init_payload(self) -> None:
         runner = self.make_runner()
@@ -235,11 +271,14 @@ class AuditRunnerTests(unittest.TestCase):
             self.assertTrue((copied / "vpn.cmd").exists())
             self.assertTrue((copied / "vpn_installer").is_dir())
 
-    def test_ensure_quick_env_rewrites_ips(self) -> None:
+    def test_ensure_quick_env_is_canonical_dual(self) -> None:
         runner = self.make_runner()
         env_path, out_dir = runner.ensure_quick_env()
-        text = env_path.read_text(encoding="utf-8")
-        self.assertIn("203.0.113.10", text)
+        env = load_env_file(env_path)
+        self.assertEqual(env["CONFIG_SCHEMA"], "2")
+        self.assertEqual(env["TOPOLOGY"], TOPOLOGY_DUAL)
+        self.assertEqual(env["GATEWAY_PUBLIC_IP"], "203.0.113.10")
+        self.assertEqual(env["EXIT_PUBLIC_IP"], "198.51.100.20")
         self.assertTrue(str(out_dir).endswith("quick"))
 
     def test_cleanup_stale_lab_resources_filters_names(self) -> None:

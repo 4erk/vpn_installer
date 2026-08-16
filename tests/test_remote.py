@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from vpn_installer.models import AppError, ROLE_RU, RemoteTarget
+from vpn_installer.diagnostics import DiagnosticsSnapshot
 from vpn_installer.remote import (
     build_remote_command,
     configure_paramiko_logging,
@@ -47,6 +48,9 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("wg-quick@${WG_INTERFACE}.service", script)
         self.assertIn("os_id", script)
         self.assertIn("deployment_name", script)
+        self.assertIn("/etc/vpn-stack/node-id", script)
+        self.assertIn("/etc/vpn-stack/installed-at", script)
+        self.assertIn("printf 'node_id=%s", script)
         self.assertIn("wg_latest_handshake_age_s", script)
         self.assertNotIn("journalctl", script)
         self.assertNotIn("curl", script)
@@ -510,7 +514,16 @@ class RemoteTests(unittest.TestCase):
         self.assertEqual(parse_kv_output(payload), {"a": "1", "b": "2"})
 
     def test_remote_preflight_uses_ssh_capture(self) -> None:
-        snapshot = {"schema_version": 2, "generated_at": "2026-08-06T12:00:00+00:00", "role": "ru-gateway", "services": {}, "artifacts": {}, "logs": {"fresh": {}, "windows_minutes": {}}, "release": {}, "wireguard": {}, "network": {}, "front": {}}
+        snapshot = DiagnosticsSnapshot(
+            generated_at="2026-08-06T12:00:00+00:00",
+            deployment="demo",
+            topology="dual",
+            node_id="gateway",
+            location="ru",
+            capabilities=("interserver-client", "local-egress", "public-front", "router", "ru-split-routing", "web-admin"),
+            role="ru-gateway",
+            release={"release_id": "release-1"},
+        ).to_dict()
         with patch("vpn_installer.remote.ssh_capture", return_value=json.dumps(snapshot)) as mocked:
             payload = remote_preflight(RemoteTarget(role=ROLE_RU), "wgx")
         mocked.assert_called_once()
@@ -537,17 +550,20 @@ class RemoteTests(unittest.TestCase):
         mocked.assert_called_once_with(unittest.mock.ANY, "cat /etc/vpn-stack/deployment.env", as_root=True)
     def test_bootstrap_from_snapshot_uses_agent_host_and_lifecycle_fields(self) -> None:
         preflight = bootstrap_from_snapshot(
-            {
-                "schema_version": 2,
-                "generated_at": "2026-08-06T12:00:00+00:00",
-                "deployment": "demo",
-                "role": ROLE_RU,
-                "release": {"release_id": "release-1", "installed_at": "2026-07-15T00:00:00Z", "policy_version": "0.11.0"},
-                "host": {"hostname": "demo", "login_user": "root", "is_root": True, "has_sudo": True, "os_id": "ubuntu", "os_version": "24.04", "default_interface": "eth0"},
-                "services": {"wireguard": "active", "nftables": "active", "sing-box": "active", "xray": "active", "resolver": "active", "health_timer": "active"},
-                "artifacts": {"drift": "none", "files": {}},
-                "wireguard": {"peers": []},
-                "network": {
+            DiagnosticsSnapshot(
+                generated_at="2026-08-06T12:00:00+00:00",
+                deployment="demo",
+                topology="dual",
+                node_id="gateway",
+                location="ru",
+                capabilities=("interserver-client", "local-egress", "public-front", "router", "ru-split-routing", "web-admin"),
+                role=ROLE_RU,
+                release={"release_id": "release-1", "installed_at": "2026-07-15T00:00:00Z", "policy_version": "0.11.0"},
+                host={"hostname": "demo", "login_user": "root", "is_root": True, "has_sudo": True, "os_id": "ubuntu", "os_version": "24.04", "default_interface": "eth0"},
+                services={"wireguard": "active", "nftables": "active", "sing-box": "active", "xray": "active", "resolver": "active", "health_timer": "active"},
+                artifacts={"drift": "none", "files": {}},
+                wg_state={"peers": []},
+                network={
                     "interfaces": {"eth0": {}},
                     "tcp_adaptation": {
                         "congestion_control": "bbr",
@@ -571,8 +587,8 @@ class RemoteTests(unittest.TestCase):
                         "udp_wmem_max": 16777216,
                     },
                 },
-                "front": {"rtt_ms": {"p95": 40}, "socket_retransmissions": 3, "bytes_retrans": 1200, "retransmit_ratio_pct": 1.2, "state_counts": {"FIN-WAIT-1": 0}},
-            }
+                front={"rtt_ms": {"p95": 40}, "socket_retransmissions": 3, "bytes_retrans": 1200, "retransmit_ratio_pct": 1.2, "state_counts": {"FIN-WAIT-1": 0}},
+            ).to_dict()
         )
         self.assertEqual(preflight["is_root"], "1")
         self.assertEqual(preflight["installed"], "1")
@@ -595,6 +611,10 @@ class RemoteTests(unittest.TestCase):
                     "default_iface": "eth0",
                     "installed": "1",
                     "deployment_name": "demo",
+                    "topology": "dual",
+                    "node": "gateway",
+                    "location": "ru",
+                    "capabilities": "interserver-client,local-egress,public-front,router,ru-split-routing,web-admin",
                     "role": "ru-gateway",
                     "drift": "none",
                     "wireguard": "active",
@@ -634,7 +654,7 @@ class RemoteTests(unittest.TestCase):
             )
         output = stream.getvalue()
         self.assertIn("host: demo", output)
-        self.assertIn("services: wg=active, nft=active, sing-box=active, xray=active, resolver=active, health=active", output)
+        self.assertIn("services: nft=active, sing-box=active, resolver=active, health=active, wg=active, xray=active, admin=-", output)
         self.assertIn("wireguard: handshake_age_s=4, transfer_rx_tx=1/2", output)
         self.assertIn("front: rtt_p95_ms=40, retransmissions_lifetime=3, retransmit_ratio_pct=1.2, active=0, closing=0, fin_wait_1=0", output)
         self.assertIn("front retransmission scope: lifetime counters of currently open sockets", output)
@@ -646,6 +666,20 @@ class RemoteTests(unittest.TestCase):
             output,
         )
         self.assertIn("udp_rmem=8388608/16777216, udp_wmem=8388608/16777216", output)
+
+        without_admin = dict(
+            hostname="demo",
+            installed="1",
+            topology="single",
+            node="gateway",
+            location="foreign",
+            capabilities="local-egress,public-front,router",
+        )
+        with patch("sys.stdout", new_callable=io.StringIO) as stream:
+            print_preflight(RemoteTarget(role=ROLE_RU), without_admin)
+        self.assertIn("xray=-", stream.getvalue())
+        self.assertNotIn("admin=", stream.getvalue())
+
     def test_ensure_remote_privilege_paths(self) -> None:
         target = RemoteTarget(role=ROLE_RU)
         ensure_remote_privilege(target, {"is_root": "1"}, prompt_yes_no=lambda *_args, **_kwargs: True, prompt_secret=lambda *_args, **_kwargs: "x")

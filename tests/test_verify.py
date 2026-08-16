@@ -9,7 +9,18 @@ from unittest.mock import patch
 
 from vpn_installer.diagnostics import COLLECTOR_NAMES, LOG_WINDOW_KEYS, CollectorState, DiagnosticsSnapshot, LogWindowSnapshot
 from vpn_installer.log_classifier import BUCKETS
-from vpn_installer.models import ROLE_FOREIGN, ROLE_RU, RemoteTarget
+from vpn_installer.models import RemoteTarget
+from vpn_installer.topology import (
+    CAP_INTERSERVER_CLIENT,
+    CAP_INTERSERVER_SERVER,
+    CAP_PUBLIC_FRONT,
+    NODE_EXIT,
+    NODE_GATEWAY,
+    TOPOLOGY_DUAL,
+    TOPOLOGY_SINGLE,
+    TopologySpec,
+    legacy_role_for_node,
+)
 from vpn_installer.verify import (
     FALLBACK_CAPACITY_REFERENCE_BYTES_PER_SECOND,
     _apply_private_reject_correlation,
@@ -27,6 +38,8 @@ from vpn_installer.verify import (
 from vpn_installer.vless_verify import parse_vless_uri
 
 
+ROLE_RU = legacy_role_for_node(NODE_GATEWAY)
+ROLE_FOREIGN = legacy_role_for_node(NODE_EXIT)
 FIRST_LOAD_OK = {"attempts": 9, "successes": 9, "failures": 0, "average_total_seconds": 0.2, "max_total_seconds": 0.4}
 UDP_DNS_OK = {
     "ok": True,
@@ -67,6 +80,80 @@ UDP_DNS_OK = {
 }
 
 
+def deployment_env(
+    topology: str = TOPOLOGY_DUAL,
+    *,
+    gateway_location: str = "ru",
+) -> dict[str, str]:
+    return {
+        "TOPOLOGY": topology,
+        "GATEWAY_LOCATION": gateway_location,
+        "GATEWAY_PUBLIC_IP": "203.0.113.10",
+        "EXIT_PUBLIC_IP": "198.51.100.20" if topology == TOPOLOGY_DUAL else "",
+    }
+
+
+def client_env(
+    topology: str = TOPOLOGY_DUAL,
+    *,
+    gateway_location: str = "ru",
+) -> dict[str, str]:
+    return {
+        **deployment_env(topology, gateway_location=gateway_location),
+        "CLIENT_UUID": "00000000-0000-0000-0000-000000000000",
+        "RU_LISTEN_PORT": "443",
+        "RU_REALITY_SERVER_NAME": "www.bing.com",
+        "RU_REALITY_PUBLIC_KEY": "public-key",
+        "RU_REALITY_SHORT_ID": "0123456789abcdef",
+        "UTLS_FINGERPRINT": "chrome",
+        "CLIENT_FLOW": "xtls-rprx-vision",
+        "DEPLOY_NAME": "demo",
+    }
+
+
+def remote_target(topology: TopologySpec, node_id: str, *, ssh_host: str | None = None) -> RemoteTarget:
+    node = topology.node(node_id)
+    return RemoteTarget(
+        role=legacy_role_for_node(node_id),
+        location=node.location,
+        public_ip=node.public_ip,
+        ssh_host=ssh_host or node.public_ip,
+    )
+
+
+def verified_public_vless_evidence(topology: TopologySpec) -> dict[str, object]:
+    paths: dict[str, dict[str, object]] = {
+        "gateway_local_egress": {
+            "state": "verified",
+            "checked": True,
+            "expected_ip": topology.gateway.public_ip,
+            "observed_ips": [topology.gateway.public_ip],
+        },
+        "interserver_exit": (
+            {
+                "state": "verified",
+                "checked": True,
+                "expected_ip": topology.exit.public_ip,
+                "observed_ip": topology.exit.public_ip,
+            }
+            if topology.exit is not None
+            else {
+                "state": "not_applicable",
+                "checked": False,
+                "reason": "single topology has no exit or interserver path",
+            }
+        ),
+    }
+    return {
+        "verdict": "verified",
+        "topology": topology.mode,
+        "functional": {"verdict": "verified", "paths": paths},
+        "front_correlation": {"verdict": "verified", "accepted_delta": 1},
+        "paths": paths,
+        "result": {},
+    }
+
+
 def throughput_result(*, sustained: float, capacity: float, max_gap: float, duration: float = 60) -> dict[str, object]:
     return {
         "bytes_per_second": sustained,
@@ -85,22 +172,40 @@ def throughput_result(*, sustained: float, capacity: float, max_gap: float, dura
     }
 
 
-def acceptance_snapshot(role: str, **overrides: object) -> DiagnosticsSnapshot:
+def acceptance_snapshot(
+    node_id: str,
+    *,
+    topology_mode: str = TOPOLOGY_DUAL,
+    gateway_location: str = "ru",
+    **overrides: object,
+) -> DiagnosticsSnapshot:
+    topology = TopologySpec.from_env(
+        deployment_env(topology_mode, gateway_location=gateway_location)
+    )
+    plan = topology.plan(node_id)
     observed_at = datetime.now(timezone.utc).isoformat()
-    services = {"wireguard": "active", "nftables": "active", "sing-box": "active", "resolver": "active"}
+    services = {name: "active" for name in plan.required_services}
     verdicts = {
         "server_path": "verified",
         "public_front": "not-applicable",
         "client_observation": "not-applicable",
         "host_integrity": "verified",
     }
-    if role == ROLE_RU:
-        services.update({"sing-box": "active", "xray": "active"})
+    if CAP_PUBLIC_FRONT in plan.capabilities:
         verdicts.update({"public_front": "verified", "public_quic": "verified", "client_observation": "observed"})
+    collectors = {name: CollectorState.ok(observed_at) for name in COLLECTOR_NAMES}
+    if CAP_PUBLIC_FRONT not in plan.capabilities:
+        collectors["front"] = CollectorState.not_applicable("node plan has no public front")
+    if not plan.capabilities & {CAP_INTERSERVER_CLIENT, CAP_INTERSERVER_SERVER}:
+        collectors["wireguard"] = CollectorState.not_applicable("node plan has no interserver overlay")
+        collectors["transport"] = CollectorState.not_applicable("node plan has no interserver transport")
     payload: dict[str, object] = {
-        "role": role,
+        "topology": topology.mode,
+        "node_id": plan.node_id,
+        "location": plan.location,
+        "capabilities": tuple(plan.capabilities),
         "generated_at": observed_at,
-        "collectors": {name: CollectorState.ok(observed_at) for name in COLLECTOR_NAMES},
+        "collectors": collectors,
         "log_windows": {
             name: LogWindowSnapshot.collected({bucket: 0 for bucket in BUCKETS}, observed_at=observed_at)
             for name in LOG_WINDOW_KEYS
@@ -122,8 +227,12 @@ def acceptance_snapshot(role: str, **overrides: object) -> DiagnosticsSnapshot:
                 "udp_wmem_max": 16_777_216,
             }
         },
-        "front": {"tcp_keepalive_idle_seconds": 90, "tcp_keepalive_interval_seconds": 15} if role == ROLE_RU else {},
-        "transport": {"interserver": {"adaptive_state": {"state": "healthy", "fresh": True}}} if role == ROLE_RU else {},
+        "front": {"tcp_keepalive_idle_seconds": 90, "tcp_keepalive_interval_seconds": 15}
+        if CAP_PUBLIC_FRONT in plan.capabilities
+        else {},
+        "transport": {"interserver": {"adaptive_state": {"state": "healthy", "fresh": True}}}
+        if CAP_INTERSERVER_CLIENT in plan.capabilities
+        else {},
         "storage": {
             "root_filesystem": {
                 "filesystem": "ext4",
@@ -169,6 +278,32 @@ class VerifyTests(unittest.TestCase):
             {"schema_version": 2, "generated_at": datetime.now(timezone.utc).isoformat(), "verdicts": {"overall": "verified"}}
         )
         self.assertEqual(_verify_snapshot(migrated).verdict, "inconclusive")
+
+    def test_verify_snapshot_accepts_native_v4_contract_metadata(self) -> None:
+        snapshot = acceptance_snapshot(
+            NODE_GATEWAY,
+            migration={"state": "native", "source_schema": 3, "target_schema": 3},
+        )
+
+        verified = _verify_snapshot(snapshot)
+
+        self.assertEqual(verified.verdict, "verified")
+
+    def test_verify_snapshot_single_gateway_does_not_require_interserver(self) -> None:
+        snapshot = acceptance_snapshot(NODE_GATEWAY, topology_mode=TOPOLOGY_SINGLE)
+        snapshot.component_verdicts.pop("public_quic")
+
+        verified = _verify_snapshot(snapshot)
+
+        self.assertEqual(verified.verdict, "verified")
+        self.assertEqual(verified.collectors["wireguard"].status, "not_applicable")
+        self.assertEqual(verified.collectors["transport"].status, "not_applicable")
+        self.assertNotIn("wireguard", verified.services)
+
+        snapshot.collectors["wireguard"] = CollectorState.ok(datetime.now(timezone.utc).isoformat())
+        invalid = _verify_snapshot(snapshot)
+        self.assertEqual(invalid.verdict, "failed")
+        self.assertIn("collector wireguard must be not_applicable for this node", invalid.reasons)
 
     def test_verify_snapshot_requires_recent_since_release_window_only_within_retention(self) -> None:
         windows = {
@@ -390,41 +525,53 @@ class VerifyTests(unittest.TestCase):
         self.assertIn("collector route_probes was skipped: not requested", verified.reasons)
 
     def test_verify_live_workflow_returns_nonzero_on_server_mutated_drift(self) -> None:
-        targets = [RemoteTarget(role=ROLE_RU, ssh_host="ru.example"), RemoteTarget(role=ROLE_FOREIGN, ssh_host="foreign.example")]
-        env = {"RU_PUBLIC_IP": "203.0.113.10", "FOREIGN_PUBLIC_IP": "198.51.100.20"}
+        env = deployment_env()
+        topology = TopologySpec.from_env(env)
+        targets = [
+            remote_target(topology, NODE_GATEWAY, ssh_host="gateway.example"),
+            remote_target(topology, NODE_EXIT, ssh_host="exit.example"),
+        ]
         with (
             patch("vpn_installer.verify.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), env, {}, targets, {})),
             patch("vpn_installer.verify.workflows.print_summary"),
             patch("vpn_installer.verify._capture_client_front", return_value={"events": {"accepted_tcp": 0}, "front": {"flows": {}}}),
             patch("vpn_installer.verify._collect_agent_snapshot", side_effect=[acceptance_snapshot(ROLE_RU, drift="server-mutated"), acceptance_snapshot(ROLE_FOREIGN)]),
-            patch("vpn_installer.verify._verify_public_vless_uri", return_value={"verdict": "verified", "result": {}}),
+            patch("vpn_installer.verify._verify_public_vless_uri", return_value=verified_public_vless_evidence(topology)),
             patch("vpn_installer.verify._verify_public_hysteria2", return_value={"verdict": "verified", "result": {}}),
         ):
             self.assertEqual(verify_live_workflow("demo", non_interactive=True), 1)
 
     def test_verify_live_workflow_returns_nonzero_when_agent_acceptance_fails(self) -> None:
-        targets = [RemoteTarget(role=ROLE_RU, ssh_host="ru.example"), RemoteTarget(role=ROLE_FOREIGN, ssh_host="foreign.example")]
-        env = {"RU_PUBLIC_IP": "203.0.113.10", "FOREIGN_PUBLIC_IP": "198.51.100.20"}
+        env = deployment_env()
+        topology = TopologySpec.from_env(env)
+        targets = [
+            remote_target(topology, NODE_GATEWAY, ssh_host="gateway.example"),
+            remote_target(topology, NODE_EXIT, ssh_host="exit.example"),
+        ]
         broken = acceptance_snapshot(ROLE_RU, route_probes={"profile": "acceptance", "ok": False}, component_verdicts={"server_path": "failed", "public_front": "verified", "public_quic": "verified", "client_observation": "observed", "host_integrity": "verified"})
         with (
             patch("vpn_installer.verify.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), env, {}, targets, {})),
             patch("vpn_installer.verify.workflows.print_summary"),
             patch("vpn_installer.verify._capture_client_front", return_value={"events": {"accepted_tcp": 0}, "front": {"flows": {}}}),
             patch("vpn_installer.verify._collect_agent_snapshot", side_effect=[broken, acceptance_snapshot(ROLE_FOREIGN)]),
-            patch("vpn_installer.verify._verify_public_vless_uri", return_value={"verdict": "verified", "result": {}}),
+            patch("vpn_installer.verify._verify_public_vless_uri", return_value=verified_public_vless_evidence(topology)),
             patch("vpn_installer.verify._verify_public_hysteria2", return_value={"verdict": "verified", "result": {}}),
         ):
             self.assertEqual(verify_live_workflow("demo", non_interactive=True), 1)
 
     def test_verify_live_workflow_rollback_scope_checks_primary_vless_only(self) -> None:
-        targets = [RemoteTarget(role=ROLE_RU, ssh_host="ru.example"), RemoteTarget(role=ROLE_FOREIGN, ssh_host="foreign.example")]
-        env = {"RU_PUBLIC_IP": "203.0.113.10", "FOREIGN_PUBLIC_IP": "198.51.100.20"}
+        env = deployment_env()
+        topology = TopologySpec.from_env(env)
+        targets = [
+            remote_target(topology, NODE_GATEWAY, ssh_host="gateway.example"),
+            remote_target(topology, NODE_EXIT, ssh_host="exit.example"),
+        ]
         with (
             patch("vpn_installer.verify.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), env, {}, targets, {})),
             patch("vpn_installer.verify.workflows.print_summary"),
             patch("vpn_installer.verify._capture_client_front", return_value={"events": {"accepted_tcp": 1}, "front": {"flows": {}}}),
             patch("vpn_installer.verify._collect_agent_snapshot") as collect_snapshot,
-            patch("vpn_installer.verify._verify_public_vless_uri", return_value={"verdict": "verified", "result": {}}),
+            patch("vpn_installer.verify._verify_public_vless_uri", return_value=verified_public_vless_evidence(topology)),
             patch("vpn_installer.verify._verify_public_hysteria2") as verify_hysteria2,
         ):
             self.assertEqual(
@@ -434,22 +581,26 @@ class VerifyTests(unittest.TestCase):
         collect_snapshot.assert_not_called()
         verify_hysteria2.assert_not_called()
 
-    def test_verify_live_workflow_requests_post_vless_agent_acceptance_per_role(self) -> None:
-        targets = [RemoteTarget(role=ROLE_RU, ssh_host="ru.example"), RemoteTarget(role=ROLE_FOREIGN, ssh_host="foreign.example")]
-        env = {"RU_PUBLIC_IP": "203.0.113.10", "FOREIGN_PUBLIC_IP": "198.51.100.20"}
+    def test_verify_live_workflow_requests_post_vless_agent_acceptance_per_node(self) -> None:
+        env = deployment_env()
+        topology = TopologySpec.from_env(env)
+        targets = [
+            remote_target(topology, NODE_GATEWAY, ssh_host="gateway.example"),
+            remote_target(topology, NODE_EXIT, ssh_host="exit.example"),
+        ]
         sequence: list[str] = []
 
         def public_vless(*_args, **_kwargs) -> dict[str, object]:
             sequence.append("public-vless")
-            return {"verdict": "verified", "result": {}}
+            return verified_public_vless_evidence(topology)
 
         def public_hysteria2(*_args, **_kwargs) -> dict[str, object]:
             sequence.append("public-hysteria2")
             return {"verdict": "verified", "result": {}}
 
         def collect(target: RemoteTarget) -> DiagnosticsSnapshot:
-            sequence.append(f"snapshot:{target.role}")
-            return acceptance_snapshot(target.role)
+            sequence.append(f"snapshot:{target.node_id}")
+            return acceptance_snapshot(target.node_id)
 
         with (
             patch("vpn_installer.verify.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), env, {}, targets, {})) as prepare,
@@ -461,20 +612,126 @@ class VerifyTests(unittest.TestCase):
         ):
             self.assertEqual(verify_live_workflow("demo", non_interactive=True), 0)
         self.assertEqual(collect_mock.call_count, 2)
-        self.assertEqual(sequence, ["public-vless", "public-hysteria2", f"snapshot:{ROLE_RU}", f"snapshot:{ROLE_FOREIGN}"])
+        self.assertEqual(sequence, ["public-vless", "public-hysteria2", f"snapshot:{NODE_GATEWAY}", f"snapshot:{NODE_EXIT}"])
         self.assertFalse(prepare.call_args.kwargs["run_live_probes"])
         self.assertFalse(prepare.call_args.kwargs["enforce_safe_route"])
+        self.assertIsNone(prepare.call_args.kwargs["roles"])
+
+    def test_verify_live_workflow_single_uses_gateway_runner_and_marks_exit_not_applicable(self) -> None:
+        env = client_env(TOPOLOGY_SINGLE, gateway_location="foreign")
+        topology = TopologySpec.from_env(env)
+        gateway = remote_target(topology, NODE_GATEWAY, ssh_host="gateway.example")
+        observed_runner_nodes: list[str] = []
+
+        def public_vless(_path, _env, runner, **_kwargs) -> dict[str, object]:
+            observed_runner_nodes.append(runner.node_id)
+            return verified_public_vless_evidence(topology)
+
+        with (
+            patch(
+                "vpn_installer.verify.workflows.prepare_remote_session",
+                return_value=("demo", Path("deployments/demo.env"), env, {}, [gateway], {}),
+            ) as prepare,
+            patch("vpn_installer.verify.workflows.print_summary"),
+            patch("vpn_installer.verify._capture_client_front", return_value={"events": {"accepted_tcp": 1}, "front": {"flows": {}}}),
+            patch("vpn_installer.verify._collect_agent_snapshot", return_value=acceptance_snapshot(NODE_GATEWAY, topology_mode=TOPOLOGY_SINGLE, gateway_location="foreign")) as collect,
+            patch("vpn_installer.verify._verify_public_vless_uri", side_effect=public_vless),
+            patch("vpn_installer.verify._verify_public_hysteria2") as verify_hysteria2,
+        ):
+            self.assertEqual(verify_live_workflow("demo", non_interactive=True), 1)
+
+        self.assertEqual(observed_runner_nodes, [NODE_GATEWAY])
+        self.assertEqual(collect.call_count, 1)
+        verify_hysteria2.assert_not_called()
+        self.assertIsNone(prepare.call_args.kwargs["roles"])
+        report_path = next((Path(self.temp_out.name) / "diagnostics").glob("*/live-verify.json"))
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertEqual(report["topology"], TOPOLOGY_SINGLE)
+        self.assertEqual(report["verdict"], "inconclusive")
+        self.assertEqual([node["node_id"] for node in report["nodes"]], [NODE_GATEWAY])
+        self.assertEqual(report["paths"]["interserver_exit"]["state"], "not_applicable")
+        self.assertEqual(report["paths"]["exit_agent_acceptance"]["state"], "not_applicable")
+        self.assertEqual(report["paths"]["public_vless"]["runner_scope"], "same-node")
+        self.assertFalse(report["paths"]["public_vless"]["external_ingress_observed"])
+        self.assertEqual(report["runner_scope"], "same-node")
+        self.assertEqual(report["public_hysteria2"]["verdict"], "not_applicable")
+        self.assertFalse(report["same_node_install_accepted"])
+
+    def test_verify_live_workflow_can_accept_same_node_only_for_internal_install_gate(self) -> None:
+        env = client_env(TOPOLOGY_SINGLE, gateway_location="foreign")
+        topology = TopologySpec.from_env(env)
+        gateway = remote_target(topology, NODE_GATEWAY, ssh_host="gateway.example")
+        with (
+            patch(
+                "vpn_installer.verify.workflows.prepare_remote_session",
+                return_value=("demo", Path("deployments/demo.env"), env, {}, [gateway], {}),
+            ),
+            patch("vpn_installer.verify.workflows.print_summary"),
+            patch(
+                "vpn_installer.verify._capture_client_front",
+                return_value={"events": {"accepted_tcp": 1}, "front": {"flows": {}}},
+            ),
+            patch(
+                "vpn_installer.verify._collect_agent_snapshot",
+                return_value=acceptance_snapshot(
+                    NODE_GATEWAY,
+                    topology_mode=TOPOLOGY_SINGLE,
+                    gateway_location="foreign",
+                ),
+            ),
+            patch(
+                "vpn_installer.verify._verify_public_vless_uri",
+                return_value=verified_public_vless_evidence(topology),
+            ),
+        ):
+            self.assertEqual(
+                verify_live_workflow(
+                    "demo",
+                    non_interactive=True,
+                    accept_same_node_for_install=True,
+                ),
+                0,
+            )
+
+        report_path = next((Path(self.temp_out.name) / "diagnostics").glob("*/live-verify.json"))
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertEqual(report["verdict"], "inconclusive")
+        self.assertTrue(report["same_node_install_accepted"])
+
+    def test_verified_agent_or_direct_probes_cannot_replace_public_vless_evidence(self) -> None:
+        env = client_env(TOPOLOGY_SINGLE)
+        topology = TopologySpec.from_env(env)
+        gateway = remote_target(topology, NODE_GATEWAY)
+        with (
+            patch(
+                "vpn_installer.verify.workflows.prepare_remote_session",
+                return_value=("demo", Path("deployments/demo.env"), env, {}, [gateway], {}),
+            ),
+            patch("vpn_installer.verify.workflows.print_summary"),
+            patch("vpn_installer.verify._capture_client_front", return_value={"events": {"accepted_tcp": 1}, "front": {"flows": {}}}),
+            patch("vpn_installer.verify._collect_agent_snapshot", return_value=acceptance_snapshot(NODE_GATEWAY, topology_mode=TOPOLOGY_SINGLE)),
+            patch("vpn_installer.verify._verify_public_vless_uri", return_value={"verdict": "verified"}),
+        ):
+            self.assertEqual(verify_live_workflow("demo", non_interactive=True), 1)
+
+        report_path = next((Path(self.temp_out.name) / "diagnostics").glob("*/live-verify.json"))
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertEqual(report["public_vless"]["verdict"], "inconclusive")
+        self.assertFalse(report["paths"]["public_vless"]["checked"])
 
     def test_public_vless_verifier_requires_both_egress_identities(self) -> None:
         uri = parse_vless_uri("vless://00000000-0000-0000-0000-000000000000@203.0.113.10:443?security=reality&sni=www.bing.com&pbk=public-key&sid=0123456789abcdef&fp=chrome&type=tcp&flow=xtls-rprx-vision")
-        foreign = RemoteTarget(role=ROLE_FOREIGN, public_ip="198.51.100.20", ssh_host="198.51.100.20")
+        topology = TopologySpec.from_env(deployment_env())
         valid = {"ru_egress_ip": "203.0.113.10", "foreign_egress_ip": "198.51.100.20", "github_status": "200", "google_status": "204", "udp_dns": UDP_DNS_OK, "ipv6_literal_status": "200", "first_load_reliability": FIRST_LOAD_OK}
-        unmeasured = _validate_public_vless_result(valid, uri, foreign)
+        unmeasured = _validate_public_vless_result(valid, uri, topology)
         self.assertEqual(unmeasured["verdict"], "verified")
         self.assertEqual(unmeasured["functional"]["verdict"], "verified")
+        self.assertEqual(unmeasured["topology"], TOPOLOGY_DUAL)
+        self.assertEqual(unmeasured["paths"]["gateway_local_egress"]["state"], "verified")
+        self.assertEqual(unmeasured["paths"]["interserver_exit"]["state"], "verified")
         self.assertEqual(unmeasured["performance"], {"verdict": "inconclusive", "measured": False, "reason": "public VLESS performance was not measured"})
         invalid = {**valid, "foreign_egress_ip": "203.0.113.99"}
-        self.assertEqual(_validate_public_vless_result(invalid, uri, foreign)["verdict"], "failed")
+        self.assertEqual(_validate_public_vless_result(invalid, uri, topology)["verdict"], "failed")
         uncorrelated = {
             **UDP_DNS_OK,
             "private_reject": {
@@ -485,9 +742,33 @@ class VerifyTests(unittest.TestCase):
                 ],
             },
         }
-        private_result = _validate_public_vless_result({**valid, "udp_dns": uncorrelated}, uri, foreign)
+        private_result = _validate_public_vless_result({**valid, "udp_dns": uncorrelated}, uri, topology)
         self.assertEqual(private_result["verdict"], "inconclusive")
         self.assertEqual(private_result["functional"]["verdict"], "inconclusive")
+        rollback_result = _validate_public_vless_result(
+            {**valid, "udp_dns": uncorrelated},
+            uri,
+            topology,
+            require_private_reject=False,
+        )
+        self.assertEqual(rollback_result["verdict"], "verified")
+        rejected = {
+            **uncorrelated,
+            "private_reject": {
+                "verdict": "failed",
+                "ok": False,
+                "targets": [{"target": "10.0.0.1:80", "verdict": "failed", "evidence": "accepted"}],
+            },
+        }
+        self.assertEqual(
+            _validate_public_vless_result(
+                {**valid, "udp_dns": rejected},
+                uri,
+                topology,
+                require_private_reject=False,
+            )["verdict"],
+            "failed",
+        )
         correlated = {
             **UDP_DNS_OK,
             "private_reject": {
@@ -505,12 +786,39 @@ class VerifyTests(unittest.TestCase):
             },
         }
         self.assertEqual(
-            _validate_public_vless_result({**valid, "udp_dns": correlated}, uri, foreign)["functional"]["verdict"],
+            _validate_public_vless_result({**valid, "udp_dns": correlated}, uri, topology)["functional"]["verdict"],
             "verified",
         )
         invalid_dns = {**UDP_DNS_OK, "dns": {**UDP_DNS_OK["dns"], "rcode": 2}}
-        self.assertEqual(_validate_public_vless_result({**valid, "udp_dns": invalid_dns}, uri, foreign)["functional"]["verdict"], "failed")
-        self.assertEqual(_validate_public_vless_result({**valid, "first_load_reliability": {**FIRST_LOAD_OK, "failures": 1}}, uri, foreign)["verdict"], "failed")
+        self.assertEqual(_validate_public_vless_result({**valid, "udp_dns": invalid_dns}, uri, topology)["functional"]["verdict"], "failed")
+        self.assertEqual(_validate_public_vless_result({**valid, "first_load_reliability": {**FIRST_LOAD_OK, "failures": 1}}, uri, topology)["verdict"], "failed")
+
+    def test_public_vless_identity_paths_are_topology_aware(self) -> None:
+        uri = parse_vless_uri("vless://00000000-0000-0000-0000-000000000000@203.0.113.10:443?security=reality&sni=www.bing.com&pbk=public-key&sid=0123456789abcdef&fp=chrome&type=tcp&flow=xtls-rprx-vision")
+        single = TopologySpec.from_env(deployment_env(TOPOLOGY_SINGLE))
+        result = {
+            "ru_egress_ip": single.gateway.public_ip,
+            "foreign_egress_ip": single.gateway.public_ip,
+            "github_status": "200",
+            "google_status": "204",
+            "udp_dns": UDP_DNS_OK,
+            "ipv6_literal_status": "200",
+            "first_load_reliability": FIRST_LOAD_OK,
+        }
+
+        verified = _validate_public_vless_result(result, uri, single)
+
+        self.assertEqual(verified["verdict"], "verified")
+        self.assertEqual(verified["topology"], TOPOLOGY_SINGLE)
+        self.assertEqual(verified["paths"]["gateway_local_egress"]["state"], "verified")
+        self.assertEqual(verified["paths"]["interserver_exit"]["state"], "not_applicable")
+
+        leaked_exit = _validate_public_vless_result(
+            {**result, "foreign_egress_ip": "198.51.100.20"},
+            uri,
+            single,
+        )
+        self.assertEqual(leaked_exit["verdict"], "failed")
 
     def test_private_reject_log_correlation_upgrades_only_matching_eof_evidence(self) -> None:
         raw = {
@@ -558,16 +866,16 @@ class VerifyTests(unittest.TestCase):
 
     def test_public_vless_throughput_requires_rate_and_duration(self) -> None:
         uri = parse_vless_uri("vless://00000000-0000-0000-0000-000000000000@203.0.113.10:443?security=reality&sni=www.bing.com&pbk=public-key&sid=0123456789abcdef&fp=chrome&type=tcp&flow=xtls-rprx-vision")
-        foreign = RemoteTarget(role=ROLE_FOREIGN, public_ip="198.51.100.20", ssh_host="198.51.100.20")
+        topology = TopologySpec.from_env(deployment_env())
         result = {"ru_egress_ip": "203.0.113.10", "foreign_egress_ip": "198.51.100.20", "github_status": "200", "google_status": "204", "udp_dns": UDP_DNS_OK, "ipv6_literal_status": "200", "first_load_reliability": FIRST_LOAD_OK, "throughput": throughput_result(sustained=7_000_000, capacity=7_000_000, max_gap=0.4)}
-        self.assertEqual(_validate_public_vless_result(result, uri, foreign, throughput_seconds=60)["verdict"], "verified")
+        self.assertEqual(_validate_public_vless_result(result, uri, topology, throughput_seconds=60)["verdict"], "verified")
         source_limited = {**result, "throughput": throughput_result(sustained=1_000_000, capacity=7_000_000, max_gap=0.4)}
-        self.assertEqual(_validate_public_vless_result(source_limited, uri, foreign, throughput_seconds=60)["performance"]["verdict"], "failed")
+        self.assertEqual(_validate_public_vless_result(source_limited, uri, topology, throughput_seconds=60)["performance"]["verdict"], "failed")
         stalled = {**result, "throughput": throughput_result(sustained=7_000_000, capacity=7_000_000, max_gap=3.0)}
-        self.assertEqual(_validate_public_vless_result(stalled, uri, foreign, throughput_seconds=60)["performance"]["verdict"], "failed")
-        self.assertEqual(_validate_public_vless_result({**result, "throughput": {"bytes_per_second": 5_000_000, "duration_seconds": 60, "failures": 0}}, uri, foreign, throughput_seconds=60)["verdict"], "failed")
-        self.assertEqual(_validate_public_vless_result({**result, "throughput": {"bytes_per_second": 7_000_000, "duration_seconds": 60, "failures": 1}}, uri, foreign, throughput_seconds=60)["verdict"], "failed")
-        self.assertEqual(_validate_public_vless_result({**result, "throughput": {**result["throughput"], "source_failures": 1}}, uri, foreign, throughput_seconds=60)["verdict"], "failed")
+        self.assertEqual(_validate_public_vless_result(stalled, uri, topology, throughput_seconds=60)["performance"]["verdict"], "failed")
+        self.assertEqual(_validate_public_vless_result({**result, "throughput": {"bytes_per_second": 5_000_000, "duration_seconds": 60, "failures": 0}}, uri, topology, throughput_seconds=60)["verdict"], "failed")
+        self.assertEqual(_validate_public_vless_result({**result, "throughput": {"bytes_per_second": 7_000_000, "duration_seconds": 60, "failures": 1}}, uri, topology, throughput_seconds=60)["verdict"], "failed")
+        self.assertEqual(_validate_public_vless_result({**result, "throughput": {**result["throughput"], "source_failures": 1}}, uri, topology, throughput_seconds=60)["verdict"], "failed")
         source_redundant = {
             **result,
             "throughput": {
@@ -582,18 +890,18 @@ class VerifyTests(unittest.TestCase):
                 ],
             },
         }
-        self.assertEqual(_validate_public_vless_result(source_redundant, uri, foreign, throughput_seconds=60)["verdict"], "verified")
+        self.assertEqual(_validate_public_vless_result(source_redundant, uri, topology, throughput_seconds=60)["verdict"], "verified")
         insufficient_sources = {
             **source_redundant,
             "throughput": {**source_redundant["throughput"], "successful_sources": 1},
         }
-        self.assertEqual(_validate_public_vless_result(insufficient_sources, uri, foreign, throughput_seconds=60)["verdict"], "failed")
-        self.assertEqual(_validate_public_vless_result({**result, "throughput": {**result["throughput"], "sustained_bytes_per_second": 1_000_000}}, uri, foreign, throughput_seconds=60)["verdict"], "failed")
+        self.assertEqual(_validate_public_vless_result(insufficient_sources, uri, topology, throughput_seconds=60)["verdict"], "failed")
+        self.assertEqual(_validate_public_vless_result({**result, "throughput": {**result["throughput"], "sustained_bytes_per_second": 1_000_000}}, uri, topology, throughput_seconds=60)["verdict"], "failed")
         self.assertEqual(_vless_runner_timeout(0), 189)
         self.assertEqual(_vless_runner_timeout(600), 794)
 
     def test_peak_capacity_is_diagnostic_after_sustained_gate_passes(self) -> None:
-        foreign = RemoteTarget(role=ROLE_FOREIGN, public_ip="198.51.100.20", ssh_host="198.51.100.20")
+        topology = TopologySpec.from_env(deployment_env())
         result = {
             "ru_egress_ip": "203.0.113.10",
             "foreign_egress_ip": "198.51.100.20",
@@ -606,16 +914,14 @@ class VerifyTests(unittest.TestCase):
         }
         fallback = _validate_public_transport_result(
             result,
-            "203.0.113.10",
-            foreign,
+            topology,
             label="public Hysteria2",
             throughput_seconds=30,
             capacity_reference_bytes_per_second=FALLBACK_CAPACITY_REFERENCE_BYTES_PER_SECOND,
         )
         primary = _validate_public_transport_result(
             result,
-            "203.0.113.10",
-            foreign,
+            topology,
             label="public VLESS",
             throughput_seconds=30,
         )
@@ -639,7 +945,9 @@ class VerifyTests(unittest.TestCase):
         self.assertEqual(correlation["flow_count"], 0)
 
     def test_public_hysteria_runner_and_validator_keep_separate_contracts(self) -> None:
-        foreign = RemoteTarget(role=ROLE_FOREIGN, public_ip="198.51.100.20", ssh_host="198.51.100.20")
+        env = deployment_env()
+        topology = TopologySpec.from_env(env)
+        runner = remote_target(topology, NODE_EXIT)
         result = {
             "ru_egress_ip": "203.0.113.10",
             "foreign_egress_ip": "198.51.100.20",
@@ -658,27 +966,18 @@ class VerifyTests(unittest.TestCase):
 
         with (
             patch("vpn_installer.verify.render_public_hy2_outbound", return_value={"type": "direct", "tag": "ru-gateway"}),
-            patch("vpn_installer.verify._run_external_public_profile", side_effect=run_profile),
+            patch("vpn_installer.verify._run_public_profile", side_effect=run_profile),
         ):
-            verified = _verify_public_hysteria2({"RU_PUBLIC_IP": "203.0.113.10"}, foreign, throughput_seconds=30)
+            verified = _verify_public_hysteria2(env, runner, throughput_seconds=30)
         self.assertEqual(verified["verdict"], "verified")
 
     def test_public_vless_runner_uploads_lf_script_and_executes_it(self) -> None:
-        env = {
-            "CLIENT_UUID": "00000000-0000-0000-0000-000000000000",
-            "RU_PUBLIC_IP": "203.0.113.10",
-            "RU_LISTEN_PORT": "443",
-            "RU_REALITY_SERVER_NAME": "www.bing.com",
-            "RU_REALITY_PUBLIC_KEY": "public-key",
-            "RU_REALITY_SHORT_ID": "0123456789abcdef",
-            "UTLS_FINGERPRINT": "chrome",
-            "CLIENT_FLOW": "xtls-rprx-vision",
-            "DEPLOY_NAME": "demo",
-        }
+        env = client_env()
         from vpn_installer.client_artifacts import render_vless_uri
 
         uri_text = render_vless_uri(env)
-        foreign = RemoteTarget(role=ROLE_FOREIGN, public_ip="198.51.100.20", ssh_host="198.51.100.20")
+        topology = TopologySpec.from_env(env)
+        runner = remote_target(topology, NODE_EXIT)
         result = {
             "ru_egress_ip": "203.0.113.10",
             "foreign_egress_ip": "198.51.100.20",
@@ -704,7 +1003,7 @@ class VerifyTests(unittest.TestCase):
                 verified = _verify_public_vless_uri(
                     uri_path,
                     env,
-                    foreign,
+                    runner,
                     on_running=lambda: {
                         "baseline": {"events": {"accepted_tcp": 0}, "front": {"flows": {}}},
                         "during": {
@@ -728,20 +1027,16 @@ class VerifyTests(unittest.TestCase):
         self.assertEqual(capture.call_args_list[-1].args[1], "rm -rf /tmp/vpn-stack-vless-verify.test")
 
     def test_public_vless_rejects_noncanonical_contract_before_network(self) -> None:
-        env = {
-            "CLIENT_UUID": "00000000-0000-0000-0000-000000000000", "RU_PUBLIC_IP": "203.0.113.10",
-            "RU_LISTEN_PORT": "443", "RU_REALITY_SERVER_NAME": "www.bing.com", "RU_REALITY_PUBLIC_KEY": "public-key",
-            "RU_REALITY_SHORT_ID": "0123456789abcdef", "UTLS_FINGERPRINT": "chrome", "CLIENT_FLOW": "xtls-rprx-vision",
-            "DEPLOY_NAME": "demo",
-        }
-        foreign = RemoteTarget(role=ROLE_FOREIGN, ssh_host="198.51.100.20")
+        env = client_env()
+        topology = TopologySpec.from_env(env)
+        runner = remote_target(topology, NODE_EXIT)
         with tempfile.TemporaryDirectory() as temp_dir:
             uri_path = Path(temp_dir) / "vless-uri.txt"
             uri_path.write_text("vless://stale", encoding="utf-8")
-            with patch("vpn_installer.verify._run_external_public_profile") as runner:
-                result = _verify_public_vless_uri(uri_path, env, foreign)
+        with patch("vpn_installer.verify._run_public_profile") as run_profile:
+                result = _verify_public_vless_uri(uri_path, env, runner)
         self.assertEqual(result["verdict"], "failed")
-        runner.assert_not_called()
+        run_profile.assert_not_called()
 
     def test_detached_runner_reports_its_stderr_when_it_exits_without_result(self) -> None:
         target = RemoteTarget(role=ROLE_FOREIGN, ssh_host="foreign.example")

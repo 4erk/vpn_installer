@@ -34,6 +34,22 @@ from vpn_installer.interserver_transport import (
 )
 
 
+def canonical_dual_env(name: str = "demo") -> dict[str, str]:
+    env = generate_default_env(name)
+    env.update(
+        {
+            "CONFIG_SCHEMA": "2",
+            "TOPOLOGY": "dual",
+            "GATEWAY_LOCATION": "ru",
+            "GATEWAY_PUBLIC_IP": "203.0.113.10",
+            "EXIT_PUBLIC_IP": "198.51.100.20",
+        }
+    )
+    env.pop("RU_PUBLIC_IP", None)
+    env.pop("FOREIGN_PUBLIC_IP", None)
+    return env
+
+
 class InterserverTransportIdentityTests(unittest.TestCase):
     def test_stdlib_x25519_matches_rfc_7748_vector(self) -> None:
         private_key = bytes.fromhex("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a")
@@ -93,8 +109,7 @@ class InterserverTransportIdentityTests(unittest.TestCase):
         self.assertEqual(len(base64.b64decode(first["public_key"])), 32)
 
     def test_topology_compiles_one_stable_relay_with_an_underlay_selector(self) -> None:
-        env = generate_default_env("demo")
-        env["FOREIGN_PUBLIC_IP"] = "198.51.100.20"
+        env = canonical_dual_env()
         topology = build_ru_transport_topology(env)
         self.assertEqual(
             {item["tag"]: item["listen_port"] for item in topology["inbounds"]},
@@ -120,8 +135,7 @@ class InterserverTransportIdentityTests(unittest.TestCase):
         )
 
     def test_topology_validation_uses_the_compiled_model(self) -> None:
-        env = generate_default_env("demo")
-        env["FOREIGN_PUBLIC_IP"] = "198.51.100.20"
+        env = canonical_dual_env()
         topology = build_ru_transport_topology(env)
         config = {
             "endpoints": topology["endpoints"],
@@ -135,6 +149,48 @@ class InterserverTransportIdentityTests(unittest.TestCase):
         self.assertTrue(transport_topology_configured(config, env))
         config["inbounds"][0]["listen_port"] += 1
         self.assertFalse(transport_topology_configured(config, env))
+
+    def test_canonical_dual_transport_output_is_byte_stable(self) -> None:
+        env = canonical_dual_env("transport-golden")
+        env.update(
+            {
+                "WG_PRESHARED_KEY": base64.b64encode(bytes(range(32))).decode("ascii"),
+                "WG_FOREIGN_PUBLIC_KEY": "foreign-public-key",
+                "INTERSERVER_HY2_PUBLIC_KEY_SHA256": "transport-pin",
+                "WG_TUNNEL_FWMARK": "51820",
+                "WG_PORT": "51820",
+            }
+        )
+        payload = json.dumps(build_ru_transport_topology(env), sort_keys=True, separators=(",", ":"))
+
+        self.assertEqual(
+            hashlib.sha256(payload.encode("utf-8")).hexdigest(),
+            "25b3b25f46c98c59ca6425d474e92fef2862f316896bed29dfd890efaf8a37c5",
+        )
+
+    def test_interserver_transport_rejects_legacy_address_aliases(self) -> None:
+        env = canonical_dual_env()
+        env["FOREIGN_PUBLIC_IP"] = env["EXIT_PUBLIC_IP"]
+
+        with self.assertRaisesRegex(ValueError, "legacy public IP aliases"):
+            build_ru_transport_topology(env)
+
+    def test_interserver_transport_rejects_single_topology(self) -> None:
+        env = generate_default_env("single", topology="single", gateway_location="ru")
+        env.update(
+            {
+                "CONFIG_SCHEMA": "2",
+                "TOPOLOGY": "single",
+                "GATEWAY_LOCATION": "ru",
+                "GATEWAY_PUBLIC_IP": "203.0.113.10",
+                "EXIT_PUBLIC_IP": "",
+            }
+        )
+        env.pop("RU_PUBLIC_IP", None)
+        env.pop("FOREIGN_PUBLIC_IP", None)
+
+        with self.assertRaisesRegex(ValueError, "requires a dual topology"):
+            build_ru_transport_topology(env)
 
     def test_policy_switches_only_after_confirmed_failure(self) -> None:
         first = evaluate_transport_policy(

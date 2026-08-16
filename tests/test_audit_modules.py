@@ -11,6 +11,16 @@ from vpn_installer.audit import docker as audit_docker
 from vpn_installer.audit import lab as audit_lab
 from vpn_installer.audit import quick as audit_quick
 from vpn_installer.audit.runner import AuditFailure
+from vpn_installer.client_artifacts import PUBLIC_VLESS_OUTBOUND_TAG
+from vpn_installer.config import generate_default_env
+from vpn_installer.topology import (
+    LOCATION_FOREIGN,
+    LOCATION_RU,
+    NODE_EXIT,
+    NODE_GATEWAY,
+    TOPOLOGY_DUAL,
+    TOPOLOGY_SINGLE,
+)
 
 
 class FakeRunner:
@@ -31,6 +41,13 @@ class FakeRunner:
 
 
 class AuditModuleTests(unittest.TestCase):
+    @staticmethod
+    def canonical_dual_env() -> dict[str, str]:
+        env = generate_default_env("demo", topology=TOPOLOGY_DUAL, gateway_location=LOCATION_RU)
+        env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
+        env["EXIT_PUBLIC_IP"] = "198.51.100.20"
+        return env
+
     def test_quick_run_registers_expected_checks(self) -> None:
         class QuickRunner(FakeRunner):
             def ensure_quick_env(self):
@@ -49,6 +66,7 @@ class AuditModuleTests(unittest.TestCase):
             test_coverage=lambda *_args, **_kwargs: {},
             test_install_ux_helpers=lambda *_args, **_kwargs: {},
             test_render_all=lambda *_args, **_kwargs: {},
+            test_topology_matrix=lambda *_args, **_kwargs: {},
             test_validate_json=lambda *_args, **_kwargs: {},
             test_user_artifacts=lambda *_args, **_kwargs: {},
             test_validate_bundle=lambda *_args, **_kwargs: {},
@@ -69,6 +87,7 @@ class AuditModuleTests(unittest.TestCase):
             audit_quick.run(runner)  # type: ignore[arg-type]
         self.assertNotIn("quick-unittest", runner.records)
         self.assertIn("quick-install-ux", runner.records)
+        self.assertIn("quick-topology-matrix", runner.records)
         self.assertNotIn("quick-interserver-hysteria-runtime", runner.records)
         self.assertEqual(runner.skips, [])
 
@@ -76,8 +95,13 @@ class AuditModuleTests(unittest.TestCase):
         verified = audit_docker.acceptance_snapshot_fixture("verified")
         failed = audit_docker.acceptance_snapshot_fixture("failed")
 
-        self.assertEqual(verified["schema_version"], 3)
-        self.assertEqual(verified["role"], "foreign-exit")
+        self.assertEqual(verified["schema_version"], 4)
+        self.assertEqual(verified["topology"], TOPOLOGY_DUAL)
+        self.assertEqual(verified["node_id"], NODE_EXIT)
+        self.assertEqual(verified["location"], LOCATION_FOREIGN)
+        self.assertEqual(verified["role"], "")
+        self.assertIn("wireguard", verified["services"])
+        self.assertNotIn("xray", verified["services"])
         self.assertEqual(verified["network"], {"profile_mismatches": []})
         self.assertEqual(verified["artifacts"]["drift"], "none")
         self.assertEqual(verified["component_verdicts"]["server_path"], "verified")
@@ -85,6 +109,50 @@ class AuditModuleTests(unittest.TestCase):
         self.assertEqual(failed["component_verdicts"]["server_path"], "failed")
         with self.assertRaises(ValueError):
             audit_docker.acceptance_snapshot_fixture("inconclusive")
+
+    def test_acceptance_fixture_topology_capability_matrix(self) -> None:
+        single_ru = audit_docker.acceptance_snapshot_fixture(
+            "verified",
+            topology=TOPOLOGY_SINGLE,
+            node_id=NODE_GATEWAY,
+            gateway_location=LOCATION_RU,
+        )
+        single_foreign = audit_docker.acceptance_snapshot_fixture(
+            "verified",
+            topology=TOPOLOGY_SINGLE,
+            node_id=NODE_GATEWAY,
+            gateway_location=LOCATION_FOREIGN,
+        )
+        dual_gateway = audit_docker.acceptance_snapshot_fixture(
+            "verified",
+            topology=TOPOLOGY_DUAL,
+            node_id=NODE_GATEWAY,
+        )
+        dual_exit = audit_docker.acceptance_snapshot_fixture(
+            "verified",
+            topology=TOPOLOGY_DUAL,
+            node_id=NODE_EXIT,
+        )
+
+        for snapshot, location in ((single_ru, LOCATION_RU), (single_foreign, LOCATION_FOREIGN)):
+            self.assertEqual(snapshot["topology"], TOPOLOGY_SINGLE)
+            self.assertEqual(snapshot["node_id"], NODE_GATEWAY)
+            self.assertEqual(snapshot["location"], location)
+            self.assertIn("xray", snapshot["services"])
+            self.assertNotIn("wireguard", snapshot["services"])
+            self.assertEqual(snapshot["collectors"]["wireguard"]["status"], "not_applicable")
+
+        self.assertIn("xray", dual_gateway["services"])
+        self.assertIn("wireguard", dual_gateway["services"])
+        self.assertIn("wireguard", dual_exit["services"])
+        self.assertNotIn("xray", dual_exit["services"])
+        self.assertEqual(dual_exit["collectors"]["front"]["status"], "not_applicable")
+        with self.assertRaisesRegex(ValueError, "not configured"):
+            audit_docker.acceptance_snapshot_fixture(
+                "verified",
+                topology=TOPOLOGY_SINGLE,
+                node_id=NODE_EXIT,
+            )
 
     def test_release_workflow_requires_bounded_gates_before_publish(self) -> None:
         workflow = (Path(__file__).parents[1] / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
@@ -102,30 +170,30 @@ class AuditModuleTests(unittest.TestCase):
             client = out_dir / "client"
             bundle = out_dir / "bundle"
             cloud = out_dir / "cloud-init"
-            (preview / "ru").mkdir(parents=True)
-            (preview / "foreign").mkdir(parents=True)
+            (preview / NODE_GATEWAY).mkdir(parents=True)
+            (preview / NODE_EXIT).mkdir(parents=True)
             client.mkdir(parents=True)
             bundle.mkdir(parents=True)
             cloud.mkdir(parents=True)
             server = out_dir / "server"
             server.mkdir(parents=True)
-            (server / "ru.env").write_text('DEPLOY_NAME="demo"\n', encoding="utf-8")
+            (server / f"{NODE_GATEWAY}.env").write_text('DEPLOY_NAME="demo"\n', encoding="utf-8")
             for path in [
-                preview / "ru" / "sing-box.json",
-                preview / "ru" / "xray.json",
-                preview / "foreign" / "sing-box.json",
+                preview / NODE_GATEWAY / "sing-box.json",
+                preview / NODE_GATEWAY / "xray.json",
+                preview / NODE_EXIT / "sing-box.json",
             ]:
                 path.write_text("{}\n", encoding="utf-8")
             public_outbounds = [
                 {
                     "type": "vless",
-                    "tag": "ru-gateway-vless",
+                    "tag": PUBLIC_VLESS_OUTBOUND_TAG,
                     "multiplex": {"enabled": False},
                 }
             ]
             public_profile = {
-                "dns": {"servers": [{"detour": "ru-gateway-vless"}]},
-                "route": {"final": "ru-gateway-vless"},
+                "dns": {"servers": [{"detour": PUBLIC_VLESS_OUTBOUND_TAG}]},
+                "route": {"final": PUBLIC_VLESS_OUTBOUND_TAG},
                 "outbounds": public_outbounds,
             }
             (client / "hiddify-cross-platform.json").write_text(
@@ -161,14 +229,14 @@ class AuditModuleTests(unittest.TestCase):
                 f"VLESS URI\nv2rayNG\nandroid-v2rayng-xray.json\n{audit_quick.cli_command('status')}\n",
                 encoding="utf-8",
             )
-            for name in ("ru-gateway.tar.gz", "foreign-exit.tar.gz"):
+            for name in (f"{NODE_GATEWAY}.tar.gz", f"{NODE_EXIT}.tar.gz"):
                 with tarfile.open(bundle / name, "w:gz") as archive:
                     keep = out_dir / f"{name}.txt"
                     keep.write_text("x", encoding="utf-8")
                     archive.add(keep, arcname="demo.txt")
             with self.assertRaises(AuditFailure):
-                audit_quick.test_validate_bundle(out_dir)
-            self.assertIn("validated", audit_quick.test_validate_json(out_dir))
+                audit_quick.test_validate_bundle(out_dir, self.canonical_dual_env())
+            self.assertIn("validated", audit_quick.test_validate_json(out_dir, self.canonical_dual_env()))
             self.assertIn("vless_uri", audit_quick.test_user_artifacts(out_dir))
 
     def test_quick_vpn_menu_exit_accepts_expected_output(self) -> None:
@@ -185,22 +253,100 @@ class AuditModuleTests(unittest.TestCase):
         runner = FakeRunner()
         audit_docker.run(runner)  # type: ignore[arg-type]
         self.assertIn("docker-unmanaged-remove-purge-render-only", runner.records)
-        self.assertIn("docker-role-scoped-workflows", runner.records)
+        self.assertIn("docker-schema2-to-schema3-migration", runner.records)
+        self.assertIn("docker-install-rollback-state", runner.records)
+        self.assertIn("docker-node-scoped-workflows", runner.records)
+
+    def test_schema2_migration_linux_gate_covers_direct_cleanup_and_fail_closed_paths(self) -> None:
+        builder = audit_docker.schema2_fixture_builder_text()
+        compile(builder, "<schema2-fixture-builder>", "exec")
+        self.assertIn("_COMMON_ARTIFACT_PATHS", builder)
+        self.assertIn('effective_paths.append("/etc/sing-box/config.json")', builder)
+
+        script = audit_docker.schema2_migration_acceptance_script()
+        self.assertEqual(script.count("support adapt-schema2"), 3)
+        self.assertIn("schema2.paths", script)
+        self.assertIn("schema3.paths", script)
+        self.assertIn("comm -23", script)
+        self.assertIn("intermediate dual schema-3 contract is not allowed", script)
+        self.assertIn("/etc/wireguard/wg0.conf", script)
+        self.assertIn("vpn-stack-transport.service", script)
+        self.assertIn("owned live path was modified: /etc/xray/config.json", script)
+        self.assertIn("/etc/sing-box/config.json", script)
+        self.assertIn("/etc/vpn-stack/sing-box.base.json", script)
+        self.assertIn('test "$(meta_value "$gateway_contract" topology)" = dual', script)
+        self.assertIn('test "$(meta_value "$single_contract" topology)" = single', script)
+        self.assertNotIn("--node exit", script)
+        self.assertLessEqual(audit_docker.SCHEMA2_MIGRATION_TIMEOUT_SECONDS, 45)
+
+    def test_transaction_rollback_linux_gate_uses_schema_three_helpers(self) -> None:
+        script = audit_docker.transaction_rollback_acceptance_script(repr("{}"))
+
+        for helper in (
+            "build_operation_scope",
+            "create_transaction_snapshots",
+            "rollback_action",
+            "current_release_contract",
+            "prepare_previous_contract",
+            "install_action",
+            "on_exit",
+        ):
+            self.assertIn(helper, script)
+        for gate in (
+            "acceptance-marker-path",
+            "failed-acceptance-evidence",
+            "single-rollback-without-wireguard",
+            "node-mismatch-rejection",
+            "sigkill-production-cutover-reconciliation",
+            "schema2-rollback-verification",
+        ):
+            self.assertIn(f"pass_gate {gate}", script)
+        for stale in (
+            "require_matching_install_identity",
+            "create_revision_snapshot",
+            "restore_install_state_on_error",
+            "VPNSTACK_ACCEPTANCE_FILE",
+        ):
+            self.assertNotIn(stale, script)
+        self.assertIn("/etc/vpn-stack/last-acceptance.json", script)
+        self.assertIn("test -f /etc/wireguard/wg0.conf", script)
+        self.assertEqual(script.count("rollback_action"), 2)
+        self.assertIn('kill -KILL "$installer_pid"', script)
+        self.assertIn('flock 9', script)
+        self.assertIn('grep -Fxq "is-enabled $unit"', script)
+        self.assertIn('grep -Fxq "is-active $unit"', script)
+        self.assertIn('test "$expected_enabled" = disabled', script)
+        crash_section = script.split("cp \"$PREVIOUS_CONTRACT/services.tsv\" /work/schema2-services.tsv", 1)[1].split(
+            "pass_gate sigkill-production-cutover-reconciliation", 1
+        )[0]
+        self.assertIn("install_action", crash_section)
+        self.assertNotIn("install_planned_links", crash_section)
+        self.assertNotIn("switch_current_release", crash_section)
+        self.assertNotIn("retire_previous_services", crash_section)
+        self.assertEqual(script.count("pass_gate "), 6)
+        self.assertLessEqual(audit_docker.TRANSACTION_ACCEPTANCE_TIMEOUT_SECONDS, 45)
+
+    def test_install_cutover_starts_new_services_before_retiring_previous_services(self) -> None:
+        script = (Path(__file__).parents[1] / "install.sh").read_text(encoding="utf-8")
+        install_body = script.split("install_action() {", 1)[1].split("\n}\n\ncurrent_release_contract()", 1)[0]
+
+        start = install_body.index('start_planned_services "${staged_contract}"')
+        retire = install_body.index('retire_previous_services "${PREVIOUS_CONTRACT}" "${staged_contract}"')
+        self.assertLess(start, retire)
 
     def test_lab_builders_return_expected_content(self) -> None:
         self.assertIn("address=/ya.ru/", audit_lab.build_lab_dnsmasq())
         self.assertIn("server=ru-web", audit_lab.build_lab_web_server("ru-web"))
-        env = {
-            "RU_LISTEN_PORT": "443",
-            "CLIENT_UUID": "00000000-0000-0000-0000-000000000000",
-            "WG_INTERFACE": "wg0",
-            "RU_PUBLIC_IP": "203.0.113.10",
-            "FOREIGN_PUBLIC_IP": "198.51.100.20",
-        }
+        env = self.canonical_dual_env()
+        env["CLIENT_UUID"] = "00000000-0000-0000-0000-000000000000"
         client_cfg = audit_lab.build_lab_client_config(env)
         self.assertIn('"server": "198.18.0.10"', client_cfg)
 
     def test_lab_network_apply_validation_uses_nested_agent_contract(self) -> None:
+        lab_source = (Path(__file__).parents[1] / "vpn_installer" / "audit" / "lab.py").read_text(encoding="utf-8")
+        self.assertIn("topology.py", audit_lab.SERVER_AGENT_INTERSERVER_MODULES)
+        self.assertIn("release_integrity.py", audit_lab.SERVER_AGENT_BASE_MODULES)
+        self.assertIn("*SERVER_AGENT_BASE_MODULES, *SERVER_AGENT_INTERSERVER_MODULES", lab_source)
         audit_lab.validate_network_apply_result(
             {
                 "qdisc": {

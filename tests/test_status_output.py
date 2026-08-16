@@ -172,7 +172,7 @@ class StatusOutputTests(unittest.TestCase):
         rendered = "\n".join(lines)
         self.assertIn("role: ru-gateway", rendered)
         self.assertIn("drift: none", rendered)
-        self.assertIn("snapshot schema: 3", rendered)
+        self.assertIn("snapshot schema: 4", rendered)
         self.assertIn("collector status: ok", rendered)
         self.assertIn(
             "log window 5m: status=ok (observed=2026-07-20T08:00:00Z), "
@@ -344,6 +344,90 @@ class StatusOutputTests(unittest.TestCase):
         self.assertIn("log window 5m: status=error (journalctl timed out), counts=unavailable", rendered)
         self.assertIn("log window 30m:", rendered)
         self.assertIn("counts=no classified events", rendered)
+
+    def test_single_gateway_uses_capabilities_and_omits_interserver_state(self) -> None:
+        collectors = ok_collectors()
+        collectors["wireguard"] = CollectorState.not_applicable("single topology")
+        collectors["transport"] = CollectorState.not_applicable("single topology")
+        rendered = "\n".join(
+            format_snapshot_summary(
+                DiagnosticsSnapshot(
+                    topology="single",
+                    node_id="gateway",
+                    location="foreign",
+                    capabilities=("local-egress", "public-front", "router", "web-admin"),
+                    role="foreign-exit",
+                    collectors=collectors,
+                    log_windows=collected_windows(),
+                    front={"reality_target": "example.org:443"},
+                    network={
+                        "tcp_adaptation": {
+                            "qdisc": "fq",
+                            "overlay_qdisc": "fq",
+                        },
+                        "wireguard_policy": {"managed": True, "ok": False},
+                    },
+                    transport={
+                        "interserver": {"mode": "stale-dual-data", "listening": True},
+                    },
+                )
+            )
+        )
+
+        self.assertIn("topology: single", rendered)
+        self.assertIn("node: gateway", rendered)
+        self.assertIn("location: foreign", rendered)
+        self.assertIn("Reality target: target=example.org:443", rendered)
+        self.assertIn("collector status: ok", rendered)
+        self.assertIn("wireguard=not_applicable (single topology)", rendered)
+        self.assertNotIn("role: foreign-exit", rendered)
+        self.assertNotIn("wg_qdisc=", rendered)
+        self.assertNotIn("wireguard policy:", rendered)
+        self.assertNotIn("interserver transport:", rendered)
+
+    def test_dual_formatter_matrix_uses_interserver_capabilities_not_role(self) -> None:
+        cases = (
+            (
+                "gateway",
+                "foreign-exit",
+                ("interserver-client", "local-egress", "public-front", "router"),
+                {
+                    "mode": "stable-wireguard-overlay",
+                    "adaptive_state": {"state": "healthy", "fresh": True},
+                    "selection": {"selected": "interserver-underlay-wg", "candidates": {}},
+                },
+                "selected=interserver-underlay-wg",
+            ),
+            (
+                "exit",
+                "ru-gateway",
+                ("interserver-server", "nat-exit"),
+                {
+                    "mode": "hysteria2-egress",
+                    "listening": True,
+                    "source_restricted_to": "203.0.113.10",
+                },
+                "listener=active, source=203.0.113.10",
+            ),
+        )
+        for node_id, legacy_role, capabilities, interserver, expected in cases:
+            with self.subTest(node_id=node_id):
+                rendered = "\n".join(
+                    format_snapshot_summary(
+                        DiagnosticsSnapshot(
+                            topology="dual",
+                            node_id=node_id,
+                            location="ru" if node_id == "gateway" else "foreign",
+                            capabilities=capabilities,
+                            role=legacy_role,
+                            transport={"interserver": interserver},
+                        )
+                    )
+                )
+                self.assertIn("topology: dual", rendered)
+                self.assertIn(f"node: {node_id}", rendered)
+                self.assertIn(expected, rendered)
+                self.assertNotIn(f"role: {legacy_role}", rendered)
 
 
 if __name__ == "__main__":

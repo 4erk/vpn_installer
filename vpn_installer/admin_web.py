@@ -6,14 +6,9 @@ import hmac
 import json
 import os
 import secrets
-import socket
-import subprocess
 import sys
-import threading
 import time
 import urllib.parse
-import urllib.request
-import ipaddress
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -31,8 +26,7 @@ AUTH_PATH = Path("/etc/vpn-stack/admin-auth.json")
 RULES_PATH = admin_apply.RULES_PATH
 PBKDF2_ROUNDS = 200_000
 CSRF_TOKEN = secrets.token_urlsafe(32)
-CLIENT_IP_CACHE: dict[str, Any] = {"expires_at": 0.0, "listen_port": None, "ips": set()}
-CLASH_CONNECTIONS_URL = "http://127.0.0.1:19090/connections"
+ADMIN_BIND = "127.0.0.1"
 
 
 def load_env(path: Path | None = None) -> dict[str, str]:
@@ -103,239 +97,6 @@ def check_basic_auth(header: str | None) -> bool:
     return hmac.compare_digest(username, str(auth.get("username", ""))) and verify_password(password, auth.get("password", {}))
 
 
-def is_loopback_bind(bind: str) -> bool:
-    if bind in {"localhost"}:
-        return True
-    try:
-        return ipaddress.ip_address(bind).is_loopback
-    except ValueError:
-        return False
-
-
-def assert_safe_bind(env: dict[str, str]) -> None:
-    bind = env.get("ADMIN_WEB_BIND", "127.0.0.1") or "127.0.0.1"
-    if is_loopback_bind(bind):
-        return
-    username = env.get("ADMIN_WEB_USERNAME", "user") or "user"
-    password = env.get("ADMIN_WEB_PASSWORD", "password") or "password"
-    default_credentials = username == "user" and password == "password"
-    if AUTH_PATH.exists():
-        auth = json.loads(AUTH_PATH.read_text(encoding="utf-8"))
-        default_credentials = hmac.compare_digest(str(auth.get("username", "")), "user") and verify_password("password", auth.get("password", {}))
-    client_match_enabled = env.get("ADMIN_WEB_ACTIVE_CLIENT_REQUIRED", "1").strip().lower() in {"1", "true", "yes", "on"}
-    allow_wg = env.get("ADMIN_WEB_ALLOW_WG", "0").strip().lower() in {"1", "true", "yes", "on"}
-    allowed_cidr = env.get("ADMIN_WEB_ALLOWED_CIDR", "").strip()
-    if default_credentials and not (client_match_enabled and not allow_wg and not allowed_cidr):
-        raise RuntimeError("ADMIN_WEB_BIND is public but admin credentials are still user/password")
-
-
-def split_endpoint(endpoint: str) -> tuple[str, str]:
-    value = endpoint.strip()
-    if value.startswith("[") and "]:" in value:
-        host, port = value[1:].split("]:", 1)
-        return host, port
-    host, sep, port = value.rpartition(":")
-    if not sep:
-        return "", ""
-    return host, port
-
-
-def parse_established_client_ips(ss_text: str, listen_port: int) -> set[str]:
-    ips: set[str] = set()
-    expected_port = str(listen_port)
-    for line in ss_text.splitlines():
-        parts = line.split()
-        if len(parts) < 4:
-            continue
-        local_host, local_port = split_endpoint(parts[-2])
-        peer_host, _peer_port = split_endpoint(parts[-1])
-        if local_port != expected_port:
-            continue
-        try:
-            ip = ipaddress.ip_address(peer_host.strip("[]"))
-        except ValueError:
-            continue
-        if ip.version == 6 and ip.ipv4_mapped:
-            ip = ip.ipv4_mapped
-        if ip.version == 4:
-            ips.add(str(ip))
-    return ips
-
-
-def xray_client_ips(listen_port: int) -> set[str]:
-    try:
-        completed = subprocess.run(
-            ["ss", "-Htn", "state", "established"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=3,
-        )
-    except Exception:
-        return set()
-    return parse_established_client_ips(completed.stdout, listen_port)
-
-
-def parse_hysteria_client_ips(payload: dict[str, Any]) -> set[str]:
-    ips: set[str] = set()
-    connections = payload.get("connections", []) if isinstance(payload, dict) else []
-    for connection in connections if isinstance(connections, list) else []:
-        metadata = connection.get("metadata", {}) if isinstance(connection, dict) else {}
-        if not isinstance(metadata, dict) or metadata.get("type") != "hysteria2/public-hy2-in":
-            continue
-        try:
-            ip = ipaddress.ip_address(str(metadata.get("sourceIP", "")))
-        except ValueError:
-            continue
-        if ip.version == 6 and ip.ipv4_mapped:
-            ip = ip.ipv4_mapped
-        if ip.version == 4:
-            ips.add(str(ip))
-    return ips
-
-
-def hysteria_client_ips() -> set[str]:
-    try:
-        request = urllib.request.Request(CLASH_CONNECTIONS_URL, headers={"Accept": "application/json"})
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        with opener.open(request, timeout=2) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except Exception:
-        return set()
-    return parse_hysteria_client_ips(payload)
-
-
-def active_public_client_ips(listen_port: int) -> set[str]:
-    now = time.monotonic()
-    if CLIENT_IP_CACHE["listen_port"] == listen_port and now < float(CLIENT_IP_CACHE["expires_at"]):
-        return set(CLIENT_IP_CACHE["ips"])
-    ips = xray_client_ips(listen_port) | hysteria_client_ips()
-    CLIENT_IP_CACHE.update({"expires_at": now + 1, "listen_port": listen_port, "ips": set(ips)})
-    return ips
-
-
-def active_client_ip_allowed(client_ip: str, env: dict[str, str]) -> bool:
-    if env.get("ADMIN_WEB_ACTIVE_CLIENT_REQUIRED", "1").strip().lower() not in {"1", "true", "yes", "on"}:
-        return False
-    try:
-        listen_port = int(env.get("RU_LISTEN_PORT", "443") or "443")
-    except ValueError:
-        listen_port = 443
-    return client_ip in active_public_client_ips(listen_port)
-
-
-def any_active_client(env: dict[str, str]) -> bool:
-    if env.get("ADMIN_WEB_ACTIVE_CLIENT_REQUIRED", "1").strip().lower() not in {"1", "true", "yes", "on"}:
-        return True
-    try:
-        listen_port = int(env.get("RU_LISTEN_PORT", "443") or "443")
-    except ValueError:
-        listen_port = 443
-    return bool(active_public_client_ips(listen_port))
-
-
-def tunnel_source_allowed(client_ip: str, env: dict[str, str]) -> bool:
-    if env.get("ADMIN_WEB_ALLOW_TUNNEL_CLIENTS", "1").strip().lower() not in {"1", "true", "yes", "on"}:
-        return False
-    try:
-        ip = ipaddress.ip_address(client_ip)
-    except ValueError:
-        return False
-    candidates = [
-        env.get("RU_PUBLIC_IP", ""),
-        env.get("FOREIGN_PUBLIC_IP", ""),
-        env.get("WG_RU_ADDRESS", ""),
-        env.get("WG_FOREIGN_ADDRESS", ""),
-    ]
-    for value in candidates:
-        value = value.strip()
-        if not value:
-            continue
-        try:
-            if ip in ipaddress.ip_network(value, strict=False):
-                return any_active_client(env)
-        except ValueError:
-            continue
-    return False
-
-
-def active_client_timeout_seconds(env: dict[str, str]) -> int:
-    try:
-        timeout_seconds = int(env.get("ADMIN_WEB_ACTIVE_CLIENT_TIMEOUT_SECONDS", "5") or "5")
-    except ValueError:
-        timeout_seconds = 5
-    return max(2, min(timeout_seconds, 300))
-
-
-def active_client_sync_interval(env: dict[str, str]) -> float:
-    return max(1.0, min(5.0, active_client_timeout_seconds(env) / 2))
-
-
-def sync_admin_client_nft_set(env: dict[str, str]) -> None:
-    if env.get("ADMIN_WEB_ACTIVE_CLIENT_REQUIRED", "1").strip().lower() not in {"1", "true", "yes", "on"}:
-        return
-    try:
-        listen_port = int(env.get("RU_LISTEN_PORT", "443") or "443")
-    except ValueError:
-        listen_port = 443
-    timeout_seconds = active_client_timeout_seconds(env)
-    for ip in active_public_client_ips(listen_port):
-        subprocess.run(
-            ["nft", "add", "element", "inet", "vpnstack", "admin_clients_ipv4", f"{{ {ip} timeout {timeout_seconds}s }}"],
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=2,
-        )
-
-
-def sync_admin_client_nft_set_loop() -> None:
-    while True:
-        env: dict[str, str] = {}
-        try:
-            env = load_env()
-            sync_admin_client_nft_set(env)
-        except Exception:
-            pass
-        time.sleep(active_client_sync_interval(env))
-
-
-def client_ip_allowed(client_ip: str, env: dict[str, str]) -> bool:
-    if is_loopback_bind(env.get("ADMIN_WEB_BIND", "127.0.0.1") or "127.0.0.1"):
-        return True
-    try:
-        ip = ipaddress.ip_address(client_ip)
-    except ValueError:
-        return False
-    if ip.is_loopback:
-        return True
-    if active_client_ip_allowed(str(ip), env):
-        return True
-    if tunnel_source_allowed(str(ip), env):
-        return True
-    allow_wg = env.get("ADMIN_WEB_ALLOW_WG", "0").strip().lower() in {"1", "true", "yes", "on"}
-    if allow_wg:
-        for key in ("WG_RU_ADDRESS", "WG_FOREIGN_ADDRESS"):
-            value = env.get(key, "").strip()
-            if not value:
-                continue
-            try:
-                if ip in ipaddress.ip_network(value, strict=False):
-                    return True
-            except ValueError:
-                continue
-    cidrs = [item.strip() for item in env.get("ADMIN_WEB_ALLOWED_CIDR", "").replace(",", " ").split() if item.strip()]
-    if not cidrs:
-        return False
-    for cidr in cidrs:
-        try:
-            if ip in ipaddress.ip_network(cidr, strict=False):
-                return True
-        except ValueError:
-            continue
-    return False
-
-
 def load_rules() -> list[dict[str, Any]]:
     return admin_apply.load_rules(RULES_PATH)
 
@@ -358,11 +119,16 @@ def commit_rules(new_rules: list[dict[str, Any]], old_rules: list[dict[str, Any]
 def routes_payload() -> dict[str, Any]:
     env = load_env()
     rules = load_rules()
+    base_config = admin_apply.read_json(admin_apply.BASE_CONFIG_PATH, {})
+    catalog = admin_apply.outbound_catalog(base_config) if isinstance(base_config, dict) else {}
     return {
         "rules": rules,
         "generation": admin_apply.rules_generation(rules),
         "config": {
+            "topology": env.get("TOPOLOGY", ""),
+            "gateway_location": env.get("GATEWAY_LOCATION", ""),
             "foreign_block_ru": env.get("FOREIGN_BLOCK_RU", "0").strip() == "1",
+            "egresses": list(catalog.values()),
         },
     }
 
@@ -426,7 +192,7 @@ ROUTES_BODY = """
     <div class="card">
       <div class="card-body p-4">
         <h1 class="h4 mb-3">Новое исключение</h1>
-        <p class="text-muted">Правило применяется на российском router сразу после сохранения.</p>
+        <p class="text-muted">Правило применяется на gateway сразу после сохранения.</p>
         <div class="mb-3">
           <label class="form-label">Домен или CIDR</label>
           <input id="rule-value" class="form-control form-control-lg" placeholder="example.com или *.example.com">
@@ -438,10 +204,7 @@ ROUTES_BODY = """
         </div>
         <div class="mb-3">
           <label class="form-label">Через какой сервер открывать</label>
-          <select id="rule-outbound" class="form-select">
-            <option value="direct-ru">российский сервер</option>
-            <option value="to-foreign">зарубежный сервер</option>
-          </select>
+          <select id="rule-outbound" class="form-select"></select>
         </div>
         <div id="foreign-block-warning" class="alert alert-warning small d-none">
           Foreign-side RU block включён. Российские IP через зарубежный сервер могут отрезаться на foreign host.
@@ -480,8 +243,19 @@ ROUTES_BODY = """
 
 ROUTES_SCRIPT = """
 <script>
+let routeEgresses = [];
 function serverLabel(outbound) {
-  return outbound === "to-foreign" ? "зарубежный сервер" : "российский сервер";
+  const item = routeEgresses.find(function(entry) { return entry.tag === outbound; });
+  return item ? item.label : outbound;
+}
+function egressOptions(selected) {
+  const options = routeEgresses.map(function(entry) {
+    return '<option value="' + $("<div>").text(entry.tag).html() + '">' + $("<div>").text(entry.label).html() + '</option>';
+  }).join("");
+  if (selected && !routeEgresses.some(function(entry) { return entry.tag === selected; })) {
+    return options + '<option value="' + $("<div>").text(selected).html() + '" disabled>' + $("<div>").text(selected + " (недоступно)").html() + '</option>';
+  }
+  return options;
 }
 function showMessage(kind, text) {
   $("#rules-message").html('<div class="alert alert-' + kind + '">' + $("<div>").text(text).html() + '</div>');
@@ -496,7 +270,8 @@ function renderRules(rules) {
     const value = $("<span>").text(rule.value).html();
     const row = $('<tr>').attr("data-id", rule.id);
     row.append('<td><div class="d-flex align-items-center gap-2"><div class="form-check form-switch mb-0"><input class="form-check-input rule-enabled" type="checkbox" ' + (rule.enabled ? "checked" : "") + '></div><code>' + value + '</code></div></td>');
-    row.append('<td><select class="form-select form-select-sm rule-outbound"><option value="direct-ru">российский сервер</option><option value="to-foreign">зарубежный сервер</option></select></td>');
+    const conflict = rule.conflict ? '<div class="text-danger small mt-1">' + $("<div>").text(rule.conflict).html() + '</div>' : '';
+    row.append('<td><select class="form-select form-select-sm rule-outbound">' + egressOptions(rule.outbound) + '</select>' + conflict + '</td>');
     row.append('<td><div class="form-check form-switch mb-0"><input class="form-check-input rule-subdomains" type="checkbox" ' + (rule.include_subdomains ? "checked" : "") + '></div></td>');
     row.append('<td class="text-end"><button class="btn btn-outline-danger btn-sm rule-delete">Удалить</button></td>');
     row.find(".rule-outbound").val(rule.outbound);
@@ -514,6 +289,8 @@ function setLoadingRules() {
   $("#rules-table").html('<tr><td colspan="4" class="text-muted"><span class="spinner-border spinner-border-sm me-2" aria-hidden="true"></span>Загружаю исключения...</td></tr>');
 }
 function applyRoutesConfig(config) {
+  routeEgresses = (config && config.egresses) || [];
+  $("#rule-outbound").html(egressOptions());
   $("#foreign-block-warning").toggleClass("d-none", !(config && config.foreign_block_ru));
 }
 function loadRules() {
@@ -654,22 +431,7 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: Any) -> None:
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
 
-    def drop_connection(self) -> None:
-        self.close_connection = True
-        try:
-            self.connection.shutdown(socket.SHUT_RDWR)
-        except OSError:
-            pass
-        try:
-            self.connection.close()
-        except OSError:
-            pass
-
     def require_auth(self) -> bool:
-        env = load_env()
-        if not client_ip_allowed(self.client_address[0], env):
-            self.drop_connection()
-            return False
         if check_basic_auth(self.headers.get("Authorization")):
             return True
         data = "Authentication required\n".encode("utf-8")
@@ -849,33 +611,11 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
 
 
-class StealthAdminServer(ThreadingHTTPServer):
-    def verify_request(self, request: Any, client_address: tuple[Any, ...]) -> bool:
-        env = load_env()
-        client_ip = str(client_address[0]) if client_address else ""
-        allowed = client_ip_allowed(client_ip, env)
-        if not allowed:
-            try:
-                request.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-            try:
-                request.close()
-            except OSError:
-                pass
-        return allowed
-
-
 def serve() -> None:
     env = load_env()
-    bind = env.get("ADMIN_WEB_BIND", "127.0.0.1") or "127.0.0.1"
     port = int(env.get("ADMIN_WEB_PORT", "11333") or "11333")
-    assert_safe_bind(env)
     init_auth(env.get("ADMIN_WEB_USERNAME", "user") or "user", env.get("ADMIN_WEB_PASSWORD", "password") or "password")
-    if env.get("ADMIN_WEB_ACTIVE_CLIENT_REQUIRED", "1").strip().lower() in {"1", "true", "yes", "on"}:
-        sync_admin_client_nft_set(env)
-        threading.Thread(target=sync_admin_client_nft_set_loop, daemon=True).start()
-    StealthAdminServer((bind, port), Handler).serve_forever()
+    ThreadingHTTPServer((ADMIN_BIND, port), Handler).serve_forever()
 
 
 def main(argv: list[str] | None = None) -> int:

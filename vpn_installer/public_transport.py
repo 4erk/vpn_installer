@@ -8,9 +8,24 @@ import uuid
 from typing import Any
 
 from .interserver_transport import HY2_SERVER_NAME, decode_transport_pem
+from .topology import CAP_PUBLIC_FRONT, NODE_GATEWAY, NodePlan, TopologySpec
 
 PUBLIC_HY2_INBOUND_TAG = "public-hy2-in"
 PUBLIC_HY2_OUTBOUND_TAG = "ru-gateway-quic"
+_LEGACY_PUBLIC_IP_KEYS = ("RU_PUBLIC_IP", "FOREIGN_PUBLIC_IP")
+
+
+def _public_gateway_plan(env: dict[str, str]) -> NodePlan:
+    legacy_keys = [key for key in _LEGACY_PUBLIC_IP_KEYS if key in env]
+    if legacy_keys:
+        raise ValueError(
+            "legacy public IP aliases are not accepted by public transport: "
+            + ", ".join(legacy_keys)
+        )
+    plan = TopologySpec.from_env(env).plan(NODE_GATEWAY)
+    if CAP_PUBLIC_FRONT not in plan.capabilities:
+        raise ValueError("gateway topology does not provide the public-front capability")
+    return plan
 
 
 def derive_public_hy2_password(client_uuid: str) -> str:
@@ -25,13 +40,15 @@ def derive_public_hy2_password(client_uuid: str) -> str:
 
 
 def public_hy2_certificate_fingerprint(env: dict[str, str]) -> str:
-    certificate_pem = "\n".join(decode_transport_pem(env["INTERSERVER_HY2_CERTIFICATE_B64"], "certificate")) + "\n"
+    _public_gateway_plan(env)
+    certificate_pem = "\n".join(decode_transport_pem(env["PUBLIC_HY2_CERTIFICATE_B64"], "certificate")) + "\n"
     certificate_der = ssl.PEM_cert_to_DER_cert(certificate_pem)
     digest = hashlib.sha256(certificate_der).hexdigest().upper()
     return ":".join(digest[index : index + 2] for index in range(0, len(digest), 2))
 
 
 def render_public_hy2_inbound(env: dict[str, str]) -> dict[str, Any]:
+    _public_gateway_plan(env)
     return {
         "type": "hysteria2",
         "tag": PUBLIC_HY2_INBOUND_TAG,
@@ -40,22 +57,23 @@ def render_public_hy2_inbound(env: dict[str, str]) -> dict[str, Any]:
         "users": [{"password": derive_public_hy2_password(env["CLIENT_UUID"])}],
         "tls": {
             "enabled": True,
-            "certificate": decode_transport_pem(env["INTERSERVER_HY2_CERTIFICATE_B64"], "certificate"),
-            "key": decode_transport_pem(env["INTERSERVER_HY2_PRIVATE_KEY_B64"], "private key"),
+            "certificate": decode_transport_pem(env["PUBLIC_HY2_CERTIFICATE_B64"], "certificate"),
+            "key": decode_transport_pem(env["PUBLIC_HY2_PRIVATE_KEY_B64"], "private key"),
         },
     }
 
 
 def render_public_hy2_outbound(env: dict[str, str], *, tag: str = PUBLIC_HY2_OUTBOUND_TAG) -> dict[str, Any]:
+    gateway = _public_gateway_plan(env)
     return {
         "type": "hysteria2",
         "tag": tag,
-        "server": env["RU_PUBLIC_IP"],
+        "server": gateway.public_ip,
         "server_port": int(env["RU_LISTEN_PORT"]),
         "password": derive_public_hy2_password(env["CLIENT_UUID"]),
         "tls": {
             "enabled": True,
             "server_name": HY2_SERVER_NAME,
-            "certificate_public_key_sha256": [env["INTERSERVER_HY2_PUBLIC_KEY_SHA256"]],
+            "certificate_public_key_sha256": [env["PUBLIC_HY2_PUBLIC_KEY_SHA256"]],
         },
     }

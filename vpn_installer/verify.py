@@ -11,10 +11,6 @@ from . import workflows
 from .common import OUT_DIR, print_header
 from .client_artifacts import render_vless_uri
 from .diagnostics import DiagnosticsSnapshot, classify_interserver_adaptation
-from .models import (
-    ROLE_FOREIGN,
-    ROLE_RU,
-)
 from .network_profile import (
     FQ_FLOW_LIMIT,
     FQ_KIND,
@@ -28,7 +24,17 @@ from .network_profile import (
 )
 from .public_transport import PUBLIC_HY2_OUTBOUND_TAG, render_public_hy2_outbound
 from .remote import remote_agent_snapshot, scp_upload, ssh_capture
-from .roles import requested_roles
+from .topology import (
+    CAP_INTERSERVER_CLIENT,
+    CAP_INTERSERVER_SERVER,
+    CAP_PUBLIC_FRONT,
+    CAP_WEB_ADMIN,
+    NODE_EXIT,
+    NODE_GATEWAY,
+    NodePlan,
+    TOPOLOGY_DUAL,
+    TopologySpec,
+)
 from .vless_verify import (
     RUNNER_HTTP_PROBE_COUNT,
     RUNNER_HTTP_TIMEOUT_SECONDS,
@@ -57,6 +63,33 @@ FALLBACK_CAPACITY_REFERENCE_BYTES_PER_SECOND = 1_250_000
 VLESS_RUNNER_LOCK_PATH = "/run/lock/vpn-stack-vless-verify.lock"
 SNAPSHOT_MAX_AGE_SECONDS = 180
 COMPLETE_LOG_RETENTION_SECONDS = 14 * 24 * 60 * 60
+INTERSERVER_CAPABILITIES = frozenset({CAP_INTERSERVER_CLIENT, CAP_INTERSERVER_SERVER})
+
+
+def _required_snapshot_collectors(capabilities: frozenset[str]) -> frozenset[str]:
+    required = {"services", "artifacts", "route_probes", "logs", "storage", "network", "maintenance"}
+    if CAP_PUBLIC_FRONT in capabilities:
+        required.add("front")
+    if capabilities & INTERSERVER_CAPABILITIES:
+        required.update({"wireguard", "transport"})
+    return frozenset(required)
+
+
+def _required_snapshot_services(capabilities: frozenset[str]) -> frozenset[str]:
+    required = {"nftables", "sing-box", "resolver", "health_timer"}
+    if CAP_PUBLIC_FRONT in capabilities:
+        required.add("xray")
+    if CAP_WEB_ADMIN in capabilities:
+        required.add("admin")
+    if capabilities & INTERSERVER_CAPABILITIES:
+        required.add("wireguard")
+    if CAP_INTERSERVER_CLIENT in capabilities:
+        required.add("transport")
+    return frozenset(required)
+
+
+def _has_compatibility_migration(snapshot: DiagnosticsSnapshot) -> bool:
+    return bool(snapshot.migration) and snapshot.migration.get("state") != "native"
 
 
 def _release_within_complete_log_retention(snapshot: DiagnosticsSnapshot) -> bool:
@@ -71,10 +104,14 @@ def _release_within_complete_log_retention(snapshot: DiagnosticsSnapshot) -> boo
     return -30 <= age_seconds <= COMPLETE_LOG_RETENTION_SECONDS
 
 
-def _verify_snapshot(snapshot: DiagnosticsSnapshot) -> DiagnosticsSnapshot:
-    if snapshot.migration:
+def _verify_snapshot(snapshot: DiagnosticsSnapshot, *, expected_plan: NodePlan | None = None) -> DiagnosticsSnapshot:
+    if _has_compatibility_migration(snapshot):
         snapshot.verdict = "inconclusive"
-        snapshot.reasons = ["native diagnostics schema 3 is required for live verification"]
+        snapshot.reasons = ["native diagnostics schema 4 is required for live verification"]
+        return snapshot
+    if not snapshot.has_capability_contract:
+        snapshot.verdict = "inconclusive"
+        snapshot.reasons = ["canonical topology/node/location/capabilities evidence is missing"]
         return snapshot
     try:
         observed_at = datetime.fromisoformat(snapshot.generated_at.replace("Z", "+00:00"))
@@ -90,15 +127,37 @@ def _verify_snapshot(snapshot: DiagnosticsSnapshot) -> DiagnosticsSnapshot:
 
     hard_failures: list[str] = []
     degradations: list[str] = []
-    required_collectors = {"services", "artifacts", "wireguard", "route_probes", "logs", "storage", "network", "front", "transport", "maintenance"}
+    capabilities = frozenset(snapshot.capabilities)
+    if expected_plan is not None:
+        expected_contract = (
+            expected_plan.topology,
+            expected_plan.node_id,
+            expected_plan.location,
+            expected_plan.capabilities,
+        )
+        observed_contract = (
+            snapshot.topology,
+            snapshot.node_id,
+            snapshot.location,
+            capabilities,
+        )
+        if observed_contract != expected_contract:
+            hard_failures.append("agent canonical node contract differs from deployment topology")
+    required_collectors = _required_snapshot_collectors(capabilities)
     for name in sorted(required_collectors):
         state = snapshot.collectors[name]
         if state.status == "error":
             hard_failures.append(f"collector {name} failed: {state.message}")
         elif state.status == "skipped":
             hard_failures.append(f"collector {name} was skipped: {state.message}")
+        elif state.status == "not_applicable":
+            hard_failures.append(f"collector {name} is required by node capabilities")
         elif state.status == "stale":
             degradations.append(f"collector {name} is stale")
+    for name in sorted({"front", "wireguard", "transport"} - required_collectors):
+        state = snapshot.collectors[name]
+        if state.status != "not_applicable":
+            hard_failures.append(f"collector {name} must be not_applicable for this node")
     for name, window in snapshot.log_windows.items():
         if window.collector.status == "error":
             if name == "since_release" and not _release_within_complete_log_retention(snapshot):
@@ -106,21 +165,24 @@ def _verify_snapshot(snapshot: DiagnosticsSnapshot) -> DiagnosticsSnapshot:
             hard_failures.append(f"log window {name} unavailable: {window.collector.message}")
         elif window.collector.status == "skipped":
             hard_failures.append(f"log window {name} was skipped: {window.collector.message}")
+        elif window.collector.status == "not_applicable":
+            hard_failures.append(f"log window {name} is unexpectedly not_applicable")
         elif window.collector.status == "stale":
             degradations.append(f"log window {name} is stale")
-    required_services = {"wireguard", "nftables", "sing-box", "resolver"}
+    required_services = _required_snapshot_services(capabilities)
     for service_name in sorted(required_services):
         state = snapshot.services.get(service_name)
         if state != "active":
             hard_failures.append(f"{service_name}={state or 'missing'}")
-    if snapshot.role == ROLE_RU and snapshot.services.get("xray") != "active":
-        hard_failures.append(f"xray={snapshot.services.get('xray')}")
-    if snapshot.role == ROLE_RU and (
+    has_public_front = CAP_PUBLIC_FRONT in capabilities
+    has_interserver_client = CAP_INTERSERVER_CLIENT in capabilities
+    requires_public_quic = has_public_front and snapshot.topology == TOPOLOGY_DUAL
+    if has_public_front and (
         snapshot.front.get("tcp_keepalive_idle_seconds") != 90
         or snapshot.front.get("tcp_keepalive_interval_seconds") != 15
     ):
         hard_failures.append("public TCP front keepalive policy is missing")
-    if snapshot.role == ROLE_RU:
+    if has_interserver_client:
         adaptation = snapshot.transport.get("interserver", {}).get("adaptive_state", {})
         adaptation_failure, adaptation_degradation = classify_interserver_adaptation(adaptation)
         if adaptation_failure:
@@ -165,8 +227,10 @@ def _verify_snapshot(snapshot: DiagnosticsSnapshot) -> DiagnosticsSnapshot:
         or qdisc_flow_limit != FQ_FLOW_LIMIT
     ):
         hard_failures.append("managed fq profile is not active")
-    required_verdicts = {"server_path", "public_front", "client_observation", "host_integrity"}
-    if snapshot.role == ROLE_RU:
+    required_verdicts = {"server_path", "host_integrity"}
+    if has_public_front:
+        required_verdicts.update({"public_front", "client_observation"})
+    if requires_public_quic:
         required_verdicts.add("public_quic")
     if not required_verdicts.issubset(snapshot.component_verdicts):
         hard_failures.append("agent verdict fields are incomplete")
@@ -181,13 +245,14 @@ def _verify_snapshot(snapshot: DiagnosticsSnapshot) -> DiagnosticsSnapshot:
         hard_failures.append("agent server_path failed")
     elif server_path != "verified":
         degradations.append(f"agent server_path={server_path}")
-    if public_front == "failed":
-        hard_failures.append("agent public_front failed")
-    elif snapshot.role == ROLE_RU and public_front != "verified":
-        degradations.append(f"agent public_front={public_front}")
-    if snapshot.role == ROLE_RU and public_quic != "verified":
+    if has_public_front:
+        if public_front == "failed":
+            hard_failures.append("agent public_front failed")
+        elif public_front != "verified":
+            degradations.append(f"agent public_front={public_front}")
+    if requires_public_quic and public_quic != "verified":
         hard_failures.append(f"agent public_quic={public_quic}")
-    if client_observation in {"client_specific", "degraded"}:
+    if has_public_front and client_observation in {"client_specific", "degraded"}:
         degradations.append("public TCP front shows active data-path degradation")
     if host_integrity == "failed":
         hard_failures.append("agent host_integrity failed")
@@ -229,7 +294,7 @@ def _collect_agent_snapshot(target) -> DiagnosticsSnapshot:
 
 
 def _reconcile_public_capabilities(snapshot: DiagnosticsSnapshot, public_vless: dict[str, object]) -> DiagnosticsSnapshot:
-    if snapshot.migration or snapshot.collector_status != "ok":
+    if _has_compatibility_migration(snapshot) or snapshot.collector_status != "ok":
         return snapshot
     functional = public_vless.get("functional", {})
     functional_verdict = functional.get("verdict") if isinstance(functional, dict) else None
@@ -284,18 +349,55 @@ def _private_reject_component(private_reject: object, *, label: str) -> dict[str
 
 def _validate_functional_transport_result(
     result: dict[str, object],
-    expected_ru_ip: str,
-    expected_foreign_ip: str,
+    topology: TopologySpec,
     *,
     label: str,
+    require_private_reject: bool = True,
 ) -> dict[str, object]:
     statuses = {str(result.get("github_status", "")), str(result.get("google_status", ""))}
     failures: list[str] = []
     inconclusive: list[str] = []
-    if result.get("ru_egress_ip") != expected_ru_ip:
-        failures.append(f"{label} direct identity mismatch: expected {expected_ru_ip}, got {result.get('ru_egress_ip', '')}")
-    if result.get("foreign_egress_ip") != expected_foreign_ip:
-        failures.append(f"{label} foreign identity mismatch: expected {expected_foreign_ip}, got {result.get('foreign_egress_ip', '')}")
+    expected_gateway_ip = topology.gateway.public_ip
+    expected_routed_ip = topology.exit.public_ip if topology.exit is not None else expected_gateway_ip
+    observed_gateway_ip = str(result.get("ru_egress_ip", ""))
+    observed_routed_ip = str(result.get("foreign_egress_ip", ""))
+    gateway_identity_ok = observed_gateway_ip == expected_gateway_ip
+    routed_identity_ok = observed_routed_ip == expected_routed_ip
+    if not gateway_identity_ok:
+        failures.append(
+            f"{label} gateway-local identity mismatch: expected {expected_gateway_ip}, got {observed_gateway_ip}"
+        )
+    if not routed_identity_ok:
+        route_label = "exit" if topology.is_dual else "gateway-local"
+        failures.append(
+            f"{label} {route_label} routed identity mismatch: expected {expected_routed_ip}, got {observed_routed_ip}"
+        )
+    local_egress_ok = gateway_identity_ok and (routed_identity_ok if not topology.is_dual else True)
+    paths: dict[str, dict[str, object]] = {
+        "gateway_local_egress": {
+            "state": "verified" if local_egress_ok else "failed",
+            "checked": True,
+            "expected_ip": expected_gateway_ip,
+            "observed_ips": [
+                observed_gateway_ip,
+                *([observed_routed_ip] if not topology.is_dual else []),
+            ],
+        },
+        "interserver_exit": (
+            {
+                "state": "verified" if routed_identity_ok else "failed",
+                "checked": True,
+                "expected_ip": expected_routed_ip,
+                "observed_ip": observed_routed_ip,
+            }
+            if topology.is_dual
+            else {
+                "state": "not_applicable",
+                "checked": False,
+                "reason": "single topology has no exit or interserver path",
+            }
+        ),
+    }
     if not statuses.issubset({"200", "204", "301", "302", "403"}):
         failures.append(f"{label} returned invalid HTTP probes")
 
@@ -337,7 +439,7 @@ def _validate_functional_transport_result(
         private_component = _private_reject_component(udp_dns.get("private_reject"), label=label)
         if private_component["verdict"] == "failed":
             failures.append(str(private_component.get("reason", "private/fake reject failed")))
-        elif private_component["verdict"] == "inconclusive":
+        elif private_component["verdict"] == "inconclusive" and require_private_reject:
             inconclusive.append(str(private_component.get("reason", "private/fake reject is inconclusive")))
 
     if str(result.get("ipv6_literal_status", "")) != "200":
@@ -359,10 +461,13 @@ def _validate_functional_transport_result(
             elif max_total <= 0 or max_total > RUNNER_RELIABILITY_MAX_TOTAL_SECONDS:
                 failures.append(f"{label} first-load latency exceeded {RUNNER_RELIABILITY_MAX_TOTAL_SECONDS:.1f}s")
     if failures:
-        return _probe_component("failed", "; ".join(failures))
-    if inconclusive:
-        return _probe_component("inconclusive", "; ".join(inconclusive))
-    return _probe_component("verified")
+        component = _probe_component("failed", "; ".join(failures))
+    elif inconclusive:
+        component = _probe_component("inconclusive", "; ".join(inconclusive))
+    else:
+        component = _probe_component("verified")
+    component.update({"topology": topology.mode, "paths": paths})
+    return component
 
 
 def _validate_performance_result(
@@ -459,15 +564,19 @@ def _validate_performance_result(
 
 def _validate_public_transport_result(
     result: dict[str, object],
-    expected_ru_ip: str,
-    foreign_target,
+    topology: TopologySpec,
     *,
     label: str,
     throughput_seconds: int = 0,
     capacity_reference_bytes_per_second: int = PRIMARY_CAPACITY_REFERENCE_BYTES_PER_SECOND,
+    require_private_reject: bool = True,
 ) -> dict[str, object]:
-    expected_foreign_ip = foreign_target.public_ip or foreign_target.ssh_host
-    functional = _validate_functional_transport_result(result, expected_ru_ip, expected_foreign_ip, label=label)
+    functional = _validate_functional_transport_result(
+        result,
+        topology,
+        label=label,
+        require_private_reject=require_private_reject,
+    )
     performance = _validate_performance_result(
         result,
         label=label,
@@ -481,6 +590,8 @@ def _validate_public_transport_result(
     reasons = [str(component["reason"]) for component in (functional, performance) if component.get("reason")]
     response: dict[str, object] = {
         "verdict": verdict,
+        "topology": topology.mode,
+        "paths": dict(functional.get("paths", {})),
         "functional": functional,
         "performance": performance,
         "result": result,
@@ -490,14 +601,137 @@ def _validate_public_transport_result(
     return response
 
 
-def _validate_public_vless_result(result: dict[str, object], uri, foreign_target, *, expected_ru_ip: str | None = None, throughput_seconds: int = 0) -> dict[str, object]:
-    return _validate_public_transport_result(
+def _validate_public_vless_result(
+    result: dict[str, object],
+    uri,
+    topology: TopologySpec,
+    *,
+    throughput_seconds: int = 0,
+    require_private_reject: bool = True,
+) -> dict[str, object]:
+    response = _validate_public_transport_result(
         result,
-        expected_ru_ip or uri.host,
-        foreign_target,
+        topology,
         label="public VLESS",
         throughput_seconds=throughput_seconds,
+        require_private_reject=require_private_reject,
     )
+    if uri.host != topology.gateway.public_ip:
+        reason = (
+            f"public VLESS gateway mismatch: expected {topology.gateway.public_ip}, got {uri.host}"
+        )
+        response["verdict"] = "failed"
+        response["reason"] = "; ".join(
+            value for value in (str(response.get("reason", "")), reason) if value
+        )
+    return response
+
+
+def _annotate_public_vless_evidence(
+    topology: TopologySpec,
+    payload: dict[str, object],
+) -> dict[str, object]:
+    verdict = str(payload.get("verdict", "inconclusive"))
+    raw_paths = payload.get("paths")
+    paths = dict(raw_paths) if isinstance(raw_paths, dict) else {}
+    correlation = payload.get("front_correlation")
+    functional = payload.get("functional")
+    functional_paths = functional.get("paths") if isinstance(functional, dict) else None
+    gateway_evidence = (
+        functional_paths.get("gateway_local_egress")
+        if isinstance(functional_paths, dict)
+        else None
+    )
+    interserver_evidence = (
+        functional_paths.get("interserver_exit")
+        if isinstance(functional_paths, dict)
+        else None
+    )
+    complete_path_evidence = (
+        isinstance(correlation, dict)
+        and isinstance(gateway_evidence, dict)
+        and gateway_evidence.get("checked") is True
+        and isinstance(interserver_evidence, dict)
+        and (
+            interserver_evidence.get("checked") is True
+            if topology.is_dual
+            else interserver_evidence.get("state") == "not_applicable"
+        )
+    )
+    if verdict == "verified" and not complete_path_evidence:
+        verdict = "inconclusive"
+        payload["verdict"] = verdict
+        missing_reason = "required VLESS/Xray/egress evidence is incomplete"
+        payload["reason"] = "; ".join(
+            value for value in (str(payload.get("reason", "")), missing_reason) if value
+        )
+    front_state = str(correlation.get("verdict", verdict)) if isinstance(correlation, dict) else verdict
+    paths.setdefault(
+        "gateway_local_egress",
+        {
+            "state": verdict,
+            "checked": False,
+            "reason": "public VLESS probe did not produce validated egress evidence",
+        },
+    )
+    paths.setdefault(
+        "interserver_exit",
+        (
+            {
+                "state": verdict,
+                "checked": False,
+                "reason": "public VLESS probe did not produce validated exit evidence",
+            }
+            if topology.is_dual
+            else {
+                "state": "not_applicable",
+                "checked": False,
+                "reason": "single topology has no exit or interserver path",
+            }
+        ),
+    )
+    paths["gateway_public_front"] = {
+        "state": front_state,
+        "checked": isinstance(correlation, dict),
+        "chain": ["gateway-public-vless", "xray", "local-router"],
+    }
+    runner_scope = "independent-node" if topology.is_dual else "same-node"
+    chain = ["probe-runner", "gateway-public-vless", "xray", "local-router"]
+    chain.extend(["interserver", "exit-egress"] if topology.is_dual else ["gateway-local-egress"])
+    paths["public_vless"] = {
+        "state": verdict,
+        "checked": complete_path_evidence,
+        "required": True,
+        "runner_node": NODE_EXIT if topology.is_dual else NODE_GATEWAY,
+        "runner_scope": runner_scope,
+        "external_ingress_observed": topology.is_dual and complete_path_evidence,
+        "chain": chain,
+    }
+    payload.update({"topology": topology.mode, "paths": paths})
+    return payload
+
+
+def _public_vless_failure(topology: TopologySpec, verdict: str, reason: str) -> dict[str, object]:
+    return _annotate_public_vless_evidence(
+        topology,
+        {"verdict": verdict, "reason": reason},
+    )
+
+
+def _not_applicable_profile(topology: TopologySpec, profile: str, reason: str) -> dict[str, object]:
+    return {
+        "verdict": "not_applicable",
+        "topology": topology.mode,
+        "reason": reason,
+        "paths": {
+            profile: {
+                "state": "not_applicable",
+                "checked": False,
+                "required": False,
+                "reason": reason,
+            }
+        },
+    }
 
 
 def _vless_runner_timeout(throughput_seconds: int) -> int:
@@ -538,7 +772,7 @@ def _start_vless_runner(
     )
     pid = ssh_capture(target, command, command_timeout=20).strip()
     if not pid.isdecimal():
-        raise RuntimeError(f"external VLESS runner did not return a PID: {pid!r}")
+        raise RuntimeError(f"VLESS probe runner did not return a PID: {pid!r}")
     return pid
 
 
@@ -578,21 +812,21 @@ def _wait_for_vless_runner(
         state, separator, payload = response.partition("\n")
         if state == "completed":
             if not separator:
-                raise RuntimeError("external VLESS runner completed without a result payload")
+                raise RuntimeError("VLESS probe runner completed without a result payload")
             return json.loads(payload)
         if state == "exited":
             detail = payload.strip()
-            raise RuntimeError(f"external VLESS runner exited before result{f': {detail}' if detail else ''}")
+            raise RuntimeError(f"VLESS probe runner exited before result{f': {detail}' if detail else ''}")
         if state != "running":
-            raise RuntimeError(f"external VLESS runner returned an invalid state: {state!r}")
+            raise RuntimeError(f"VLESS probe runner returned an invalid state: {state!r}")
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             detail = _stop_vless_runner(target, pid, error_path)
-            raise RuntimeError(f"external VLESS runner exceeded its {_vless_runner_timeout(throughput_seconds)}s budget{f': {detail}' if detail else ''}")
+            raise RuntimeError(f"VLESS probe runner exceeded its {_vless_runner_timeout(throughput_seconds)}s budget{f': {detail}' if detail else ''}")
         time.sleep(min(VLESS_RUNNER_POLL_INTERVAL_SECONDS, remaining))
 
 
-def _run_external_public_profile(
+def _run_public_profile(
     config_text: str,
     foreign_target,
     *,
@@ -796,32 +1030,52 @@ def _correlate_private_reject(target, result: dict[str, object], *, since: str, 
 def _verify_public_vless_uri(
     uri_path: Path,
     env: dict[str, str],
-    foreign_target,
+    runner_target,
     *,
     throughput_seconds: int = 0,
     on_running: Callable[[], dict[str, object]] | None = None,
     reject_target=None,
+    require_private_reject: bool = True,
 ) -> dict[str, object]:
+    try:
+        topology = TopologySpec.from_env(env)
+    except ValueError as exc:
+        return {
+            "verdict": "failed",
+            "topology": str(env.get("TOPOLOGY", "") or "invalid"),
+            "reason": f"canonical topology is invalid: {exc}",
+            "paths": {
+                "public_vless": {
+                    "state": "failed",
+                    "checked": False,
+                    "required": True,
+                }
+            },
+        }
     if not uri_path.is_file():
-        return {"verdict": "failed", "reason": f"primary VLESS URI is missing: {uri_path}"}
+        return _public_vless_failure(topology, "failed", f"primary VLESS URI is missing: {uri_path}")
     try:
         raw_uri = uri_path.read_bytes()
         expected_uri = render_vless_uri(env).encode("utf-8")
         if raw_uri != expected_uri:
-            return {"verdict": "failed", "reason": "primary VLESS URI differs from the canonical deployment contract"}
+            return _public_vless_failure(
+                topology,
+                "failed",
+                "primary VLESS URI differs from the canonical deployment contract",
+            )
         uri = parse_vless_uri(raw_uri.decode("utf-8").strip())
     except (OSError, ValueError) as exc:
-        return {"verdict": "failed", "reason": f"primary VLESS URI is invalid: {exc}"}
+        return _public_vless_failure(topology, "failed", f"primary VLESS URI is invalid: {exc}")
     reject_marker = _capture_private_reject_marker(reject_target) if reject_target is not None else ""
-    run_result = _run_external_public_profile(
+    run_result = _run_public_profile(
         render_ephemeral_singbox_client(uri, listen_port=18080),
-        foreign_target,
+        runner_target,
         label="public VLESS",
         throughput_seconds=throughput_seconds,
         on_running=on_running,
     )
     if run_result.get("verdict") != "completed":
-        return run_result
+        return _annotate_public_vless_evidence(topology, run_result)
     if reject_target is not None:
         run_result["result"] = _correlate_private_reject(
             reject_target,
@@ -832,9 +1086,9 @@ def _verify_public_vless_uri(
     validated = _validate_public_vless_result(
         run_result["result"],
         uri,
-        foreign_target,
-        expected_ru_ip=env.get("RU_PUBLIC_IP") or uri.host,
+        topology,
         throughput_seconds=throughput_seconds,
+        require_private_reject=require_private_reject,
     )
     correlation = _validate_front_correlation(run_result["result"].get("running_observations"))
     validated["front_correlation"] = correlation
@@ -846,7 +1100,7 @@ def _verify_public_vless_uri(
             validated["verdict"] = "degraded"
         else:
             validated["verdict"] = "inconclusive"
-    return validated
+    return _annotate_public_vless_evidence(topology, validated)
 
 
 def _capture_client_front(target, source: str) -> dict[str, object]:
@@ -906,7 +1160,14 @@ def _validate_front_correlation(observation: object) -> dict[str, object]:
     return result
 
 
-def _verify_public_hysteria2(env: dict[str, str], foreign_target, *, throughput_seconds: int = 0, reject_target=None) -> dict[str, object]:
+def _verify_public_hysteria2(env: dict[str, str], runner_target, *, throughput_seconds: int = 0, reject_target=None) -> dict[str, object]:
+    topology = TopologySpec.from_env(env)
+    if not topology.is_dual:
+        return _not_applicable_profile(
+            topology,
+            "public_hysteria2",
+            "single topology release acceptance is defined by the primary public VLESS path",
+        )
     payload = {
         "log": {"level": "warn", "timestamp": True},
         "inbounds": [
@@ -925,9 +1186,9 @@ def _verify_public_hysteria2(env: dict[str, str], foreign_target, *, throughput_
         "route": {"final": PUBLIC_HY2_OUTBOUND_TAG},
     }
     reject_marker = _capture_private_reject_marker(reject_target) if reject_target is not None else ""
-    run_result = _run_external_public_profile(
+    run_result = _run_public_profile(
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-        foreign_target,
+        runner_target,
         label="public Hysteria2",
         throughput_seconds=throughput_seconds,
     )
@@ -942,12 +1203,52 @@ def _verify_public_hysteria2(env: dict[str, str], foreign_target, *, throughput_
         )
     return _validate_public_transport_result(
         run_result["result"],
-        env["RU_PUBLIC_IP"],
-        foreign_target,
+        topology,
         label="public Hysteria2",
         throughput_seconds=throughput_seconds,
         capacity_reference_bytes_per_second=FALLBACK_CAPACITY_REFERENCE_BYTES_PER_SECOND,
     )
+
+
+def _verification_path_evidence(
+    topology: TopologySpec,
+    public_vless: dict[str, object],
+    snapshots: list[DiagnosticsSnapshot],
+    *,
+    require_native_agent: bool,
+) -> dict[str, object]:
+    raw_paths = public_vless.get("paths")
+    paths: dict[str, object] = dict(raw_paths) if isinstance(raw_paths, dict) else {}
+    snapshots_by_node = {snapshot.node_id: snapshot for snapshot in snapshots if snapshot.node_id}
+    for node in topology.nodes:
+        snapshot = snapshots_by_node.get(node.node_id)
+        key = f"{node.node_id}_agent_acceptance"
+        if not require_native_agent:
+            paths[key] = {
+                "state": "not_applicable",
+                "checked": False,
+                "reason": "rollback scope requires only external public VLESS evidence",
+            }
+        elif snapshot is None:
+            paths[key] = {
+                "state": "failed",
+                "checked": False,
+                "reason": "required native agent evidence is missing",
+            }
+        else:
+            paths[key] = {
+                "state": snapshot.verdict,
+                "checked": True,
+                "topology": snapshot.topology,
+                "capabilities": list(snapshot.capabilities),
+            }
+    if topology.exit is None:
+        paths["exit_agent_acceptance"] = {
+            "state": "not_applicable",
+            "checked": False,
+            "reason": "single topology has no exit node",
+        }
+    return paths
 
 
 def verify_live_workflow(
@@ -956,12 +1257,12 @@ def verify_live_workflow(
     non_interactive: bool = False,
     throughput_seconds: int = 30,
     require_native_agent: bool = True,
+    accept_same_node_for_install: bool = False,
 ) -> int:
     print_header("Live verification")
-    roles = requested_roles("all")
     deployment_name, env_path, env, _state, targets, _preflights_by_role = workflows.prepare_remote_session(
         deployment,
-        roles=roles,
+        roles=None,
         require_privilege=False,
         validate_os=False,
         allow_create=False,
@@ -971,45 +1272,120 @@ def verify_live_workflow(
         enforce_safe_route=False,
         run_live_probes=False,
     )
+    topology = TopologySpec.from_env(env)
     workflows.print_summary(deployment_name, env, targets)
     worst = "verified"
     rank = {"verified": 0, "degraded": 1, "inconclusive": 2, "failed": 3}
-    foreign_target = next((target for target in targets if target.role == ROLE_FOREIGN), None)
-    ru_target = next((target for target in targets if target.role == ROLE_RU), None)
-    public_vless: dict[str, object] = {"verdict": "inconclusive", "reason": "foreign verifier is unavailable"}
-    public_hysteria2: dict[str, object] = {"verdict": "inconclusive", "reason": "foreign verifier is unavailable"}
-    if foreign_target is not None:
-        verifier_source = env.get("FOREIGN_PUBLIC_IP") or foreign_target.public_ip or foreign_target.ssh_host
-        if ru_target is None:
-            baseline_front = {"error": "RU target is unavailable"}
-        elif not verifier_source:
-            baseline_front = {"error": "foreign verifier source address is unavailable"}
+    targets_by_node = {target.node_id: target for target in targets}
+    gateway_target = targets_by_node.get(NODE_GATEWAY)
+    runner_node = NODE_EXIT if topology.is_dual else NODE_GATEWAY
+    runner_target = targets_by_node.get(runner_node)
+    public_vless = _public_vless_failure(
+        topology,
+        "inconclusive",
+        f"VLESS probe runner node {runner_node} is unavailable",
+    )
+    public_hysteria2 = (
+        {"verdict": "inconclusive", "topology": topology.mode, "reason": "exit verifier is unavailable"}
+        if topology.is_dual
+        else _not_applicable_profile(
+            topology,
+            "public_hysteria2",
+            "single topology release acceptance is defined by the primary public VLESS path",
+        )
+    )
+    if runner_target is not None and gateway_target is not None:
+        runner_spec = topology.node(runner_node)
+        verifier_source = runner_spec.public_ip or runner_target.public_ip or runner_target.ssh_host
+        if not verifier_source:
+            baseline_front = {"error": "external verifier source address is unavailable"}
         else:
-            baseline_front = _capture_client_front(ru_target, verifier_source)
+            baseline_front = _capture_client_front(gateway_target, verifier_source)
         public_vless = _verify_public_vless_uri(
             OUT_DIR / deployment_name / "client" / "vless-uri.txt",
             env,
-            foreign_target,
+            runner_target,
             throughput_seconds=throughput_seconds,
             on_running=lambda: {
                 "baseline": baseline_front,
-                "during": _capture_client_front(ru_target, verifier_source) if ru_target is not None and verifier_source else {"error": "RU target or verifier source is unavailable"},
+                "during": _capture_client_front(gateway_target, verifier_source)
+                if verifier_source
+                else {"error": "gateway target or verifier source is unavailable"},
             },
-            reject_target=ru_target if require_native_agent else None,
+            reject_target=gateway_target if require_native_agent else None,
+            require_private_reject=require_native_agent,
         )
-        if require_native_agent:
-            public_hysteria2 = _verify_public_hysteria2(env, foreign_target, throughput_seconds=0, reject_target=ru_target)
+        if require_native_agent and topology.is_dual:
+            public_hysteria2 = _verify_public_hysteria2(
+                env,
+                runner_target,
+                throughput_seconds=0,
+                reject_target=gateway_target,
+            )
+    public_vless = _annotate_public_vless_evidence(topology, public_vless)
+    same_node_functional = public_vless.get("functional", {})
+    same_node_functional_verified = (
+        not topology.is_dual
+        and isinstance(same_node_functional, dict)
+        and same_node_functional.get("verdict") == "verified"
+        and public_vless.get("verdict") == "verified"
+    )
+    if same_node_functional_verified:
+        public_vless["verdict"] = "inconclusive"
+        public_vless["reason"] = (
+            "same-node VLESS path passed, but no independent runner observed the public gateway ingress"
+        )
+        public_path = public_vless.get("paths", {}).get("public_vless", {})
+        if isinstance(public_path, dict):
+            public_path["state"] = "inconclusive"
     snapshots: list[DiagnosticsSnapshot] = []
     if require_native_agent:
         for target in targets:
+            plan = topology.plan(target.node_id)
             try:
                 snapshot = _collect_agent_snapshot(target)
                 snapshot.deployment = deployment_name
-                snapshot = _verify_snapshot(snapshot)
+                snapshot = _verify_snapshot(snapshot, expected_plan=plan)
             except Exception as exc:  # noqa: BLE001
-                snapshot = DiagnosticsSnapshot(deployment=deployment_name, role=target.role, verdict="failed", reasons=[f"agent snapshot failed: {exc}"])
+                snapshot = DiagnosticsSnapshot(
+                    deployment=deployment_name,
+                    topology=plan.topology,
+                    node_id=plan.node_id,
+                    location=plan.location,
+                    capabilities=tuple(plan.capabilities),
+                    verdict="failed",
+                    reasons=[f"agent snapshot failed: {exc}"],
+                )
             snapshots.append(snapshot)
         snapshots = [_reconcile_public_capabilities(snapshot, public_vless) for snapshot in snapshots]
+    verdicts = [str(public_vless["verdict"])]
+    if require_native_agent:
+        verdicts = [*(snapshot.verdict for snapshot in snapshots), *verdicts]
+    for verdict in verdicts:
+        if verdict not in rank:
+            worst = "failed"
+        elif rank[verdict] > rank[worst]:
+            worst = verdict
+    same_node_install_accepted = bool(
+        accept_same_node_for_install
+        and same_node_functional_verified
+        and require_native_agent
+        and snapshots
+        and all(snapshot.verdict == "verified" for snapshot in snapshots)
+    )
+    if (
+        require_native_agent
+        and topology.is_dual
+        and public_hysteria2.get("verdict") != "verified"
+        and rank[worst] < rank["degraded"]
+    ):
+        worst = "degraded"
+    paths = _verification_path_evidence(
+        topology,
+        public_vless,
+        snapshots,
+        require_native_agent=require_native_agent,
+    )
     report_dir = OUT_DIR / "diagnostics" / f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{deployment_name}"
     report_dir.mkdir(parents=True, exist_ok=True)
     report_path = report_dir / "live-verify.json"
@@ -1017,8 +1393,21 @@ def verify_live_workflow(
         json.dumps(
             {
                 "deployment": deployment_name,
+                "topology": topology.mode,
+                "nodes": [
+                    {
+                        "node_id": node.node_id,
+                        "location": node.location,
+                        "capabilities": sorted(topology.plan(node.node_id).capabilities),
+                    }
+                    for node in topology.nodes
+                ],
+                "verdict": worst,
+                "paths": paths,
                 "throughput_seconds": throughput_seconds,
                 "verification_scope": "release" if require_native_agent else "rollback-public-vless",
+                "runner_scope": "independent-node" if topology.is_dual else "same-node",
+                "same_node_install_accepted": same_node_install_accepted,
                 "public_vless": public_vless,
                 "public_hysteria2": public_hysteria2,
                 "snapshots": [snapshot.to_dict() for snapshot in snapshots],
@@ -1030,20 +1419,16 @@ def verify_live_workflow(
         + "\n",
         encoding="utf-8",
     )
-    verdicts = [str(public_vless["verdict"])]
-    if require_native_agent:
-        verdicts = [*(snapshot.verdict for snapshot in snapshots), *verdicts]
-    for verdict in verdicts:
-        if rank[verdict] > rank[worst]:
-            worst = verdict
-    if require_native_agent and public_hysteria2.get("verdict") != "verified" and rank[worst] < rank["degraded"]:
-        worst = "degraded"
     print_header("Live verification result")
+    print(f"topology: {topology.mode}")
     print(f"verification scope: {'release' if require_native_agent else 'rollback-public-vless'}")
     print(f"verify verdict: {worst}")
     for snapshot in snapshots:
         reason_text = "; ".join(snapshot.reasons) if snapshot.reasons else "fresh probes and installed manifest are consistent"
-        print(f"{snapshot.role or 'unknown'}: {snapshot.verdict} - {reason_text}")
+        print(f"{snapshot.node_id or 'unknown'}: {snapshot.verdict} - {reason_text}")
+    for path_name, evidence in paths.items():
+        if isinstance(evidence, dict):
+            print(f"path {path_name}: {evidence.get('state', 'inconclusive')}")
     profiles = [("public-vless-uri", public_vless)]
     if require_native_agent:
         profiles.append(("public-hysteria2", public_hysteria2))
@@ -1055,4 +1440,4 @@ def verify_live_workflow(
                 print(f"{profile_name}-{component_name}: {component['verdict']} - {component.get('reason', 'passed')}")
     print(f"report: {report_path}")
     print(f"Deployment env: {Path(env_path)}")
-    return 0 if worst == "verified" else 1
+    return 0 if worst == "verified" or same_node_install_accepted else 1

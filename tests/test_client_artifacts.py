@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,9 +14,32 @@ from vpn_installer.config import generate_default_env
 class ClientArtifactTests(unittest.TestCase):
     def make_env(self) -> dict[str, str]:
         env = generate_default_env("demo")
-        env["RU_PUBLIC_IP"] = "203.0.113.10"
-        env["FOREIGN_PUBLIC_IP"] = "198.51.100.20"
+        env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
+        env["EXIT_PUBLIC_IP"] = "198.51.100.20"
         return env
+
+    def test_primary_vless_uri_dual_contract_is_byte_stable(self) -> None:
+        env = self.make_env()
+        env.update(
+            {
+                "CLIENT_UUID": "00000000-0000-0000-0000-000000000000",
+                "RU_REALITY_PUBLIC_KEY": "public-key",
+                "RU_REALITY_SHORT_ID": "0123456789abcdef",
+            }
+        )
+        self.assertEqual(
+            client_artifacts.render_vless_uri(env),
+            "vless://00000000-0000-0000-0000-000000000000@203.0.113.10:443?"
+            "security=reality&sni=www.bing.com&pbk=public-key&sid=0123456789abcdef&"
+            "fp=chrome&type=tcp&flow=xtls-rprx-vision#demo-ru-gateway\n",
+        )
+
+    def test_single_client_excludes_only_its_gateway(self) -> None:
+        env = generate_default_env("demo", topology="single", gateway_location="foreign")
+        env["GATEWAY_PUBLIC_IP"] = "198.51.100.20"
+        self.assertEqual(client_artifacts.client_route_excludes(env), ["198.51.100.20/32"])
+        self.assertIn("@198.51.100.20:443?", client_artifacts.render_vless_uri(env))
+        self.assertNotIn("203.0.113.10", client_artifacts.render_client_profile(env, auto_redirect=False))
 
     def test_client_artifact_paths_honor_explicit_out_dir(self) -> None:
         env = self.make_env()
@@ -27,6 +52,12 @@ class ClientArtifactTests(unittest.TestCase):
         self.assertEqual(paths["android_xray_json"].name, "android-v2rayng-xray.json")
         self.assertEqual(paths["hysteria2_uri"].name, "hysteria2-uri.txt")
         self.assertEqual(paths["next_steps"], Path(tmp) / "demo" / "NEXT-STEPS.txt")
+
+    def test_next_steps_use_canonical_node_selector(self) -> None:
+        rendered = client_artifacts.render_next_steps(self.make_env())
+
+        self.assertIn("status --deployment demo --node gateway", rendered)
+        self.assertNotIn("--role ru-gateway", rendered)
 
     def test_render_client_profiles_honors_explicit_out_dir(self) -> None:
         env = self.make_env()
@@ -54,6 +85,10 @@ class ClientArtifactTests(unittest.TestCase):
                 (client_dir / "windows-xray.json").read_text(encoding="utf-8"),
             )
             self.assertTrue((Path(tmp) / "demo" / "NEXT-STEPS.txt").is_file())
+            if os.name != "nt":
+                for path in client_dir.iterdir():
+                    if path.is_file():
+                        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600, path.name)
 
     def test_render_client_profiles_replaces_stale_generated_directory(self) -> None:
         env = self.make_env()

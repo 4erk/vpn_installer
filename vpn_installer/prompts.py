@@ -17,6 +17,14 @@ from .config import (
     validate_ssh_user,
 )
 from .models import ROLE_FOREIGN, ROLE_META, ROLE_RU, RemoteTarget
+from .topology import (
+    LOCATION_FOREIGN,
+    LOCATION_RU,
+    NODE_EXIT,
+    NODE_GATEWAY,
+    TOPOLOGY_DUAL,
+    TOPOLOGY_SINGLE,
+)
 
 DEFAULT_FIRST_DEPLOYMENT_NAME = "home-vpn"
 
@@ -90,6 +98,25 @@ def prompt_choice(label: str, options: list[tuple[str, str]], default: str) -> s
                 return value
 
 
+def prompt_topology(*, current_mode: str = TOPOLOGY_DUAL, current_location: str = LOCATION_RU) -> tuple[str, str]:
+    mode = prompt_choice(
+        "Схема установки",
+        [
+            (TOPOLOGY_DUAL, "Два сервера: gateway в России и зарубежный exit"),
+            (TOPOLOGY_SINGLE, "Один gateway без межсерверного туннеля"),
+        ],
+        default=current_mode,
+    )
+    if mode == TOPOLOGY_DUAL:
+        return mode, LOCATION_RU
+    location = prompt_choice(
+        "Где расположен единственный gateway?",
+        [(LOCATION_RU, "Россия"), (LOCATION_FOREIGN, "За рубежом")],
+        default=current_location,
+    )
+    return mode, location
+
+
 def has_saved_connection(role_state: dict[str, Any]) -> bool:
     auth_mode = str(role_state.get("auth_mode", "")).strip().lower()
     return bool(
@@ -134,12 +161,11 @@ def display_target_connection(target: RemoteTarget) -> None:
 def hydrate_runtime_auth(target: RemoteTarget) -> RemoteTarget:
     target.ssh_password = ""
     if target.auth_mode == "password":
-        env_names = []
-        if target.role == ROLE_RU:
-            env_names.append("VPN_RU_SSH_PASSWORD")
-        elif target.role == ROLE_FOREIGN:
-            env_names.append("VPN_FOREIGN_SSH_PASSWORD")
-        env_names.append("VPN_SSH_PASSWORD")
+        env_names = (
+            ["VPN_GATEWAY_SSH_PASSWORD", "VPN_RU_SSH_PASSWORD", "VPN_SSH_PASSWORD"]
+            if target.node_id == NODE_GATEWAY
+            else ["VPN_EXIT_SSH_PASSWORD", "VPN_FOREIGN_SSH_PASSWORD", "VPN_SSH_PASSWORD"]
+        )
         for env_name in env_names:
             password = os.environ.get(env_name, "")
             if password:
@@ -269,37 +295,46 @@ def select_existing_deployment(cli_name: str | None) -> str:
             return existing[selection - 1]
 
 
-def ask_install_action(role: str, deployment_name: str, preflight: dict[str, str]) -> str:
+def ask_install_action(role: str, deployment_name: str, preflight: dict[str, str], *, label: str | None = None) -> str:
+    target_label = label or ROLE_META[role]["label"]
     if preflight.get("installed") != "1":
-        print(f"На {ROLE_META[role]['label']} стек не найден.")
+        print(f"На {target_label} стек не найден.")
         return prompt_choice(
-            f"Что делать с {ROLE_META[role]['label']}?",
+            f"Что делать с {target_label}?",
             [("install", "Установить роль"), ("skip", "Пока ничего не делать")],
             default="install",
         )
     existing_role = preflight.get("role", "")
     existing_deployment = preflight.get("deployment_name", "")
     if existing_role and existing_role != role:
-        print(f"На {ROLE_META[role]['label']} уже стоит роль {existing_role} (deployment: {existing_deployment or '-'})")
+        print(f"На {target_label} уже стоит роль {existing_role} (deployment: {existing_deployment or '-'})")
         return prompt_choice(
-            f"Что делать с {ROLE_META[role]['label']}?",
+            f"Что делать с {target_label}?",
             [("reinstall", "Переустановить и обновить роль"), ("skip", "Пока ничего не делать")],
             default="skip",
         )
     if existing_deployment and existing_deployment != deployment_name:
         print(f"На сервере уже найден другой deployment: {existing_deployment}")
     return prompt_choice(
-        f"Что делать с {ROLE_META[role]['label']}?",
+        f"Что делать с {target_label}?",
         [("reinstall", "Обновить / переустановить роль"), ("skip", "Пока ничего не делать")],
         default="reinstall",
     )
 
 
-def select_role_for_menu(command_name: str) -> str:
+def select_node_for_menu(command_name: str) -> str:
     if command_name not in {"status", "reinstall", "remove", "purge"}:
         return "all"
     return prompt_choice(
         "Какой сервер нужно затронуть?",
-        [("all", "Оба сервера"), (ROLE_RU, "Только российский сервер"), (ROLE_FOREIGN, "Только зарубежный сервер")],
+        [
+            ("all", "Все настроенные серверы"),
+            (NODE_GATEWAY, "VPN gateway"),
+            (NODE_EXIT, "Exit (только для схемы из двух серверов)"),
+        ],
         default="all",
     )
+
+
+# One-release import alias. Remove in 0.20.1.
+select_role_for_menu = select_node_for_menu

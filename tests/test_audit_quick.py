@@ -78,6 +78,7 @@ class AuditQuickTests(unittest.TestCase):
                 "quick-py-compile",
                 "quick-install-ux",
                 "quick-render-all",
+                "quick-topology-matrix",
                 "quick-validate-json",
                 "quick-user-artifacts",
                 "quick-validate-bundle",

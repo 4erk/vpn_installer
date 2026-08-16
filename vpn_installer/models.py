@@ -14,13 +14,13 @@ class UserCancelled(AppError):
 ROLE_RU = "ru-gateway"
 ROLE_FOREIGN = "foreign-exit"
 ROLE_META = {
-    ROLE_RU: {"label": "Российский сервер", "prefix": "RU", "public_ip_key": "RU_PUBLIC_IP"},
-    ROLE_FOREIGN: {"label": "Зарубежный сервер", "prefix": "FOREIGN", "public_ip_key": "FOREIGN_PUBLIC_IP"},
+    ROLE_RU: {"label": "Сервер входа", "prefix": "RU", "public_ip_key": "GATEWAY_PUBLIC_IP"},
+    ROLE_FOREIGN: {"label": "Сервер выхода", "prefix": "FOREIGN", "public_ip_key": "EXIT_PUBLIC_IP"},
 }
 
 ALLOW_EMPTY_OVERRIDE = {
-    "RU_PUBLIC_IP",
-    "FOREIGN_PUBLIC_IP",
+    "GATEWAY_PUBLIC_IP",
+    "EXIT_PUBLIC_IP",
     "WAN_INTERFACE",
     "CLIENT_ROUTE_EXCLUDE_V4",
     "CLIENT_ROUTE_EXCLUDE_V6",
@@ -31,12 +31,13 @@ ALLOW_EMPTY_OVERRIDE = {
 }
 
 ENV_SECTIONS = [
-    ("", ["DEPLOY_NAME"]),
-    ("# Public addresses", ["RU_PUBLIC_IP", "FOREIGN_PUBLIC_IP"]),
+    ("", ["CONFIG_SCHEMA", "DEPLOY_NAME"]),
+    ("# Deployment topology", ["TOPOLOGY", "GATEWAY_LOCATION", "GATEWAY_PUBLIC_IP", "EXIT_PUBLIC_IP"]),
     ("# SSH access and daemon hardening", ["SSH_PORT", "SSH_LOGIN_GRACE_TIME", "SSH_MAX_AUTH_TRIES", "SSH_MAX_STARTUPS", "SSH_PER_SOURCE_MAX_STARTUPS", "SSH_PER_SOURCE_NETBLOCK_SIZE"]),
     ("# Foreign egress NIC override. Leave empty to auto-detect on the foreign host.", ["WAN_INTERFACE"]),
     ("# Xray public VLESS/REALITY front + sing-box local router", ["CLIENT_UUID", "CLIENT_FLOW", "RU_LISTEN_PORT", "RU_ROUTER_LISTEN_PORT", "RU_REALITY_SERVER_NAME", "RU_REALITY_PRIVATE_KEY", "RU_REALITY_PUBLIC_KEY", "RU_REALITY_SHORT_ID", "RU_REALITY_ACCEPT_EMPTY_SHORT_ID", "RU_REALITY_MAX_TIME_DIFFERENCE", "UTLS_FINGERPRINT", "SING_BOX_LOG_LEVEL", "RU_SNIFF_TIMEOUT"]),
     ("# WireGuard between RU and foreign", ["WG_INTERFACE", "WG_PORT", "WG_MTU", "WG_ROUTE_TABLE", "APP_ROUTE_MARK", "WG_TUNNEL_FWMARK", "WG_RU_ADDRESS", "WG_FOREIGN_ADDRESS", "WG_RU_ADDRESS_V6", "WG_FOREIGN_ADDRESS_V6", "WG_IPV6_PREFIX", "WG_RU_PRIVATE_KEY", "WG_RU_PUBLIC_KEY", "WG_FOREIGN_PRIVATE_KEY", "WG_FOREIGN_PUBLIC_KEY", "WG_PRESHARED_KEY"]),
+    ("# Generated identity for the public Hysteria2 gateway", ["PUBLIC_HY2_CERTIFICATE_B64", "PUBLIC_HY2_PRIVATE_KEY_B64", "PUBLIC_HY2_PUBLIC_KEY_SHA256"]),
     ("# Generated identity for the resilient interserver transport", ["INTERSERVER_HY2_CERTIFICATE_B64", "INTERSERVER_HY2_PRIVATE_KEY_B64", "INTERSERVER_HY2_PUBLIC_KEY_SHA256"]),
     ("# DNS policy", ["GLOBAL_DOH_SERVER", "GLOBAL_DOH_SERVER_NAME", "GLOBAL_DOH_PATH"]),
     ("# Explicit Russian routing policy; diagnostics must not add production route exceptions", ["RU_FORCE_DIRECT_DOMAIN", "RU_FORCE_DIRECT_DOMAIN_SUFFIX", "RU_FORCE_DIRECT_IP_CIDR", "RU_BLOCK_IP_CIDR"]),
@@ -54,13 +55,7 @@ ENV_SECTIONS = [
         "# Optional web admin for server-side routing exceptions",
         [
             "ADMIN_WEB_ENABLED",
-            "ADMIN_WEB_BIND",
             "ADMIN_WEB_PORT",
-            "ADMIN_WEB_ACTIVE_CLIENT_REQUIRED",
-            "ADMIN_WEB_ACTIVE_CLIENT_TIMEOUT_SECONDS",
-            "ADMIN_WEB_ALLOW_TUNNEL_CLIENTS",
-            "ADMIN_WEB_ALLOWED_CIDR",
-            "ADMIN_WEB_ALLOW_WG",
             "ADMIN_WEB_USERNAME",
             "ADMIN_WEB_PASSWORD",
         ],
@@ -71,26 +66,15 @@ ENV_SECTIONS = [
 
 REQUIRED_ENV_VARS = [
     "DEPLOY_NAME",
-    "RU_PUBLIC_IP",
-    "FOREIGN_PUBLIC_IP",
+    "GATEWAY_PUBLIC_IP",
     "CLIENT_UUID",
     "RU_REALITY_SERVER_NAME",
     "RU_REALITY_PRIVATE_KEY",
     "RU_REALITY_PUBLIC_KEY",
     "RU_REALITY_SHORT_ID",
-    "WG_RU_ADDRESS",
-    "WG_FOREIGN_ADDRESS",
-    "WG_RU_ADDRESS_V6",
-    "WG_FOREIGN_ADDRESS_V6",
-    "WG_IPV6_PREFIX",
-    "WG_RU_PRIVATE_KEY",
-    "WG_RU_PUBLIC_KEY",
-    "WG_FOREIGN_PRIVATE_KEY",
-    "WG_FOREIGN_PUBLIC_KEY",
-    "WG_PRESHARED_KEY",
-    "INTERSERVER_HY2_CERTIFICATE_B64",
-    "INTERSERVER_HY2_PRIVATE_KEY_B64",
-    "INTERSERVER_HY2_PUBLIC_KEY_SHA256",
+    "PUBLIC_HY2_CERTIFICATE_B64",
+    "PUBLIC_HY2_PRIVATE_KEY_B64",
+    "PUBLIC_HY2_PUBLIC_KEY_SHA256",
 ]
 
 DEFAULT_ASSET_TIMEOUT = 30
@@ -99,6 +83,7 @@ DEFAULT_ASSET_TIMEOUT = 30
 @dataclass
 class RemoteTarget:
     role: str
+    location: str = ""
     public_ip: str = ""
     ssh_host: str = ""
     ssh_port: int = 22
@@ -113,10 +98,22 @@ class RemoteTarget:
 
     @property
     def label(self) -> str:
-        return ROLE_META[self.role]["label"]
+        from .topology import LOCATION_FOREIGN, NODE_GATEWAY, legacy_role_for_node, normalize_node_id
+
+        node_id = normalize_node_id(self.role)
+        if node_id == NODE_GATEWAY and self.location == LOCATION_FOREIGN:
+            return "VPN-шлюз (зарубежный сервер)"
+        return ROLE_META[legacy_role_for_node(node_id)]["label"]
+
+    @property
+    def node_id(self) -> str:
+        from .topology import normalize_node_id
+
+        return normalize_node_id(self.role)
 
     def to_state(self) -> dict[str, str]:
         return {
+            "location": self.location,
             "public_ip": self.public_ip,
             "ssh_host": self.ssh_host,
             "ssh_port": str(self.ssh_port),

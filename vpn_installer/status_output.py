@@ -4,6 +4,17 @@ from .common import cli_command
 from .diagnostics import LOG_WINDOW_KEYS, CollectorState, DiagnosticsSnapshot, LogWindowSnapshot
 
 
+CAP_PUBLIC_FRONT = "public-front"
+CAP_INTERSERVER_CLIENT = "interserver-client"
+CAP_INTERSERVER_SERVER = "interserver-server"
+
+
+def _uses_capability(snapshot: DiagnosticsSnapshot, capability: str, *, legacy_role: str) -> bool:
+    if snapshot.has_capability_contract:
+        return snapshot.has_capability(capability)
+    return snapshot.role == legacy_role
+
+
 def _collector_label(state: CollectorState) -> str:
     details: list[str] = []
     if state.observed_at:
@@ -44,16 +55,32 @@ def _format_log_window(name: str, window: LogWindowSnapshot) -> list[str]:
 
 
 def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
-    lines = [
-        f"snapshot schema: {snapshot.schema_version}",
-        f"role: {snapshot.role or '-'}",
-        f"drift: {snapshot.drift}",
-        f"verdict: {snapshot.verdict}",
-        f"collector status: {snapshot.collector_status}",
-        "collectors: " + ", ".join(
-            f"{name}={_collector_label(snapshot.collectors[name])}" for name in snapshot.collectors
-        ),
-    ]
+    lines = [f"snapshot schema: {snapshot.schema_version}"]
+    if snapshot.has_capability_contract:
+        lines.extend(
+            (
+                f"topology: {snapshot.topology}",
+                f"node: {snapshot.node_id}",
+                f"location: {snapshot.location}",
+                "capabilities: " + ",".join(snapshot.capabilities),
+            )
+        )
+    else:
+        lines.append(f"role: {snapshot.role or '-'}")
+    lines.extend(
+        (
+            f"drift: {snapshot.drift}",
+            f"verdict: {snapshot.verdict}",
+            f"collector status: {snapshot.collector_status}",
+            "collectors: " + ", ".join(
+                f"{name}={_collector_label(snapshot.collectors[name])}" for name in snapshot.collectors
+            ),
+        )
+    )
+    has_public_front = _uses_capability(snapshot, CAP_PUBLIC_FRONT, legacy_role="ru-gateway")
+    has_interserver_client = _uses_capability(snapshot, CAP_INTERSERVER_CLIENT, legacy_role="ru-gateway")
+    has_interserver_server = _uses_capability(snapshot, CAP_INTERSERVER_SERVER, legacy_role="foreign-exit")
+    has_interserver = has_interserver_client or has_interserver_server
     if snapshot.verdict == "inconclusive" and snapshot.route_probes.get("profile") == "none":
         lines.append(f"live probes: not run by read-only status; use {cli_command('verify live')} for route acceptance")
     for window_name in LOG_WINDOW_KEYS:
@@ -80,7 +107,7 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
             f"boot_fsck={'enabled' if root_filesystem.get('boot_check_enabled') else 'disabled'}, "
             f"verdict={root_filesystem.get('verdict', 'inconclusive')}"
         )
-    if snapshot.role == "ru-gateway" and snapshot.front:
+    if has_public_front and snapshot.front:
         lines.append(
             "Reality target: "
             f"target={snapshot.front.get('reality_target') or '-'}, "
@@ -108,23 +135,31 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
     if tcp_adaptation:
         metrics_state = tcp_adaptation.get("metrics_save_disabled")
         metrics_label = "disabled" if metrics_state == 1 else "enabled" if metrics_state == 0 else "unknown"
-        lines.append(
-            "tcp adaptation: "
+        adaptation_details = [
             f"cc={tcp_adaptation.get('congestion_control', '-')}, "
             f"qdisc={tcp_adaptation.get('qdisc', '-')}"
             f"(limit={tcp_adaptation.get('qdisc_limit', '-')},flow_limit={tcp_adaptation.get('qdisc_flow_limit', '-')},"
-            f"drops={tcp_adaptation.get('qdisc_drops', '-')},flow_limit_drops={tcp_adaptation.get('qdisc_flow_limit_drops', '-')}), "
-            f"wg_qdisc={tcp_adaptation.get('overlay_qdisc', '-')}"
-            f"(limit={tcp_adaptation.get('overlay_qdisc_limit', '-')},flow_limit={tcp_adaptation.get('overlay_qdisc_flow_limit', '-')},"
-            f"drops={tcp_adaptation.get('overlay_qdisc_drops', '-')},flow_limit_drops={tcp_adaptation.get('overlay_qdisc_flow_limit_drops', '-')}), "
-            f"mtu_probing={tcp_adaptation.get('mtu_probing', '-')}, mtu_floor={tcp_adaptation.get('mtu_probe_floor', '-')}, "
-            f"metrics_cache={metrics_label}, "
-            f"probe_interval_s={tcp_adaptation.get('probe_interval_seconds', '-')}, "
-            f"udp_rmem={tcp_adaptation.get('udp_rmem_default', '-')}/{tcp_adaptation.get('udp_rmem_max', '-')}, "
-            f"udp_wmem={tcp_adaptation.get('udp_wmem_default', '-')}/{tcp_adaptation.get('udp_wmem_max', '-')}"
+            f"drops={tcp_adaptation.get('qdisc_drops', '-')},flow_limit_drops={tcp_adaptation.get('qdisc_flow_limit_drops', '-')})"
+        ]
+        if has_interserver:
+            adaptation_details.append(
+                f"wg_qdisc={tcp_adaptation.get('overlay_qdisc', '-')}"
+                f"(limit={tcp_adaptation.get('overlay_qdisc_limit', '-')},flow_limit={tcp_adaptation.get('overlay_qdisc_flow_limit', '-')},"
+                f"drops={tcp_adaptation.get('overlay_qdisc_drops', '-')},flow_limit_drops={tcp_adaptation.get('overlay_qdisc_flow_limit_drops', '-')})"
+            )
+        adaptation_details.extend(
+            (
+                f"mtu_probing={tcp_adaptation.get('mtu_probing', '-')}, "
+                f"mtu_floor={tcp_adaptation.get('mtu_probe_floor', '-')}, "
+                f"metrics_cache={metrics_label}, "
+                f"probe_interval_s={tcp_adaptation.get('probe_interval_seconds', '-')}",
+                f"udp_rmem={tcp_adaptation.get('udp_rmem_default', '-')}/{tcp_adaptation.get('udp_rmem_max', '-')}",
+                f"udp_wmem={tcp_adaptation.get('udp_wmem_default', '-')}/{tcp_adaptation.get('udp_wmem_max', '-')}",
+            )
         )
+        lines.append("tcp adaptation: " + ", ".join(adaptation_details))
     wireguard_policy = snapshot.network.get("wireguard_policy", {})
-    if wireguard_policy.get("managed"):
+    if has_interserver and wireguard_policy.get("managed"):
         lines.append(
             "wireguard policy: "
             f"state={'ok' if wireguard_policy.get('ok') else 'drift'}, "
@@ -135,7 +170,7 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
     if conntrack:
         details = [f"{conntrack.get('count', '-')}/{conntrack.get('max', '-')} ({conntrack.get('percent', '-')}%)"]
         bypass = conntrack.get("front_bypass", {})
-        if bypass:
+        if has_public_front and bypass:
             details.append(f"xray_front_bypass={'active' if bypass.get('active') else 'inactive'}")
         events = conntrack.get("table_full_events", {})
         labels = {"5": "5m", "30": "30m", "1440": "24h"}
@@ -152,7 +187,7 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
             f"upstreams={','.join(str(value) for value in resolver.get('upstreams', [])) or '-'}"
         )
     interserver = snapshot.transport.get("interserver", {})
-    if interserver:
+    if has_interserver and interserver:
         selection = interserver.get("selection", {})
         candidates = selection.get("candidates", {})
         details = [f"mode={interserver.get('mode', '-')}"]
@@ -165,7 +200,7 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
         ]
         if configured_candidates:
             details.append(f"configured_candidates={','.join(configured_candidates)}")
-        if snapshot.role == "ru-gateway":
+        if has_interserver_client:
             adaptive = interserver.get("adaptive_state", {})
             overlay_probe = adaptive.get("overlay_probe", {})
             if isinstance(overlay_probe, dict) and overlay_probe.get("checked") is True:
@@ -202,12 +237,12 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
             details.append(f"hy2_session={'active' if interserver.get('hysteria_session_active') else 'inactive'}")
             if adaptive.get("reason"):
                 details.append(f"reason={adaptive['reason']}")
-        elif snapshot.role == "foreign-exit":
+        elif has_interserver_server:
             details.append(f"listener={'active' if interserver.get('listening') else 'inactive'}")
             details.append(f"source={interserver.get('source_restricted_to') or '-'}")
         lines.append("interserver transport: " + ", ".join(details))
     public_client = snapshot.transport.get("public_client", {})
-    if public_client:
+    if has_public_front and public_client:
         lines.append(
             "public QUIC transport: "
             f"configured={public_client.get('configured', 'unknown')}, "
@@ -261,7 +296,7 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
     if recovery_signals:
         lines.append("tcp recovery deltas: " + ", ".join(f"{key}=+{value}" for key, value in recovery_signals.items()))
     front_degradation = snapshot.network.get("last_front_degradation", {})
-    if front_degradation:
+    if has_public_front and front_degradation:
         aggregate = front_degradation.get("aggregate", {})
         sources = ",".join(str(source) for source in front_degradation.get("degraded_sources", [])) or "-"
         lines.append(
@@ -271,7 +306,7 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
             f"({aggregate.get('retransmit_ratio_pct', 'unknown')}%)"
         )
     front_interval = snapshot.network.get("recent_front_interval", {})
-    if front_interval:
+    if has_public_front and front_interval:
         aggregate = front_interval.get("aggregate", {})
         sources = ",".join(str(source) for source in front_interval.get("degraded_sources", [])) or "-"
         lines.append(

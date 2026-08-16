@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import ast
 import contextlib
 import io
 import os
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -31,17 +33,85 @@ def preferred_bash() -> str | None:
 class RenderTests(unittest.TestCase):
     def make_env(self) -> dict[str, str]:
         env = generate_default_env("demo")
-        env["RU_PUBLIC_IP"] = "203.0.113.10"
-        env["FOREIGN_PUBLIC_IP"] = "198.51.100.20"
+        env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
+        env["EXIT_PUBLIC_IP"] = "198.51.100.20"
         env["WAN_INTERFACE"] = "eth1"
         return env
+
+    def make_single_env(self, location: str) -> dict[str, str]:
+        env = generate_default_env("demo", topology="single", gateway_location=location)
+        env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
+        env["WAN_INTERFACE"] = "eth1"
+        return env
+
+    def test_single_gateway_router_has_no_interserver_runtime(self) -> None:
+        for location in ("ru", "foreign"):
+            with self.subTest(location=location):
+                payload = json.loads(render.render_gateway_singbox(self.make_single_env(location)))
+                self.assertEqual(payload["dns"]["servers"], [{"type": "local", "tag": "dns-local"}])
+                self.assertEqual(payload["dns"]["final"], "dns-local")
+                self.assertEqual([item["tag"] for item in payload["inbounds"]], ["router-in", "public-hy2-in"])
+                self.assertEqual(payload["endpoints"], [])
+                self.assertEqual([item["tag"] for item in payload["outbounds"]], ["local-egress"])
+                self.assertEqual(payload["route"]["final"], "local-egress")
+                self.assertNotIn("rule_set", payload["route"])
+                self.assertNotIn("clash_api", payload["experimental"])
+                self.assertNotIn("wg0", json.dumps(payload))
+                self.assertNotIn("interserver", json.dumps(payload))
+
+    def test_single_gateway_xray_routes_every_public_flow_through_router(self) -> None:
+        payload = json.loads(render.render_gateway_xray(self.make_single_env("foreign")))
+        self.assertNotIn("dns", payload)
+        self.assertEqual([item["tag"] for item in payload["outbounds"]], ["split-router", "blocked"])
+        self.assertEqual(
+            payload["routing"]["rules"][-1],
+            {"type": "field", "network": "tcp,udp", "outboundTag": "split-router"},
+        )
+        self.assertNotIn("foreign-overlay", json.dumps(payload))
+        self.assertNotIn("wg0", json.dumps(payload))
+
+    def test_single_gateway_firewall_never_references_wireguard(self) -> None:
+        env = self.make_single_env("ru")
+        rules = render.render_ru_firewall_nftables(env)
+        self.assertNotIn("wg0", rules)
+        self.assertNotIn("11333", rules)
+
+    def test_single_gateway_artifacts_omit_wireguard_and_transport_service(self) -> None:
+        for location in ("ru", "foreign"):
+            with self.subTest(location=location):
+                files = render.rendered_files_for_node(self.make_single_env(location), "gateway")
+                self.assertNotIn("wg0.conf", files)
+                self.assertNotIn("vpn-stack-transport.service", files)
+                self.assertIn("xray.json", files)
+                self.assertIn("vpn-stack-admin.service", files)
+
+    def test_disabled_admin_is_absent_from_single_and_dual_gateway_artifacts(self) -> None:
+        for env in (self.make_single_env("foreign"), self.make_env()):
+            with self.subTest(topology=env["TOPOLOGY"]):
+                env["ADMIN_WEB_ENABLED"] = "0"
+                files = render.rendered_files_for_node(env, "gateway")
+                manifest = json.loads(files["render-manifest.json"])
+
+                self.assertNotIn("admin_web.py", files)
+                self.assertIn("admin_apply.py", files)
+                self.assertNotIn("vpn-stack-admin.service", files)
+                self.assertIn("admin_apply.py", files["sing-box.service"])
+                self.assertNotIn("ADMIN_WEB_USERNAME", files["node.env"])
+                self.assertNotIn("ADMIN_WEB_PASSWORD", files["node.env"])
+                self.assertNotIn("admin", manifest["required_services"])
+
+    def test_enabled_admin_gateway_keeps_operator_rules_hook(self) -> None:
+        files = render.rendered_files_for_node(self.make_env(), "gateway")
+
+        self.assertIn("admin_apply.py", files)
+        self.assertIn("/etc/vpn-stack/current/admin_apply.py", files["sing-box.service"])
 
     def test_render_vless_uri(self) -> None:
         env = self.make_env()
         uri = render.render_vless_uri(env)
         self.assertTrue(uri.startswith("vless://"))
         self.assertTrue(uri.startswith(f"vless://{env['CLIENT_UUID']}@"))
-        self.assertIn(f"@{env['RU_PUBLIC_IP']}:443?", uri)
+        self.assertIn(f"@{env['GATEWAY_PUBLIC_IP']}:443?", uri)
         self.assertIn("?security=reality&", uri)
         self.assertNotIn("encryption=none", uri)
         self.assertIn("&sni=www.bing.com&", uri)
@@ -57,7 +127,7 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(payload["inbounds"][0]["sniffing"], {"enabled": True, "destOverride": ["http", "tls", "quic"], "routeOnly": False})
         outbound = payload["outbounds"][0]
         self.assertEqual(outbound["protocol"], "vless")
-        self.assertEqual(outbound["settings"]["vnext"][0]["address"], env["RU_PUBLIC_IP"])
+        self.assertEqual(outbound["settings"]["vnext"][0]["address"], env["GATEWAY_PUBLIC_IP"])
         self.assertEqual(outbound["settings"]["vnext"][0]["port"], int(env["RU_LISTEN_PORT"]))
         self.assertEqual(outbound["settings"]["vnext"][0]["users"][0]["id"], env["CLIENT_UUID"])
         self.assertEqual(outbound["streamSettings"]["security"], "reality")
@@ -71,7 +141,7 @@ class RenderTests(unittest.TestCase):
         )
         self.assertEqual(
             payload["routing"]["rules"][1],
-            {"type": "field", "ip": [f"{env['RU_PUBLIC_IP']}/32", f"{env['FOREIGN_PUBLIC_IP']}/32"], "outboundTag": "direct"},
+            {"type": "field", "ip": [f"{env['GATEWAY_PUBLIC_IP']}/32", f"{env['EXIT_PUBLIC_IP']}/32"], "outboundTag": "direct"},
         )
         self.assertFalse(any(rule.get("network") == "udp" and rule.get("port") == 443 for rule in payload["routing"]["rules"]))
 
@@ -86,7 +156,7 @@ class RenderTests(unittest.TestCase):
         outbound = payload["outbounds"][0]
         self.assertEqual(outbound["type"], "vless")
         self.assertEqual(outbound["tag"], PUBLIC_VLESS_OUTBOUND_TAG)
-        self.assertEqual(outbound["server"], env["RU_PUBLIC_IP"])
+        self.assertEqual(outbound["server"], env["GATEWAY_PUBLIC_IP"])
         self.assertEqual(outbound["server_port"], int(env["RU_LISTEN_PORT"]))
         self.assertEqual(outbound["multiplex"], {"enabled": False})
         self.assertNotIn("network", outbound)
@@ -104,7 +174,7 @@ class RenderTests(unittest.TestCase):
         self.assertNotIn("sniff_override_destination", payload["inbounds"][0])
         self.assertEqual(
             payload["inbounds"][0]["route_exclude_address"][:2],
-            [f"{env['RU_PUBLIC_IP']}/32", f"{env['FOREIGN_PUBLIC_IP']}/32"],
+            [f"{env['GATEWAY_PUBLIC_IP']}/32", f"{env['EXIT_PUBLIC_IP']}/32"],
         )
 
     def test_android_client_profile_is_ipv4_only_and_sets_android_override(self) -> None:
@@ -115,7 +185,7 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(payload["route"]["final"], PUBLIC_VLESS_OUTBOUND_TAG)
         self.assertEqual(
             payload["inbounds"][0]["route_exclude_address"][:2],
-            [f"{env['RU_PUBLIC_IP']}/32", f"{env['FOREIGN_PUBLIC_IP']}/32"],
+            [f"{env['GATEWAY_PUBLIC_IP']}/32", f"{env['EXIT_PUBLIC_IP']}/32"],
         )
 
     def test_client_profile_preserves_manual_route_excludes_after_server_ips(self) -> None:
@@ -126,8 +196,8 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(
             payload["inbounds"][0]["route_exclude_address"],
             [
-                f"{env['RU_PUBLIC_IP']}/32",
-                f"{env['FOREIGN_PUBLIC_IP']}/32",
+                f"{env['GATEWAY_PUBLIC_IP']}/32",
+                f"{env['EXIT_PUBLIC_IP']}/32",
                 "198.51.100.10/32",
                 "198.51.100.11/32",
                 "2001:db8::/32",
@@ -304,7 +374,7 @@ class RenderTests(unittest.TestCase):
         )
         self.assertEqual(outbounds["to-foreign"]["type"], "direct")
         self.assertEqual(outbounds["to-foreign"]["bind_interface"], env["WG_INTERFACE"])
-        self.assertEqual(outbounds["interserver-underlay-hy2"]["server"], env["FOREIGN_PUBLIC_IP"])
+        self.assertEqual(outbounds["interserver-underlay-hy2"]["server"], env["EXIT_PUBLIC_IP"])
         self.assertEqual(outbounds["interserver-underlay-hy2"]["obfs"]["type"], "salamander")
         self.assertNotIn("up_mbps", outbounds["interserver-underlay-hy2"])
         self.assertNotIn("down_mbps", outbounds["interserver-underlay-hy2"])
@@ -368,7 +438,7 @@ class RenderTests(unittest.TestCase):
         env = self.make_env()
         payload = json.loads(render.render_ru_singbox(env))
         route_rules = payload["route"]["rules"]
-        own_ip_index = next(index for index, rule in enumerate(route_rules) if rule.get("ip_cidr") == [f"{env['RU_PUBLIC_IP']}/32"])
+        own_ip_index = next(index for index, rule in enumerate(route_rules) if rule.get("ip_cidr") == [f"{env['GATEWAY_PUBLIC_IP']}/32"])
         ipv4_literal_index = next(index for index, rule in enumerate(route_rules) if rule.get("ip_cidr") == ["0.0.0.0/0"])
         self.assertEqual(route_rules[own_ip_index]["outbound"], "direct-ru")
         self.assertLess(own_ip_index, ipv4_literal_index)
@@ -446,7 +516,7 @@ class RenderTests(unittest.TestCase):
         env["RU_FORCE_DIRECT_IP_CIDR"] = "203.0.113.0/24,198.51.100.4/32"
         payload = json.loads(render.render_ru_singbox(env))
         cidr_rule = next(rule for rule in payload["route"]["rules"] if rule.get("outbound") == "direct-ru" and "ip_cidr" in rule)
-        self.assertEqual(cidr_rule["ip_cidr"], ["203.0.113.0/24", "198.51.100.4/32", f"{env['RU_PUBLIC_IP']}/32"])
+        self.assertEqual(cidr_rule["ip_cidr"], ["203.0.113.0/24", "198.51.100.4/32", f"{env['GATEWAY_PUBLIC_IP']}/32"])
 
     def test_render_next_steps_mentions_uri_first_contract(self) -> None:
         env = self.make_env()
@@ -491,9 +561,37 @@ class RenderTests(unittest.TestCase):
                 for asset_name in ("geosite-ru.srs", "geoip-ru.srs", "ru-ipv4.zone", "ru-ipv6.zone"):
                     (assets_dir / asset_name).write_text("dummy\n", encoding="utf-8")
                 cloud_dir = render.render_cloud_init_artifacts(env)
-                ru_yaml = (cloud_dir / "ru.yaml").read_text(encoding="utf-8")
-                self.assertIn("/root/vpn-stack/vpn_installer/install_support.py", ru_yaml)
-                self.assertNotIn("/root/vpn-stack/rendered/", ru_yaml)
+                gateway_yaml = (cloud_dir / "gateway.yaml").read_text(encoding="utf-8")
+                exit_yaml = (cloud_dir / "exit.yaml").read_text(encoding="utf-8")
+                self.assertIn("/root/vpn-stack/vpn_installer/install_support.py", gateway_yaml)
+                self.assertIn("/root/vpn-stack/vpn_installer/legacy_install_contract.py", gateway_yaml)
+                self.assertIn("./install.sh --node gateway", gateway_yaml)
+                self.assertIn("--assets-dir /root/vpn-stack/assets", gateway_yaml)
+                self.assertNotIn("--assets-dir /root/vpn-stack/assets", exit_yaml)
+                self.assertNotIn("/root/vpn-stack/rendered/", gateway_yaml)
+
+    def test_server_render_package_closes_module_level_dependencies(self) -> None:
+        package_dir = Path(render.__file__).parent
+        selected = {Path(name).stem for name in render.SERVER_RENDER_MODULES}
+        available = {path.stem for path in package_dir.glob("*.py")}
+        missing: dict[str, list[str]] = {}
+
+        for filename in render.SERVER_RENDER_MODULES:
+            module_name = Path(filename).stem
+            tree = ast.parse((package_dir / filename).read_text(encoding="utf-8"))
+            dependencies = {
+                node.module.split(".", 1)[0]
+                for node in tree.body
+                if isinstance(node, ast.ImportFrom)
+                and node.level == 1
+                and node.module
+                and node.module.split(".", 1)[0] in available
+                and node.module.split(".", 1)[0] not in selected
+            }
+            if dependencies:
+                missing[module_name] = sorted(dependencies)
+
+        self.assertEqual(missing, {})
 
     def test_fetch_assets_fail_fast_without_cache(self) -> None:
         env = self.make_env()
@@ -567,8 +665,8 @@ class RenderTests(unittest.TestCase):
     def test_render_windows_route_bypass_script_contains_server_ips_and_active_store(self) -> None:
         env = self.make_env()
         script = render.render_windows_route_bypass_script(env)
-        self.assertIn(env["RU_PUBLIC_IP"], script)
-        self.assertIn(env["FOREIGN_PUBLIC_IP"], script)
+        self.assertIn(env["GATEWAY_PUBLIC_IP"], script)
+        self.assertIn(env["EXIT_PUBLIC_IP"], script)
         self.assertIn("PolicyStore ActiveStore", script)
         self.assertIn("Get-PhysicalGatewayRoute", script)
         self.assertIn("TunnelInterfacePattern", script)
@@ -633,6 +731,7 @@ class RenderTests(unittest.TestCase):
         self.assertIn("resolved-vpn-stack.conf", files)
         self.assertIn("vpn-stack-agent.py", files)
         self.assertIn("log_classifier.py", files)
+        self.assertIn("release_integrity.py", files)
         self.assertNotIn("guard.sh", files)
         self.assertNotIn("sync-state.sh", files)
         self.assertNotIn("vpn-stack-sync.service", files)
@@ -771,36 +870,21 @@ class RenderTests(unittest.TestCase):
         self.assertNotIn("vless_guard", rules)
         self.assertNotIn(f"tcp dport {env['RU_LISTEN_PORT']} counter drop", rules)
         self.assertNotIn("subscription_guard", rules)
-        self.assertIn("set admin_clients_ipv4", rules)
-        self.assertIn('ip saddr @admin_clients_ipv4 tcp dport 11333 counter accept comment "vpnstack-admin-active-client"', rules)
-        self.assertIn('ip saddr { 203.0.113.10, 198.51.100.20 } tcp dport 11333 counter accept comment "vpnstack-admin-tunnel-client"', rules)
-        self.assertNotIn("tcp dport 11333 counter accept\n", rules)
+        self.assertNotIn("admin_clients_ipv4", rules)
+        self.assertNotIn("tcp dport 11333", rules)
         self.assertNotIn("flush ruleset", rules)
         self.assertNotIn("table ip nat", rules)
         self.assertNotIn("table ip6 nat", rules)
 
-    def test_render_ru_nftables_opens_admin_web_for_current_vpn_clients_by_default(self) -> None:
-        env = self.make_env()
-        rules = render.render_ru_firewall_nftables(env)
-        self.assertIn("set admin_clients_ipv4", rules)
-        self.assertIn('ip saddr @admin_clients_ipv4 tcp dport 11333 counter accept comment "vpnstack-admin-active-client"', rules)
-
-        env = self.make_env()
-        env["ADMIN_WEB_ACTIVE_CLIENT_REQUIRED"] = "0"
-        rules = render.render_ru_firewall_nftables(env)
-        self.assertNotIn("admin_clients_ipv4", rules)
-        self.assertNotIn("tcp dport 11333", rules)
-
-    def test_render_ru_nftables_keeps_explicit_admin_web_allowlists(self) -> None:
+    def test_render_ru_nftables_ignores_legacy_public_admin_inputs(self) -> None:
         env = self.make_env()
         env["ADMIN_WEB_ALLOWED_CIDR"] = "203.0.113.4/32"
-        rules = render.render_ru_firewall_nftables(env)
-        self.assertIn("ip saddr { 203.0.113.4/32 } tcp dport 11333 counter accept", rules)
-
-        env = self.make_env()
+        env["ADMIN_WEB_ACTIVE_CLIENT_REQUIRED"] = "1"
         env["ADMIN_WEB_ALLOW_WG"] = "1"
         rules = render.render_ru_firewall_nftables(env)
-        self.assertIn(f'iifname "{env["WG_INTERFACE"]}" tcp dport 11333 counter accept', rules)
+
+        self.assertNotIn("admin_clients_ipv4", rules)
+        self.assertNotIn("tcp dport 11333", rules)
 
     def test_render_foreign_nftables_admits_ssh_without_log_driven_blocks(self) -> None:
         env = self.make_env()
@@ -812,9 +896,9 @@ class RenderTests(unittest.TestCase):
         self.assertIn(f"tcp dport {env['SSH_PORT']} counter accept", rules)
         self.assertNotIn("ssh_guard", rules)
         self.assertNotIn(f"tcp dport {env['SSH_PORT']} counter drop", rules)
-        self.assertIn(f"ip saddr {env['RU_PUBLIC_IP']} udp dport {env['WG_PORT']} counter accept", rules)
+        self.assertIn(f"ip saddr {env['GATEWAY_PUBLIC_IP']} udp dport {env['WG_PORT']} counter accept", rules)
         self.assertNotIn(f"    udp dport {env['WG_PORT']} accept", rules)
-        self.assertIn(f"ip saddr {env['RU_PUBLIC_IP']} udp dport 18443 counter accept", rules)
+        self.assertIn(f"ip saddr {env['GATEWAY_PUBLIC_IP']} udp dport 18443 counter accept", rules)
         self.assertIn(f'iifname "{env["WG_INTERFACE"]}" oifname "eth0" tcp flags syn tcp option maxseg size set 1320 accept', rules)
         self.assertIn(f'iifname "eth0" oifname "{env["WG_INTERFACE"]}" tcp flags syn tcp option maxseg size set 1320 accept', rules)
         self.assertIn("table ip vpnstack_nat4", rules)
@@ -929,11 +1013,35 @@ class RenderTests(unittest.TestCase):
                 render.write_role_rendered_files(env, render.ROLE_FOREIGN, out_dir / "preview" / "foreign")
                 server_dir = out_dir / "server"
                 server_dir.mkdir(parents=True, exist_ok=True)
-                (server_dir / "ru.env").write_text(render.render_env_text(env), encoding="utf-8")
-                (server_dir / "foreign.env").write_text(render.render_env_text(env), encoding="utf-8")
+                (server_dir / "gateway.env").write_text(render.render_node_env_text(env, "gateway"), encoding="utf-8")
+                (server_dir / "exit.env").write_text(render.render_node_env_text(env, "exit"), encoding="utf-8")
                 bundle_dir = render.package_bundle(env)
-                self.assertTrue((bundle_dir / "ru-gateway.tar.gz").is_file())
-                self.assertTrue((bundle_dir / "foreign-exit.tar.gz").is_file())
+                self.assertTrue((bundle_dir / "gateway.tar.gz").is_file())
+                self.assertTrue((bundle_dir / "exit.tar.gz").is_file())
+                self.assertFalse((bundle_dir / "gateway").exists())
+                self.assertFalse((bundle_dir / "exit").exists())
+                with tarfile.open(bundle_dir / "gateway.tar.gz", "r:gz") as archive:
+                    self.assertEqual(archive.getmember("deployment.env").mode & 0o777, 0o600)
+                    self.assertEqual(archive.getmember("install.sh").mode & 0o777, 0o700)
+
+    def test_single_artifact_tree_contains_only_gateway_node_and_minimal_env(self) -> None:
+        env = self.make_single_env("foreign")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            env_path = tmp_path / "demo.env"
+            with patch.object(render, "OUT_DIR", tmp_path / "out"):
+                out_dir = render.render_config_artifacts(env_path, env, fetch_assets_first=False)
+                cloud_dir = render.render_cloud_init_artifacts(env)
+                bundle_dir = render.package_bundle(env)
+
+            node_env = (out_dir / "server" / "gateway.env").read_text(encoding="utf-8")
+            self.assertTrue((bundle_dir / "gateway.tar.gz").is_file())
+            self.assertFalse((bundle_dir / "exit.tar.gz").exists())
+            self.assertTrue((cloud_dir / "gateway.yaml").is_file())
+            self.assertFalse((cloud_dir / "exit.yaml").exists())
+            self.assertFalse((out_dir / "server" / "exit.env").exists())
+            self.assertNotIn("WG_RU_PRIVATE_KEY", node_env)
+            self.assertNotIn("EXIT_PUBLIC_IP", node_env)
 
     def test_render_all_artifacts_merges_local_ru_direct_overlay_files(self) -> None:
         env = self.make_env()
@@ -944,7 +1052,7 @@ class RenderTests(unittest.TestCase):
             (tmp_path / "demo.ru-direct-domains.txt").write_text("overlay.example\n", encoding="utf-8")
             with patch.object(render, "OUT_DIR", tmp_path / "out"), patch.object(render, "fetch_assets", return_value={}):
                 render.render_all_artifacts(env_path, env)
-                payload = json.loads((tmp_path / "out" / "demo" / "preview" / "ru" / "sing-box.json").read_text(encoding="utf-8"))
+                payload = json.loads((tmp_path / "out" / "demo" / "preview" / "gateway" / "sing-box.json").read_text(encoding="utf-8"))
         direct_domain_rule = next(rule for rule in payload["route"]["rules"] if rule.get("outbound") == "direct-ru" and "domain" in rule)
         self.assertIn("overlay.example", direct_domain_rule["domain"])
 
@@ -955,14 +1063,14 @@ class RenderTests(unittest.TestCase):
             env_path = tmp_path / "demo.env"
             env_path.write_text(render.render_env_text(env), encoding="utf-8")
             with patch.object(render, "OUT_DIR", tmp_path / "out"):
-                stale_file = tmp_path / "out" / "demo" / "preview" / "ru" / "subscription" / "old-token" / "vless.txt"
+                stale_file = tmp_path / "out" / "demo" / "preview" / "gateway" / "subscription" / "old-token" / "vless.txt"
                 stale_file.parent.mkdir(parents=True)
                 stale_file.write_text("stale\n", encoding="utf-8")
 
                 render.render_config_artifacts(env_path, env, fetch_assets_first=False)
 
                 self.assertFalse(stale_file.exists())
-                self.assertTrue((tmp_path / "out" / "demo" / "preview" / "ru" / "sing-box.json").is_file())
+                self.assertTrue((tmp_path / "out" / "demo" / "preview" / "gateway" / "sing-box.json").is_file())
 
     def test_role_manifest_requires_only_role_assets(self) -> None:
         env = self.make_env()

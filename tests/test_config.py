@@ -120,7 +120,6 @@ class ConfigTests(unittest.TestCase):
                 "SING_BOX_LOG_LEVEL": "warn",
                 "GLOBAL_DOH_SERVER": "1.1.1.1",
                 "GLOBAL_DOH_SERVER_NAME": "cloudflare-dns.com",
-                "ADMIN_WEB_BIND": "127.0.0.1",
                 "UTLS_FINGERPRINT": "randomized",
                 "RU_REALITY_SERVER_NAME": "www.cloudflare.com",
                 "SSH_MAX_STARTUPS": "5:30:20",
@@ -136,7 +135,6 @@ class ConfigTests(unittest.TestCase):
             "SING_BOX_LOG_LEVEL": "warn",
             "GLOBAL_DOH_SERVER": "1.1.1.1",
             "GLOBAL_DOH_SERVER_NAME": "cloudflare-dns.com",
-            "ADMIN_WEB_BIND": "127.0.0.1",
             "UTLS_FINGERPRINT": "randomized",
             "RU_REALITY_SERVER_NAME": "www.cloudflare.com",
             "SSH_MAX_STARTUPS": "5:30:20",
@@ -262,14 +260,15 @@ class ConfigTests(unittest.TestCase):
 
     def test_render_env_roundtrip(self) -> None:
         env = config.generate_default_env("sample")
-        env["RU_PUBLIC_IP"] = "203.0.113.10"
+        env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
         text = config.render_env_text(env)
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "sample.env"
             path.write_text(text, encoding="utf-8")
             loaded = config.load_env_file(path)
         self.assertEqual(loaded["DEPLOY_NAME"], "sample")
-        self.assertEqual(loaded["RU_PUBLIC_IP"], "203.0.113.10")
+        self.assertEqual(loaded["GATEWAY_PUBLIC_IP"], "203.0.113.10")
+        self.assertNotIn("RU_PUBLIC_IP", loaded)
 
     def test_parse_env_text_parses_payload(self) -> None:
         payload = config.parse_env_text('DEPLOY_NAME="demo"\nRU_PUBLIC_IP="203.0.113.10"\n')
@@ -280,6 +279,36 @@ class ConfigTests(unittest.TestCase):
         merged = config.merge_env_with_defaults({"WAN_INTERFACE": ""}, "sample")
         self.assertIn("WAN_INTERFACE", merged)
         self.assertEqual(merged["WAN_INTERFACE"], "")
+
+    def test_dual_to_single_migration_removes_interserver_secrets(self) -> None:
+        dual = config.generate_default_env("sample")
+        dual.update(
+            {
+                "TOPOLOGY": "single",
+                "GATEWAY_LOCATION": "foreign",
+                "GATEWAY_PUBLIC_IP": "198.51.100.20",
+                "EXIT_PUBLIC_IP": "",
+            }
+        )
+        single = config.merge_env_with_defaults(dual, "sample")
+        self.assertEqual(single["TOPOLOGY"], "single")
+        self.assertEqual(single["GATEWAY_LOCATION"], "foreign")
+        for key in config.DUAL_REQUIRED_ENV_VARS:
+            self.assertEqual(single[key], "", key)
+
+    def test_single_to_dual_migration_generates_interserver_secrets(self) -> None:
+        single = config.generate_default_env("sample", topology="single", gateway_location="ru")
+        single.update(
+            {
+                "TOPOLOGY": "dual",
+                "GATEWAY_PUBLIC_IP": "203.0.113.10",
+                "EXIT_PUBLIC_IP": "198.51.100.20",
+            }
+        )
+        dual = config.merge_env_with_defaults(single, "sample")
+        self.assertEqual(dual["TOPOLOGY"], "dual")
+        for key in config.DUAL_REQUIRED_ENV_VARS:
+            self.assertTrue(dual[key], key)
 
     def test_merge_env_with_defaults_appends_new_direct_domain_defaults(self) -> None:
         merged = config.merge_env_with_defaults(
@@ -366,13 +395,32 @@ class ConfigTests(unittest.TestCase):
     def test_generate_example_env_contains_public_ip_placeholders(self) -> None:
         env = config.generate_example_env()
         self.assertEqual(env["DEPLOY_NAME"], "my-stack")
-        self.assertEqual(env["RU_PUBLIC_IP"], "203.0.113.10")
+        self.assertEqual(env["GATEWAY_PUBLIC_IP"], "203.0.113.10")
+        self.assertNotIn("RU_PUBLIC_IP", env)
+        self.assertNotIn("FOREIGN_PUBLIC_IP", env)
         self.assertEqual(env["RU_LISTEN_PORT"], "443")
         self.assertEqual(env["RU_REALITY_MAX_TIME_DIFFERENCE"], "24h")
         self.assertEqual(env["FOREIGN_BLOCK_RU"], "0")
         self.assertEqual(env["ADMIN_WEB_ENABLED"], "1")
-        self.assertEqual(env["ADMIN_WEB_BIND"], "0.0.0.0")
-        self.assertEqual(env["ADMIN_WEB_ACTIVE_CLIENT_REQUIRED"], "1")
+        self.assertNotIn("ADMIN_WEB_BIND", env)
+        self.assertNotIn("ADMIN_WEB_ACTIVE_CLIENT_REQUIRED", env)
+
+    def test_legacy_admin_public_access_inputs_are_removed_fail_closed(self) -> None:
+        legacy_keys = {
+            "ADMIN_WEB_BIND": "0.0.0.0",
+            "ADMIN_WEB_ACTIVE_CLIENT_REQUIRED": "1",
+            "ADMIN_WEB_ACTIVE_CLIENT_TIMEOUT_SECONDS": "30",
+            "ADMIN_WEB_ALLOW_TUNNEL_CLIENTS": "1",
+            "ADMIN_WEB_ALLOWED_CIDR": "0.0.0.0/0",
+            "ADMIN_WEB_ALLOW_WG": "1",
+        }
+        env = config.merge_env_with_defaults(legacy_keys, "sample")
+        rendered = config.parse_env_text(config.render_env_text(env))
+
+        self.assertEqual(env["ADMIN_WEB_ENABLED"], "1")
+        for key in legacy_keys:
+            self.assertNotIn(key, env)
+            self.assertNotIn(key, rendered)
 
     def test_split_asset_sources_supports_spaces_and_pipe(self) -> None:
         self.assertEqual(
@@ -422,9 +470,34 @@ class ConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             env_path = Path(tmp) / "demo.env"
             env = config.ensure_deployment_env(env_path, "demo")
-            env_path.write_text(config.render_env_text({**env, "WAN_INTERFACE": "eth9"}), encoding="utf-8")
+            self.assertFalse(env_path.exists())
+            env_path.write_text(
+                config.render_env_text(
+                    {
+                        **env,
+                        "GATEWAY_PUBLIC_IP": "203.0.113.10",
+                        "EXIT_PUBLIC_IP": "198.51.100.20",
+                        "WAN_INTERFACE": "eth9",
+                    }
+                ),
+                encoding="utf-8",
+            )
             updated = config.ensure_deployment_env(env_path, "demo")
         self.assertEqual(updated["WAN_INTERFACE"], "eth9")
+
+    def test_failed_env_migration_does_not_rewrite_existing_file(self) -> None:
+        payload = (
+            'CONFIG_SCHEMA="2"\nTOPOLOGY="single"\nGATEWAY_LOCATION="ru"\n'
+            'GATEWAY_PUBLIC_IP="203.0.113.10"\nRU_PUBLIC_IP="198.51.100.20"\n'
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            env_path = Path(tmp) / "demo.env"
+            env_path.write_text(payload, encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "canonical/legacy conflict"):
+                config.ensure_deployment_env(env_path, "demo")
+            observed = env_path.read_text(encoding="utf-8")
+
+        self.assertEqual(observed, payload)
 
     def test_write_prefix_lines_and_download_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

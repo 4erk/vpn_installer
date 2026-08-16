@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import subprocess
+import os
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -19,6 +21,8 @@ from vpn_installer.common import (
     sanitize_name,
     shell_env_quote,
     write_json,
+    write_private_json,
+    write_private_text,
 )
 
 
@@ -97,6 +101,24 @@ class CommonTests(unittest.TestCase):
             write_json(path, {"ok": True})
             self.assertTrue(path.is_file())
             self.assertIn('"ok": true', path.read_text(encoding="utf-8"))
+
+    def test_write_private_text_is_atomic_and_owner_only_on_posix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "nested" / "secret.txt"
+            write_private_text(path, "first\n")
+            write_private_text(path, "second\n")
+            self.assertEqual(path.read_text(encoding="utf-8"), "second\n")
+            self.assertEqual(list(path.parent.glob(f".{path.name}.*")), [])
+            if os.name != "nt":
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+
+    def test_write_private_json_uses_the_same_private_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "state.json"
+            write_private_json(path, {"secret": "value"})
+            self.assertEqual(__import__("json").loads(path.read_text(encoding="utf-8")), {"secret": "value"})
+            if os.name != "nt":
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
 
     def test_ensure_directories_creates_runtime_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

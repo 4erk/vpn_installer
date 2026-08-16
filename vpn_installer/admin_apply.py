@@ -32,8 +32,11 @@ SING_BOX_BINARY_PATH = Path("/etc/vpn-stack/current/bin/sing-box")
 _THREAD_LOCK = threading.Lock()
 
 DOMAIN_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
-OUTBOUND_TO_DNS = {"direct-ru": "dns-ru-direct", "to-foreign": "dns-global"}
-OUTBOUND_LABELS = {"direct-ru": "российский сервер", "to-foreign": "зарубежный сервер"}
+OUTBOUND_LABELS = {
+    "direct-ru": "российский сервер",
+    "to-foreign": "зарубежный сервер",
+    "local-egress": "текущий сервер",
+}
 
 
 class RulesConflictError(RuntimeError):
@@ -105,8 +108,8 @@ def normalize_domain(raw_value: str) -> tuple[str, bool]:
 
 def normalize_rule(raw_rule: dict[str, Any]) -> dict[str, Any]:
     outbound = str(raw_rule.get("outbound", "")).strip()
-    if outbound not in OUTBOUND_TO_DNS:
-        raise ValueError("Нужно выбрать российский или зарубежный сервер")
+    if outbound not in OUTBOUND_LABELS:
+        raise ValueError("Нужно выбрать доступный сервер")
     value = str(raw_rule.get("value", "")).strip()
     if not value:
         raise ValueError("Значение правила не может быть пустым")
@@ -116,7 +119,7 @@ def normalize_rule(raw_rule: dict[str, Any]) -> dict[str, Any]:
         network = ipaddress.ip_network(value, strict=False)
         if not network.is_global:
             raise ValueError("CIDR web-правила разрешены только для публичных сетей")
-        return {
+        rule = {
             "id": str(raw_rule.get("id", "")).strip() or uuid.uuid4().hex,
             "type": "cidr",
             "value": str(network),
@@ -124,8 +127,11 @@ def normalize_rule(raw_rule: dict[str, Any]) -> dict[str, Any]:
             "outbound": outbound,
             "enabled": bool(raw_rule.get("enabled", True)),
         }
+        if not rule["enabled"] and str(raw_rule.get("conflict", "")).strip():
+            rule["conflict"] = str(raw_rule["conflict"]).strip()
+        return rule
     domain, wildcard = normalize_domain(value)
-    return {
+    rule = {
         "id": str(raw_rule.get("id", "")).strip() or uuid.uuid4().hex,
         "type": "domain",
         "value": domain,
@@ -133,6 +139,9 @@ def normalize_rule(raw_rule: dict[str, Any]) -> dict[str, Any]:
         "outbound": outbound,
         "enabled": bool(raw_rule.get("enabled", True)),
     }
+    if not rule["enabled"] and str(raw_rule.get("conflict", "")).strip():
+        rule["conflict"] = str(raw_rule["conflict"]).strip()
+    return rule
 
 
 def load_rules(path: Path = RULES_PATH) -> list[dict[str, Any]]:
@@ -203,8 +212,56 @@ def rule_domains(rule: dict[str, Any]) -> tuple[list[str], list[str]]:
     return [value], [f".{value}"]
 
 
+def outbound_catalog(base_config: dict[str, Any]) -> dict[str, dict[str, str]]:
+    catalog: dict[str, dict[str, str]] = {}
+    for outbound in base_config.get("outbounds", []):
+        if not isinstance(outbound, dict):
+            continue
+        tag = str(outbound.get("tag", ""))
+        if tag not in OUTBOUND_LABELS:
+            continue
+        resolver = outbound.get("domain_resolver", {})
+        dns_server = str(resolver.get("server", "")) if isinstance(resolver, dict) else ""
+        if not dns_server:
+            continue
+        catalog[tag] = {"tag": tag, "label": OUTBOUND_LABELS[tag], "dns_server": dns_server}
+    return catalog
+
+
+def resolve_outbound(outbound: str, catalog: dict[str, dict[str, str]]) -> str:
+    if outbound in catalog:
+        return outbound
+    raise ValueError(f"Направление {outbound or '-'} отсутствует в текущей topology")
+
+
+def reconcile_rules_with_catalog(
+    rules: list[dict[str, Any]],
+    catalog: dict[str, dict[str, str]],
+    *,
+    migrate_unavailable: bool,
+) -> list[dict[str, Any]]:
+    reconciled: list[dict[str, Any]] = []
+    for rule in rules:
+        if rule["outbound"] in catalog:
+            reconciled.append({key: value for key, value in rule.items() if key != "conflict"})
+            continue
+        if not migrate_unavailable:
+            resolve_outbound(rule["outbound"], catalog)
+        reconciled.append(
+            {
+                **rule,
+                "enabled": False,
+                "conflict": f"outbound {rule['outbound']} is unavailable in the installed topology",
+            }
+        )
+    return reconciled
+
+
 def apply_admin_rules_to_config(base_config: dict[str, Any], rules: list[dict[str, Any]]) -> dict[str, Any]:
     config = json.loads(json.dumps(base_config))
+    catalog = outbound_catalog(config)
+    if not catalog:
+        raise ValueError("В base config нет egress, доступного для operator rules")
     enabled = [rule for rule in rules if rule.get("enabled", True)]
     dns_rules = config.setdefault("dns", {}).setdefault("rules", [])
     route_rules = config.setdefault("route", {}).setdefault("rules", [])
@@ -217,8 +274,8 @@ def apply_admin_rules_to_config(base_config: dict[str, Any], rules: list[dict[st
             guard_rules.append(route_rule)
     route_inserts: list[dict[str, Any]] = []
     for rule in enabled:
-        outbound = rule["outbound"]
-        dns_server = OUTBOUND_TO_DNS[outbound]
+        outbound = resolve_outbound(rule["outbound"], catalog)
+        dns_server = catalog[outbound]["dns_server"]
         if rule["type"] == "cidr":
             route_inserts.extend((*guard_rules, {"ip_cidr": [rule["value"]], "action": "route", "outbound": outbound}))
             continue
@@ -292,8 +349,14 @@ def commit_rules(
     operator_manifest_path: Path | None = None,
     sing_box_binary: Path = SING_BOX_BINARY_PATH,
     expected_generation: str | None = None,
+    migrate_unavailable: bool = False,
 ) -> list[dict[str, Any]]:
     rules = normalize_rules(raw_rules)
+    base_config = read_json(base_path, None)
+    if not isinstance(base_config, dict):
+        raise RuntimeError(f"Base sing-box config not found or invalid: {base_path}")
+    catalog = outbound_catalog(base_config)
+    rules = reconcile_rules_with_catalog(rules, catalog, migrate_unavailable=migrate_unavailable)
     effective_lock = lock_path or (RULES_LOCK_PATH if rules_path == RULES_PATH else rules_path.with_suffix(".lock"))
     effective_manifest = operator_manifest_path or (
         OPERATOR_MANIFEST_PATH if rules_path == RULES_PATH else rules_path.with_suffix(".operator-state.json")
@@ -308,14 +371,15 @@ def commit_rules(
         old_manifest = effective_manifest.read_bytes() if effective_manifest.exists() else None
         staged_config = render_checked_config(base_path, config_path, rules, sing_box_binary=sing_box_binary)
         try:
-            write_json_atomic(rules_path, {"schema_version": 1, "rules": rules})
+            write_json_atomic(rules_path, {"schema_version": 2, "rules": rules})
             os.replace(staged_config, config_path)
             manifest = {
-                "schema_version": 1,
+                "schema_version": 2,
                 "generation": rules_generation(rules),
                 "base_sha256": hashlib.sha256(base_path.read_bytes()).hexdigest(),
                 "rules_sha256": hashlib.sha256(rules_path.read_bytes()).hexdigest(),
                 "effective_config_sha256": hashlib.sha256(config_path.read_bytes()).hexdigest(),
+                "conflicts": sum(bool(rule.get("conflict")) for rule in rules),
             }
             write_json_atomic(effective_manifest, manifest)
             if restart:
@@ -352,6 +416,7 @@ def apply_rules(
     restart: bool = True,
     operator_manifest_path: Path | None = None,
     sing_box_binary: Path = SING_BOX_BINARY_PATH,
+    migrate_unavailable: bool = True,
 ) -> None:
     commit_rules(
         load_rules(rules_path),
@@ -361,6 +426,7 @@ def apply_rules(
         restart=restart,
         operator_manifest_path=operator_manifest_path,
         sing_box_binary=sing_box_binary,
+        migrate_unavailable=migrate_unavailable,
     )
 
 

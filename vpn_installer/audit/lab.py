@@ -10,6 +10,8 @@ from ..config import load_env_file
 from ..interserver_transport import HY2_PORT, TRANSPORT_CANDIDATE_TAGS, TRANSPORT_HY2_TAG, TRANSPORT_PREFERRED_TAG
 from ..network_profile import FQ_FLOW_LIMIT, FQ_KIND, FQ_PACKET_LIMIT
 from ..render import (
+    SERVER_AGENT_BASE_MODULES,
+    SERVER_AGENT_INTERSERVER_MODULES,
     render_all_artifacts,
     render_foreign_nftables,
     render_foreign_singbox,
@@ -18,6 +20,7 @@ from ..render import (
     render_ru_singbox,
     render_ru_wg,
 )
+from ..topology import NODE_GATEWAY
 from .runner import AUDIT_IMAGE, AuditFailure, AuditRunner, write_text
 from .quick import seed_quick_asset_cache
 
@@ -28,13 +31,13 @@ LAB_FRONT_GATEWAY = "198.18.0.1"
 LAB_RU_GATEWAY = "203.0.113.1"
 LAB_GLOBAL_GATEWAY = "198.51.100.1"
 LAB_IPS = {
-    "ru": "198.18.0.10",
-    "foreign": "198.18.0.20",
+    "gateway": "198.18.0.10",
+    "exit": "198.18.0.20",
     "client": "198.18.0.30",
     "dns": "198.18.0.53",
     "ru_web": "203.0.113.80",
     "global_web": "198.51.100.80",
-    "foreign_wan": "198.51.100.20",
+    "exit_wan": "198.51.100.20",
     "ru_lan": "203.0.113.10",
 }
 LAB_STREAM_CHUNK_BYTES = 65_536
@@ -67,8 +70,8 @@ def build_lab_client_config(env: dict[str, str]) -> str:
         "outbounds": [
             {
                 "type": "socks",
-                "tag": "ru-gateway",
-                "server": LAB_IPS["ru"],
+                "tag": "gateway",
+                "server": LAB_IPS["gateway"],
                 "server_port": int(env.get("RU_ROUTER_LISTEN_PORT", "2080")),
             },
             {"type": "block", "tag": "block"},
@@ -76,7 +79,7 @@ def build_lab_client_config(env: dict[str, str]) -> str:
         "route": {
             "auto_detect_interface": True,
             "rules": [{"ip_version": 6, "action": "route", "outbound": "block"}],
-            "final": "ru-gateway",
+            "final": "gateway",
         },
     }
     return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
@@ -126,7 +129,7 @@ def build_lab_web_server(name: str) -> str:
                         self.wfile.flush()
                         time.sleep(0.05)
                     return
-                body = f"server={name}\\nsource={{self.client_address[0]}}\\nip={LAB_IPS['foreign_wan']}\\npath={{self.path}}\\n".encode("utf-8")
+                body = f"server={name}\\nsource={{self.client_address[0]}}\\nip={LAB_IPS['exit_wan']}\\npath={{self.path}}\\n".encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/plain; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
@@ -166,8 +169,8 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
     env_path, env = runner.create_env(
         "lab",
         {
-            "RU_PUBLIC_IP": LAB_IPS["ru"],
-            "FOREIGN_PUBLIC_IP": LAB_IPS["foreign"],
+            "GATEWAY_PUBLIC_IP": LAB_IPS["gateway"],
+            "EXIT_PUBLIC_IP": LAB_IPS["exit"],
             "WAN_INTERFACE": "eth1",
             "WG_INTERFACE": "wg0",
             "FOREIGN_BLOCK_RU": "1",
@@ -184,9 +187,9 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
     global_lan = f"audit-global-{runner.run_id}"
 
     with runner.docker_network(front, LAB_FRONT_SUBNET, LAB_FRONT_GATEWAY), runner.docker_network(ru_lan, LAB_RU_SUBNET, LAB_RU_GATEWAY), runner.docker_network(global_lan, LAB_GLOBAL_SUBNET, LAB_GLOBAL_GATEWAY):
-        with runner.docker_container(f"ru-{runner.run_id}", AUDIT_IMAGE, privileged=True, network=front, ip=LAB_IPS["ru"]) as ru_container, runner.docker_container(f"foreign-{runner.run_id}", AUDIT_IMAGE, privileged=True, network=front, ip=LAB_IPS["foreign"]) as foreign_container, runner.docker_container(f"client-{runner.run_id}", AUDIT_IMAGE, privileged=True, network=front, ip=LAB_IPS["client"]) as client_container, runner.docker_container(f"dns-{runner.run_id}", AUDIT_IMAGE, privileged=True, network=front, ip=LAB_IPS["dns"]) as dns_container, runner.docker_container(f"ruweb-{runner.run_id}", AUDIT_IMAGE, privileged=True, network=ru_lan, ip=LAB_IPS["ru_web"]) as ru_web_container, runner.docker_container(f"globalweb-{runner.run_id}", AUDIT_IMAGE, privileged=True, network=global_lan, ip=LAB_IPS["global_web"]) as global_web_container:
+        with runner.docker_container(f"gateway-{runner.run_id}", AUDIT_IMAGE, privileged=True, network=front, ip=LAB_IPS["gateway"]) as ru_container, runner.docker_container(f"exit-{runner.run_id}", AUDIT_IMAGE, privileged=True, network=front, ip=LAB_IPS["exit"]) as foreign_container, runner.docker_container(f"client-{runner.run_id}", AUDIT_IMAGE, privileged=True, network=front, ip=LAB_IPS["client"]) as client_container, runner.docker_container(f"dns-{runner.run_id}", AUDIT_IMAGE, privileged=True, network=front, ip=LAB_IPS["dns"]) as dns_container, runner.docker_container(f"ruweb-{runner.run_id}", AUDIT_IMAGE, privileged=True, network=ru_lan, ip=LAB_IPS["ru_web"]) as ru_web_container, runner.docker_container(f"globalweb-{runner.run_id}", AUDIT_IMAGE, privileged=True, network=global_lan, ip=LAB_IPS["global_web"]) as global_web_container:
             runner.docker_network_connect(ru_lan, ru_container, LAB_IPS["ru_lan"])
-            runner.docker_network_connect(global_lan, foreign_container, LAB_IPS["foreign_wan"])
+            runner.docker_network_connect(global_lan, foreign_container, LAB_IPS["exit_wan"])
             runner.docker_exec(foreign_container, f"ip route replace default via {LAB_GLOBAL_GATEWAY} dev eth1")
 
             lab_dir = runner.work_dir / "lab"
@@ -203,7 +206,7 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
             global_web = lab_dir / "global-web.py"
             geoip_source = lab_dir / "geoip-ru.json"
             lab_transport_policy = lab_dir / "interserver_transport.py"
-            agent_dir = out_dir / "preview" / "ru"
+            agent_dir = out_dir / "preview" / NODE_GATEWAY
             ru_manifest = agent_dir / "render-manifest.json"
             ru_assets.mkdir(parents=True, exist_ok=True)
             shutil.copy2(out_dir / "assets" / "geosite-ru.srs", ru_assets / "geosite-ru.srs")
@@ -241,7 +244,7 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
             ]:
                 runner.docker_copy(container, local, remote)
 
-            for name in ("vpn-stack-agent.py", "diagnostics.py", "log_classifier.py", "interserver_transport.py", "network_profile.py"):
+            for name in ("vpn-stack-agent.py", *SERVER_AGENT_BASE_MODULES, *SERVER_AGENT_INTERSERVER_MODULES):
                 source = lab_transport_policy if name == "interserver_transport.py" else agent_dir / name
                 runner.docker_copy(ru_container, source, f"/opt/agent/{name}")
 
@@ -288,7 +291,7 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
                 raise AuditFailure(f"Raw RU GeoIP ушёл не через direct-ru:\n{raw_ru_resp}")
 
             global_resp = runner.lab_curl(client_container, "http://example.com/").stdout
-            if "server=global-web" not in global_resp or f"source={LAB_IPS['foreign_wan']}" not in global_resp:
+            if "server=global-web" not in global_resp or f"source={LAB_IPS['exit_wan']}" not in global_resp:
                 raise AuditFailure(f"Global dataplane через foreign не подтверждён:\n{global_resp}")
             wg_qdisc = next(
                 item
@@ -299,7 +302,7 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
                 raise AuditFailure(f"WireGuard traffic bypassed the managed qdisc: {wg_qdisc}")
 
             raw_global_resp = runner.lab_curl(client_container, f"http://{LAB_IPS['global_web']}/").stdout
-            if "server=global-web" not in raw_global_resp or f"source={LAB_IPS['foreign_wan']}" not in raw_global_resp:
+            if "server=global-web" not in raw_global_resp or f"source={LAB_IPS['exit_wan']}" not in raw_global_resp:
                 raise AuditFailure(f"Raw global IP ушёл не через foreign:\n{raw_global_resp}")
 
             runner.docker_exec(
@@ -314,7 +317,7 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
             fault_port = HY2_PORT if TRANSPORT_PREFERRED_TAG == TRANSPORT_HY2_TAG else int(env["WG_PORT"])
             runner.docker_exec(
                 ru_container,
-                f"nft add table inet underlay_fault; nft 'add chain inet underlay_fault output {{ type filter hook output priority -10; policy accept; }}'; nft add rule inet underlay_fault output ip daddr {LAB_IPS['foreign']} udp dport {fault_port} drop",
+                f"nft add table inet underlay_fault; nft 'add chain inet underlay_fault output {{ type filter hook output priority -10; policy accept; }}'; nft add rule inet underlay_fault output ip daddr {LAB_IPS['exit']} udp dport {fault_port} drop",
             )
             switch_started = time.monotonic()
             suspicion = json.loads(

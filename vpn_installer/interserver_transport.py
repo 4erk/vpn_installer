@@ -47,6 +47,45 @@ UNDERLAY_WG_FOREIGN_ADDRESS = "10.75.0.2/32"
 UNDERLAY_WG_MTU = 1420
 X25519_P = 2**255 - 19
 X25519_A24 = 121665
+_LEGACY_PUBLIC_IP_KEYS = ("RU_PUBLIC_IP", "FOREIGN_PUBLIC_IP")
+
+
+def _interserver_exit_public_ip(env: dict[str, str]) -> str:
+    legacy_keys = [key for key in _LEGACY_PUBLIC_IP_KEYS if key in env]
+    if legacy_keys:
+        raise ValueError(
+            "legacy public IP aliases are not accepted by interserver transport: "
+            + ", ".join(legacy_keys)
+        )
+
+    try:
+        from .topology import (
+            CAP_INTERSERVER_CLIENT,
+            CAP_INTERSERVER_SERVER,
+            NODE_EXIT,
+            NODE_GATEWAY,
+            TopologySpec,
+        )
+    except ImportError:  # Installed policy module runs as a standalone script.
+        from topology import (  # type: ignore[no-redef]
+            CAP_INTERSERVER_CLIENT,
+            CAP_INTERSERVER_SERVER,
+            NODE_EXIT,
+            NODE_GATEWAY,
+            TopologySpec,
+        )
+
+    topology = TopologySpec.from_env(env)
+    if not topology.is_dual:
+        raise ValueError("interserver transport requires a dual topology")
+    gateway_plan = topology.plan(NODE_GATEWAY)
+    exit_plan = topology.plan(NODE_EXIT)
+    if (
+        CAP_INTERSERVER_CLIENT not in gateway_plan.capabilities
+        or CAP_INTERSERVER_SERVER not in exit_plan.capabilities
+    ):
+        raise ValueError("topology does not provide interserver transport capabilities")
+    return exit_plan.public_ip
 
 
 def _receive_exact(connection: socket.socket, size: int) -> bytes:
@@ -391,11 +430,11 @@ def derive_underlay_wireguard_identity(wireguard_preshared_key: str) -> dict[str
     }
 
 
-def _hysteria_outbound(env: dict[str, str]) -> dict[str, Any]:
+def _hysteria_outbound(env: dict[str, str], exit_public_ip: str) -> dict[str, Any]:
     return {
         "type": "hysteria2",
         "tag": TRANSPORT_HY2_TAG,
-        "server": env["FOREIGN_PUBLIC_IP"],
+        "server": exit_public_ip,
         "server_port": HY2_PORT,
         "obfs": {"type": "salamander", "password": derive_transport_obfs_password(env["WG_PRESHARED_KEY"])},
         "password": derive_transport_password(env["WG_PRESHARED_KEY"]),
@@ -418,12 +457,12 @@ def _relay_inbound() -> dict[str, Any]:
     }
 
 
-def _relay_rule(env: dict[str, str]) -> dict[str, Any]:
+def _relay_rule(env: dict[str, str], exit_public_ip: str) -> dict[str, Any]:
     return {
         "inbound": [TRANSPORT_RELAY_INBOUND_TAG],
         "action": "route",
         "outbound": TRANSPORT_SELECTOR_TAG,
-        "override_address": env["FOREIGN_PUBLIC_IP"],
+        "override_address": exit_public_ip,
         "override_port": int(env["WG_PORT"]),
     }
 
@@ -452,6 +491,7 @@ def _probe_rules() -> list[dict[str, Any]]:
 
 
 def build_ru_transport_topology(env: dict[str, str]) -> dict[str, Any]:
+    exit_public_ip = _interserver_exit_public_ip(env)
     identity = derive_underlay_wireguard_identity(env["WG_PRESHARED_KEY"])
     endpoint = {
         "type": "wireguard",
@@ -462,7 +502,7 @@ def build_ru_transport_topology(env: dict[str, str]) -> dict[str, Any]:
         "private_key": identity["private_key"],
         "peers": [
             {
-                "address": env["FOREIGN_PUBLIC_IP"],
+                "address": exit_public_ip,
                 "port": int(env["WG_PORT"]),
                 "public_key": env["WG_FOREIGN_PUBLIC_KEY"],
                 "pre_shared_key": identity["pre_shared_key"],
@@ -481,8 +521,8 @@ def build_ru_transport_topology(env: dict[str, str]) -> dict[str, Any]:
     return {
         "endpoints": [endpoint],
         "inbounds": [_relay_inbound(), *_probe_inbounds()],
-        "outbounds": [_hysteria_outbound(env), selector],
-        "route_rules": [_relay_rule(env), *_probe_rules()],
+        "outbounds": [_hysteria_outbound(env, exit_public_ip), selector],
+        "route_rules": [_relay_rule(env, exit_public_ip), *_probe_rules()],
     }
 
 
@@ -508,13 +548,14 @@ def transport_topology_configured(config: dict[str, Any], env: dict[str, str]) -
         }
 
     try:
+        exit_public_ip = _interserver_exit_public_ip(env)
         outbounds = by_tag(config.get("outbounds", []))
         stable_overlay = outbounds.get(TRANSPORT_OVERLAY_TAG, {})
         wireguard = by_tag(config.get("endpoints", [])).get(TRANSPORT_WG_TAG, {})
-        expected_hysteria = _hysteria_outbound(env)
+        expected_hysteria = _hysteria_outbound(env, exit_public_ip)
         expected_inbounds = [_relay_inbound(), *_probe_inbounds()]
-        expected_rules = [_relay_rule(env), *_probe_rules()]
-    except (KeyError, TypeError, ValueError):
+        expected_rules = [_relay_rule(env, exit_public_ip), *_probe_rules()]
+    except (ImportError, KeyError, TypeError, ValueError):
         return False
     if stable_overlay.get("type") != "direct" or stable_overlay.get("bind_interface") != env.get("WG_INTERFACE", "wg0"):
         return False
@@ -537,7 +578,7 @@ def transport_topology_configured(config: dict[str, Any], env: dict[str, str]) -
         and wireguard.get("address") == [UNDERLAY_WG_RU_ADDRESS]
         and wireguard.get("mtu") == UNDERLAY_WG_MTU
         and bool(wireguard.get("private_key"))
-        and peer.get("address") == env.get("FOREIGN_PUBLIC_IP")
+        and peer.get("address") == exit_public_ip
         and peer.get("port") == int(env.get("WG_PORT", "0") or 0)
         and bool(peer.get("pre_shared_key"))
     ):

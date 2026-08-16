@@ -12,12 +12,20 @@ from pathlib import Path
 
 from .common import DEPLOYMENTS_DIR, env_line, fail, parse_env_value, read_text, sanitize_name, write_text
 from .interserver_transport import generate_transport_identity, generate_x25519_pair, validate_transport_identity
+from .migration import migrate_env
 from .models import (
     ALLOW_EMPTY_OVERRIDE,
     DEFAULT_ASSET_TIMEOUT,
     ENV_SECTIONS,
     REQUIRED_ENV_VARS,
     AppError,
+)
+from .topology import (
+    CONFIG_SCHEMA_VERSION,
+    LOCATION_RU,
+    TOPOLOGY_DUAL,
+    TopologySpec,
+    normalize_node_id,
 )
 
 MERGED_CSV_DEFAULT_KEYS = {
@@ -35,6 +43,14 @@ MERGED_SOURCE_DEFAULT_KEYS = {
 }
 
 DEPRECATED_ENV_KEYS = {
+    # Public web-admin access was replaced by the loopback-only SSH tunnel.
+    # Compatibility boundary: remove in 0.20.1.
+    "ADMIN_WEB_BIND",
+    "ADMIN_WEB_ACTIVE_CLIENT_REQUIRED",
+    "ADMIN_WEB_ACTIVE_CLIENT_TIMEOUT_SECONDS",
+    "ADMIN_WEB_ALLOW_TUNNEL_CLIENTS",
+    "ADMIN_WEB_ALLOWED_CIDR",
+    "ADMIN_WEB_ALLOW_WG",
     "CLIENT_COMPAT_UUID",
     "RU_COMPAT_LISTEN_PORTS",
     "RU_REALITY_HANDSHAKE_SERVER",
@@ -154,6 +170,26 @@ TRANSPORT_IDENTITY_KEYS = (
     "INTERSERVER_HY2_PUBLIC_KEY_SHA256",
 )
 
+PUBLIC_TRANSPORT_IDENTITY_KEYS = (
+    "PUBLIC_HY2_CERTIFICATE_B64",
+    "PUBLIC_HY2_PRIVATE_KEY_B64",
+    "PUBLIC_HY2_PUBLIC_KEY_SHA256",
+)
+
+DUAL_REQUIRED_ENV_VARS = (
+    "EXIT_PUBLIC_IP",
+    "WG_RU_ADDRESS",
+    "WG_FOREIGN_ADDRESS",
+    "WG_RU_ADDRESS_V6",
+    "WG_FOREIGN_ADDRESS_V6",
+    "WG_IPV6_PREFIX",
+    "WG_RU_PRIVATE_KEY",
+    "WG_RU_PUBLIC_KEY",
+    "WG_FOREIGN_PRIVATE_KEY",
+    "WG_FOREIGN_PUBLIC_KEY",
+    "WG_PRESHARED_KEY",
+    *TRANSPORT_IDENTITY_KEYS,
+)
 
 def validate_deployment_name(raw_name: str) -> str:
     cleaned = sanitize_name(raw_name)
@@ -178,6 +214,8 @@ def load_env_file(path: Path) -> dict[str, str]:
 
 
 def render_env_text(env: dict[str, str]) -> str:
+    normalized = env.copy()
+    normalized.update(TopologySpec.from_env(normalized, require_addresses=False).canonical_env_values())
     lines: list[str] = []
     seen_keys: set[str] = set()
     for comment, keys in ENV_SECTIONS:
@@ -186,13 +224,19 @@ def render_env_text(env: dict[str, str]) -> str:
                 lines.append("")
             lines.append(comment)
         for key in keys:
-            lines.append(env_line(key, env.get(key, "")))
+            if key in DEPRECATED_ENV_KEYS:
+                continue
+            lines.append(env_line(key, normalized.get(key, "")))
             seen_keys.add(key)
-    extra_keys = sorted(key for key in env if key not in seen_keys)
+    extra_keys = sorted(
+        key
+        for key in normalized
+        if key not in seen_keys and key not in DEPRECATED_ENV_KEYS
+    )
     if extra_keys:
         lines.extend(["", "# Extra values"])
         for key in extra_keys:
-            lines.append(env_line(key, env[key]))
+            lines.append(env_line(key, normalized[key]))
     return "\n".join(lines) + "\n"
 
 
@@ -200,17 +244,32 @@ def generate_default_env(
     deploy_name: str,
     *,
     transport_identity: dict[str, str] | None = None,
+    public_transport_identity: dict[str, str] | None = None,
+    topology: str = TOPOLOGY_DUAL,
+    gateway_location: str = LOCATION_RU,
 ) -> dict[str, str]:
     reality_private, reality_public = generate_x25519_pair()
-    ru_wg_private, ru_wg_public = generate_x25519_pair()
-    foreign_wg_private, foreign_wg_public = generate_x25519_pair()
+    dual = topology == TOPOLOGY_DUAL
+    ru_wg_private, ru_wg_public = generate_x25519_pair() if dual else (b"", b"")
+    foreign_wg_private, foreign_wg_public = generate_x25519_pair() if dual else (b"", b"")
     if transport_identity is not None and not all(transport_identity.get(key, "").strip() for key in TRANSPORT_IDENTITY_KEYS):
         raise ValueError("transport identity must be complete")
-    transport_identity = transport_identity or generate_transport_identity()
+    if public_transport_identity is not None and not all(public_transport_identity.get(key, "").strip() for key in PUBLIC_TRANSPORT_IDENTITY_KEYS):
+        raise ValueError("public transport identity must be complete")
+    transport_identity = transport_identity or (generate_transport_identity() if dual else {key: "" for key in TRANSPORT_IDENTITY_KEYS})
+    if public_transport_identity is None:
+        generated_public_identity = generate_transport_identity()
+        public_transport_identity = {
+            public_key: generated_public_identity[interserver_key]
+            for public_key, interserver_key in zip(PUBLIC_TRANSPORT_IDENTITY_KEYS, TRANSPORT_IDENTITY_KEYS)
+        }
     return {
+        "CONFIG_SCHEMA": str(CONFIG_SCHEMA_VERSION),
         "DEPLOY_NAME": deploy_name,
-        "RU_PUBLIC_IP": "",
-        "FOREIGN_PUBLIC_IP": "",
+        "TOPOLOGY": topology,
+        "GATEWAY_LOCATION": gateway_location,
+        "GATEWAY_PUBLIC_IP": "",
+        "EXIT_PUBLIC_IP": "",
         "SSH_PORT": "22",
         "SSH_LOGIN_GRACE_TIME": "20",
         "SSH_MAX_AUTH_TRIES": "3",
@@ -242,11 +301,12 @@ def generate_default_env(
         "WG_RU_ADDRESS_V6": "fd74:7670:6e73::1/128",
         "WG_FOREIGN_ADDRESS_V6": "fd74:7670:6e73::2/128",
         "WG_IPV6_PREFIX": "fd74:7670:6e73::/64",
-        "WG_RU_PRIVATE_KEY": base64_std(ru_wg_private),
-        "WG_RU_PUBLIC_KEY": base64_std(ru_wg_public),
-        "WG_FOREIGN_PRIVATE_KEY": base64_std(foreign_wg_private),
-        "WG_FOREIGN_PUBLIC_KEY": base64_std(foreign_wg_public),
-        "WG_PRESHARED_KEY": base64_std(os.urandom(32)),
+        "WG_RU_PRIVATE_KEY": base64_std(ru_wg_private) if dual else "",
+        "WG_RU_PUBLIC_KEY": base64_std(ru_wg_public) if dual else "",
+        "WG_FOREIGN_PRIVATE_KEY": base64_std(foreign_wg_private) if dual else "",
+        "WG_FOREIGN_PUBLIC_KEY": base64_std(foreign_wg_public) if dual else "",
+        "WG_PRESHARED_KEY": base64_std(os.urandom(32)) if dual else "",
+        **public_transport_identity,
         **transport_identity,
         "GLOBAL_DOH_SERVER": "8.8.8.8",
         "GLOBAL_DOH_SERVER_NAME": "dns.google",
@@ -265,13 +325,7 @@ def generate_default_env(
         "JOURNAL_SYSTEM_MAX_USE": "256M",
         "JOURNAL_MAX_RETENTION_SEC": "14day",
         "ADMIN_WEB_ENABLED": "1",
-        "ADMIN_WEB_BIND": "0.0.0.0",
         "ADMIN_WEB_PORT": "11333",
-        "ADMIN_WEB_ACTIVE_CLIENT_REQUIRED": "1",
-        "ADMIN_WEB_ACTIVE_CLIENT_TIMEOUT_SECONDS": "5",
-        "ADMIN_WEB_ALLOW_TUNNEL_CLIENTS": "1",
-        "ADMIN_WEB_ALLOWED_CIDR": "",
-        "ADMIN_WEB_ALLOW_WG": "0",
         "ADMIN_WEB_USERNAME": "user",
         "ADMIN_WEB_PASSWORD": "password",
         "CLIENT_TUN_NAME": "tun0",
@@ -344,6 +398,8 @@ def merge_env_with_defaults(
     *,
     fallback_defaults: dict[str, str] | None = None,
 ) -> dict[str, str]:
+    topology_mode = existing.get("TOPOLOGY", "").strip() or (fallback_defaults or {}).get("TOPOLOGY", "").strip() or TOPOLOGY_DUAL
+    gateway_location = existing.get("GATEWAY_LOCATION", "").strip() or (fallback_defaults or {}).get("GATEWAY_LOCATION", "").strip() or LOCATION_RU
     existing_transport_identity = (
         {key: existing[key] for key in TRANSPORT_IDENTITY_KEYS}
         if all(existing.get(key, "").strip() for key in TRANSPORT_IDENTITY_KEYS)
@@ -354,16 +410,38 @@ def merge_env_with_defaults(
         if fallback_defaults and all(fallback_defaults.get(key, "").strip() for key in TRANSPORT_IDENTITY_KEYS)
         else None
     )
+    existing_public_identity = (
+        {key: existing[key] for key in PUBLIC_TRANSPORT_IDENTITY_KEYS}
+        if all(existing.get(key, "").strip() for key in PUBLIC_TRANSPORT_IDENTITY_KEYS)
+        else None
+    )
+    fallback_public_identity = (
+        {key: fallback_defaults[key] for key in PUBLIC_TRANSPORT_IDENTITY_KEYS}
+        if fallback_defaults and all(fallback_defaults.get(key, "").strip() for key in PUBLIC_TRANSPORT_IDENTITY_KEYS)
+        else None
+    )
+    if existing_public_identity is None and existing_transport_identity is not None:
+        # One release migration boundary: old deployments used the same TLS
+        # identity for public and interserver Hysteria2. Persisting explicit
+        # public keys keeps existing client artifacts stable while allowing the
+        # two identities to rotate independently afterwards.
+        existing_public_identity = {
+            public_key: existing_transport_identity[interserver_key]
+            for public_key, interserver_key in zip(PUBLIC_TRANSPORT_IDENTITY_KEYS, TRANSPORT_IDENTITY_KEYS)
+        }
     defaults = generate_default_env(
         deploy_name,
         transport_identity=existing_transport_identity or fallback_transport_identity,
+        public_transport_identity=existing_public_identity or fallback_public_identity,
+        topology=topology_mode,
+        gateway_location=gateway_location,
     )
     if fallback_defaults:
         defaults.update(
             {
                 key: value
                 for key, value in fallback_defaults.items()
-                if key in defaults and key not in TRANSPORT_IDENTITY_KEYS
+                if key in defaults and key not in (*TRANSPORT_IDENTITY_KEYS, *PUBLIC_TRANSPORT_IDENTITY_KEYS)
             }
         )
     merged = defaults.copy()
@@ -371,6 +449,8 @@ def merge_env_with_defaults(
         if key in DEPRECATED_ENV_KEYS:
             continue
         if key in TRANSPORT_IDENTITY_KEYS and existing_transport_identity is None:
+            continue
+        if key in PUBLIC_TRANSPORT_IDENTITY_KEYS and existing_public_identity is None:
             continue
         if value or key in ALLOW_EMPTY_OVERRIDE:
             merged[key] = value
@@ -382,7 +462,57 @@ def merge_env_with_defaults(
         if existing.get(key):
             merged[key] = _merge_source_defaults(existing[key], defaults[key])
     merged["DEPLOY_NAME"] = deploy_name
+    merged["GATEWAY_PUBLIC_IP"] = (
+        existing.get("GATEWAY_PUBLIC_IP", "").strip()
+        or merged.get("GATEWAY_PUBLIC_IP", "").strip()
+        or (fallback_defaults or {}).get("GATEWAY_PUBLIC_IP", "").strip()
+    )
+    if topology_mode == TOPOLOGY_DUAL:
+        merged["EXIT_PUBLIC_IP"] = (
+            existing.get("EXIT_PUBLIC_IP", "").strip()
+            or merged.get("EXIT_PUBLIC_IP", "").strip()
+            or (fallback_defaults or {}).get("EXIT_PUBLIC_IP", "").strip()
+        )
+    else:
+        merged["EXIT_PUBLIC_IP"] = ""
+        for key in DUAL_REQUIRED_ENV_VARS:
+            merged[key] = ""
+    merged["CONFIG_SCHEMA"] = str(CONFIG_SCHEMA_VERSION)
+    merged["TOPOLOGY"] = topology_mode
+    merged["GATEWAY_LOCATION"] = gateway_location
     return merged
+
+
+def merge_node_env_with_defaults(existing: dict[str, str], deploy_name: str) -> dict[str, str]:
+    """Validate a projected node env without inventing values on the target."""
+
+    node_id = normalize_node_id(existing.get("NODE_ID", ""))
+    topology = TopologySpec.from_env(existing)
+    node = topology.node(node_id)
+    if existing.get("DEPLOY_NAME", "").strip() != deploy_name:
+        raise ValueError("node env deployment name does not match its canonical descriptor")
+    if existing.get("NODE_LOCATION", "").strip() != node.location:
+        raise ValueError("node env location does not match canonical topology")
+    if existing.get("NODE_PUBLIC_IP", "").strip() != node.public_ip:
+        raise ValueError("node env public IP does not match canonical topology")
+
+    # Import locally to keep the configuration/model dependency one-way.
+    from .manifest import project_node_env
+
+    projected = project_node_env(existing, topology.plan(node_id))
+    if projected != existing:
+        unexpected = sorted(set(existing) - set(projected))
+        missing = sorted(set(projected) - set(existing))
+        changed = sorted(
+            key
+            for key in set(existing) & set(projected)
+            if existing[key] != projected[key]
+        )
+        raise ValueError(
+            "node env is not a canonical capability projection "
+            f"(unexpected={unexpected}, missing={missing}, changed={changed})"
+        )
+    return projected
 
 
 def overlay_file_path(env_path: Path, deploy_name: str, overlay_name: str) -> Path:
@@ -418,8 +548,8 @@ def generate_example_env() -> dict[str, str]:
     env = generate_default_env("my-stack")
     env.update(
         {
-            "RU_PUBLIC_IP": "203.0.113.10",
-            "FOREIGN_PUBLIC_IP": "198.51.100.20",
+            "GATEWAY_PUBLIC_IP": "203.0.113.10",
+            "EXIT_PUBLIC_IP": "198.51.100.20",
             "CLIENT_UUID": "00000000-0000-0000-0000-000000000000",
             "RU_REALITY_PRIVATE_KEY": "",
             "RU_REALITY_PUBLIC_KEY": "",
@@ -428,6 +558,9 @@ def generate_example_env() -> dict[str, str]:
             "WG_FOREIGN_PRIVATE_KEY": "",
             "WG_FOREIGN_PUBLIC_KEY": "",
             "WG_PRESHARED_KEY": "",
+            "PUBLIC_HY2_CERTIFICATE_B64": "",
+            "PUBLIC_HY2_PRIVATE_KEY_B64": "",
+            "PUBLIC_HY2_PUBLIC_KEY_SHA256": "",
             "INTERSERVER_HY2_CERTIFICATE_B64": "",
             "INTERSERVER_HY2_PRIVATE_KEY_B64": "",
             "INTERSERVER_HY2_PUBLIC_KEY_SHA256": "",
@@ -440,12 +573,26 @@ def render_example_env_text() -> str:
     return render_env_text(generate_example_env())
 
 
-def ensure_deployment_env(env_path: Path, deployment_name: str) -> dict[str, str]:
+def ensure_deployment_env(
+    env_path: Path,
+    deployment_name: str,
+    *,
+    topology: str | None = None,
+    gateway_location: str | None = None,
+) -> dict[str, str]:
     if env_path.exists():
-        env = merge_env_with_defaults(load_env_file(env_path), deployment_name)
+        source = migrate_env(load_env_file(env_path)).env
+        if topology is not None:
+            source["TOPOLOGY"] = topology
+        if gateway_location is not None:
+            source["GATEWAY_LOCATION"] = gateway_location
+        env = merge_env_with_defaults(source, deployment_name)
     else:
-        env = generate_default_env(deployment_name)
-    write_text(env_path, render_env_text(env))
+        env = generate_default_env(
+            deployment_name,
+            topology=topology or TOPOLOGY_DUAL,
+            gateway_location=gateway_location or LOCATION_RU,
+        )
     return env
 
 
@@ -453,7 +600,7 @@ def load_existing_deployment_env(deployment_name: str) -> tuple[Path, dict[str, 
     env_path = DEPLOYMENTS_DIR / f"{deployment_name}.env"
     if not env_path.exists():
         fail(f"Не найден deployment env: {env_path}")
-    return env_path, merge_env_with_defaults(load_env_file(env_path), deployment_name)
+    return env_path, merge_env_with_defaults(migrate_env(load_env_file(env_path)).env, deployment_name)
 
 
 def validate_ip_literal(raw_value: str) -> str:
@@ -535,11 +682,25 @@ def validate_auth_mode(raw_value: str) -> str:
 
 
 def require_env(env: dict[str, str], required: list[str] | None = None) -> None:
-    required_names = required or REQUIRED_ENV_VARS
+    topology = TopologySpec.from_env(env, require_addresses=False)
+    env.update(topology.canonical_env_values())
+    required_names = list(required) if required is not None else [
+        *REQUIRED_ENV_VARS,
+        *(DUAL_REQUIRED_ENV_VARS if topology.is_dual else ()),
+    ]
     missing = [name for name in required_names if not env.get(name, "").strip()]
     if missing:
         fail(f"В deployment env не хватает обязательных значений: {', '.join(missing)}")
-    if all(env.get(name, "").strip() for name in ("INTERSERVER_HY2_CERTIFICATE_B64", "INTERSERVER_HY2_PRIVATE_KEY_B64", "INTERSERVER_HY2_PUBLIC_KEY_SHA256")):
+    if all(env.get(name, "").strip() for name in PUBLIC_TRANSPORT_IDENTITY_KEYS):
+        public_identity = {
+            interserver_key: env[public_key]
+            for public_key, interserver_key in zip(PUBLIC_TRANSPORT_IDENTITY_KEYS, TRANSPORT_IDENTITY_KEYS)
+        }
+        try:
+            validate_transport_identity(public_identity)
+        except ValueError as exc:
+            fail(f"Некорректная identity публичного Hysteria2: {exc}")
+    if topology.is_dual and all(env.get(name, "").strip() for name in TRANSPORT_IDENTITY_KEYS):
         try:
             validate_transport_identity(env)
         except ValueError as exc:

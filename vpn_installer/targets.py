@@ -6,17 +6,23 @@ from typing import Any
 
 from .models import AppError, ROLE_META, ROLE_RU, RemoteTarget
 from .prompts import has_saved_connection
+from .topology import NODE_GATEWAY, TopologySpec, legacy_role_for_node, normalize_node_id
 
 
 def build_target(role: str, env: dict[str, str], state: dict[str, Any]) -> RemoteTarget:
-    role_state = state.get(role, {})
+    node_id = normalize_node_id(role)
+    legacy_role = legacy_role_for_node(node_id)
+    nodes = state.get("nodes", {}) if isinstance(state.get("nodes"), dict) else state
+    role_state = nodes.get(node_id, {}) or nodes.get(legacy_role, {})
     saved_connection = has_saved_connection(role_state)
-    public_ip_key = ROLE_META[role]["public_ip_key"]
+    topology = TopologySpec.from_env(env, require_addresses=False)
+    node = topology.node(node_id)
     ssh_port_raw = str((role_state.get("ssh_port") if saved_connection else None) or env.get("SSH_PORT", "22") or "22")
     ssh_port = int(ssh_port_raw)
-    public_ip = str((role_state.get("public_ip") if saved_connection else None) or env.get(public_ip_key, ""))
+    public_ip = str((role_state.get("public_ip") if saved_connection else None) or node.public_ip)
     return RemoteTarget(
-        role=role,
+        role=legacy_role,
+        location=node.location,
         public_ip=public_ip,
         ssh_host=str((role_state.get("ssh_host") if saved_connection else None) or public_ip),
         ssh_port=ssh_port,
@@ -28,19 +34,34 @@ def build_target(role: str, env: dict[str, str], state: dict[str, Any]) -> Remot
 
 
 def role_env_prefix(role: str) -> str:
-    return "VPN_RU" if role == ROLE_RU else "VPN_FOREIGN"
+    return "VPN_GATEWAY" if normalize_node_id(role) == NODE_GATEWAY else "VPN_EXIT"
+
+
+def legacy_role_env_prefix(role: str) -> str:
+    """One-release process-env adapter. Remove in 0.20.1."""
+
+    return "VPN_RU" if normalize_node_id(role) == NODE_GATEWAY else "VPN_FOREIGN"
 
 
 def apply_env_connection_overrides(target: RemoteTarget) -> RemoteTarget:
     prefix = role_env_prefix(target.role)
-    public_ip = os.environ.get(f"{prefix}_PUBLIC_IP", "").strip()
-    ssh_host = os.environ.get(f"{prefix}_SSH_HOST", "").strip()
-    ssh_port = os.environ.get(f"{prefix}_SSH_PORT", "").strip()
-    ssh_user = os.environ.get(f"{prefix}_SSH_USER", "").strip()
-    auth_mode = os.environ.get(f"{prefix}_SSH_AUTH_MODE", "").strip()
-    identity_path = os.environ.get(f"{prefix}_SSH_IDENTITY_PATH", "").strip()
+    legacy_prefix = legacy_role_env_prefix(target.role)
+
+    def setting(name: str) -> str:
+        return os.environ.get(f"{prefix}_{name}", "").strip() or os.environ.get(f"{legacy_prefix}_{name}", "").strip()
+
+    public_ip = setting("PUBLIC_IP")
+    ssh_host = setting("SSH_HOST")
+    ssh_port = setting("SSH_PORT")
+    ssh_user = setting("SSH_USER")
+    auth_mode = setting("SSH_AUTH_MODE")
+    identity_path = setting("SSH_IDENTITY_PATH")
     bind_address = os.environ.get("VPN_SSH_BIND_ADDRESS", "").strip()
-    password = os.environ.get(f"{prefix}_SSH_PASSWORD", "") or os.environ.get("VPN_SSH_PASSWORD", "")
+    password = (
+        os.environ.get(f"{prefix}_SSH_PASSWORD", "")
+        or os.environ.get(f"{legacy_prefix}_SSH_PASSWORD", "")
+        or os.environ.get("VPN_SSH_PASSWORD", "")
+    )
 
     if public_ip:
         target.public_ip = public_ip
@@ -76,21 +97,27 @@ def apply_env_connection_overrides(target: RemoteTarget) -> RemoteTarget:
 
 def update_env_with_targets(env: dict[str, str], targets: list[RemoteTarget]) -> None:
     for target in targets:
-        env[ROLE_META[target.role]["public_ip_key"]] = target.public_ip
+        if target.node_id == NODE_GATEWAY:
+            env["GATEWAY_PUBLIC_IP"] = target.public_ip
+        else:
+            env["EXIT_PUBLIC_IP"] = target.public_ip
 
 
 def sync_targets_from_env(env: dict[str, str], targets: list[RemoteTarget]) -> None:
+    topology = TopologySpec.from_env(env, require_addresses=False)
     for target in targets:
-        public_ip = env.get(ROLE_META[target.role]["public_ip_key"], "").strip()
+        public_ip = topology.node(target.node_id).public_ip
         if public_ip:
             target.public_ip = public_ip
 
 
 def remote_env_matches_target(target: RemoteTarget, deployment_name: str, preflight: dict[str, str]) -> bool:
+    observed_node = preflight.get("node", "").strip()
+    observed_role = preflight.get("role", "").strip()
     return (
         preflight.get("installed") == "1"
         and preflight.get("deployment_name", "").strip() == deployment_name
-        and preflight.get("role", "").strip() == target.role
+        and (observed_node == target.node_id or observed_role == target.role)
     )
 
 

@@ -6,15 +6,39 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from vpn_installer.client_artifacts import PUBLIC_VLESS_OUTBOUND_TAG, render_client_profile, render_hysteria2_uri, render_vless_uri
 from vpn_installer.config import generate_default_env
-from vpn_installer.public_transport import derive_public_hy2_password
+from vpn_installer.public_transport import derive_public_hy2_password, render_public_hy2_outbound
 from vpn_installer.render import render_ru_firewall_nftables, render_ru_singbox
 
 
 class PublicTransportTests(unittest.TestCase):
     def make_env(self) -> dict[str, str]:
         env = generate_default_env("demo")
-        env["RU_PUBLIC_IP"] = "203.0.113.10"
-        env["FOREIGN_PUBLIC_IP"] = "198.51.100.20"
+        env.update(
+            {
+                "CONFIG_SCHEMA": "2",
+                "TOPOLOGY": "dual",
+                "GATEWAY_LOCATION": "ru",
+                "GATEWAY_PUBLIC_IP": "203.0.113.10",
+                "EXIT_PUBLIC_IP": "198.51.100.20",
+            }
+        )
+        env.pop("RU_PUBLIC_IP", None)
+        env.pop("FOREIGN_PUBLIC_IP", None)
+        return env
+
+    def make_single_env(self) -> dict[str, str]:
+        env = generate_default_env("single", topology="single", gateway_location="foreign")
+        env.update(
+            {
+                "CONFIG_SCHEMA": "2",
+                "TOPOLOGY": "single",
+                "GATEWAY_LOCATION": "foreign",
+                "GATEWAY_PUBLIC_IP": "192.0.2.44",
+                "EXIT_PUBLIC_IP": "",
+            }
+        )
+        env.pop("RU_PUBLIC_IP", None)
+        env.pop("FOREIGN_PUBLIC_IP", None)
         return env
 
     def test_public_hysteria_credential_is_stable_and_transport_scoped(self) -> None:
@@ -51,10 +75,24 @@ class PublicTransportTests(unittest.TestCase):
 
     def test_primary_vless_uri_contract_remains_tcp_reality(self) -> None:
         env = self.make_env()
-        uri = render_vless_uri(env)
-        self.assertIn("security=reality", uri)
-        self.assertIn("type=tcp", uri)
-        self.assertNotIn("hysteria", uri.lower())
+        env.update(
+            {
+                "CLIENT_UUID": "11111111-2222-3333-4444-555555555555",
+                "RU_LISTEN_PORT": "443",
+                "RU_REALITY_SERVER_NAME": "www.microsoft.com",
+                "RU_REALITY_PUBLIC_KEY": "fixed-public-key",
+                "RU_REALITY_SHORT_ID": "0123456789abcdef",
+                "UTLS_FINGERPRINT": "chrome",
+                "CLIENT_FLOW": "xtls-rprx-vision",
+            }
+        )
+
+        self.assertEqual(
+            render_vless_uri(env),
+            "vless://11111111-2222-3333-4444-555555555555@203.0.113.10:443?"
+            "security=reality&sni=www.microsoft.com&pbk=fixed-public-key&sid=0123456789abcdef&"
+            "fp=chrome&type=tcp&flow=xtls-rprx-vision#demo-ru-gateway\n",
+        )
 
     def test_standard_hysteria2_uri_uses_pinned_certificate(self) -> None:
         env = self.make_env()
@@ -62,12 +100,31 @@ class PublicTransportTests(unittest.TestCase):
         query = parse_qs(parsed.query)
 
         self.assertEqual(parsed.scheme, "hysteria2")
-        self.assertEqual(parsed.hostname, env["RU_PUBLIC_IP"])
+        self.assertEqual(parsed.hostname, env["GATEWAY_PUBLIC_IP"])
         self.assertEqual(parsed.port, int(env["RU_LISTEN_PORT"]))
         self.assertEqual(unquote(parsed.username or ""), derive_public_hy2_password(env["CLIENT_UUID"]))
         self.assertEqual(query["sni"], ["vpn-stack.internal"])
         self.assertEqual(query["insecure"], ["1"])
         self.assertRegex(query["pinSHA256"][0], r"^(?:[0-9A-F]{2}:){31}[0-9A-F]{2}$")
+
+    def test_single_gateway_public_uris_and_outbound_use_the_gateway_address(self) -> None:
+        env = self.make_single_env()
+
+        vless = urlsplit(render_vless_uri(env).strip())
+        hysteria = urlsplit(render_hysteria2_uri(env).strip())
+        outbound = render_public_hy2_outbound(env)
+
+        self.assertEqual(vless.hostname, env["GATEWAY_PUBLIC_IP"])
+        self.assertEqual(vless.fragment, "single-foreign-gateway")
+        self.assertEqual(hysteria.hostname, env["GATEWAY_PUBLIC_IP"])
+        self.assertEqual(outbound["server"], env["GATEWAY_PUBLIC_IP"])
+
+    def test_public_transport_rejects_legacy_address_aliases(self) -> None:
+        env = self.make_env()
+        env["RU_PUBLIC_IP"] = env["GATEWAY_PUBLIC_IP"]
+
+        with self.assertRaisesRegex(ValueError, "legacy public IP aliases"):
+            render_public_hy2_outbound(env)
 
 
 if __name__ == "__main__":

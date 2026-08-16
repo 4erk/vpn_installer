@@ -4,14 +4,58 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
-from vpn_installer.config import generate_default_env
+from vpn_installer.common import env_line
+from vpn_installer.config import generate_default_env, merge_env_with_defaults, render_env_text
 from vpn_installer.diagnostics import COLLECTOR_NAMES, LOG_WINDOW_KEYS, CollectorState, DiagnosticsSnapshot, LogWindowSnapshot
 from vpn_installer.localnet import LocalRoute
+from vpn_installer.manifest import render_node_env_text
+from vpn_installer.migration import migrate_env
 from vpn_installer.models import AppError, ROLE_FOREIGN, ROLE_RU, RemoteTarget, UserCancelled
 from vpn_installer import targets
 from vpn_installer import workflows
+
+
+def transaction_state(
+    release_id: str = "",
+    *,
+    target: str = "",
+    node_id: str = "",
+    rollback_services: list[dict[str, str]] | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "state": "idle",
+        "current_present": bool(release_id),
+    }
+    if release_id:
+        payload.update(
+            current_release_id=release_id,
+            current_target=target or f"/etc/vpn-stack/releases/{release_id}",
+            current_node_id=node_id,
+        )
+    if rollback_services is not None:
+        payload.update(rollback_services_present=True, rollback_services=rollback_services)
+    return payload
+
+
+def rollback_service(
+    name: str,
+    unit: str,
+    *,
+    enabled: str = "enabled",
+    active: str = "active",
+    ownership: str = "managed",
+) -> dict[str, str]:
+    return {
+        "name": name,
+        "unit": unit,
+        "ownership": ownership,
+        "expected_enabled": enabled,
+        "expected_active": active,
+        "actual_enabled": enabled,
+        "actual_active": active,
+    }
 
 
 class WorkflowTests(unittest.TestCase):
@@ -21,10 +65,40 @@ class WorkflowTests(unittest.TestCase):
         self.addCleanup(patch.stopall)
 
     def test_build_target_from_env_without_state(self) -> None:
-        env = {"RU_PUBLIC_IP": "203.0.113.10", "SSH_PORT": "22"}
+        env = {
+            "TOPOLOGY": "single",
+            "GATEWAY_LOCATION": "ru",
+            "GATEWAY_PUBLIC_IP": "203.0.113.10",
+            "SSH_PORT": "22",
+        }
         target = targets.build_target(ROLE_RU, env, {})
         self.assertEqual(target.public_ip, "203.0.113.10")
         self.assertFalse(target.saved_connection)
+
+    def test_existing_deployment_rejects_physical_topology_change_before_ssh(self) -> None:
+        env = generate_default_env("demo", topology="dual", gateway_location="ru")
+        env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
+        env["EXIT_PUBLIC_IP"] = "198.51.100.20"
+        with tempfile.TemporaryDirectory() as tmp:
+            deployment_dir = Path(tmp)
+            (deployment_dir / "demo.env").write_text(render_env_text(env), encoding="utf-8")
+            with (
+                patch.object(workflows, "DEPLOYMENTS_DIR", deployment_dir),
+                patch("vpn_installer.workflows.ensure_directories"),
+                patch("vpn_installer.workflows.select_deployment", return_value="demo"),
+                patch("vpn_installer.workflows.verify_target_non_interactively") as verify,
+            ):
+                with self.assertRaisesRegex(AppError, "Нельзя менять topology"):
+                    workflows.prepare_remote_session(
+                        "demo",
+                        roles=None,
+                        require_privilege=True,
+                        allow_create=True,
+                        non_interactive=True,
+                        topology_mode="single",
+                        gateway_location="ru",
+                    )
+            verify.assert_not_called()
 
     def test_apply_env_connection_overrides_supports_unattended_password_login(self) -> None:
         target = RemoteTarget(role=ROLE_RU)
@@ -51,7 +125,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(updated.ssh_bind_address, "192.168.0.101")
 
     def test_update_env_with_targets(self) -> None:
-        env = {}
+        env = {"TOPOLOGY": "dual", "GATEWAY_LOCATION": "ru"}
         targets.update_env_with_targets(
             env,
             [
@@ -59,8 +133,42 @@ class WorkflowTests(unittest.TestCase):
                 RemoteTarget(role=ROLE_FOREIGN, public_ip="198.51.100.20"),
             ],
         )
-        self.assertEqual(env["RU_PUBLIC_IP"], "203.0.113.10")
-        self.assertEqual(env["FOREIGN_PUBLIC_IP"], "198.51.100.20")
+        self.assertEqual(env["GATEWAY_PUBLIC_IP"], "203.0.113.10")
+        self.assertEqual(env["EXIT_PUBLIC_IP"], "198.51.100.20")
+        self.assertNotIn("RU_PUBLIC_IP", env)
+        self.assertNotIn("FOREIGN_PUBLIC_IP", env)
+
+    def test_build_target_supports_single_foreign_gateway(self) -> None:
+        env = {
+            "TOPOLOGY": "single",
+            "GATEWAY_LOCATION": "foreign",
+            "GATEWAY_PUBLIC_IP": "198.51.100.20",
+            "SSH_PORT": "22",
+        }
+        target = targets.build_target("gateway", env, {})
+        self.assertEqual(target.node_id, "gateway")
+        self.assertEqual(target.location, "foreign")
+        self.assertEqual(target.public_ip, "198.51.100.20")
+        self.assertIn("зарубежный", target.label)
+
+    def test_new_connection_env_names_override_legacy_aliases(self) -> None:
+        target = RemoteTarget(role=ROLE_RU, location="ru")
+        with patch.dict(
+            "vpn_installer.targets.os.environ",
+            {
+                "VPN_GATEWAY_PUBLIC_IP": "203.0.113.30",
+                "VPN_GATEWAY_SSH_HOST": "gateway.example.test",
+                "VPN_GATEWAY_SSH_USER": "root",
+                "VPN_GATEWAY_SSH_PORT": "2222",
+                "VPN_GATEWAY_SSH_PASSWORD": "secret",
+                "VPN_RU_PUBLIC_IP": "203.0.113.99",
+            },
+            clear=False,
+        ):
+            updated = targets.apply_env_connection_overrides(target)
+        self.assertEqual(updated.public_ip, "203.0.113.30")
+        self.assertEqual(updated.ssh_host, "gateway.example.test")
+        self.assertEqual(updated.ssh_port, 2222)
 
     def test_ensure_foreign_wan_interface_prefers_detected_value(self) -> None:
         env = {"WAN_INTERFACE": ""}
@@ -90,7 +198,7 @@ class WorkflowTests(unittest.TestCase):
 
     def test_finalize_install_output_prefers_vless_uri(self) -> None:
         env = generate_default_env("demo")
-        env["RU_PUBLIC_IP"] = "203.0.113.10"
+        env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
         with tempfile.TemporaryDirectory() as tmp:
             paths = {
                 "vless_uri": Path(tmp) / "vless-uri.txt",
@@ -187,7 +295,7 @@ class WorkflowTests(unittest.TestCase):
                 require_privilege=True,
                 validate_os=True,
             )
-        self.assertIn("VPN_RU_SSH_PASSWORD", str(ctx.exception))
+        self.assertIn("VPN_GATEWAY_SSH_PASSWORD", str(ctx.exception))
 
     def test_verify_target_interactively_checks_remote_privilege(self) -> None:
         target = RemoteTarget(role=ROLE_RU, public_ip="203.0.113.10", ssh_host="203.0.113.10", ssh_port=22, ssh_user="root")
@@ -219,7 +327,11 @@ class WorkflowTests(unittest.TestCase):
 
     def test_prepare_remote_session_persists_only_selected_roles(self) -> None:
         ru = RemoteTarget(role=ROLE_RU, public_ip="203.0.113.10", ssh_host="203.0.113.10")
-        with patch("vpn_installer.workflows.ensure_directories"), patch("vpn_installer.workflows.select_existing_deployment", return_value="demo"), patch("vpn_installer.workflows.load_existing_deployment_env", return_value=(Path("deployments/demo.env"), {"DEPLOY_NAME": "demo", "WG_INTERFACE": "wgx"})), patch("vpn_installer.workflows.load_state", return_value={}), patch("vpn_installer.workflows.verify_target_interactively", return_value=(ru, {"default_iface": "eth0"})), patch("vpn_installer.workflows.write_text") as write_text_mock, patch("vpn_installer.workflows.write_state") as write_state_mock:
+        env = generate_default_env("demo")
+        env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
+        env["EXIT_PUBLIC_IP"] = "198.51.100.20"
+        env["WG_INTERFACE"] = "wgx"
+        with patch("vpn_installer.workflows.ensure_directories"), patch("vpn_installer.workflows.select_existing_deployment", return_value="demo"), patch("vpn_installer.workflows.load_existing_deployment_env", return_value=(Path("deployments/demo.env"), env)), patch("vpn_installer.workflows.load_state", return_value={}), patch("vpn_installer.workflows.verify_target_interactively", return_value=(ru, {"default_iface": "eth0"})), patch("vpn_installer.workflows.write_private_text") as write_text_mock, patch("vpn_installer.workflows.write_state") as write_state_mock:
             name, env_path, env, _state, targets, preflights = workflows.prepare_remote_session(
                 "demo",
                 roles=[ROLE_RU],
@@ -236,7 +348,7 @@ class WorkflowTests(unittest.TestCase):
 
     def test_prepare_remote_session_delegates_safe_route_check_to_target_verification(self) -> None:
         env = generate_default_env("demo")
-        env["RU_PUBLIC_IP"] = "203.0.113.10"
+        env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
         state = {ROLE_RU: {"public_ip": "203.0.113.10", "ssh_host": "203.0.113.10", "ssh_port": "22", "ssh_user": "root", "auth_mode": "password"}}
         target = workflows.build_target(ROLE_RU, env, state)
         with patch("vpn_installer.workflows.ensure_directories"), patch("vpn_installer.workflows.select_existing_deployment", return_value="demo"), patch("vpn_installer.workflows.load_existing_deployment_env", return_value=(Path("deployments/demo.env"), env)), patch("vpn_installer.workflows.load_state", return_value=state), patch("vpn_installer.workflows.verify_target_interactively", return_value=(target, {"role": ROLE_RU})) as verify:
@@ -251,27 +363,26 @@ class WorkflowTests(unittest.TestCase):
 
     def test_client_check_workflow_reports_self_tunnel(self) -> None:
         env = generate_default_env("demo")
-        env["RU_PUBLIC_IP"] = "203.0.113.10"
+        env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
         state = {ROLE_RU: {"public_ip": "203.0.113.10", "ssh_host": "203.0.113.10", "ssh_port": "22", "ssh_user": "root", "auth_mode": "password"}}
         with patch("vpn_installer.workflows.ensure_directories"), patch("vpn_installer.workflows.select_existing_deployment", return_value="demo"), patch("vpn_installer.workflows.load_existing_deployment_env", return_value=(Path("deployments/demo.env"), env)), patch("vpn_installer.workflows.load_state", return_value=state), patch("vpn_installer.workflows.local_route_to_server", return_value=LocalRoute(target_ip="203.0.113.10", interface_alias="singbox_tun")), patch("vpn_installer.workflows.find_client_drift", return_value=[]):
             self.assertEqual(workflows.client_check_workflow("demo", ROLE_RU), 1)
 
     def test_client_check_workflow_reports_stale_client_profile(self) -> None:
         env = generate_default_env("demo")
-        env["RU_PUBLIC_IP"] = "203.0.113.10"
+        env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
         state = {ROLE_RU: {"public_ip": "203.0.113.10", "ssh_host": "203.0.113.10", "ssh_port": "22", "ssh_user": "root", "auth_mode": "password"}}
         finding = __import__("vpn_installer.client_drift", fromlist=["ClientDriftFinding"]).ClientDriftFinding(Path("hiddify.json"), "устаревший порт клиента: 443, ожидается 8443")
         with patch("vpn_installer.workflows.ensure_directories"), patch("vpn_installer.workflows.select_existing_deployment", return_value="demo"), patch("vpn_installer.workflows.load_existing_deployment_env", return_value=(Path("deployments/demo.env"), env)), patch("vpn_installer.workflows.load_state", return_value=state), patch("vpn_installer.workflows.local_route_to_server", return_value=LocalRoute(target_ip="203.0.113.10", interface_alias="Беспроводная сеть")), patch("vpn_installer.workflows.find_client_drift", return_value=[finding]), patch("sys.stdout", new_callable=__import__("io").StringIO) as stream:
             self.assertEqual(workflows.client_check_workflow("demo", ROLE_RU), 1)
         self.assertIn("STALE: hiddify.json", stream.getvalue())
 
-    def test_load_remote_authoritative_env_syncs_local_file_without_mutating_client_artifacts(self) -> None:
+    def test_remote_node_env_is_drift_evidence_and_never_replaces_local_secrets(self) -> None:
         local_env = generate_default_env("demo")
-        local_env["RU_PUBLIC_IP"] = "203.0.113.10"
-        local_env["FOREIGN_PUBLIC_IP"] = "198.51.100.20"
-        remote_env = {**local_env, "CLIENT_UUID": "remote-uuid", "RU_REALITY_PUBLIC_KEY": "remote-key"}
+        local_env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
+        local_env["EXIT_PUBLIC_IP"] = "198.51.100.20"
         target = RemoteTarget(role=ROLE_RU, public_ip="203.0.113.10", ssh_host="203.0.113.10", ssh_user="root")
-        with patch("vpn_installer.workflows.fetch_remote_deployment_env", return_value=workflows.render_env_text(remote_env)), patch("vpn_installer.workflows.write_text") as write_text_mock:
+        with patch("vpn_installer.workflows.fetch_remote_deployment_env", return_value=render_node_env_text(local_env, "gateway")), patch("vpn_installer.workflows.write_private_text") as write_text_mock:
             synced_env, synced = workflows.load_remote_authoritative_env(
                 "demo",
                 Path("deployments/demo.env"),
@@ -279,34 +390,65 @@ class WorkflowTests(unittest.TestCase):
                 [target],
                 {ROLE_RU: {"installed": "1", "deployment_name": "demo", "role": ROLE_RU}},
             )
-        self.assertTrue(synced)
-        self.assertEqual(synced_env["CLIENT_UUID"], "remote-uuid")
-        self.assertEqual(synced_env["RU_REALITY_PUBLIC_KEY"], "remote-key")
+        self.assertFalse(synced)
+        self.assertIs(synced_env, local_env)
         self.assertEqual(target.public_ip, "203.0.113.10")
-        write_text_mock.assert_called_once()
+        write_text_mock.assert_not_called()
 
-    def test_load_remote_authoritative_env_fails_closed_on_remote_mismatch(self) -> None:
+    def test_remote_schema_two_full_env_is_normalized_at_one_release_boundary(self) -> None:
+        legacy = generate_default_env("demo")
+        legacy["RU_PUBLIC_IP"] = "203.0.113.10"
+        legacy["FOREIGN_PUBLIC_IP"] = "198.51.100.20"
+        for key in (
+            "CONFIG_SCHEMA",
+            "TOPOLOGY",
+            "GATEWAY_LOCATION",
+            "GATEWAY_PUBLIC_IP",
+            "EXIT_PUBLIC_IP",
+            "PUBLIC_HY2_CERTIFICATE_B64",
+            "PUBLIC_HY2_PRIVATE_KEY_B64",
+            "PUBLIC_HY2_PUBLIC_KEY_SHA256",
+        ):
+            legacy.pop(key, None)
+        remote_text = "\n".join(env_line(key, value) for key, value in sorted(legacy.items())) + "\n"
+        local_env = merge_env_with_defaults(migrate_env(legacy).env, "demo")
+        target = RemoteTarget(
+            role=ROLE_RU,
+            public_ip="203.0.113.10",
+            ssh_host="203.0.113.10",
+            ssh_user="root",
+        )
+
+        with patch("vpn_installer.workflows.fetch_remote_deployment_env", return_value=remote_text):
+            synced_env, synced = workflows.load_remote_authoritative_env(
+                "demo",
+                Path("deployments/demo.env"),
+                local_env,
+                [target],
+                {ROLE_RU: {"installed": "1", "deployment_name": "demo", "role": ROLE_RU}},
+            )
+
+        self.assertFalse(synced)
+        self.assertIs(synced_env, local_env)
+
+    def test_load_remote_authoritative_env_fails_closed_on_node_projection_drift(self) -> None:
         env = generate_default_env("demo")
-        env["RU_PUBLIC_IP"] = "203.0.113.10"
-        env["FOREIGN_PUBLIC_IP"] = "198.51.100.20"
+        env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
+        env["EXIT_PUBLIC_IP"] = "198.51.100.20"
         ru_target = RemoteTarget(role=ROLE_RU, public_ip="203.0.113.10", ssh_host="203.0.113.10", ssh_user="root")
-        foreign_target = RemoteTarget(role=ROLE_FOREIGN, public_ip="198.51.100.20", ssh_host="198.51.100.20", ssh_user="root")
-        ru_remote = workflows.render_env_text(env)
-        foreign_env = {**env, "CLIENT_UUID": "different"}
-        foreign_remote = workflows.render_env_text(foreign_env)
-        with patch("vpn_installer.workflows.fetch_remote_deployment_env", side_effect=[ru_remote, foreign_remote]):
+        drifted = {**env, "CLIENT_UUID": "different"}
+        with patch("vpn_installer.workflows.fetch_remote_deployment_env", return_value=render_node_env_text(drifted, "gateway")):
             with self.assertRaises(AppError) as ctx:
                 workflows.load_remote_authoritative_env(
                     "demo",
                     Path("deployments/demo.env"),
                     env,
-                    [ru_target, foreign_target],
+                    [ru_target],
                     {
                         ROLE_RU: {"installed": "1", "deployment_name": "demo", "role": ROLE_RU},
-                        ROLE_FOREIGN: {"installed": "1", "deployment_name": "demo", "role": ROLE_FOREIGN},
                     },
                 )
-        self.assertIn("Remote env mismatch between roles", str(ctx.exception))
+        self.assertIn("installed node env drift", str(ctx.exception))
 
     def test_cleanup_remote_workdir_warns_on_error(self) -> None:
         with patch("vpn_installer.workflows.ssh_stream", side_effect=AppError("fail")), patch("vpn_installer.workflows.warn") as warn_mock:
@@ -321,12 +463,14 @@ class WorkflowTests(unittest.TestCase):
             "state": "idle",
             "acceptance_present": True,
             "acceptance_release_id": "release-1",
-            "acceptance_role": ROLE_RU,
+            "acceptance_node_id": "gateway",
             "acceptance_deployment": "demo",
         }
         with patch("vpn_installer.workflows.ssh_capture", return_value=json.dumps(payload)) as capture:
             self.assertEqual(workflows.remote_install_transaction_state(target), payload)
         self.assertTrue(capture.call_args.kwargs["as_root"])
+        self.assertIn('root / "current"', capture.call_args.args[1])
+        self.assertIn('service-state.tsv', capture.call_args.args[1])
 
     def test_wait_for_remote_install_completion_waits_for_lock_release(self) -> None:
         target = RemoteTarget(role=ROLE_RU)
@@ -341,21 +485,113 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result["acceptance_present"], "True")
         sleep.assert_called_once_with(1)
 
+    def test_wait_for_remote_install_idle_waits_out_agent_read_lock(self) -> None:
+        target = RemoteTarget(role=ROLE_RU)
+        idle = transaction_state("old-release", node_id="gateway")
+        with (
+            patch(
+                "vpn_installer.workflows.remote_install_transaction_state",
+                side_effect=[{"state": "busy"}, idle],
+            ),
+            patch("vpn_installer.workflows.time.sleep") as sleep,
+        ):
+            result = workflows.wait_for_remote_install_idle(
+                target,
+                timeout_sec=10,
+                interval_sec=0.5,
+            )
+        self.assertEqual(result, idle)
+        sleep.assert_called_once_with(0.5)
+
+    def test_wait_for_remote_install_idle_rejects_stuck_writer(self) -> None:
+        target = RemoteTarget(role=ROLE_RU)
+        with (
+            patch(
+                "vpn_installer.workflows.remote_install_transaction_state",
+                return_value={"state": "busy"},
+            ),
+            patch("vpn_installer.workflows.time.monotonic", side_effect=[0.0, 2.0]),
+            patch("vpn_installer.workflows.time.sleep") as sleep,
+        ):
+            with self.assertRaisesRegex(AppError, "не освободила lock за 1 секунд"):
+                workflows.wait_for_remote_install_idle(target, timeout_sec=1)
+        sleep.assert_not_called()
+
     def test_install_remote_role_confirms_normal_transaction(self) -> None:
         target = RemoteTarget(role=ROLE_FOREIGN)
         accepted = {
             "installed": "1", "role": ROLE_FOREIGN, "deployment_name": "demo", "release_id": "release-1", "drift": "none",
-            "acceptance_present": "True", "acceptance_release_id": "release-1", "acceptance_role": ROLE_FOREIGN,
-            "acceptance_deployment": "demo",
+            "acceptance_present": "True", "acceptance_release_id": "release-1", "acceptance_node_id": "exit",
+            "acceptance_deployment": "demo", "current_present": "True", "current_release_id": "release-1",
+            "current_target": "/etc/vpn-stack/releases/release-1", "current_node_id": "exit",
         }
         with (
             patch("vpn_installer.workflows.expected_release_id_for_role", return_value="release-1"),
+            patch("vpn_installer.workflows.wait_for_remote_install_idle", return_value=transaction_state("old-release", node_id="exit")),
             patch("vpn_installer.workflows.install_remote_role") as install,
             patch("vpn_installer.workflows.wait_for_remote_install_completion", return_value=accepted) as wait,
         ):
             workflows.install_remote_role_with_recovery(target, "demo", {}, "reinstall", "wg0")
         install.assert_called_once_with(target, "demo", {}, "reinstall")
         wait.assert_called_once_with(target, "wg0")
+
+    def test_install_cutover_requires_a_provable_current_transition(self) -> None:
+        observed = transaction_state("new-release", target="/etc/vpn-stack/releases/new-release", node_id="exit")
+        self.assertTrue(workflows.install_cutover_observed(transaction_state(), observed, "new-release"))
+        self.assertTrue(
+            workflows.install_cutover_observed(
+                transaction_state("old-release", target="/etc/vpn-stack/releases/old-release", node_id="exit"),
+                observed,
+                "new-release",
+            )
+        )
+        self.assertFalse(
+            workflows.install_cutover_observed(
+                {"state": "idle", "current_present": True},
+                observed,
+                "new-release",
+            )
+        )
+        self.assertFalse(
+            workflows.install_cutover_observed(
+                {
+                    **transaction_state("new-release", target="/etc/vpn-stack/releases/new-release", node_id="exit"),
+                    "rollback_snapshot": "/etc/vpn-stack/backups/revisions/old",
+                },
+                {
+                    **observed,
+                    "rollback_snapshot": "/etc/vpn-stack/backups/revisions/new",
+                },
+                "new-release",
+            )
+        )
+        self.assertFalse(
+            workflows.install_cutover_observed(
+                {
+                    **transaction_state("old-release", target="/etc/vpn-stack/releases/old-release", node_id="exit"),
+                    "rollback_snapshot": "/etc/vpn-stack/backups/revisions/old",
+                },
+                {
+                    **transaction_state("old-release", target="/etc/vpn-stack/releases/old-release", node_id="exit"),
+                    "rollback_snapshot": "/etc/vpn-stack/backups/revisions/new",
+                },
+                "new-release",
+            )
+        )
+        self.assertTrue(
+            workflows.install_cutover_observed(
+                {
+                    **transaction_state("old-release", target="/etc/vpn-stack/releases/old-release", node_id="exit"),
+                    "rollback_snapshot": "/etc/vpn-stack/backups/revisions/old",
+                },
+                {
+                    "state": "idle",
+                    "current_present": True,
+                    "rollback_snapshot": "/etc/vpn-stack/backups/revisions/new",
+                },
+                "new-release",
+            )
+        )
 
     def test_wait_for_ru_transport_ready_reconciles_until_healthy(self) -> None:
         target = RemoteTarget(role=ROLE_RU)
@@ -375,60 +611,223 @@ class WorkflowTests(unittest.TestCase):
 
     def test_install_remote_role_uses_bundle_for_install(self) -> None:
         env = generate_default_env("demo")
-        env["RU_PUBLIC_IP"] = "203.0.113.10"
-        env["FOREIGN_PUBLIC_IP"] = "198.51.100.20"
+        env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
+        env["EXIT_PUBLIC_IP"] = "198.51.100.20"
         target = RemoteTarget(role=ROLE_RU, ssh_host="ru.example", ssh_user="root")
         with tempfile.TemporaryDirectory() as tmp:
             out_dir = Path(tmp) / "out" / "demo" / "bundle"
             out_dir.mkdir(parents=True)
-            bundle = out_dir / "ru-gateway.tar.gz"
+            bundle = out_dir / "gateway.tar.gz"
             bundle.write_text("bundle", encoding="utf-8")
             with patch("vpn_installer.workflows.deployment_out_dir", return_value=Path(tmp) / "out" / "demo"), patch("vpn_installer.workflows.ssh_stream") as ssh_mock, patch("vpn_installer.workflows.scp_upload") as scp_mock:
                 workflows.install_remote_role(target, "demo", env, "install")
         scp_mock.assert_called_once()
         self.assertTrue(ssh_mock.call_count >= 2)
+        self.assertIn("umask 077", ssh_mock.call_args_list[0].args[1])
+        self.assertIn("chmod 0600 ./deployment.env", ssh_mock.call_args_list[1].args[1])
+        self.assertIn("--node gateway", ssh_mock.call_args_list[1].args[1])
 
-    def test_install_remote_role_defers_cleanup_after_disconnect(self) -> None:
+    def test_install_remote_role_defers_cleanup_after_any_install_error(self) -> None:
         env = generate_default_env("demo")
         target = RemoteTarget(role=ROLE_RU)
         with tempfile.TemporaryDirectory() as tmp:
             bundle_dir = Path(tmp) / "bundle"
             bundle_dir.mkdir()
-            (bundle_dir / "ru-gateway.tar.gz").write_bytes(b"bundle")
+            (bundle_dir / "gateway.tar.gz").write_bytes(b"bundle")
             with (
                 patch("vpn_installer.workflows.deployment_out_dir", return_value=Path(tmp)),
-                patch("vpn_installer.workflows.ssh_stream", side_effect=[None, AppError("connection reset by peer")]),
+                patch("vpn_installer.workflows.ssh_stream", side_effect=[None, AppError("remote installer exited with status 137")]),
                 patch("vpn_installer.workflows.scp_upload"),
                 patch("vpn_installer.workflows.cleanup_remote_workdir") as cleanup,
             ):
                 with self.assertRaises(AppError) as raised:
                     workflows.install_remote_role(target, "demo", env, "install")
         cleanup.assert_not_called()
-        self.assertIn("vpn-installer/demo/ru-gateway/", getattr(raised.exception, "vpn_remote_root"))
+        self.assertIn("vpn-installer/demo/gateway/", getattr(raised.exception, "vpn_remote_root"))
 
-    def test_install_remote_role_uses_install_script_for_remove(self) -> None:
+    def test_install_remote_role_uses_self_contained_support_bundle_for_remove(self) -> None:
         target = RemoteTarget(role=ROLE_RU, ssh_host="ru.example", ssh_user="root")
-        with patch("vpn_installer.workflows.ssh_stream") as ssh_mock, patch("vpn_installer.workflows.scp_upload") as scp_mock:
-            workflows.install_remote_role(target, "demo", {}, "remove")
+        with tempfile.TemporaryDirectory() as tmp:
+            support = Path(tmp) / "installer-support.tar.gz"
+            support.write_bytes(b"support")
+            with (
+                patch("vpn_installer.workflows.package_control_bundle", return_value=support),
+                patch("vpn_installer.workflows.ssh_stream") as ssh_mock,
+                patch("vpn_installer.workflows.scp_upload") as scp_mock,
+            ):
+                workflows.install_remote_role(target, "demo", {}, "remove")
         scp_mock.assert_called_once()
         self.assertTrue(ssh_mock.call_count >= 2)
+        self.assertEqual(scp_mock.call_args.args[0], target)
+        self.assertEqual(scp_mock.call_args.args[1], support)
+        self.assertIn("tar -xzf installer-support.tar.gz", ssh_mock.call_args_list[1].args[1])
+        self.assertIn("--node gateway --action remove", ssh_mock.call_args_list[1].args[1])
 
     def test_verify_rollback_role_accepts_cross_version_service_evidence(self) -> None:
         observed = {
             "installed": "1", "role": ROLE_FOREIGN, "deployment_name": "demo", "release_id": "old-release",
-            "wireguard": "active", "nftables": "active", "sing_box": "active", "resolver": "active", "drift": "none",
+            "wireguard": "active", "wg_qdisc": "fq", "nftables": "active", "sing_box": "active", "resolver": "active", "drift": "none",
         }
-        with patch("vpn_installer.workflows.remote_preflight", return_value=observed):
+        services = [
+            rollback_service("sing-box", "sing-box.service"),
+            rollback_service("nftables", "vpn-stack-nftables.service"),
+            rollback_service("resolver", "systemd-resolved.service", ownership="borrowed"),
+            rollback_service("wireguard", "wg-quick@wg0.service"),
+        ]
+        with (
+            patch("vpn_installer.workflows.remote_preflight", return_value=observed),
+            patch("vpn_installer.workflows.remote_install_transaction_state", return_value=transaction_state("old-release", node_id="exit", rollback_services=services)),
+        ):
             workflows.verify_rollback_role(RemoteTarget(role=ROLE_FOREIGN), "demo", "wg0", "old-release")
 
     def test_verify_rollback_role_requires_exact_previous_release(self) -> None:
         observed = {
             "installed": "1", "role": ROLE_FOREIGN, "deployment_name": "demo", "release_id": "unexpected",
-            "wireguard": "active", "nftables": "active", "sing_box": "active", "resolver": "active", "drift": "none",
+            "wireguard": "active", "wg_qdisc": "fq", "nftables": "active", "sing_box": "active", "resolver": "active", "drift": "none",
         }
-        with patch("vpn_installer.workflows.remote_preflight", return_value=observed):
+        services = [
+            rollback_service("sing-box", "sing-box.service"),
+            rollback_service("nftables", "vpn-stack-nftables.service"),
+            rollback_service("resolver", "systemd-resolved.service", ownership="borrowed"),
+            rollback_service("wireguard", "wg-quick@wg0.service"),
+        ]
+        with (
+            patch("vpn_installer.workflows.remote_preflight", return_value=observed),
+            patch("vpn_installer.workflows.remote_install_transaction_state", return_value=transaction_state("old-release", node_id="exit", rollback_services=services)),
+        ):
             with self.assertRaisesRegex(AppError, "release_id=unexpected"):
                 workflows.verify_rollback_role(RemoteTarget(role=ROLE_FOREIGN), "demo", "wg0", "old-release")
+
+    def test_verify_rollback_role_rejects_unrestored_wireguard_qdisc(self) -> None:
+        observed = {
+            "installed": "1",
+            "role": ROLE_FOREIGN,
+            "deployment_name": "demo",
+            "release_id": "old-release",
+            "wg_qdisc": "noqueue",
+            "drift": "none",
+        }
+        services = [
+            rollback_service("sing-box", "sing-box.service"),
+            rollback_service("nftables", "vpn-stack-nftables.service"),
+            rollback_service("resolver", "systemd-resolved.service", ownership="borrowed"),
+            rollback_service("wireguard", "wg-quick@wg0.service"),
+        ]
+        with (
+            patch("vpn_installer.workflows.remote_preflight", return_value=observed),
+            patch(
+                "vpn_installer.workflows.remote_install_transaction_state",
+                return_value=transaction_state("old-release", node_id="exit", rollback_services=services),
+            ),
+        ):
+            with self.assertRaisesRegex(AppError, "wg_qdisc=noqueue expected=fq"):
+                workflows.verify_rollback_role(
+                    RemoteTarget(role=ROLE_FOREIGN),
+                    "demo",
+                    "wg0",
+                    "old-release",
+                )
+
+    def test_verify_rollback_role_single_does_not_require_wireguard(self) -> None:
+        observed = {
+            "installed": "1",
+            "role": ROLE_RU,
+            "deployment_name": "demo",
+            "release_id": "old-release",
+            "wireguard": "not-applicable",
+            "nftables": "active",
+            "sing_box": "active",
+            "resolver": "active",
+            "xray": "active",
+            "drift": "none",
+        }
+        services = [
+            rollback_service("sing-box", "sing-box.service"),
+            rollback_service("nftables", "vpn-stack-nftables.service"),
+            rollback_service("resolver", "systemd-resolved.service", ownership="borrowed"),
+            rollback_service("xray", "vpn-stack-xray.service"),
+        ]
+        with (
+            patch("vpn_installer.workflows.remote_preflight", return_value=observed),
+            patch("vpn_installer.workflows.remote_install_transaction_state", return_value=transaction_state("old-release", node_id="gateway", rollback_services=services)),
+        ):
+            workflows.verify_rollback_role(
+                RemoteTarget(role=ROLE_RU),
+                "demo",
+                "wg0",
+                "old-release",
+                wireguard_required=False,
+                public_front_required=True,
+            )
+
+    def test_verify_rollback_role_accepts_first_install_restored_to_uninstalled(self) -> None:
+        services = [
+            rollback_service("sing-box", "sing-box.service", enabled="not-found", active="inactive"),
+            rollback_service("nftables", "vpn-stack-nftables.service", enabled="not-found", active="inactive"),
+            rollback_service("resolver", "systemd-resolved.service", enabled="enabled", active="active", ownership="borrowed"),
+            rollback_service("xray", "vpn-stack-xray.service", enabled="not-found", active="inactive"),
+        ]
+        with (
+            patch("vpn_installer.workflows.remote_preflight", return_value={"installed": "0"}),
+            patch("vpn_installer.workflows.remote_install_transaction_state", return_value=transaction_state(rollback_services=services)),
+        ):
+            workflows.verify_rollback_role(
+                RemoteTarget(role=ROLE_RU),
+                "demo",
+                "wg0",
+                "",
+                wireguard_required=False,
+                public_front_required=True,
+            )
+
+    def test_verify_rollback_role_uses_snapshot_state_for_disabled_schema2_admin(self) -> None:
+        observed = {
+            "installed": "1",
+            "role": ROLE_RU,
+            "deployment_name": "demo",
+            "release_id": "old-release",
+            "drift": "none",
+        }
+        services = [
+            rollback_service("sing-box", "sing-box.service"),
+            rollback_service("nftables", "vpn-stack-nftables.service"),
+            rollback_service("resolver", "systemd-resolved.service", ownership="borrowed"),
+            rollback_service("xray", "vpn-stack-xray.service"),
+            rollback_service("admin", "vpn-stack-admin.service", enabled="disabled", active="inactive"),
+        ]
+        with (
+            patch("vpn_installer.workflows.remote_preflight", return_value=observed),
+            patch("vpn_installer.workflows.remote_install_transaction_state", return_value=transaction_state("old-release", node_id="gateway", rollback_services=services)),
+        ):
+            workflows.verify_rollback_role(
+                RemoteTarget(role=ROLE_RU),
+                "demo",
+                "wg0",
+                "old-release",
+                wireguard_required=False,
+                public_front_required=True,
+                admin_required=True,
+            )
+
+    def test_rollback_changed_roles_skips_vless_gate_after_first_install_is_removed(self) -> None:
+        env = generate_default_env("demo", topology="single", gateway_location="ru")
+        env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
+        target = RemoteTarget(role=ROLE_RU)
+        with (
+            patch("vpn_installer.workflows.install_remote_role") as rollback,
+            patch("vpn_installer.workflows.verify_rollback_role") as verify_role,
+            patch("vpn_installer.workflows.verify_postcutover") as verify_vless,
+        ):
+            workflows.rollback_changed_roles(
+                [ROLE_RU],
+                {ROLE_RU: target},
+                "demo",
+                env,
+                {ROLE_RU: ""},
+            )
+        rollback.assert_called_once_with(target, "demo", env, "rollback")
+        self.assertEqual(verify_role.call_args.args[3], "")
+        verify_vless.assert_not_called()
 
     def test_filter_targets_for_remove_skips_unmanaged_hosts(self) -> None:
         ru = RemoteTarget(role=ROLE_RU)
@@ -443,13 +842,13 @@ class WorkflowTests(unittest.TestCase):
                 },
             )
         self.assertEqual(result, [foreign])
-        self.assertIn("Российский сервер: стек не найден на сервере, действие remove пропущено.", stream.getvalue())
+        self.assertIn("Сервер входа: стек не найден на сервере, действие remove пропущено.", stream.getvalue())
 
     def test_load_env_for_render_rewrites_existing_env(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             env_path = Path(tmp) / "demo.env"
             env_path.write_text('DEPLOY_NAME="demo"\nRU_PUBLIC_IP="203.0.113.10"\nFOREIGN_PUBLIC_IP="198.51.100.20"\n', encoding="utf-8")
-            with patch("vpn_installer.workflows.write_text") as write_text_mock:
+            with patch("vpn_installer.workflows.write_private_text") as write_text_mock:
                 env = workflows.load_env_for_render(env_path)
         self.assertEqual(env["DEPLOY_NAME"], "demo")
         write_text_mock.assert_called_once()
@@ -463,12 +862,13 @@ class WorkflowTests(unittest.TestCase):
             non_interactive=True,
             throughput_seconds=0,
             require_native_agent=True,
+            accept_same_node_for_install=True,
         )
 
     def test_run_selected_remote_action_install_orders_roles(self) -> None:
         env = generate_default_env("demo")
-        env["RU_PUBLIC_IP"] = "203.0.113.10"
-        env["FOREIGN_PUBLIC_IP"] = "198.51.100.20"
+        env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
+        env["EXIT_PUBLIC_IP"] = "198.51.100.20"
         ru = RemoteTarget(role=ROLE_RU)
         foreign = RemoteTarget(role=ROLE_FOREIGN)
         order: list[str] = []
@@ -487,51 +887,67 @@ class WorkflowTests(unittest.TestCase):
                 preflights={ROLE_RU: {"installed": "1"}, ROLE_FOREIGN: {"installed": "1"}},
             )
         self.assertEqual(order, [ROLE_FOREIGN, ROLE_RU])
-        ready.assert_called_once_with(ru)
+        self.assertEqual(ready.call_args_list, [call(ru), call(ru)])
+
+    def test_settle_transport_after_install_is_not_applicable_to_single_topology(self) -> None:
+        env = generate_default_env("demo", topology="single", gateway_location="ru")
+        gateway = RemoteTarget(role=ROLE_RU)
+        with patch("vpn_installer.workflows.wait_for_ru_transport_ready") as ready:
+            workflows.settle_transport_after_install(
+                ROLE_RU,
+                {ROLE_RU: gateway},
+                {ROLE_RU: {"installed": "1"}},
+                env,
+            )
+        ready.assert_not_called()
 
     def test_run_selected_remote_action_install_recovers_after_disconnect(self) -> None:
         env = generate_default_env("demo")
-        env["RU_PUBLIC_IP"] = "203.0.113.10"
-        env["FOREIGN_PUBLIC_IP"] = "198.51.100.20"
+        env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
+        env["EXIT_PUBLIC_IP"] = "198.51.100.20"
         foreign = RemoteTarget(role=ROLE_FOREIGN)
         recovered = {
             "installed": "1", "role": ROLE_FOREIGN, "deployment_name": "demo", "release_id": "release-1", "drift": "none",
-            "acceptance_present": "True", "acceptance_release_id": "release-1", "acceptance_role": ROLE_FOREIGN,
-            "acceptance_deployment": "demo",
+            "acceptance_present": "True", "acceptance_release_id": "release-1", "acceptance_node_id": "exit",
+            "acceptance_deployment": "demo", "current_present": "True", "current_release_id": "release-1",
+            "current_target": "/etc/vpn-stack/releases/release-1", "current_node_id": "exit",
         }
-        with patch("vpn_installer.workflows.render_all_artifacts"), patch("vpn_installer.workflows.install_remote_role", side_effect=AppError("Socket exception: An existing connection was forcibly closed by the remote host (10054)")), patch("vpn_installer.workflows.wait_for_remote_install_completion", return_value=recovered) as wait_mock, patch("vpn_installer.workflows.expected_release_id_for_role", return_value="release-1"), patch("vpn_installer.workflows.warn") as warn_mock, patch("vpn_installer.workflows.verify_postcutover"):
+        with patch("vpn_installer.workflows.render_all_artifacts"), patch("vpn_installer.workflows.install_remote_role", side_effect=AppError("Socket exception: An existing connection was forcibly closed by the remote host (10054)")), patch("vpn_installer.workflows.wait_for_remote_install_completion", return_value=recovered) as wait_mock, patch("vpn_installer.workflows.remote_install_transaction_state", return_value=transaction_state("old-release", node_id="exit")), patch("vpn_installer.workflows.expected_release_id_for_role", return_value="release-1"), patch("vpn_installer.workflows.warn") as warn_mock, patch("vpn_installer.workflows.verify_postcutover"):
             workflows.run_selected_remote_action("reinstall", "demo", Path("deployments/demo.env"), env, [foreign], role_arg=ROLE_FOREIGN)
         wait_mock.assert_called_once()
         warn_mock.assert_called()
 
     def test_run_selected_remote_action_rejects_unconfirmed_disconnect(self) -> None:
         env = generate_default_env("demo")
-        env["RU_PUBLIC_IP"] = "203.0.113.10"
-        env["FOREIGN_PUBLIC_IP"] = "198.51.100.20"
+        env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
+        env["EXIT_PUBLIC_IP"] = "198.51.100.20"
         foreign = RemoteTarget(role=ROLE_FOREIGN)
         recovered = {
             "installed": "1", "role": ROLE_FOREIGN, "deployment_name": "demo", "release_id": "old-release", "drift": "none",
-            "acceptance_present": "True", "acceptance_release_id": "old-release", "acceptance_role": ROLE_FOREIGN,
-            "acceptance_deployment": "demo",
+            "acceptance_present": "True", "acceptance_release_id": "old-release", "acceptance_node_id": "exit",
+            "acceptance_deployment": "demo", "current_present": "True", "current_release_id": "old-release",
+            "current_target": "/etc/vpn-stack/releases/old-release", "current_node_id": "exit",
         }
-        with patch("vpn_installer.workflows.render_all_artifacts"), patch("vpn_installer.workflows.install_remote_role", side_effect=AppError("connection reset by peer")), patch("vpn_installer.workflows.wait_for_remote_install_completion", return_value=recovered), patch("vpn_installer.workflows.expected_release_id_for_role", return_value="new-release"):
+        with patch("vpn_installer.workflows.render_all_artifacts"), patch("vpn_installer.workflows.install_remote_role", side_effect=AppError("connection reset by peer")), patch("vpn_installer.workflows.wait_for_remote_install_completion", return_value=recovered), patch("vpn_installer.workflows.remote_install_transaction_state", return_value=transaction_state("old-release", node_id="exit")), patch("vpn_installer.workflows.expected_release_id_for_role", return_value="new-release"):
             with self.assertRaisesRegex(AppError, "установка не подтверждена"):
                 workflows.run_selected_remote_action("reinstall", "demo", Path("deployments/demo.env"), env, [foreign], role_arg=ROLE_FOREIGN)
 
-    def test_run_selected_remote_action_rolls_back_uncertain_new_release(self) -> None:
+    def test_run_selected_remote_action_reconciles_exit_137_and_rolls_back_cutover(self) -> None:
         env = generate_default_env("demo")
-        env["RU_PUBLIC_IP"] = "203.0.113.10"
-        env["FOREIGN_PUBLIC_IP"] = "198.51.100.20"
+        env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
+        env["EXIT_PUBLIC_IP"] = "198.51.100.20"
         foreign = RemoteTarget(role=ROLE_FOREIGN)
         recovered = {
             "installed": "1", "role": ROLE_FOREIGN, "deployment_name": "demo", "release_id": "new-release", "drift": "none",
-            "acceptance_present": "True", "acceptance_release_id": "old-release", "acceptance_role": ROLE_FOREIGN,
-            "acceptance_deployment": "demo",
+            "acceptance_present": "True", "acceptance_release_id": "old-release", "acceptance_node_id": "exit",
+            "acceptance_deployment": "demo", "current_present": "True", "current_release_id": "new-release",
+            "current_target": "/etc/vpn-stack/releases/new-release", "current_node_id": "exit",
         }
         with (
             patch("vpn_installer.workflows.render_all_artifacts"),
-            patch("vpn_installer.workflows.install_remote_role", side_effect=[AppError("connection reset by peer"), None]) as install,
+            patch("vpn_installer.workflows.install_remote_role", side_effect=[AppError("remote installer exited with status 137"), None]) as install,
             patch("vpn_installer.workflows.wait_for_remote_install_completion", return_value=recovered),
+            patch("vpn_installer.workflows.remote_install_transaction_state", return_value=transaction_state("old-release", node_id="exit")),
             patch("vpn_installer.workflows.expected_release_id_for_role", return_value="new-release"),
             patch("vpn_installer.workflows.verify_rollback_role"),
             patch("vpn_installer.workflows.verify_postcutover"),
@@ -543,18 +959,25 @@ class WorkflowTests(unittest.TestCase):
 
     def test_run_selected_remote_action_install_reraises_nonrecoverable_error(self) -> None:
         env = generate_default_env("demo")
-        env["RU_PUBLIC_IP"] = "203.0.113.10"
-        env["FOREIGN_PUBLIC_IP"] = "198.51.100.20"
+        env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
+        env["EXIT_PUBLIC_IP"] = "198.51.100.20"
         foreign = RemoteTarget(role=ROLE_FOREIGN)
-        with patch("vpn_installer.workflows.render_all_artifacts"), patch("vpn_installer.workflows.install_remote_role", side_effect=AppError("permission denied")), patch("vpn_installer.workflows.wait_for_remote_install_completion") as wait_mock:
+        recovered = {
+            "installed": "1", "role": ROLE_FOREIGN, "deployment_name": "demo", "release_id": "old-release", "drift": "none",
+            "acceptance_present": "True", "acceptance_release_id": "old-release", "acceptance_node_id": "exit",
+            "acceptance_deployment": "demo", "current_present": "True", "current_release_id": "old-release",
+            "current_target": "/etc/vpn-stack/releases/old-release", "current_node_id": "exit",
+        }
+        with patch("vpn_installer.workflows.render_all_artifacts"), patch("vpn_installer.workflows.install_remote_role", side_effect=AppError("permission denied")) as install, patch("vpn_installer.workflows.wait_for_remote_install_completion", return_value=recovered) as wait_mock, patch("vpn_installer.workflows.remote_install_transaction_state", return_value=transaction_state("old-release", node_id="exit")), patch("vpn_installer.workflows.expected_release_id_for_role", return_value="new-release"):
             with self.assertRaises(AppError):
                 workflows.run_selected_remote_action("reinstall", "demo", Path("deployments/demo.env"), env, [foreign], role_arg=ROLE_FOREIGN)
-        wait_mock.assert_not_called()
+        wait_mock.assert_called_once()
+        install.assert_called_once()
 
     def test_run_selected_remote_action_remove_noops_when_targets_empty(self) -> None:
         env = generate_default_env("demo")
-        env["RU_PUBLIC_IP"] = "203.0.113.10"
-        env["FOREIGN_PUBLIC_IP"] = "198.51.100.20"
+        env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
+        env["EXIT_PUBLIC_IP"] = "198.51.100.20"
         with patch("vpn_installer.workflows.install_remote_role") as install_remote, patch("vpn_installer.workflows.remote_preflight") as remote_preflight, patch("vpn_installer.workflows.print_preflight") as print_preflight:
             workflows.run_selected_remote_action("remove", "demo", Path("deployments/demo.env"), env, [], role_arg=ROLE_RU)
         install_remote.assert_not_called()
@@ -563,8 +986,8 @@ class WorkflowTests(unittest.TestCase):
 
     def test_run_selected_remote_action_remove_all_uses_only_available_roles(self) -> None:
         env = generate_default_env("demo")
-        env["RU_PUBLIC_IP"] = "203.0.113.10"
-        env["FOREIGN_PUBLIC_IP"] = "198.51.100.20"
+        env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
+        env["EXIT_PUBLIC_IP"] = "198.51.100.20"
         foreign = RemoteTarget(role=ROLE_FOREIGN)
         with patch("vpn_installer.workflows.install_remote_role") as install_remote, patch("vpn_installer.workflows.remote_preflight", return_value={"installed": "1"}) as remote_preflight, patch("vpn_installer.workflows.print_preflight") as print_preflight:
             workflows.run_selected_remote_action("remove", "demo", Path("deployments/demo.env"), env, [foreign], role_arg="all")
@@ -574,30 +997,71 @@ class WorkflowTests(unittest.TestCase):
 
     def test_install_workflow_returns_zero_when_all_skipped(self) -> None:
         env = generate_default_env("demo")
-        env["RU_PUBLIC_IP"] = "203.0.113.10"
-        env["FOREIGN_PUBLIC_IP"] = "198.51.100.20"
+        env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
+        env["EXIT_PUBLIC_IP"] = "198.51.100.20"
         ru = RemoteTarget(role=ROLE_RU)
         foreign = RemoteTarget(role=ROLE_FOREIGN)
-        with patch("vpn_installer.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), env, {}, [ru, foreign], {ROLE_FOREIGN: {"default_iface": "eth1"}, ROLE_RU: {}})), patch("vpn_installer.workflows.ensure_foreign_wan_interface"), patch("vpn_installer.workflows.write_text"), patch("vpn_installer.workflows.write_state"), patch("vpn_installer.workflows.print_summary"), patch("vpn_installer.workflows.ask_install_action", return_value="skip"):
+        with patch("vpn_installer.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), env, {}, [ru, foreign], {ROLE_FOREIGN: {"default_iface": "eth1"}, ROLE_RU: {}})), patch("vpn_installer.workflows.ensure_foreign_wan_interface"), patch("vpn_installer.workflows.write_private_text"), patch("vpn_installer.workflows.write_state"), patch("vpn_installer.workflows.print_summary"), patch("vpn_installer.workflows.ask_install_action", return_value="skip"):
             self.assertEqual(workflows.install_workflow("demo"), 0)
 
     def test_install_workflow_runs_selected_actions(self) -> None:
         env = generate_default_env("demo")
-        env["RU_PUBLIC_IP"] = "203.0.113.10"
-        env["FOREIGN_PUBLIC_IP"] = "198.51.100.20"
+        env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
+        env["EXIT_PUBLIC_IP"] = "198.51.100.20"
         ru = RemoteTarget(role=ROLE_RU)
         foreign = RemoteTarget(role=ROLE_FOREIGN)
-        with patch("vpn_installer.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), env, {}, [ru, foreign], {ROLE_FOREIGN: {"default_iface": "eth1"}, ROLE_RU: {}})), patch("vpn_installer.workflows.ensure_foreign_wan_interface"), patch("vpn_installer.workflows.write_text"), patch("vpn_installer.workflows.write_state"), patch("vpn_installer.workflows.print_summary"), patch("vpn_installer.workflows.ask_install_action", side_effect=["skip", "install"]), patch("vpn_installer.workflows.prompt_yes_no", return_value=True), patch("vpn_installer.workflows.render_all_artifacts") as render_all, patch("vpn_installer.workflows.install_remote_role_with_recovery") as install_remote, patch("vpn_installer.workflows.verify_postcutover") as verify_postcutover, patch("vpn_installer.workflows.finalize_install_output") as finalize:
+        with patch("vpn_installer.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), env, {}, [ru, foreign], {ROLE_FOREIGN: {"default_iface": "eth1"}, ROLE_RU: {}})), patch("vpn_installer.workflows.ensure_foreign_wan_interface"), patch("vpn_installer.workflows.write_private_text"), patch("vpn_installer.workflows.write_state"), patch("vpn_installer.workflows.print_summary"), patch("vpn_installer.workflows.ask_install_action", side_effect=["skip", "install"]), patch("vpn_installer.workflows.prompt_yes_no", return_value=True), patch("vpn_installer.workflows.render_all_artifacts") as render_all, patch("vpn_installer.workflows.install_remote_role_with_recovery") as install_remote, patch("vpn_installer.workflows.verify_postcutover") as verify_postcutover, patch("vpn_installer.workflows.finalize_install_output") as finalize:
             self.assertEqual(workflows.install_workflow("demo"), 0)
         render_all.assert_called_once()
         install_remote.assert_called_once()
         verify_postcutover.assert_called_once_with("demo")
         finalize.assert_called_once_with(env, "demo")
 
+    def test_install_workflow_single_foreign_touches_only_gateway(self) -> None:
+        env = generate_default_env("demo", topology="single", gateway_location="foreign")
+        env["GATEWAY_PUBLIC_IP"] = "198.51.100.20"
+        gateway = RemoteTarget(role=ROLE_RU, location="foreign", public_ip="198.51.100.20")
+        with (
+            patch(
+                "vpn_installer.workflows.prepare_remote_session",
+                return_value=(
+                    "demo",
+                    Path("deployments/demo.env"),
+                    env,
+                    {},
+                    [gateway],
+                    {ROLE_RU: {"installed": "0"}},
+                ),
+            ) as prepare,
+            patch("vpn_installer.workflows.ensure_foreign_wan_interface") as ensure_wan,
+            patch("vpn_installer.workflows.write_private_text"),
+            patch("vpn_installer.workflows.write_state"),
+            patch("vpn_installer.workflows.print_summary"),
+            patch("vpn_installer.workflows.render_all_artifacts"),
+            patch("vpn_installer.workflows.install_remote_role_with_recovery") as install_remote,
+            patch("vpn_installer.workflows.verify_postcutover"),
+            patch("vpn_installer.workflows.finalize_install_output"),
+        ):
+            self.assertEqual(
+                workflows.install_workflow(
+                    "demo",
+                    non_interactive=True,
+                    yes=True,
+                    topology_mode="single",
+                    gateway_location="foreign",
+                ),
+                0,
+            )
+        self.assertIsNone(prepare.call_args.kwargs["roles"])
+        self.assertFalse(prepare.call_args.kwargs["sync_remote_env"])
+        ensure_wan.assert_not_called()
+        install_remote.assert_called_once()
+        self.assertIs(install_remote.call_args.args[0], gateway)
+
     def test_install_workflow_rolls_back_changed_roles_when_vless_gate_fails(self) -> None:
         env = generate_default_env("demo")
-        env["RU_PUBLIC_IP"] = "203.0.113.10"
-        env["FOREIGN_PUBLIC_IP"] = "198.51.100.20"
+        env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
+        env["EXIT_PUBLIC_IP"] = "198.51.100.20"
         ru = RemoteTarget(role=ROLE_RU)
         foreign = RemoteTarget(role=ROLE_FOREIGN)
         calls: list[tuple[str, str]] = []
@@ -608,7 +1072,7 @@ class WorkflowTests(unittest.TestCase):
         with (
             patch("vpn_installer.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), env, {}, [ru, foreign], {ROLE_FOREIGN: {"default_iface": "eth1", "installed": "1"}, ROLE_RU: {"installed": "1"}})),
             patch("vpn_installer.workflows.ensure_foreign_wan_interface"),
-            patch("vpn_installer.workflows.write_text"),
+            patch("vpn_installer.workflows.write_private_text"),
             patch("vpn_installer.workflows.write_state"),
             patch("vpn_installer.workflows.print_summary"),
             patch("vpn_installer.workflows.prompt_yes_no", return_value=True),
@@ -634,8 +1098,8 @@ class WorkflowTests(unittest.TestCase):
 
     def test_maintain_reports_updates_without_mutating_servers(self) -> None:
         env = generate_default_env("demo")
-        env["RU_PUBLIC_IP"] = "203.0.113.10"
-        env["FOREIGN_PUBLIC_IP"] = "198.51.100.20"
+        env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
+        env["EXIT_PUBLIC_IP"] = "198.51.100.20"
         ru = RemoteTarget(role=ROLE_RU)
         foreign = RemoteTarget(role=ROLE_FOREIGN)
         snapshot = DiagnosticsSnapshot(maintenance={"upgradable": 4, "security_upgradable": 2, "reboot_required": False}).to_dict()
@@ -648,18 +1112,104 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(agent_snapshot.call_count, 2)
         ssh_stream.assert_not_called()
 
+    def test_maintain_single_uses_only_the_configured_gateway(self) -> None:
+        env = generate_default_env("demo", topology="single", gateway_location="foreign")
+        env["GATEWAY_PUBLIC_IP"] = "198.51.100.20"
+        gateway = RemoteTarget(role=ROLE_RU, location="foreign")
+        snapshot = DiagnosticsSnapshot(
+            maintenance={"upgradable": 0, "security_upgradable": 0, "reboot_required": False}
+        ).to_dict()
+        with (
+            patch(
+                "vpn_installer.workflows.prepare_remote_session",
+                return_value=("demo", Path("deployments/demo.env"), env, {}, [gateway], {}),
+            ),
+            patch("vpn_installer.workflows.remote_agent_snapshot", return_value=snapshot) as agent_snapshot,
+        ):
+            self.assertEqual(
+                workflows.maintain_workflow(
+                    "demo",
+                    apply_updates=False,
+                    refresh_assets=False,
+                    reboot=False,
+                    non_interactive=True,
+                ),
+                0,
+            )
+        agent_snapshot.assert_called_once_with(gateway)
+
+    def test_maintain_runs_full_vless_gate_after_each_changed_node(self) -> None:
+        env = generate_default_env("demo")
+        env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
+        env["EXIT_PUBLIC_IP"] = "198.51.100.20"
+        ru = RemoteTarget(role=ROLE_RU)
+        foreign = RemoteTarget(role=ROLE_FOREIGN)
+        collectors = {
+            name: CollectorState(status="ok", observed_at="2026-08-16T12:00:00+00:00")
+            for name in COLLECTOR_NAMES
+        }
+        snapshot = DiagnosticsSnapshot(
+            collectors=collectors,
+            component_verdicts={"server_path": "verified", "public_front": "verified"},
+            maintenance={"reboot_required": False},
+        ).to_dict()
+        events: list[str] = []
+
+        def install(target: RemoteTarget, *_args, **_kwargs) -> None:
+            events.append(f"assets:{target.role}")
+
+        def update(target: RemoteTarget, *_args, **_kwargs) -> None:
+            events.append(f"updates:{target.role}")
+
+        def verify(_deployment: str, *_args, **_kwargs) -> None:
+            events.append("verify")
+
+        with (
+            patch("vpn_installer.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), env, {}, [ru, foreign], {})),
+            patch("vpn_installer.workflows.render_config_artifacts"),
+            patch("vpn_installer.workflows.package_bundle"),
+            patch("vpn_installer.workflows.install_remote_role_with_recovery", side_effect=install),
+            patch("vpn_installer.workflows.ssh_stream", side_effect=update),
+            patch("vpn_installer.workflows.remote_agent_snapshot", return_value=snapshot),
+            patch("vpn_installer.workflows.verify_postcutover", side_effect=verify) as verify_vless,
+        ):
+            result = workflows.maintain_workflow(
+                "demo",
+                apply_updates=True,
+                refresh_assets=True,
+                reboot=False,
+                non_interactive=True,
+                yes=True,
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            events,
+            [
+                f"assets:{ROLE_FOREIGN}",
+                "verify",
+                f"assets:{ROLE_RU}",
+                "verify",
+                f"updates:{ROLE_FOREIGN}",
+                "verify",
+                f"updates:{ROLE_RU}",
+                "verify",
+            ],
+        )
+        self.assertEqual(verify_vless.call_count, 4)
+
     def test_remote_action_workflow_stops_on_user_decline(self) -> None:
         env = generate_default_env("demo")
-        env["RU_PUBLIC_IP"] = "203.0.113.10"
-        env["FOREIGN_PUBLIC_IP"] = "198.51.100.20"
+        env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
+        env["EXIT_PUBLIC_IP"] = "198.51.100.20"
         ru = RemoteTarget(role=ROLE_RU)
         with patch("vpn_installer.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), env, {}, [ru], {ROLE_RU: {}})), patch("vpn_installer.workflows.print_summary"), patch("vpn_installer.workflows.prompt_yes_no", return_value=False):
             self.assertEqual(workflows.remote_action_workflow("demo", ROLE_RU, "remove"), 0)
 
     def test_remote_action_workflow_skips_remove_when_stack_absent(self) -> None:
         env = generate_default_env("demo")
-        env["RU_PUBLIC_IP"] = "203.0.113.10"
-        env["FOREIGN_PUBLIC_IP"] = "198.51.100.20"
+        env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
+        env["EXIT_PUBLIC_IP"] = "198.51.100.20"
         ru = RemoteTarget(role=ROLE_RU)
         with patch("vpn_installer.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), env, {}, [ru], {ROLE_RU: {"installed": "0"}})), patch("vpn_installer.workflows.print_summary") as print_summary, patch("vpn_installer.workflows.prompt_yes_no") as prompt_yes_no, patch("vpn_installer.workflows.run_selected_remote_action") as run_selected, patch("sys.stdout", new_callable=__import__('io').StringIO) as stream:
             self.assertEqual(workflows.remote_action_workflow("demo", ROLE_RU, "remove"), 0)
@@ -670,8 +1220,8 @@ class WorkflowTests(unittest.TestCase):
 
     def test_remote_action_workflow_remove_all_runs_only_remaining_role(self) -> None:
         env = generate_default_env("demo")
-        env["RU_PUBLIC_IP"] = "203.0.113.10"
-        env["FOREIGN_PUBLIC_IP"] = "198.51.100.20"
+        env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
+        env["EXIT_PUBLIC_IP"] = "198.51.100.20"
         ru = RemoteTarget(role=ROLE_RU)
         foreign = RemoteTarget(role=ROLE_FOREIGN)
         with patch(
@@ -692,24 +1242,79 @@ class WorkflowTests(unittest.TestCase):
         call_args = run_selected.call_args
         self.assertEqual(call_args.args[4], [foreign])
         self.assertEqual(call_args.kwargs["role_arg"], "all")
-        self.assertIn("Российский сервер: стек не найден на сервере, действие remove пропущено.", stream.getvalue())
+        self.assertIn("Сервер входа: стек не найден на сервере, действие remove пропущено.", stream.getvalue())
 
     def test_remote_action_workflow_reinstall_updates_env_and_finalizes(self) -> None:
         env = generate_default_env("demo")
-        env["RU_PUBLIC_IP"] = "203.0.113.10"
-        env["FOREIGN_PUBLIC_IP"] = "198.51.100.20"
+        env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
+        env["EXIT_PUBLIC_IP"] = "198.51.100.20"
         foreign = RemoteTarget(role=ROLE_FOREIGN)
-        with patch("vpn_installer.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), env, {}, [foreign], {ROLE_FOREIGN: {"default_iface": "eth1"}})), patch("vpn_installer.workflows.ensure_foreign_wan_interface"), patch("vpn_installer.workflows.write_text") as write_text_mock, patch("vpn_installer.workflows.write_state") as write_state_mock, patch("vpn_installer.workflows.print_summary"), patch("vpn_installer.workflows.prompt_yes_no", return_value=True), patch("vpn_installer.workflows.run_selected_remote_action") as run_selected, patch("vpn_installer.workflows.finalize_install_output") as finalize:
+        with patch("vpn_installer.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), env, {}, [foreign], {ROLE_FOREIGN: {"default_iface": "eth1"}})), patch("vpn_installer.workflows.ensure_foreign_wan_interface"), patch("vpn_installer.workflows.write_private_text") as write_text_mock, patch("vpn_installer.workflows.write_state") as write_state_mock, patch("vpn_installer.workflows.print_summary"), patch("vpn_installer.workflows.prompt_yes_no", return_value=True), patch("vpn_installer.workflows.run_selected_remote_action") as run_selected, patch("vpn_installer.workflows.finalize_install_output") as finalize:
             self.assertEqual(workflows.remote_action_workflow("demo", ROLE_FOREIGN, "reinstall"), 0)
         write_text_mock.assert_called_once()
         write_state_mock.assert_called_once()
         run_selected.assert_called_once()
         finalize.assert_called_once_with(env, "demo")
 
+    def test_remote_action_single_all_reinstall_does_not_require_an_exit(self) -> None:
+        env = generate_default_env("demo", topology="single", gateway_location="ru")
+        env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
+        gateway = RemoteTarget(role=ROLE_RU, location="ru")
+        with (
+            patch(
+                "vpn_installer.workflows.prepare_remote_session",
+                return_value=(
+                    "demo",
+                    Path("deployments/demo.env"),
+                    env,
+                    {},
+                    [gateway],
+                    {ROLE_RU: {"installed": "1"}},
+                ),
+            ),
+            patch("vpn_installer.workflows.ensure_foreign_wan_interface") as ensure_wan,
+            patch("vpn_installer.workflows.write_private_text"),
+            patch("vpn_installer.workflows.write_state"),
+            patch("vpn_installer.workflows.print_summary"),
+            patch("vpn_installer.workflows.run_selected_remote_action") as run_selected,
+            patch("vpn_installer.workflows.finalize_install_output"),
+        ):
+            self.assertEqual(
+                workflows.remote_action_workflow(
+                    "demo",
+                    "all",
+                    "reinstall",
+                    non_interactive=True,
+                    yes=True,
+                ),
+                0,
+            )
+        ensure_wan.assert_not_called()
+        self.assertEqual(run_selected.call_args.args[4], [gateway])
+
+    def test_client_check_all_ignores_unconfigured_exit_in_single_topology(self) -> None:
+        env = generate_default_env("demo", topology="single", gateway_location="foreign")
+        env["GATEWAY_PUBLIC_IP"] = "198.51.100.20"
+        with (
+            patch("vpn_installer.workflows.ensure_directories"),
+            patch("vpn_installer.workflows.select_existing_deployment", return_value="demo"),
+            patch(
+                "vpn_installer.workflows.load_existing_deployment_env",
+                return_value=(Path("deployments/demo.env"), env),
+            ),
+            patch("vpn_installer.workflows.load_state", return_value={}),
+            patch("vpn_installer.workflows.build_target", wraps=targets.build_target) as build,
+            patch("vpn_installer.workflows.local_route_to_server", return_value=None),
+            patch("vpn_installer.workflows.find_client_drift", return_value=[]),
+        ):
+            self.assertEqual(workflows.client_check_workflow("demo", "all"), 0)
+        self.assertEqual(build.call_count, 1)
+        self.assertEqual(build.call_args.args[0], ROLE_RU)
+
     def test_status_workflow_prints_summary_without_mutation(self) -> None:
         env = generate_default_env("demo")
-        env["RU_PUBLIC_IP"] = "203.0.113.10"
-        env["FOREIGN_PUBLIC_IP"] = "198.51.100.20"
+        env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
+        env["EXIT_PUBLIC_IP"] = "198.51.100.20"
         ru = RemoteTarget(role=ROLE_RU)
         payload = {"schema_version": 2, "generated_at": "2026-08-06T12:00:00+00:00", "role": ROLE_RU, "services": {"sing-box": "active"}, "artifacts": {"drift": "none", "files": {}, "installed_env_sha256": ""}, "logs": {"fresh": {"window_minutes": 5, "counts": {}}, "windows_minutes": {"1440": {"counts": {}}}}, "verdicts": {"overall": "verified"}}
         with patch("vpn_installer.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), env, {}, [ru], {})), patch("vpn_installer.workflows.print_summary") as mocked, patch("vpn_installer.workflows.remote_agent_snapshot", return_value=payload) as agent_snapshot:
@@ -719,8 +1324,8 @@ class WorkflowTests(unittest.TestCase):
 
     def test_status_workflow_prints_one_structured_snapshot_per_role(self) -> None:
         env = generate_default_env("demo")
-        env["RU_PUBLIC_IP"] = "203.0.113.10"
-        env["FOREIGN_PUBLIC_IP"] = "198.51.100.20"
+        env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
+        env["EXIT_PUBLIC_IP"] = "198.51.100.20"
         ru = RemoteTarget(role=ROLE_RU)
         foreign = RemoteTarget(role=ROLE_FOREIGN)
         snapshot = {"schema_version": 2, "generated_at": "2026-08-06T12:00:00+00:00", "services": {}, "artifacts": {"drift": "none", "files": {}, "installed_env_sha256": ""}, "logs": {"fresh": {"window_minutes": 5, "counts": {}}, "windows_minutes": {"1440": {"counts": {}}}}, "verdicts": {"overall": "verified"}}
@@ -771,9 +1376,9 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(workflows.menu_workflow(), 0)
         cleanup.assert_called_once_with(None, drop_env=False, drop_runtime=False)
 
-        with patch("vpn_installer.workflows.prompt_choice", side_effect=["status", "exit"]), patch("vpn_installer.workflows.select_role_for_menu", return_value=ROLE_RU), patch("vpn_installer.workflows.status_workflow", return_value=0) as status:
+        with patch("vpn_installer.workflows.prompt_choice", side_effect=["status", "exit"]), patch("vpn_installer.workflows.select_node_for_menu", return_value="gateway"), patch("vpn_installer.workflows.status_workflow", return_value=0) as status:
             self.assertEqual(workflows.menu_workflow(), 0)
-        status.assert_called_once_with(None, ROLE_RU)
+        status.assert_called_once_with(None, "gateway")
 
     def test_run_menu_action_handles_cancel_and_error_without_propagation(self) -> None:
         with patch("sys.stderr", new_callable=__import__("io").StringIO) as stream:

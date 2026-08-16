@@ -8,7 +8,7 @@
 
 ```powershell
 .\vpn.cmd
-.\vpn.cmd status --deployment home-vpn --role all
+.\vpn.cmd status --deployment home-vpn --node all
 .\vpn.cmd verify live --deployment home-vpn
 ```
 
@@ -18,7 +18,7 @@
 
 ```powershell
 $env:VPN_NO_PAUSE="1"
-.\vpn.cmd status --deployment home-vpn --role all --non-interactive
+.\vpn.cmd status --deployment home-vpn --node all --non-interactive
 ```
 
 ## SSH-доступ
@@ -36,7 +36,7 @@ $env:VPN_NO_PAUSE="1"
 
 ### SSH password
 
-Пароль принимает встроенный Python backend, без запуска `ssh.exe`. Он используется только в памяти процесса и не сохраняется в `state` или deployment env. Для non-interactive запуска пароль передаётся через `VPN_RU_SSH_PASSWORD`, `VPN_FOREIGN_SSH_PASSWORD` либо общий `VPN_SSH_PASSWORD`.
+Пароль принимает встроенный Python backend, без запуска `ssh.exe`. Он используется только в памяти процесса и не сохраняется в `state` или deployment env. Для non-interactive запуска пароль передаётся через `VPN_GATEWAY_SSH_PASSWORD`, `VPN_EXIT_SSH_PASSWORD` либо общий `VPN_SSH_PASSWORD`. Старые имена `VPN_RU_SSH_PASSWORD`/`VPN_FOREIGN_SSH_PASSWORD` принимаются только в переходном релизе `0.20.0`.
 
 Host keys обоих режимов проверяются по управляемому файлу `state/known_hosts`. Старый state без явного `auth_mode` не угадывается: мастер заново спрашивает способ входа.
 
@@ -56,9 +56,19 @@ Host keys обоих режимов проверяются по управляе
 ## Базовая проверка
 
 ```powershell
-.\vpn.cmd status --deployment home-vpn --role all
+.\vpn.cmd status --deployment home-vpn --node all
 .\vpn.cmd diagnose path --deployment home-vpn
 .\vpn.cmd verify live --deployment home-vpn
 ```
 
 `status` и `diagnose` не меняют локальный VPN-клиент. `verify live` строит эфемерный probe из основного `vless-uri.txt`; он также не перезапускает установленный на компьютере VPN-клиент.
+
+## Веб-панель
+
+Публичный порт панели не используется. Открой loopback-only SSH tunnel через штатную точку входа:
+
+```powershell
+.\vpn.cmd admin --deployment home-vpn --open-browser
+```
+
+Без `--open-browser` открой напечатанный локальный адрес вручную. Команда использует сохранённый password/key режим и проверенный SSH host key. `Ctrl+C` закрывает tunnel; текущий VPN-клиент при этом не меняется и не перезапускается.

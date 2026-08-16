@@ -3,12 +3,67 @@ from __future__ import annotations
 import argparse
 import sys
 
+from .admin_tunnel import admin_tunnel_workflow
 from .android import DEFAULT_HIDDIFY_PACKAGE, android_diagnose
 from .common import cli_entrypoint, error_summary
+from .config import load_existing_deployment_env
 from .diagnose import diagnose_client_log_workflow, diagnose_front_workflow, diagnose_path_workflow, diagnose_server_client_workflow
-from .models import AppError, ROLE_FOREIGN, ROLE_RU, UserCancelled
+from .models import AppError, UserCancelled
+from .prompts import select_existing_deployment
 from .verify import verify_live_workflow
 from .workflows import cleanup_local_workflow, client_check_workflow, install_workflow, maintain_workflow, menu_workflow, remote_action_workflow, routes_workflow, status_workflow
+from .topology import LEGACY_ROLE_FOREIGN, LEGACY_ROLE_RU, LOCATIONS, NODE_EXIT, NODE_GATEWAY, TOPOLOGIES, TopologySpec
+
+NODE_CHOICES = ["all", NODE_GATEWAY, NODE_EXIT, LEGACY_ROLE_RU, LEGACY_ROLE_FOREIGN]
+CANONICAL_NODE_CHOICES = ["all", NODE_GATEWAY, NODE_EXIT]
+
+
+def add_node_selector(parser: argparse.ArgumentParser) -> None:
+    selector = parser.add_mutually_exclusive_group()
+    selector.add_argument("--node", choices=CANONICAL_NODE_CHOICES, help="Какой узел затронуть: gateway, exit или all.")
+    selector.add_argument(
+        "--role",
+        choices=NODE_CHOICES,
+        help="Deprecated alias для --node; будет удалён в следующем патче.",
+    )
+
+
+def selected_node(args: argparse.Namespace) -> str:
+    return str(getattr(args, "node", None) or getattr(args, "role", None) or "all")
+
+
+def resolve_route_outbound(env: dict[str, str], requested: str | None) -> str:
+    topology = TopologySpec.from_env(env, require_addresses=False)
+    available = topology.route_egresses
+    outbound = (requested or "").strip()
+    if not outbound:
+        if len(available) == 1:
+            return available[0]
+        raise AppError(f"Для topology={topology.mode} укажи --outbound: {', '.join(available)}")
+    if outbound not in available:
+        raise AppError(
+            f"Outbound {outbound!r} недоступен для topology={topology.mode}; "
+            f"доступны: {', '.join(available)}"
+        )
+    return outbound
+
+
+def dispatch_routes(args: argparse.Namespace, action: str) -> int:
+    deployment = select_existing_deployment(args.deployment)
+    _env_path, env = load_existing_deployment_env(deployment)
+    outbound = getattr(args, "outbound", "")
+    if action == "add":
+        outbound = resolve_route_outbound(env, outbound)
+    return routes_workflow(
+        deployment,
+        action,
+        value=getattr(args, "value", ""),
+        outbound=outbound,
+        rule_type=getattr(args, "rule_type", "domain"),
+        include_subdomains=getattr(args, "include_subdomains", False),
+        rule_id=getattr(args, "rule_id", ""),
+        non_interactive=args.non_interactive,
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -22,13 +77,37 @@ def build_parser() -> argparse.ArgumentParser:
     install.add_argument("--deployment", help="Имя deployment.")
     install.add_argument("--non-interactive", action="store_true", help="Не задавать вопросы; брать подключение из state/env.")
     install.add_argument("--yes", action="store_true", help="Не спрашивать финальное подтверждение.")
-    install.set_defaults(func=lambda args: install_workflow(args.deployment, non_interactive=args.non_interactive, yes=args.yes))
+    install.add_argument("--topology", choices=sorted(TOPOLOGIES), help="single или dual при создании deployment.")
+    install.add_argument("--gateway-location", choices=sorted(LOCATIONS), help="Расположение gateway; dual всегда использует ru.")
+    install.set_defaults(
+        func=lambda args: install_workflow(
+            args.deployment,
+            non_interactive=args.non_interactive,
+            yes=args.yes,
+            topology_mode=args.topology,
+            gateway_location=args.gateway_location,
+        )
+    )
 
     status = subparsers.add_parser("status", help="Проверить состояние серверов без изменений.")
     status.add_argument("--deployment", help="Имя deployment.")
-    status.add_argument("--role", choices=["all", ROLE_RU, ROLE_FOREIGN], default="all", help="Какую роль проверять.")
+    add_node_selector(status)
     status.add_argument("--non-interactive", action="store_true", help="Не задавать вопросы; брать подключение из state/env.")
-    status.set_defaults(func=lambda args: status_workflow(args.deployment, args.role, non_interactive=args.non_interactive))
+    status.set_defaults(func=lambda args: status_workflow(args.deployment, selected_node(args), non_interactive=args.non_interactive))
+
+    admin = subparsers.add_parser("admin", help="Открыть loopback-доступ к web-admin через SSH tunnel.")
+    admin.add_argument("--deployment", help="Имя deployment.")
+    admin.add_argument("--local-port", type=int, help="Локальный loopback-порт; по умолчанию равен ADMIN_WEB_PORT.")
+    admin.add_argument("--open-browser", action="store_true", help="Открыть web-admin в браузере после запуска tunnel.")
+    admin.add_argument("--non-interactive", action="store_true", help="Не задавать вопросы; брать подключение из state/env.")
+    admin.set_defaults(
+        func=lambda args: admin_tunnel_workflow(
+            args.deployment,
+            local_port=args.local_port,
+            open_browser=args.open_browser,
+            non_interactive=args.non_interactive,
+        )
+    )
 
     routes = subparsers.add_parser("routes", help="Управлять runtime-правилами web-админки через серверный backend.")
     routes_sub = routes.add_subparsers(dest="routes_command", required=True)
@@ -38,28 +117,17 @@ def build_parser() -> argparse.ArgumentParser:
         item.add_argument("--non-interactive", action="store_true", help="Не задавать вопросы; брать подключение из state/env.")
         if action == "add":
             item.add_argument("--value", required=True)
-            item.add_argument("--outbound", required=True, choices=["direct-ru", "to-foreign"])
+            item.add_argument("--outbound", help="Egress tag; для single topology определяется автоматически.")
             item.add_argument("--type", dest="rule_type", choices=["domain", "cidr"], default="domain")
             item.add_argument("--include-subdomains", action="store_true")
         if action == "remove":
             item.add_argument("--id", dest="rule_id", required=True)
-        item.set_defaults(
-            func=lambda args, action_name=action: routes_workflow(
-                args.deployment,
-                action_name,
-                value=getattr(args, "value", ""),
-                outbound=getattr(args, "outbound", ""),
-                rule_type=getattr(args, "rule_type", "domain"),
-                include_subdomains=getattr(args, "include_subdomains", False),
-                rule_id=getattr(args, "rule_id", ""),
-                non_interactive=args.non_interactive,
-            )
-        )
+        item.set_defaults(func=lambda args, action_name=action: dispatch_routes(args, action_name))
 
     client_check = subparsers.add_parser("client-check", help="Проверить локальные маршруты клиента до серверов.")
     client_check.add_argument("--deployment", help="Имя deployment.")
-    client_check.add_argument("--role", choices=["all", ROLE_RU, ROLE_FOREIGN], default="all", help="Какую роль проверять.")
-    client_check.set_defaults(func=lambda args: client_check_workflow(args.deployment, args.role))
+    add_node_selector(client_check)
+    client_check.set_defaults(func=lambda args: client_check_workflow(args.deployment, selected_node(args)))
 
     for action, help_text in (
         ("reinstall", "Переустановить одну роль или обе."),
@@ -68,10 +136,10 @@ def build_parser() -> argparse.ArgumentParser:
     ):
         sub = subparsers.add_parser(action, help=help_text)
         sub.add_argument("--deployment", help="Имя deployment.")
-        sub.add_argument("--role", choices=["all", ROLE_RU, ROLE_FOREIGN], default="all", help="Какую роль затронуть.")
+        add_node_selector(sub)
         sub.add_argument("--non-interactive", action="store_true", help="Не задавать вопросы; брать подключение из state/env.")
         sub.add_argument("--yes", action="store_true", help="Не спрашивать подтверждение действия.")
-        sub.set_defaults(func=lambda args, action_name=action: remote_action_workflow(args.deployment, args.role, action_name, non_interactive=args.non_interactive, yes=args.yes))
+        sub.set_defaults(func=lambda args, action_name=action: remote_action_workflow(args.deployment, selected_node(args), action_name, non_interactive=args.non_interactive, yes=args.yes))
 
     cleanup = subparsers.add_parser("cleanup-local", help="Удалить локальные артефакты deployment.")
     cleanup.add_argument("--deployment", help="Имя deployment.")
@@ -113,15 +181,15 @@ def build_parser() -> argparse.ArgumentParser:
     diagnose_subparsers = diagnose.add_subparsers(dest="diagnose_command", required=True)
     path = diagnose_subparsers.add_parser("path", help="Собрать структурный snapshot маршрутов, WireGuard, front и журналов.")
     path.add_argument("--deployment", help="Имя deployment.")
-    path.add_argument("--role", choices=["all", ROLE_RU, ROLE_FOREIGN], default="all", help="Какую роль проверять.")
+    add_node_selector(path)
     path.add_argument("--iperf", action="store_true", help="Дополнительно выполнить явный iperf test; runtime-policy и firewall не меняются.")
     path.add_argument("--non-interactive", action="store_true", help="Не задавать вопросы; брать подключение из state/env.")
-    path.set_defaults(func=lambda args: diagnose_path_workflow(args.deployment, args.role, iperf=args.iperf, non_interactive=args.non_interactive))
+    path.set_defaults(func=lambda args: diagnose_path_workflow(args.deployment, selected_node(args), iperf=args.iperf, non_interactive=args.non_interactive))
     client_log = diagnose_subparsers.add_parser("client-log", help="Разобрать локальный sing-box/Hiddify log и проверить route self-tunnel.")
     client_log.add_argument("--path", required=True, help="Путь к текстовому client log.")
     client_log.add_argument("--deployment", help="Имя deployment для проверки маршрута до серверов.")
-    client_log.add_argument("--role", choices=["all", ROLE_RU, ROLE_FOREIGN], default="all", help="Какую роль проверять в локальном route check.")
-    client_log.set_defaults(func=lambda args: diagnose_client_log_workflow(args.path, deployment=args.deployment, role=args.role))
+    add_node_selector(client_log)
+    client_log.set_defaults(func=lambda args: diagnose_client_log_workflow(args.path, deployment=args.deployment, role=selected_node(args)))
     front = diagnose_subparsers.add_parser("front", help="Проверить публичный RU:443 front и source IP конкретного клиента.")
     front.add_argument("--deployment", help="Имя deployment.")
     front.add_argument("--source-ip", help="Публичный IP проблемного устройства/сети, если известен.")

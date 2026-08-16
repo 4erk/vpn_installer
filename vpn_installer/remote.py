@@ -626,10 +626,15 @@ def preflight_script(
             "service_state() { systemctl is-active \"$1\" 2>/dev/null || true; }",
             "os_id=''; os_version=''",
             "if [[ -r /etc/os-release ]]; then . /etc/os-release; os_id=\"${ID:-}\"; os_version=\"${VERSION_ID:-}\"; fi",
-            "installed=0; role=''; deployment_name=''; installed_at=''",
-            "[[ -r /etc/vpn-stack/role ]] && role=\"$(tr -d '\\r\\n' </etc/vpn-stack/role)\"",
-            "[[ -r /etc/vpn-stack/installed_at ]] && installed_at=\"$(tr -d '\\r\\n' </etc/vpn-stack/installed_at)\"",
-            "[[ -n \"$role\" && -n \"$installed_at\" ]] && installed=1",
+            "installed=0; node_id=''; role=''; deployment_name=''; installed_at=''",
+            "[[ -r /etc/vpn-stack/node-id ]] && node_id=\"$(tr -d '\\r\\n' </etc/vpn-stack/node-id)\"",
+            "[[ -r /etc/vpn-stack/installed-at ]] && installed_at=\"$(tr -d '\\r\\n' </etc/vpn-stack/installed-at)\"",
+            "# One-release fallback for pre-0.20 metadata.",
+            "if [[ -z \"$role\" && -r /etc/vpn-stack/role ]]; then role=\"$(tr -d '\\r\\n' </etc/vpn-stack/role)\"; fi",
+            "if [[ -z \"$installed_at\" && -r /etc/vpn-stack/installed_at ]]; then installed_at=\"$(tr -d '\\r\\n' </etc/vpn-stack/installed_at)\"; fi",
+            "if [[ -z \"$node_id\" ]]; then case \"$role\" in ru-gateway) node_id=gateway ;; foreign-exit) node_id=exit ;; esac; fi",
+            "if [[ -z \"$role\" ]]; then case \"$node_id\" in gateway) role=ru-gateway ;; exit) role=foreign-exit ;; esac; fi",
+            "[[ -n \"$node_id\" && -n \"$installed_at\" ]] && installed=1",
             "if [[ -r /etc/vpn-stack/deployment.env ]]; then deployment_name=\"$(awk -F= '$1 == \"DEPLOY_NAME\" {gsub(/^\"|\"$/, \"\", $2); print $2; exit}' /etc/vpn-stack/deployment.env)\"; fi",
             "default_iface=\"$(ip route show default 2>/dev/null | awk '/default/ {print $5; exit}')\"",
             "wg_latest_handshake=''; wg_transfer_rx=''; wg_transfer_tx=''",
@@ -648,6 +653,7 @@ def preflight_script(
             "printf 'default_iface=%s\\n' \"$default_iface\"",
             "printf 'installed=%s\\n' \"$installed\"",
             "printf 'deployment_name=%s\\n' \"$deployment_name\"",
+            "printf 'node_id=%s\\n' \"$node_id\"",
             "printf 'role=%s\\n' \"$role\"",
             "printf 'installed_at=%s\\n' \"$installed_at\"",
             "printf 'sing_box=%s\\n' \"$(service_state sing-box.service)\"",
@@ -697,7 +703,7 @@ def remote_agent_snapshot(target: RemoteTarget, *, live_probes: bool = False, pr
     if compact:
         command += " --compact"
     payload = json.loads(ssh_capture(target, command, command_timeout=180 if live_probes else 90))
-    if int(payload.get("schema_version", 0)) not in {2, 3}:
+    if int(payload.get("schema_version", 0)) not in {3, 4}:
         raise AppError("vpn-stack-agent returned an unsupported snapshot schema")
     return payload
 
@@ -723,6 +729,10 @@ def bootstrap_from_snapshot(snapshot: dict[str, Any]) -> dict[str, str]:
         "os_id": str(host.get("os_id", "")),
         "os_version": str(host.get("os_version", "")),
         "deployment_name": normalized.deployment,
+        "topology": normalized.topology,
+        "node": normalized.node_id,
+        "location": normalized.location,
+        "capabilities": ",".join(normalized.capabilities),
         "role": normalized.role,
         "installed": "1" if normalized.release.get("release_id") else "0",
         "release_id": str(normalized.release.get("release_id", "")),
@@ -779,30 +789,43 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
     print(f"login user: {preflight.get('login_user', '-')}")
     print(f"os: {preflight.get('os_id', '-')} {preflight.get('os_version', '-')}")
     print(f"default iface: {preflight.get('default_iface', '-')}")
-    print(f"installed: {preflight.get('installed', '0')}; deployment: {preflight.get('deployment_name', '-')}; role: {preflight.get('role', '-')}")
+    print(
+        f"installed: {preflight.get('installed', '0')}; deployment: {preflight.get('deployment_name', '-')}; "
+        f"topology: {preflight.get('topology', '-')}; node: {preflight.get('node', '-')}; location: {preflight.get('location', '-')}"
+    )
     if preflight.get("drift"):
         print(f"drift: {preflight['drift']}")
-    print(
-        "services: "
-        f"wg={preflight.get('wireguard', '-')}, nft={preflight.get('nftables', '-')}, "
-        f"sing-box={preflight.get('sing_box', '-')}, xray={preflight.get('xray', '-')}, "
-        f"resolver={preflight.get('resolver', '-')}, health={preflight.get('health_timer', '-')}"
-    )
-    print(
-        "wireguard: "
-        f"handshake_age_s={preflight.get('wg_latest_handshake_age_s', '-')}, "
-        f"transfer_rx_tx={preflight.get('wg_transfer_rx', '-')}/{preflight.get('wg_transfer_tx', '-')}"
-    )
-    print(
-        "front: "
-        f"rtt_p95_ms={preflight.get('front_rtt_p95_ms', '-')}, "
-        f"retransmissions_lifetime={preflight.get('front_retransmissions_lifetime', '0')}, "
-        f"retransmit_ratio_pct={preflight.get('front_retransmit_ratio_pct', '0')}, "
-        f"active={preflight.get('front_active_connections', '0')}, "
-        f"closing={preflight.get('front_closing_connections', '0')}, "
-        f"fin_wait_1={preflight.get('front_fin_wait_1', '0')}"
-    )
-    print(f"front retransmission scope: {preflight.get('front_retransmissions_scope', 'unknown')}")
+    capabilities = set(filter(None, preflight.get("capabilities", "").split(",")))
+    service_parts = [
+        f"nft={preflight.get('nftables', '-')}",
+        f"sing-box={preflight.get('sing_box', '-')}",
+        f"resolver={preflight.get('resolver', '-')}",
+        f"health={preflight.get('health_timer', '-')}",
+    ]
+    if capabilities & {"interserver-client", "interserver-server"}:
+        service_parts.append(f"wg={preflight.get('wireguard', '-')}")
+    if "public-front" in capabilities:
+        service_parts.append(f"xray={preflight.get('xray', '-')}")
+    if "web-admin" in capabilities:
+        service_parts.append(f"admin={preflight.get('admin', '-')}")
+    print("services: " + ", ".join(service_parts))
+    if capabilities & {"interserver-client", "interserver-server"}:
+        print(
+            "wireguard: "
+            f"handshake_age_s={preflight.get('wg_latest_handshake_age_s', '-')}, "
+            f"transfer_rx_tx={preflight.get('wg_transfer_rx', '-')}/{preflight.get('wg_transfer_tx', '-')}"
+        )
+    if "public-front" in capabilities:
+        print(
+            "front: "
+            f"rtt_p95_ms={preflight.get('front_rtt_p95_ms', '-')}, "
+            f"retransmissions_lifetime={preflight.get('front_retransmissions_lifetime', '0')}, "
+            f"retransmit_ratio_pct={preflight.get('front_retransmit_ratio_pct', '0')}, "
+            f"active={preflight.get('front_active_connections', '0')}, "
+            f"closing={preflight.get('front_closing_connections', '0')}, "
+            f"fin_wait_1={preflight.get('front_fin_wait_1', '0')}"
+        )
+        print(f"front retransmission scope: {preflight.get('front_retransmissions_scope', 'unknown')}")
     print(
         "tcp adaptation: "
         f"cc={preflight.get('tcp_congestion_control', '-')}, "

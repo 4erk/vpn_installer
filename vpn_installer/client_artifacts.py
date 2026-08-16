@@ -7,10 +7,11 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlencode
 
-from .common import OUT_DIR, cli_command, write_text
+from .common import OUT_DIR, cli_command, write_private_text
 from .config import require_env
 from .interserver_transport import HY2_SERVER_NAME
 from .models import REQUIRED_ENV_VARS
+from .topology import TopologySpec
 from .public_transport import (
     derive_public_hy2_password,
     public_hy2_certificate_fingerprint,
@@ -31,9 +32,15 @@ def deployment_out_dir(env: dict[str, str], *, out_dir: Path | None = None) -> P
     return (out_dir or OUT_DIR) / env["DEPLOY_NAME"]
 
 
+def gateway_profile_name(env: dict[str, str]) -> str:
+    topology = TopologySpec.from_env(env)
+    return "ru-gateway" if topology.is_dual else f"{topology.gateway.location}-gateway"
+
+
 def client_route_excludes(env: dict[str, str]) -> list[str]:
     route_excludes: list[str] = []
-    for auto_exclude in (env.get("RU_PUBLIC_IP", "").strip(), env.get("FOREIGN_PUBLIC_IP", "").strip()):
+    topology = TopologySpec.from_env(env)
+    for auto_exclude in (node.public_ip for node in topology.nodes):
         if auto_exclude:
             cidr = auto_exclude if "/" in auto_exclude else f"{auto_exclude}/32"
             if cidr not in route_excludes:
@@ -46,10 +53,11 @@ def client_route_excludes(env: dict[str, str]) -> list[str]:
 
 
 def render_vless_client_outbound(env: dict[str, str]) -> dict[str, Any]:
+    gateway = TopologySpec.from_env(env).gateway
     return {
         "type": "vless",
         "tag": PUBLIC_VLESS_OUTBOUND_TAG,
-        "server": env["RU_PUBLIC_IP"],
+        "server": gateway.public_ip,
         "server_port": _env_int(env, "RU_LISTEN_PORT"),
         "uuid": env["CLIENT_UUID"],
         "flow": env["CLIENT_FLOW"],
@@ -130,6 +138,7 @@ def render_client_profile(env: dict[str, str], auto_redirect: bool, *, android_s
 
 
 def render_xray_client_profile(env: dict[str, str]) -> str:
+    gateway = TopologySpec.from_env(env).gateway
     route_rules: list[dict[str, Any]] = [
         {"type": "field", "ip": ["::/0"], "outboundTag": "block"},
     ]
@@ -161,7 +170,7 @@ def render_xray_client_profile(env: dict[str, str]) -> str:
                 "settings": {
                     "vnext": [
                         {
-                            "address": env["RU_PUBLIC_IP"],
+                            "address": gateway.public_ip,
                             "port": _env_int(env, "RU_LISTEN_PORT"),
                             "users": [{"id": env["CLIENT_UUID"], "encryption": "none", "flow": env["CLIENT_FLOW"]}],
                         }
@@ -262,10 +271,12 @@ def render_windows_route_bypass_script(env: dict[str, str]) -> str:
 
 
 def render_vless_uri(env: dict[str, str]) -> str:
-    return f"vless://{env['CLIENT_UUID']}@{env['RU_PUBLIC_IP']}:{env['RU_LISTEN_PORT']}?security=reality&sni={env['RU_REALITY_SERVER_NAME']}&pbk={env['RU_REALITY_PUBLIC_KEY']}&sid={env['RU_REALITY_SHORT_ID']}&fp={env['UTLS_FINGERPRINT']}&type=tcp&flow={env['CLIENT_FLOW']}#{env['DEPLOY_NAME']}-ru-gateway\n"
+    gateway = TopologySpec.from_env(env).gateway
+    return f"vless://{env['CLIENT_UUID']}@{gateway.public_ip}:{env['RU_LISTEN_PORT']}?security=reality&sni={env['RU_REALITY_SERVER_NAME']}&pbk={env['RU_REALITY_PUBLIC_KEY']}&sid={env['RU_REALITY_SHORT_ID']}&fp={env['UTLS_FINGERPRINT']}&type=tcp&flow={env['CLIENT_FLOW']}#{env['DEPLOY_NAME']}-{gateway_profile_name(env)}\n"
 
 
 def render_hysteria2_uri(env: dict[str, str]) -> str:
+    gateway = TopologySpec.from_env(env).gateway
     password = quote(derive_public_hy2_password(env["CLIENT_UUID"]), safe="")
     query = urlencode(
         {
@@ -274,8 +285,8 @@ def render_hysteria2_uri(env: dict[str, str]) -> str:
             "pinSHA256": public_hy2_certificate_fingerprint(env),
         }
     )
-    name = quote(f"{env['DEPLOY_NAME']}-ru-gateway-quic", safe="")
-    return f"hysteria2://{password}@{env['RU_PUBLIC_IP']}:{env['RU_LISTEN_PORT']}/?{query}#{name}\n"
+    name = quote(f"{env['DEPLOY_NAME']}-{gateway_profile_name(env)}-quic", safe="")
+    return f"hysteria2://{password}@{gateway.public_ip}:{env['RU_LISTEN_PORT']}/?{query}#{name}\n"
 
 
 def client_artifact_paths(env: dict[str, str], *, out_dir: Path | None = None) -> dict[str, Path]:
@@ -330,7 +341,7 @@ def prepare_client_artifact_dir(client_dir: Path) -> None:
 
 def render_next_steps(env: dict[str, str], *, out_dir: Path | None = None) -> str:
     paths = client_artifact_paths(env, out_dir=out_dir)
-    status_command = cli_command(f"status --deployment {env['DEPLOY_NAME']} --role ru-gateway")
+    status_command = cli_command(f"status --deployment {env['DEPLOY_NAME']} --node gateway")
     verify_command = cli_command(f"verify live --deployment {env['DEPLOY_NAME']}")
     return "\n".join(
         [
@@ -367,17 +378,17 @@ def render_client_profiles(env: dict[str, str], *, out_dir: Path | None = None) 
     require_env(env, REQUIRED_ENV_VARS)
     paths = client_artifact_paths(env, out_dir=out_dir)
     prepare_client_artifact_dir(paths["client_dir"])
-    write_text(paths["hiddify_json"], render_client_profile(env, auto_redirect=False))
-    write_text(paths["android_hiddify_json"], render_client_profile(env, auto_redirect=False, android_safe=True))
-    write_text(paths["linux_json"], render_client_profile(env, auto_redirect=True))
+    write_private_text(paths["hiddify_json"], render_client_profile(env, auto_redirect=False))
+    write_private_text(paths["android_hiddify_json"], render_client_profile(env, auto_redirect=False, android_safe=True))
+    write_private_text(paths["linux_json"], render_client_profile(env, auto_redirect=True))
     xray_profile = render_xray_client_profile(env)
-    write_text(paths["windows_xray_json"], xray_profile)
-    write_text(paths["android_xray_json"], xray_profile)
-    write_text(paths["windows_route_bypass"], render_windows_route_bypass_script(env))
+    write_private_text(paths["windows_xray_json"], xray_profile)
+    write_private_text(paths["android_xray_json"], xray_profile)
+    write_private_text(paths["windows_route_bypass"], render_windows_route_bypass_script(env))
     uri_payload = render_vless_uri(env)
-    write_text(paths["vless_uri"], uri_payload)
-    write_text(paths["hiddify_uri_compat"], uri_payload)
-    write_text(paths["v2rayn_uri"], uri_payload)
-    write_text(paths["hysteria2_uri"], render_hysteria2_uri(env))
-    write_text(paths["next_steps"], render_next_steps(env, out_dir=out_dir))
+    write_private_text(paths["vless_uri"], uri_payload)
+    write_private_text(paths["hiddify_uri_compat"], uri_payload)
+    write_private_text(paths["v2rayn_uri"], uri_payload)
+    write_private_text(paths["hysteria2_uri"], render_hysteria2_uri(env))
+    write_private_text(paths["next_steps"], render_next_steps(env, out_dir=out_dir))
     return paths["client_dir"]
