@@ -2183,6 +2183,7 @@ class ServerAgentTests(unittest.TestCase):
             patch.object(server_agent, "read_json", return_value=previous),
             patch.object(server_agent, "collect_transport_probes") as probes,
             patch.object(server_agent, "select_transport") as select,
+            patch.object(server_agent, "write_json_atomic"),
         ):
             result = server_agent.reconcile_interserver_transport()
 
