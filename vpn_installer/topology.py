@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Mapping
 
 
-CONFIG_SCHEMA_VERSION = 2
+CONFIG_SCHEMA_VERSION = 3
 
 TOPOLOGY_SINGLE = "single"
 TOPOLOGY_DUAL = "dual"
@@ -19,14 +19,6 @@ NODE_GATEWAY = "gateway"
 NODE_EXIT = "exit"
 NODE_IDS = frozenset({NODE_GATEWAY, NODE_EXIT})
 
-LEGACY_ROLE_RU = "ru-gateway"
-LEGACY_ROLE_FOREIGN = "foreign-exit"
-LEGACY_ROLE_TO_NODE = {
-    LEGACY_ROLE_RU: NODE_GATEWAY,
-    LEGACY_ROLE_FOREIGN: NODE_EXIT,
-}
-NODE_TO_LEGACY_ROLE = {value: key for key, value in LEGACY_ROLE_TO_NODE.items()}
-
 CAP_PUBLIC_FRONT = "public-front"
 CAP_ROUTER = "router"
 CAP_WEB_ADMIN = "web-admin"
@@ -39,19 +31,52 @@ CAP_NAT_EXIT = "nat-exit"
 SINGLE_EGRESS_TAGS = ("local-egress",)
 DUAL_EGRESS_TAGS = ("direct-ru", "to-foreign")
 
-_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
-
+# Fields that have no meaning without an independent exit node. Keeping this
+# list next to the topology model makes generation, upgrade and validation use
+# the same capability boundary.
+DUAL_ONLY_ENV_KEYS = frozenset(
+    {
+        "EXIT_PUBLIC_IP",
+        "WAN_INTERFACE",
+        "WG_INTERFACE",
+        "WG_PORT",
+        "WG_MTU",
+        "WG_ROUTE_TABLE",
+        "APP_ROUTE_MARK",
+        "WG_TUNNEL_FWMARK",
+        "WG_RU_ADDRESS",
+        "WG_FOREIGN_ADDRESS",
+        "WG_RU_ADDRESS_V6",
+        "WG_FOREIGN_ADDRESS_V6",
+        "WG_IPV6_PREFIX",
+        "WG_RU_PRIVATE_KEY",
+        "WG_RU_PUBLIC_KEY",
+        "WG_FOREIGN_PRIVATE_KEY",
+        "WG_FOREIGN_PUBLIC_KEY",
+        "WG_PRESHARED_KEY",
+        "INTERSERVER_HY2_CERTIFICATE_B64",
+        "INTERSERVER_HY2_PRIVATE_KEY_B64",
+        "INTERSERVER_HY2_PUBLIC_KEY_SHA256",
+        "RU_FORCE_DIRECT_DOMAIN",
+        "RU_FORCE_DIRECT_DOMAIN_SUFFIX",
+        "RU_FORCE_DIRECT_IP_CIDR",
+        "RULESET_DIR",
+        "RU_GEOSITE_URL",
+        "RU_GEOIP_URL",
+        "FOREIGN_BLOCK_RU",
+        "FOREIGN_RU_IPV4_LIST_URL",
+        "FOREIGN_RU_IPV6_LIST_URL",
+        "ADMIN_WEB_PORT",
+        "ADMIN_WEB_USERNAME",
+        "ADMIN_WEB_PASSWORD",
+    }
+)
 
 def normalize_node_id(value: str) -> str:
     normalized = str(value).strip().lower()
-    normalized = LEGACY_ROLE_TO_NODE.get(normalized, normalized)
     if normalized not in NODE_IDS:
         raise ValueError(f"unsupported node: {value}")
     return normalized
-
-
-def legacy_role_for_node(node_id: str) -> str:
-    return NODE_TO_LEGACY_ROLE[normalize_node_id(node_id)]
 
 
 @dataclass(frozen=True)
@@ -124,7 +149,6 @@ class TopologySpec:
     mode: str
     gateway: NodeSpec
     exit: NodeSpec | None = None
-    admin_web_enabled: bool = True
 
     def __post_init__(self) -> None:
         mode = self.mode.strip().lower()
@@ -170,10 +194,8 @@ class TopologySpec:
                 CAP_ROUTER,
                 CAP_LOCAL_EGRESS,
             }
-            if self.admin_web_enabled:
-                capabilities.add(CAP_WEB_ADMIN)
             if self.is_dual:
-                capabilities.update({CAP_RU_SPLIT_ROUTING, CAP_INTERSERVER_CLIENT})
+                capabilities.update({CAP_RU_SPLIT_ROUTING, CAP_INTERSERVER_CLIENT, CAP_WEB_ADMIN})
         else:
             capabilities = {CAP_INTERSERVER_SERVER, CAP_NAT_EXIT}
         return NodePlan(node=node, topology=self.mode, capabilities=frozenset(capabilities))
@@ -190,11 +212,10 @@ class TopologySpec:
         if require_addresses and not gateway_ip:
             raise ValueError("gateway public IP is required")
         gateway = NodeSpec(NODE_GATEWAY, gateway_location, gateway_ip)
-        admin_web_enabled = str(env.get("ADMIN_WEB_ENABLED", "1")).strip().lower() in _TRUE_VALUES
         if mode == TOPOLOGY_SINGLE:
             if str(env.get("EXIT_PUBLIC_IP", "")).strip():
                 raise ValueError("single topology cannot contain EXIT_PUBLIC_IP")
-            return cls(mode=mode, gateway=gateway, admin_web_enabled=admin_web_enabled)
+            return cls(mode=mode, gateway=gateway)
         exit_ip = str(env.get("EXIT_PUBLIC_IP", "")).strip()
         if require_addresses and not exit_ip:
             raise ValueError("exit public IP is required for dual topology")
@@ -202,18 +223,22 @@ class TopologySpec:
             mode=mode,
             gateway=gateway,
             exit=NodeSpec(NODE_EXIT, LOCATION_FOREIGN, exit_ip),
-            admin_web_enabled=admin_web_enabled,
         )
 
     def canonical_env_values(self) -> dict[str, str]:
-        return {
+        values = {
             "CONFIG_SCHEMA": str(CONFIG_SCHEMA_VERSION),
             "TOPOLOGY": self.mode,
             "GATEWAY_LOCATION": self.gateway.location,
             "GATEWAY_PUBLIC_IP": self.gateway.public_ip,
-            "EXIT_PUBLIC_IP": self.exit.public_ip if self.exit else "",
-            "ADMIN_WEB_ENABLED": "1" if self.admin_web_enabled else "0",
         }
+        if self.exit is not None:
+            values["EXIT_PUBLIC_IP"] = self.exit.public_ip
+        return values
+
+
+def requested_node_ids(node_arg: str) -> list[str]:
+    return [NODE_GATEWAY, NODE_EXIT] if node_arg == "all" else [normalize_node_id(node_arg)]
 
 
 def execution_node_ids(action: str, topology: TopologySpec, selected: tuple[str, ...] | None = None) -> list[str]:

@@ -7,19 +7,30 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from vpn_installer import VERSION
 from vpn_installer.audit import docker as audit_docker
 from vpn_installer.audit import lab as audit_lab
 from vpn_installer.audit import quick as audit_quick
 from vpn_installer.audit.runner import AuditFailure
 from vpn_installer.client_artifacts import PUBLIC_VLESS_OUTBOUND_TAG
 from vpn_installer.config import generate_default_env
+from vpn_installer.diagnostics import SCHEMA_VERSION as DIAGNOSTICS_SCHEMA_VERSION
+from vpn_installer.manifest import INSTALL_PLAN_SCHEMA_VERSION, MANIFEST_SCHEMA_VERSION
 from vpn_installer.topology import (
+    CONFIG_SCHEMA_VERSION,
     LOCATION_FOREIGN,
     LOCATION_RU,
     NODE_EXIT,
     NODE_GATEWAY,
     TOPOLOGY_DUAL,
     TOPOLOGY_SINGLE,
+)
+from vpn_installer.upgrade_0200 import (
+    SOURCE_CONFIG_SCHEMA,
+    SOURCE_DIAGNOSTICS_SCHEMA,
+    SOURCE_INSTALL_PLAN_SCHEMA,
+    SOURCE_MANIFEST_SCHEMA,
+    SOURCE_STATE_SCHEMA,
 )
 
 
@@ -95,11 +106,11 @@ class AuditModuleTests(unittest.TestCase):
         verified = audit_docker.acceptance_snapshot_fixture("verified")
         failed = audit_docker.acceptance_snapshot_fixture("failed")
 
-        self.assertEqual(verified["schema_version"], 4)
+        self.assertEqual(verified["schema_version"], DIAGNOSTICS_SCHEMA_VERSION)
         self.assertEqual(verified["topology"], TOPOLOGY_DUAL)
         self.assertEqual(verified["node_id"], NODE_EXIT)
         self.assertEqual(verified["location"], LOCATION_FOREIGN)
-        self.assertEqual(verified["role"], "")
+        self.assertNotIn("role", verified)
         self.assertIn("wireguard", verified["services"])
         self.assertNotIn("xray", verified["services"])
         self.assertEqual(verified["network"], {"profile_mismatches": []})
@@ -253,34 +264,58 @@ class AuditModuleTests(unittest.TestCase):
         runner = FakeRunner()
         audit_docker.run(runner)  # type: ignore[arg-type]
         self.assertIn("docker-unmanaged-remove-purge-render-only", runner.records)
-        self.assertIn("docker-schema2-to-schema3-migration", runner.records)
+        self.assertIn("docker-0200-to-0201-transition", runner.records)
         self.assertIn("docker-install-rollback-state", runner.records)
         self.assertIn("docker-node-scoped-workflows", runner.records)
 
-    def test_schema2_migration_linux_gate_covers_direct_cleanup_and_fail_closed_paths(self) -> None:
-        builder = audit_docker.schema2_fixture_builder_text()
-        compile(builder, "<schema2-fixture-builder>", "exec")
-        self.assertIn("_COMMON_ARTIFACT_PATHS", builder)
-        self.assertIn('effective_paths.append("/etc/sing-box/config.json")', builder)
+    def test_0200_transition_gate_is_exact_and_rejects_out_of_window_releases(self) -> None:
+        self.assertEqual(VERSION, "0.20.1")
+        self.assertEqual(
+            (
+                SOURCE_CONFIG_SCHEMA,
+                SOURCE_STATE_SCHEMA,
+                SOURCE_MANIFEST_SCHEMA,
+                SOURCE_INSTALL_PLAN_SCHEMA,
+                SOURCE_DIAGNOSTICS_SCHEMA,
+            ),
+            (2, 2, 3, 3, 4),
+        )
+        self.assertEqual(
+            (
+                CONFIG_SCHEMA_VERSION,
+                MANIFEST_SCHEMA_VERSION,
+                INSTALL_PLAN_SCHEMA_VERSION,
+                DIAGNOSTICS_SCHEMA_VERSION,
+            ),
+            (3, 4, 4, 5),
+        )
 
-        script = audit_docker.schema2_migration_acceptance_script()
-        self.assertEqual(script.count("support adapt-schema2"), 3)
-        self.assertIn("schema2.paths", script)
-        self.assertIn("schema3.paths", script)
-        self.assertIn("comm -23", script)
-        self.assertIn("intermediate dual schema-3 contract is not allowed", script)
-        self.assertIn("/etc/wireguard/wg0.conf", script)
-        self.assertIn("vpn-stack-transport.service", script)
-        self.assertIn("owned live path was modified: /etc/xray/config.json", script)
-        self.assertIn("/etc/sing-box/config.json", script)
-        self.assertIn("/etc/vpn-stack/sing-box.base.json", script)
-        self.assertIn('test "$(meta_value "$gateway_contract" topology)" = dual', script)
-        self.assertIn('test "$(meta_value "$single_contract" topology)" = single', script)
-        self.assertNotIn("--node exit", script)
-        self.assertLessEqual(audit_docker.SCHEMA2_MIGRATION_TIMEOUT_SECONDS, 45)
+        builder = audit_docker.release_0200_fixture_builder_text()
+        compile(builder, "<release-0200-fixture-builder>", "exec")
+        self.assertIn('"version": "0.20.0"', builder)
+        self.assertIn("SOURCE_MANIFEST_SCHEMA", builder)
+        self.assertNotIn("legacy_install_contract", builder)
+        self.assertNotIn("LEGACY_ROLE", builder)
 
-    def test_transaction_rollback_linux_gate_uses_schema_three_helpers(self) -> None:
-        script = audit_docker.transaction_rollback_acceptance_script(repr("{}"))
+        script = audit_docker.upgrade_0200_acceptance_script()
+        self.assertIn("support validate-installed", script)
+        self.assertIn("upgrade_env(source_env)", script)
+        self.assertIn("upgrade_state(source_state)", script)
+        self.assertIn("upgrade_diagnostics_snapshot", script)
+        self.assertIn('(2, 2, 3, 3, 4)', script)
+        self.assertIn('(3, 4, 4, 5)', script)
+        self.assertIn('("0.19.10", "0.20.2")', script)
+        self.assertIn("cannot be updated", script)
+        self.assertNotIn("adapt-schema2", script)
+        self.assertLessEqual(audit_docker.UPGRADE_0200_TIMEOUT_SECONDS, 45)
+
+        module_source = Path(audit_docker.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("legacy_install_contract", module_source)
+        self.assertNotIn("LEGACY_ROLE", module_source)
+        self.assertNotIn("docker-schema2-to-schema3-migration", module_source)
+
+    def test_transaction_rollback_linux_gate_uses_bounded_release_contracts(self) -> None:
+        script = audit_docker.transaction_rollback_acceptance_script(repr("{}"), "audit-upgrade")
 
         for helper in (
             "build_operation_scope",
@@ -298,7 +333,7 @@ class AuditModuleTests(unittest.TestCase):
             "single-rollback-without-wireguard",
             "node-mismatch-rejection",
             "sigkill-production-cutover-reconciliation",
-            "schema2-rollback-verification",
+            "release-0200-rollback-verification",
         ):
             self.assertIn(f"pass_gate {gate}", script)
         for stale in (
@@ -315,14 +350,19 @@ class AuditModuleTests(unittest.TestCase):
         self.assertIn('flock 9', script)
         self.assertIn('grep -Fxq "is-enabled $unit"', script)
         self.assertIn('grep -Fxq "is-active $unit"', script)
-        self.assertIn('test "$expected_enabled" = disabled', script)
-        crash_section = script.split("cp \"$PREVIOUS_CONTRACT/services.tsv\" /work/schema2-services.tsv", 1)[1].split(
+        self.assertIn('test "$expected_enabled" = enabled', script)
+        self.assertIn('test "$expected_active" = active', script)
+        crash_section = script.split("cp \"$PREVIOUS_CONTRACT/services.tsv\" /work/release-0200-services.tsv", 1)[1].split(
             "pass_gate sigkill-production-cutover-reconciliation", 1
         )[0]
         self.assertIn("install_action", crash_section)
         self.assertNotIn("install_planned_links", crash_section)
         self.assertNotIn("switch_current_release", crash_section)
         self.assertNotIn("retire_previous_services", crash_section)
+        self.assertIn("release_0200", crash_section)
+        self.assertIn("build-release-0200.py", script)
+        self.assertNotIn("build-schema2.py", script)
+        self.assertNotIn("manifest_schema", script)
         self.assertEqual(script.count("pass_gate "), 6)
         self.assertLessEqual(audit_docker.TRANSACTION_ACCEPTANCE_TIMEOUT_SECONDS, 45)
 

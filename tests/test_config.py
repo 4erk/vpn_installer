@@ -94,24 +94,9 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(env["SSH_MAX_STARTUPS"], "10:30:60")
         self.assertEqual(env["SSH_PER_SOURCE_MAX_STARTUPS"], "6")
 
-    def test_merge_env_with_defaults_drops_legacy_routing_knobs(self) -> None:
-        env = config.merge_env_with_defaults(
-            {
-                "RU_LITERAL_POLICY": "reject",
-                "RU_IPV6_LITERAL_POLICY": "reject",
-                "TO_FOREIGN_CONNECT_TIMEOUT": "5s",
-                "TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT": "750ms",
-                "SSH_INPUT_RATE": "12/minute",
-                "SSH_INPUT_BURST": "6",
-                "RU_HTTPS_INPUT_RATE": "120/minute",
-                "RU_HTTPS_INPUT_BURST": "60",
-                "RU_DIRECT_DNS_SERVER": "77.88.8.8",
-                "RU_DIRECT_DNS_PORT": "53",
-                "RU_BLOCK_QUIC": "1",
-            },
-            "sample",
-        )
-        self.assertFalse(set(config.DEPRECATED_ENV_KEYS) & set(env))
+    def test_current_schema_rejects_removed_routing_knobs(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unsupported deployment env keys"):
+            config.merge_env_with_defaults({"RU_LITERAL_POLICY": "reject"}, "sample")
 
     def test_merge_env_with_defaults_preserves_explicit_operator_values(self) -> None:
         env = config.merge_env_with_defaults(
@@ -195,33 +180,17 @@ class ConfigTests(unittest.TestCase):
         env = config.generate_default_env("sample")
         self.assertEqual(env["RU_LISTEN_PORT"], "443")
 
-    def test_merge_env_with_defaults_removes_deprecated_compat_values(self) -> None:
-        env = config.merge_env_with_defaults(
-            {
-                "CLIENT_COMPAT_UUID": "11111111-1111-1111-1111-111111111111",
-                "RU_COMPAT_LISTEN_PORTS": "8443",
-                "WG_KEEPALIVE": "25",
-            },
-            "sample",
-        )
-        self.assertNotIn("CLIENT_COMPAT_UUID", env)
-        self.assertNotIn("RU_COMPAT_LISTEN_PORTS", env)
-        self.assertNotIn("WG_KEEPALIVE", env)
+    def test_current_schema_rejects_removed_compat_values(self) -> None:
+        with self.assertRaisesRegex(ValueError, "CLIENT_COMPAT_UUID"):
+            config.merge_env_with_defaults({"CLIENT_COMPAT_UUID": "unused"}, "sample")
 
     def test_default_reality_time_tolerance_is_explicit(self) -> None:
         env = config.generate_default_env("sample")
         self.assertEqual(env["RU_REALITY_MAX_TIME_DIFFERENCE"], "24h")
 
-    def test_reality_handshake_target_is_not_an_operator_env_override(self) -> None:
-        env = config.merge_env_with_defaults(
-            {
-                "RU_REALITY_HANDSHAKE_SERVER": "www.bing.com",
-                "RU_REALITY_HANDSHAKE_PORT": "443",
-            },
-            "sample",
-        )
-        self.assertNotIn("RU_REALITY_HANDSHAKE_SERVER", env)
-        self.assertNotIn("RU_REALITY_HANDSHAKE_PORT", env)
+    def test_reality_handshake_target_override_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "RU_REALITY_HANDSHAKE"):
+            config.merge_env_with_defaults({"RU_REALITY_HANDSHAKE_SERVER": "www.bing.com"}, "sample")
 
     def test_default_reality_accepts_empty_short_id_for_mobile_compat(self) -> None:
         env = config.generate_default_env("sample")
@@ -293,8 +262,7 @@ class ConfigTests(unittest.TestCase):
         single = config.merge_env_with_defaults(dual, "sample")
         self.assertEqual(single["TOPOLOGY"], "single")
         self.assertEqual(single["GATEWAY_LOCATION"], "foreign")
-        for key in config.DUAL_REQUIRED_ENV_VARS:
-            self.assertEqual(single[key], "", key)
+        self.assertFalse(config.DUAL_ONLY_ENV_KEYS & single.keys())
 
     def test_single_to_dual_migration_generates_interserver_secrets(self) -> None:
         single = config.generate_default_env("sample", topology="single", gateway_location="ru")
@@ -331,20 +299,9 @@ class ConfigTests(unittest.TestCase):
         self.assertNotIn(".ipify.org", suffixes)
         self.assertNotIn(".gstatic.com", suffixes)
 
-    def test_merge_env_with_defaults_removes_legacy_network_defaults(self) -> None:
-        block_merged = config.merge_env_with_defaults(
-            {
-                "RU_BLOCK_IP_CIDR": "91.108.56.0/22",
-                "RU_IPV6_POLICY": "block",
-                "GUARD_REALITY_BLOCK_ENABLED": "1",
-            },
-            "sample",
-        )
-        fast_fail_merged = config.merge_env_with_defaults({"RU_IPV6_POLICY": "fast-fail"}, "sample")
-        self.assertEqual(block_merged["RU_BLOCK_IP_CIDR"], "91.108.56.0/22")
-        self.assertNotIn("RU_IPV6_POLICY", block_merged)
-        self.assertNotIn("GUARD_REALITY_BLOCK_ENABLED", block_merged)
-        self.assertNotIn("RU_IPV6_POLICY", fast_fail_merged)
+    def test_current_schema_rejects_removed_network_policy(self) -> None:
+        with self.assertRaisesRegex(ValueError, "RU_IPV6_POLICY"):
+            config.merge_env_with_defaults({"RU_IPV6_POLICY": "block"}, "sample")
 
     def test_merge_env_with_defaults_appends_new_asset_sources(self) -> None:
         merged = config.merge_env_with_defaults({"RU_GEOSITE_URL": "https://legacy.example/geosite.srs"}, "sample")
@@ -353,18 +310,9 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(any("raw.githubusercontent.com/SagerNet/sing-geosite" in source for source in geosite_sources))
         self.assertTrue(any("cdn.jsdelivr.net/gh/SagerNet/sing-geosite" in source for source in geosite_sources))
 
-    def test_merge_env_with_defaults_removes_legacy_health_probe_parameters(self) -> None:
-        merged = config.merge_env_with_defaults(
-            {
-                "HEALTH_TARGET_PROBE_URLS": "https://chatgpt.com/ https://github.com/",
-                "HEALTH_RU_DIRECT_TARGET_PROBE_URLS": "https://api.ipify.org/",
-                "HEALTH_TARGET_MAX_TIME_SECONDS": "4",
-            },
-            "sample",
-        )
-        self.assertNotIn("HEALTH_TARGET_PROBE_URLS", merged)
-        self.assertNotIn("HEALTH_RU_DIRECT_TARGET_PROBE_URLS", merged)
-        self.assertNotIn("HEALTH_TARGET_MAX_TIME_SECONDS", merged)
+    def test_current_schema_rejects_removed_health_parameters(self) -> None:
+        with self.assertRaisesRegex(ValueError, "HEALTH_TARGET_PROBE_URLS"):
+            config.merge_env_with_defaults({"HEALTH_TARGET_PROBE_URLS": "https://example.com"}, "sample")
 
     def test_apply_ru_direct_overlays_merges_files_with_comments_and_deduplicates(self) -> None:
         env = config.generate_default_env("demo")
@@ -401,11 +349,12 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(env["RU_LISTEN_PORT"], "443")
         self.assertEqual(env["RU_REALITY_MAX_TIME_DIFFERENCE"], "24h")
         self.assertEqual(env["FOREIGN_BLOCK_RU"], "0")
-        self.assertEqual(env["ADMIN_WEB_ENABLED"], "1")
+        self.assertIn("ADMIN_WEB_PORT", env)
+        self.assertNotIn("ADMIN_WEB_ENABLED", env)
         self.assertNotIn("ADMIN_WEB_BIND", env)
         self.assertNotIn("ADMIN_WEB_ACTIVE_CLIENT_REQUIRED", env)
 
-    def test_legacy_admin_public_access_inputs_are_removed_fail_closed(self) -> None:
+    def test_removed_admin_inputs_are_rejected_fail_closed(self) -> None:
         legacy_keys = {
             "ADMIN_WEB_BIND": "0.0.0.0",
             "ADMIN_WEB_ACTIVE_CLIENT_REQUIRED": "1",
@@ -414,13 +363,8 @@ class ConfigTests(unittest.TestCase):
             "ADMIN_WEB_ALLOWED_CIDR": "0.0.0.0/0",
             "ADMIN_WEB_ALLOW_WG": "1",
         }
-        env = config.merge_env_with_defaults(legacy_keys, "sample")
-        rendered = config.parse_env_text(config.render_env_text(env))
-
-        self.assertEqual(env["ADMIN_WEB_ENABLED"], "1")
-        for key in legacy_keys:
-            self.assertNotIn(key, env)
-            self.assertNotIn(key, rendered)
+        with self.assertRaisesRegex(ValueError, "unsupported deployment env keys"):
+            config.merge_env_with_defaults(legacy_keys, "sample")
 
     def test_split_asset_sources_supports_spaces_and_pipe(self) -> None:
         self.assertEqual(
@@ -457,7 +401,10 @@ class ConfigTests(unittest.TestCase):
             deploy_dir = Path(tmp) / "deployments"
             deploy_dir.mkdir()
             env_path = deploy_dir / "demo.env"
-            env_path.write_text('DEPLOY_NAME="demo"\nRU_PUBLIC_IP="203.0.113.10"\nFOREIGN_PUBLIC_IP="198.51.100.20"\n', encoding="utf-8")
+            current = config.generate_default_env("demo")
+            current["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
+            current["EXIT_PUBLIC_IP"] = "198.51.100.20"
+            env_path.write_text(config.render_env_text(current), encoding="utf-8")
             with patch("vpn_installer.config.DEPLOYMENTS_DIR", deploy_dir):
                 loaded_path, loaded_env = config.load_existing_deployment_env("demo")
                 names = config.find_existing_deployments()
@@ -493,7 +440,7 @@ class ConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             env_path = Path(tmp) / "demo.env"
             env_path.write_text(payload, encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "canonical/legacy conflict"):
+            with self.assertRaisesRegex(ValueError, "pre-0.20.0"):
                 config.ensure_deployment_env(env_path, "demo")
             observed = env_path.read_text(encoding="utf-8")
 

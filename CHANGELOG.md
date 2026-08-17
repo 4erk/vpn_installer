@@ -6,6 +6,27 @@
 - `minor` — новые возможности без обязательной ломки старого сценария
 - `patch` — исправления багов и точечные доработки
 
+Каждый раздел ниже описывает поведение именно указанной версии; действующий контракт задаёт верхний раздел релиза.
+
+## [0.20.1] - 2026-08-17
+
+### Added
+
+- Manifest теперь явно публикует окно совместимых установленных версий: `installed_min=0.20.0`, `installed_max=0.20.1`. Поддерживаются только fresh install, точный переход `0.20.0 -> 0.20.1` и same-version reinstall `0.20.1`.
+- Для неподдерживаемого релиза установщик останавливается до изменения managed runtime и требует выполнить `remove`/`purge` через `vpn.cmd` или `vpn.sh` из совпадающего Git-тега.
+
+### Changed
+
+- Текущий контракт использует `CONFIG_SCHEMA=3`, manifest/install-plan schema `4` и diagnostics schema `5`. Current renderer и agent читают только эти форматы.
+- `single` больше не получает WireGuard, interserver transport или web-admin dependencies: отсутствуют их пакеты, порты, units, credentials, secrets, artifacts и probes. `dual` сохраняет межсерверный transport на двух узлах и web-admin только на gateway.
+- Web-admin `dual` слушает публичный gateway. nftables допускает web-порт только для IPv4/IPv6 source, недавно достигшего публичного TCP/UDP VPN ingress; динамический допуск истекает, а Basic Auth остаётся обязательным. `vpn admin` теперь только печатает или открывает публичный URL и не создаёт SSH tunnel.
+- Все публичные команды и generated instructions используют только `--node gateway|exit|all`; `--role` и role aliases удалены.
+
+### Removed
+
+- Удалены общие legacy migration readers, role wrappers и прежний операторский переключатель web-admin. Совместимость с `0.20.0` сосредоточена в единственном модуле `vpn_installer/upgrade_0200.py` и точных version/schema validators.
+- В `0.20.2` этот модуль и все его call sites/tests удаляются целиком; минимальная обновляемая версия становится `0.20.1`, максимальная — `0.20.2`. Повышение config/state `3`, manifest/install-plan `4` или diagnostics `5` для этой очистки не планируется.
+
 ## [0.20.0] - 2026-08-17
 
 ### Added
@@ -20,7 +41,7 @@
 - CLI и сгенерированные команды используют `--node gateway|exit|all`. Старые role/IP/state/manifest readers изолированы на одной миграционной границе и удаляются в `0.20.1`; точный список опубликован в `docs/DEPRECATIONS.md`.
 - Parameterized SSH использует `VPN_GATEWAY_*`/`VPN_EXIT_*`; прежние `VPN_RU_*`/`VPN_FOREIGN_*` остаются только одно-релизным входным адаптером и не записываются в state или deployment env.
 - Web-admin сохранён на gateway. В single доступны только правила локального выхода; недоступный outbound не переназначается молча и сохраняется отключённым конфликтом для аудита.
-- Web-admin больше не открывает публичный HTTP-порт: процесс слушает только server loopback, а `vpn admin` создаёт локальный SSH tunnel с существующей проверкой host key. Route compiler и `vpn routes` относятся к gateway router и продолжают работать независимо от включения HTTP UI.
+- В `0.20.0` web-admin временно слушал server loopback, а `vpn admin` создавал локальный SSH tunnel. Этот исторический способ доступа заменён публичным firewall-gated gateway URL в `0.20.1`; route compiler и `vpn routes` по-прежнему относятся к gateway router.
 - Install сначала запускает новый capability-plan и только затем останавливает устаревшие сервисы. `current` переключается атомарно, а acceptance доказывает свежий публичный VLESS/Xray path и canonical agent contract.
 - APT package set считается монотонным prerequisite хоста и подготавливается до managed transaction snapshot. Rollback не пытается опасно удалять пакеты или откатывать их версии; он восстанавливает только принадлежащие проекту artifacts, links, service states и runtime-state.
 

@@ -26,7 +26,7 @@ AUTH_PATH = Path("/etc/vpn-stack/admin-auth.json")
 RULES_PATH = admin_apply.RULES_PATH
 PBKDF2_ROUNDS = 200_000
 CSRF_TOKEN = secrets.token_urlsafe(32)
-ADMIN_BIND = "127.0.0.1"
+ADMIN_BIND = "0.0.0.0"
 
 
 def load_env(path: Path | None = None) -> dict[str, str]:

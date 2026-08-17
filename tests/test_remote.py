@@ -9,7 +9,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from vpn_installer.models import AppError, ROLE_RU, RemoteTarget
+from vpn_installer.models import AppError, RemoteTarget
+from vpn_installer.topology import NODE_GATEWAY
 from vpn_installer.diagnostics import DiagnosticsSnapshot
 from vpn_installer.remote import (
     build_remote_command,
@@ -31,6 +32,8 @@ from vpn_installer.remote import (
     preflight_script,
     bootstrap_from_snapshot,
     print_preflight,
+    remote_agent_snapshot,
+    remote_compatible_agent_snapshot,
     remote_preflight,
     scp_base_args,
     scp_upload,
@@ -62,17 +65,17 @@ class RemoteTests(unittest.TestCase):
         self.assertNotIn("run_live_probes", script)
         self.assertNotIn("1783733000", script)
     def test_password_mode_forces_python_backend(self) -> None:
-        target = RemoteTarget(role=ROLE_RU, auth_mode="password")
+        target = RemoteTarget(node_id=NODE_GATEWAY, auth_mode="password")
         self.assertTrue(use_python_ssh_backend(target))
 
     def test_build_remote_command_with_sudo_password(self) -> None:
-        target = RemoteTarget(role=ROLE_RU, ssh_user="ubuntu", sudo_mode="password", sudo_password="secret")
+        target = RemoteTarget(node_id=NODE_GATEWAY, ssh_user="ubuntu", sudo_mode="password", sudo_password="secret")
         command, input_text = build_remote_command("echo test", target, as_root=True)
         self.assertIn("sudo -S", command)
         self.assertEqual(input_text, "secret\n")
 
     def test_build_remote_command_quotes_heredoc_and_single_quotes(self) -> None:
-        target = RemoteTarget(role=ROLE_RU, ssh_user="root")
+        target = RemoteTarget(node_id=NODE_GATEWAY, ssh_user="root")
         body = "python3 - <<'PY'\nprint('ok')\nPY"
         command, input_text = build_remote_command(body, target, as_root=True)
         self.assertIsNone(input_text)
@@ -81,17 +84,17 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("print('\"'\"'ok'\"'\"')", command)
 
     def test_build_remote_command_enforces_target_side_timeout(self) -> None:
-        target = RemoteTarget(role=ROLE_RU, ssh_user="root")
+        target = RemoteTarget(node_id=NODE_GATEWAY, ssh_user="root")
         command, _ = build_remote_command("sleep 60", target, as_root=True, command_timeout=7)
         self.assertTrue(command.startswith("timeout --signal=TERM --kill-after=5s 7s bash -lc "))
 
     def test_key_mode_uses_system_ssh_when_available(self) -> None:
-        target = RemoteTarget(role=ROLE_RU, auth_mode="key")
+        target = RemoteTarget(node_id=NODE_GATEWAY, auth_mode="key")
         with patch("vpn_installer.remote.command_exists", return_value=True):
             self.assertFalse(use_python_ssh_backend(target))
 
     def test_ssh_and_scp_base_args_include_identity(self) -> None:
-        target = RemoteTarget(role=ROLE_RU, ssh_host="203.0.113.10", ssh_port=2222, ssh_user="root", identity_path="/tmp/id")
+        target = RemoteTarget(node_id=NODE_GATEWAY, ssh_host="203.0.113.10", ssh_port=2222, ssh_user="root", identity_path="/tmp/id")
         with tempfile.TemporaryDirectory() as tmp, patch("vpn_installer.remote.KNOWN_HOSTS_PATH", Path(tmp) / "known_hosts"):
             ssh_args = ssh_base_args(target)
             scp_args = scp_base_args(target)
@@ -107,12 +110,12 @@ class RemoteTests(unittest.TestCase):
             self.assertIn(option, scp_args)
 
     def test_ssh_and_scp_base_args_include_explicit_bind_address(self) -> None:
-        target = RemoteTarget(role=ROLE_RU, ssh_host="203.0.113.10", ssh_bind_address="192.168.0.101")
+        target = RemoteTarget(node_id=NODE_GATEWAY, ssh_host="203.0.113.10", ssh_bind_address="192.168.0.101")
         self.assertIn("BindAddress=192.168.0.101", ssh_base_args(target))
         self.assertIn("BindAddress=192.168.0.101", scp_base_args(target))
 
     def test_ssh_capture_passes_timeout_to_system_ssh_backend(self) -> None:
-        target = RemoteTarget(role=ROLE_RU, ssh_host="203.0.113.10", ssh_user="root", auth_mode="key")
+        target = RemoteTarget(node_id=NODE_GATEWAY, ssh_host="203.0.113.10", ssh_user="root", auth_mode="key")
         completed = SimpleNamespace(returncode=0, stdout="ok", stderr="")
         with (
             patch("vpn_installer.remote.command_exists", return_value=True),
@@ -124,7 +127,7 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("timeout --signal=TERM --kill-after=5s 12s", run_mock.call_args.args[0][-1])
 
     def test_ssh_capture_reports_key_failure_without_password_fallback(self) -> None:
-        target = RemoteTarget(role=ROLE_RU, ssh_host="203.0.113.10", ssh_user="root", auth_mode="key")
+        target = RemoteTarget(node_id=NODE_GATEWAY, ssh_host="203.0.113.10", ssh_user="root", auth_mode="key")
         completed = SimpleNamespace(returncode=255, stdout="", stderr="Permission denied (publickey).")
         with (
             patch("vpn_installer.remote.command_exists", return_value=True),
@@ -137,21 +140,21 @@ class RemoteTests(unittest.TestCase):
         self.assertEqual(lines[1], "Permission denied (publickey).")
 
     def test_ssh_capture_passes_timeout_to_paramiko_backend(self) -> None:
-        target = RemoteTarget(role=ROLE_RU, ssh_host="203.0.113.10", ssh_user="root", auth_mode="password")
+        target = RemoteTarget(node_id=NODE_GATEWAY, ssh_host="203.0.113.10", ssh_user="root", auth_mode="password")
         with patch("vpn_installer.remote.paramiko_exec", return_value=(0, "ok", "")) as exec_mock:
             self.assertEqual(ssh_capture(target, "echo ok", command_timeout=12), "ok")
         self.assertEqual(exec_mock.call_args.kwargs["command_timeout"], 22)
         self.assertIn("timeout --signal=TERM --kill-after=5s 12s", exec_mock.call_args.args[1])
 
     def test_build_remote_command_requires_privilege_confirmation(self) -> None:
-        target = RemoteTarget(role=ROLE_RU, ssh_user="ubuntu", sudo_mode="unknown")
+        target = RemoteTarget(node_id=NODE_GATEWAY, ssh_user="ubuntu", sudo_mode="unknown")
         with self.assertRaises(AppError):
             build_remote_command("echo test", target, as_root=True)
 
     def test_paramiko_connect_uses_password_mode(self) -> None:
         fake_client = Mock()
         fake_paramiko = Mock(SSHClient=Mock(return_value=fake_client), AutoAddPolicy=Mock(return_value="policy"))
-        target = RemoteTarget(role=ROLE_RU, ssh_host="203.0.113.10", ssh_port=22, ssh_user="root", auth_mode="password", ssh_password="secret")
+        target = RemoteTarget(node_id=NODE_GATEWAY, ssh_host="203.0.113.10", ssh_port=22, ssh_user="root", auth_mode="password", ssh_password="secret")
         with patch("vpn_installer.remote.ensure_paramiko_installed", return_value=fake_paramiko):
             client = paramiko_connect(target)
         self.assertIs(client, fake_client)
@@ -226,7 +229,7 @@ class RemoteTests(unittest.TestCase):
         fake_key = Mock()
         fake_key.get_name.return_value = "ssh-ed25519"
         fake_key.asbytes.return_value = b"key"
-        target = RemoteTarget(role=ROLE_RU, ssh_host="example.test", ssh_port=2222)
+        target = RemoteTarget(node_id=NODE_GATEWAY, ssh_host="example.test", ssh_port=2222)
         fake_paramiko = SimpleNamespace(SSHClient=Mock(return_value=fake_client), HostKeys=Mock(return_value=fake_store))
         with tempfile.TemporaryDirectory() as tmp, patch("vpn_installer.remote.KNOWN_HOSTS_PATH", Path(tmp) / "known_hosts"), patch("vpn_installer.remote.ensure_paramiko_installed", return_value=fake_paramiko), patch("vpn_installer.remote.probe_host_key", return_value=fake_key):
             with self.assertRaises(AppError) as ctx:
@@ -246,7 +249,7 @@ class RemoteTests(unittest.TestCase):
         fake_key = Mock()
         fake_key.get_name.return_value = "ssh-ed25519"
         fake_key.asbytes.return_value = b"key"
-        target = RemoteTarget(role=ROLE_RU, ssh_host="example.test")
+        target = RemoteTarget(node_id=NODE_GATEWAY, ssh_host="example.test")
         fake_paramiko = SimpleNamespace(SSHClient=Mock(return_value=fake_client), HostKeys=Mock(return_value=fake_store))
         prompt = Mock(return_value=True)
         with tempfile.TemporaryDirectory() as tmp, patch("vpn_installer.remote.KNOWN_HOSTS_PATH", Path(tmp) / "known_hosts"), patch("vpn_installer.remote.ensure_paramiko_installed", return_value=fake_paramiko), patch("vpn_installer.remote.probe_host_key", return_value=fake_key), patch("vpn_installer.remote.persist_host_key") as persist:
@@ -258,7 +261,7 @@ class RemoteTests(unittest.TestCase):
         fake_client = Mock()
         fake_paramiko = Mock(SSHClient=Mock(return_value=fake_client), AutoAddPolicy=Mock(return_value="policy"))
         bound_socket = Mock()
-        target = RemoteTarget(role=ROLE_RU, ssh_host="203.0.113.10", auth_mode="password", ssh_password="secret", ssh_bind_address="192.168.0.101")
+        target = RemoteTarget(node_id=NODE_GATEWAY, ssh_host="203.0.113.10", auth_mode="password", ssh_password="secret", ssh_bind_address="192.168.0.101")
         with patch("vpn_installer.remote.ensure_paramiko_installed", return_value=fake_paramiko), patch("vpn_installer.remote.open_bound_ssh_socket", return_value=bound_socket) as opener:
             client = paramiko_connect(target)
         self.assertIs(client, fake_client)
@@ -268,7 +271,7 @@ class RemoteTests(unittest.TestCase):
     def test_open_bound_ssh_socket_closes_socket_after_connect_error(self) -> None:
         fake_socket = Mock()
         fake_socket.connect.side_effect = OSError("blocked")
-        target = RemoteTarget(role=ROLE_RU, ssh_host="203.0.113.10", ssh_bind_address="192.168.0.101")
+        target = RemoteTarget(node_id=NODE_GATEWAY, ssh_host="203.0.113.10", ssh_bind_address="192.168.0.101")
         with patch("vpn_installer.remote.socket.getaddrinfo", side_effect=[[(2, 1, 6, "", ("192.168.0.101", 0))], [(2, 1, 6, "", ("203.0.113.10", 22))]]), patch("vpn_installer.remote.socket.socket", return_value=fake_socket):
             with self.assertRaises(AppError):
                 open_bound_ssh_socket(target)
@@ -278,7 +281,7 @@ class RemoteTests(unittest.TestCase):
         fake_client = Mock()
         fake_client.connect.side_effect = RuntimeError("fail")
         fake_paramiko = Mock(SSHClient=Mock(return_value=fake_client), AutoAddPolicy=Mock(return_value="policy"))
-        target = RemoteTarget(role=ROLE_RU, ssh_host="203.0.113.10", ssh_port=22, ssh_user="root")
+        target = RemoteTarget(node_id=NODE_GATEWAY, ssh_host="203.0.113.10", ssh_port=22, ssh_user="root")
         with patch("vpn_installer.remote.ensure_paramiko_installed", return_value=fake_paramiko):
             with self.assertRaises(AppError):
                 paramiko_connect(target)
@@ -297,7 +300,7 @@ class RemoteTests(unittest.TestCase):
             AutoAddPolicy=Mock(return_value="policy"),
             ssh_exception=SimpleNamespace(AuthenticationException=FakeAuthTimeout),
         )
-        target = RemoteTarget(role=ROLE_RU, ssh_host="203.0.113.10", ssh_port=22, ssh_user="root", auth_mode="password", ssh_password="secret")
+        target = RemoteTarget(node_id=NODE_GATEWAY, ssh_host="203.0.113.10", ssh_port=22, ssh_user="root", auth_mode="password", ssh_password="secret")
         with patch("vpn_installer.remote.ensure_paramiko_installed", return_value=fake_paramiko), patch("vpn_installer.remote.time.sleep") as sleep_mock:
             client = paramiko_connect(target)
         self.assertIs(client, second_client)
@@ -315,7 +318,7 @@ class RemoteTests(unittest.TestCase):
             AutoAddPolicy=Mock(return_value="policy"),
             ssh_exception=SimpleNamespace(AuthenticationException=Exception),
         )
-        target = RemoteTarget(role=ROLE_RU, ssh_host="203.0.113.10", ssh_port=22, ssh_user="root")
+        target = RemoteTarget(node_id=NODE_GATEWAY, ssh_host="203.0.113.10", ssh_port=22, ssh_user="root")
         with patch("vpn_installer.remote.ensure_paramiko_installed", return_value=fake_paramiko), patch("vpn_installer.remote.time.sleep") as sleep_mock:
             client = paramiko_connect(target)
         self.assertIs(client, second_client)
@@ -353,7 +356,7 @@ class RemoteTests(unittest.TestCase):
             AutoAddPolicy=Mock(return_value="policy"),
             ssh_exception=SimpleNamespace(AuthenticationException=Exception),
         )
-        target = RemoteTarget(role=ROLE_RU, ssh_host="203.0.113.10", ssh_port=22, ssh_user="root")
+        target = RemoteTarget(node_id=NODE_GATEWAY, ssh_host="203.0.113.10", ssh_port=22, ssh_user="root")
         with patch("vpn_installer.remote.ensure_paramiko_installed", return_value=fake_paramiko), patch("vpn_installer.remote.configure_paramiko_logging"), patch("vpn_installer.remote.time.sleep"):
             with self.assertRaises(AppError) as ctx:
                 paramiko_connect(target)
@@ -373,7 +376,7 @@ class RemoteTests(unittest.TestCase):
         stderr = Mock(channel=channel)
         client = Mock()
         client.exec_command.return_value = (stdin, stdout, stderr)
-        target = RemoteTarget(role=ROLE_RU)
+        target = RemoteTarget(node_id=NODE_GATEWAY)
         with patch("vpn_installer.remote.paramiko_connect", return_value=client), patch("vpn_installer.remote.time.sleep"):
             code, out, err = paramiko_exec(target, "echo test", input_text="secret\n")
         self.assertEqual((code, out, err), (5, "out", "err"))
@@ -390,7 +393,7 @@ class RemoteTests(unittest.TestCase):
         stderr = Mock(channel=channel)
         client = Mock()
         client.exec_command.return_value = (stdin, stdout, stderr)
-        target = RemoteTarget(role=ROLE_RU)
+        target = RemoteTarget(node_id=NODE_GATEWAY)
         with (
             patch("vpn_installer.remote.paramiko_connect", return_value=client),
             patch("vpn_installer.remote.time.monotonic", side_effect=[0.0, 2.0]),
@@ -415,7 +418,7 @@ class RemoteTests(unittest.TestCase):
         stderr = Mock(channel=channel)
         client = Mock()
         client.exec_command.return_value = (stdin, stdout, stderr)
-        target = RemoteTarget(role=ROLE_RU)
+        target = RemoteTarget(node_id=NODE_GATEWAY)
         with (
             patch("vpn_installer.remote.paramiko_connect", return_value=client),
             patch("vpn_installer.remote.time.sleep"),
@@ -446,7 +449,7 @@ class RemoteTests(unittest.TestCase):
             patch("sys.stderr", new_callable=io.StringIO) as err_stream,
         ):
             with self.assertRaisesRegex(AppError, "remote failure"):
-                paramiko_stream(RemoteTarget(role=ROLE_RU), "false")
+                paramiko_stream(RemoteTarget(node_id=NODE_GATEWAY), "false")
         self.assertEqual(err_stream.getvalue(), "")
         client.close.assert_called_once()
 
@@ -460,25 +463,25 @@ class RemoteTests(unittest.TestCase):
             local.write_text("x", encoding="utf-8")
             with patch("vpn_installer.remote.paramiko_connect", return_value=client):
                 with self.assertRaises(AppError):
-                    paramiko_upload(RemoteTarget(role=ROLE_RU), local, "/tmp/demo.txt")
+                    paramiko_upload(RemoteTarget(node_id=NODE_GATEWAY), local, "/tmp/demo.txt")
         client.close.assert_called_once()
 
     def test_ssh_capture_uses_paramiko_backend(self) -> None:
-        target = RemoteTarget(role=ROLE_RU, auth_mode="password", ssh_password="secret")
+        target = RemoteTarget(node_id=NODE_GATEWAY, auth_mode="password", ssh_password="secret")
         with patch("vpn_installer.remote.paramiko_exec", return_value=(0, "ok", "")) as mocked:
             result = ssh_capture(target, "echo ok", as_root=False)
         self.assertEqual(result, "ok")
         mocked.assert_called_once()
 
     def test_ssh_capture_raises_on_remote_error(self) -> None:
-        target = RemoteTarget(role=ROLE_RU, auth_mode="password", ssh_password="secret")
+        target = RemoteTarget(node_id=NODE_GATEWAY, auth_mode="password", ssh_password="secret")
         with patch("vpn_installer.remote.paramiko_exec", return_value=(9, "", "boom")):
             with self.assertRaises(AppError) as ctx:
                 ssh_capture(target, "echo ok", as_root=False)
         self.assertIn("boom", str(ctx.exception))
 
     def test_ssh_stream_uses_system_ssh_for_key_mode(self) -> None:
-        target = RemoteTarget(role=ROLE_RU, ssh_host="203.0.113.10", ssh_user="root", auth_mode="key")
+        target = RemoteTarget(node_id=NODE_GATEWAY, ssh_host="203.0.113.10", ssh_user="root", auth_mode="key")
         completed = SimpleNamespace(returncode=0, stdout="", stderr="")
         with patch("vpn_installer.remote.command_exists", return_value=True), patch("vpn_installer.remote.run_command", return_value=completed) as mocked:
             ssh_stream(target, "echo ok", as_root=False)
@@ -487,20 +490,20 @@ class RemoteTests(unittest.TestCase):
         self.assertNotIn("capture_output", mocked.call_args.kwargs)
 
     def test_ssh_stream_prints_paramiko_output(self) -> None:
-        target = RemoteTarget(role=ROLE_RU, auth_mode="password", ssh_password="secret")
+        target = RemoteTarget(node_id=NODE_GATEWAY, auth_mode="password", ssh_password="secret")
         with patch("vpn_installer.remote.paramiko_stream", return_value=0) as mocked:
             ssh_stream(target, "echo ok", as_root=False)
         mocked.assert_called_once()
 
     def test_ssh_stream_uses_pty_only_for_sudo_password_input(self) -> None:
-        target = RemoteTarget(role=ROLE_RU, auth_mode="password", ssh_password="secret", ssh_user="ubuntu", sudo_mode="password", sudo_password="sudo-secret")
+        target = RemoteTarget(node_id=NODE_GATEWAY, auth_mode="password", ssh_password="secret", ssh_user="ubuntu", sudo_mode="password", sudo_password="sudo-secret")
         with patch("vpn_installer.remote.paramiko_stream", return_value=0) as mocked:
             ssh_stream(target, "echo ok", as_root=True)
         self.assertTrue(mocked.call_args.kwargs["get_pty"])
         self.assertEqual(mocked.call_args.kwargs["input_text"], "sudo-secret\n")
 
     def test_scp_upload_uses_system_scp(self) -> None:
-        target = RemoteTarget(role=ROLE_RU, ssh_host="203.0.113.10", ssh_user="root", auth_mode="key")
+        target = RemoteTarget(node_id=NODE_GATEWAY, ssh_host="203.0.113.10", ssh_user="root", auth_mode="key")
         with tempfile.TemporaryDirectory() as tmp:
             local = Path(tmp) / "bundle.tar.gz"
             local.write_text("bundle", encoding="utf-8")
@@ -518,34 +521,61 @@ class RemoteTests(unittest.TestCase):
             generated_at="2026-08-06T12:00:00+00:00",
             deployment="demo",
             topology="dual",
-            node_id="gateway",
+            node_id=NODE_GATEWAY,
             location="ru",
             capabilities=("interserver-client", "local-egress", "public-front", "router", "ru-split-routing", "web-admin"),
-            role="ru-gateway",
             release={"release_id": "release-1"},
         ).to_dict()
         with patch("vpn_installer.remote.ssh_capture", return_value=json.dumps(snapshot)) as mocked:
-            payload = remote_preflight(RemoteTarget(role=ROLE_RU), "wgx")
+            payload = remote_preflight(RemoteTarget(node_id=NODE_GATEWAY), "wgx")
         mocked.assert_called_once()
         self.assertIn("test -r /usr/local/lib/vpn-stack/vpn-stack-agent.py", mocked.call_args.args[1])
         self.assertNotIn("test -x /usr/local/lib/vpn-stack/vpn-stack-agent.py", mocked.call_args.args[1])
-        self.assertEqual(payload["role"], "ru-gateway")
+        self.assertEqual(payload["node"], NODE_GATEWAY)
+
+    def test_compatible_snapshot_adapts_only_release_0200_schema_four(self) -> None:
+        snapshot = DiagnosticsSnapshot(
+            generated_at="2026-08-06T12:00:00+00:00",
+            deployment="demo",
+            topology="dual",
+            node_id=NODE_GATEWAY,
+            location="ru",
+            capabilities=("router",),
+            release={"version": "0.20.0", "release_id": "release-0200"},
+        ).to_dict()
+        snapshot.update({"schema_version": 4, "role": "ru-gateway"})
+        with patch("vpn_installer.remote.ssh_capture", return_value=json.dumps(snapshot)):
+            payload = remote_compatible_agent_snapshot(RemoteTarget(node_id=NODE_GATEWAY), compact=True)
+        self.assertEqual(payload["schema_version"], 5)
+        self.assertNotIn("role", payload)
+
+    def test_compatible_snapshot_rejects_unknown_schema_or_release(self) -> None:
+        snapshot = {"schema_version": 4, "release": {"version": "0.19.9"}}
+        with patch("vpn_installer.remote.ssh_capture", return_value=json.dumps(snapshot)):
+            with self.assertRaisesRegex(AppError, "unsupported snapshot schema or release"):
+                remote_compatible_agent_snapshot(RemoteTarget(node_id=NODE_GATEWAY))
+
+    def test_strict_snapshot_does_not_adapt_release_0200(self) -> None:
+        snapshot = {"schema_version": 4, "release": {"version": "0.20.0"}}
+        with patch("vpn_installer.remote.ssh_capture", return_value=json.dumps(snapshot)):
+            with self.assertRaisesRegex(AppError, "unsupported snapshot schema"):
+                remote_agent_snapshot(RemoteTarget(node_id=NODE_GATEWAY))
 
     def test_remote_preflight_uses_compact_bootstrap_when_agent_is_unavailable(self) -> None:
-        with patch("vpn_installer.remote.ssh_capture", side_effect=["not-json", "0", "role=ru-gateway\n"]) as mocked:
-            remote_preflight(RemoteTarget(role=ROLE_RU), "wgx", fresh_since_epoch=1783733001)
+        with patch("vpn_installer.remote.ssh_capture", side_effect=["not-json", "0", "node_id=ru-gateway\n"]) as mocked:
+            remote_preflight(RemoteTarget(node_id=NODE_GATEWAY), "wgx", fresh_since_epoch=1783733001)
         self.assertEqual(mocked.call_count, 3)
         self.assertIn("WG_INTERFACE=wgx", mocked.call_args.args[1])
 
     def test_remote_preflight_does_not_hide_broken_installed_agent(self) -> None:
         with patch("vpn_installer.remote.ssh_capture", side_effect=["not-json", "1"]) as mocked:
             with self.assertRaises(json.JSONDecodeError):
-                remote_preflight(RemoteTarget(role=ROLE_RU), "wgx")
+                remote_preflight(RemoteTarget(node_id=NODE_GATEWAY), "wgx")
         self.assertEqual(mocked.call_count, 2)
 
     def test_fetch_remote_deployment_env_uses_root_capture(self) -> None:
         with patch("vpn_installer.remote.ssh_capture", return_value='DEPLOY_NAME="demo"\n') as mocked:
-            payload = fetch_remote_deployment_env(RemoteTarget(role=ROLE_RU))
+            payload = fetch_remote_deployment_env(RemoteTarget(node_id=NODE_GATEWAY))
         self.assertEqual(payload, 'DEPLOY_NAME="demo"\n')
         mocked.assert_called_once_with(unittest.mock.ANY, "cat /etc/vpn-stack/deployment.env", as_root=True)
     def test_bootstrap_from_snapshot_uses_agent_host_and_lifecycle_fields(self) -> None:
@@ -554,10 +584,9 @@ class RemoteTests(unittest.TestCase):
                 generated_at="2026-08-06T12:00:00+00:00",
                 deployment="demo",
                 topology="dual",
-                node_id="gateway",
+                node_id=NODE_GATEWAY,
                 location="ru",
                 capabilities=("interserver-client", "local-egress", "public-front", "router", "ru-split-routing", "web-admin"),
-                role=ROLE_RU,
                 release={"release_id": "release-1", "installed_at": "2026-07-15T00:00:00Z", "policy_version": "0.11.0"},
                 host={"hostname": "demo", "login_user": "root", "is_root": True, "has_sudo": True, "os_id": "ubuntu", "os_version": "24.04", "default_interface": "eth0"},
                 services={"wireguard": "active", "nftables": "active", "sing-box": "active", "xray": "active", "resolver": "active", "health_timer": "active"},
@@ -602,7 +631,7 @@ class RemoteTests(unittest.TestCase):
     def test_print_preflight_emits_lifecycle_summary(self) -> None:
         with patch("sys.stdout", new_callable=io.StringIO) as stream:
             print_preflight(
-                RemoteTarget(role=ROLE_RU),
+                RemoteTarget(node_id=NODE_GATEWAY),
                 {
                     "hostname": "demo",
                     "login_user": "root",
@@ -615,7 +644,6 @@ class RemoteTests(unittest.TestCase):
                     "node": "gateway",
                     "location": "ru",
                     "capabilities": "interserver-client,local-egress,public-front,router,ru-split-routing,web-admin",
-                    "role": "ru-gateway",
                     "drift": "none",
                     "wireguard": "active",
                     "nftables": "active",
@@ -676,26 +704,26 @@ class RemoteTests(unittest.TestCase):
             capabilities="local-egress,public-front,router",
         )
         with patch("sys.stdout", new_callable=io.StringIO) as stream:
-            print_preflight(RemoteTarget(role=ROLE_RU), without_admin)
+            print_preflight(RemoteTarget(node_id=NODE_GATEWAY), without_admin)
         self.assertIn("xray=-", stream.getvalue())
         self.assertNotIn("admin=", stream.getvalue())
 
     def test_ensure_remote_privilege_paths(self) -> None:
-        target = RemoteTarget(role=ROLE_RU)
+        target = RemoteTarget(node_id=NODE_GATEWAY)
         ensure_remote_privilege(target, {"is_root": "1"}, prompt_yes_no=lambda *_args, **_kwargs: True, prompt_secret=lambda *_args, **_kwargs: "x")
         self.assertEqual(target.sudo_mode, "root")
 
-        target = RemoteTarget(role=ROLE_RU)
+        target = RemoteTarget(node_id=NODE_GATEWAY)
         ensure_remote_privilege(target, {"is_root": "0", "has_sudo": "1"}, prompt_yes_no=lambda *_args, **_kwargs: True, prompt_secret=lambda *_args, **_kwargs: "x")
         self.assertEqual(target.sudo_mode, "nopasswd")
 
-        target = RemoteTarget(role=ROLE_RU)
+        target = RemoteTarget(node_id=NODE_GATEWAY)
         ensure_remote_privilege(target, {"is_root": "0", "has_sudo": "0", "login_user": "ubuntu", "hostname": "demo"}, prompt_yes_no=lambda *_args, **_kwargs: True, prompt_secret=lambda *_args, **_kwargs: "secret")
         self.assertEqual(target.sudo_mode, "password")
         self.assertEqual(target.sudo_password, "secret")
 
     def test_ensure_remote_privilege_can_fail(self) -> None:
-        target = RemoteTarget(role=ROLE_RU)
+        target = RemoteTarget(node_id=NODE_GATEWAY)
         with self.assertRaises(AppError):
             ensure_remote_privilege(target, {"is_root": "0", "has_sudo": "0", "login_user": "ubuntu", "hostname": "demo"}, prompt_yes_no=lambda *_args, **_kwargs: False, prompt_secret=lambda *_args, **_kwargs: "secret")
 

@@ -16,7 +16,7 @@ class ClientDriftTests(unittest.TestCase):
         env = generate_default_env("demo")
         env.update(
             {
-                "CONFIG_SCHEMA": "2",
+                "CONFIG_SCHEMA": "3",
                 "TOPOLOGY": "dual",
                 "GATEWAY_LOCATION": "ru",
                 "GATEWAY_PUBLIC_IP": "203.0.113.10",
@@ -102,7 +102,7 @@ class ClientDriftTests(unittest.TestCase):
         env = generate_default_env("single", topology="single", gateway_location="foreign")
         env.update(
             {
-                "CONFIG_SCHEMA": "2",
+                "CONFIG_SCHEMA": "3",
                 "TOPOLOGY": "single",
                 "GATEWAY_LOCATION": "foreign",
                 "GATEWAY_PUBLIC_IP": "192.0.2.44",
@@ -120,13 +120,6 @@ class ClientDriftTests(unittest.TestCase):
 
         self.assertEqual(len(findings), 1)
         self.assertIn("устаревший VLESS URI порт", findings[0].issue)
-
-    def test_client_drift_rejects_legacy_address_aliases(self) -> None:
-        env = self.make_env()
-        env["RU_PUBLIC_IP"] = env["GATEWAY_PUBLIC_IP"]
-
-        with self.assertRaisesRegex(ValueError, "legacy public IP aliases"):
-            find_client_drift(env, [])
 
     def test_default_candidate_paths_includes_known_client_locations(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

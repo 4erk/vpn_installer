@@ -110,7 +110,8 @@ class PackageTests(unittest.TestCase):
         self.assertIn('"${PYTHON_BIN}" "${agent_path}" network-apply', script)
         self.assertIn('"${PYTHON_BIN}" "${agent_path}" snapshot --live-probes --profile acceptance', script)
         self.assertNotIn("AGENT_SCRIPT_PATH=", script)
-        self.assertIn('payload.get("schema_version") != 4', script)
+        self.assertIn("from vpn_installer.diagnostics import SCHEMA_VERSION as DIAGNOSTICS_SCHEMA_VERSION", script)
+        self.assertIn('payload.get("schema_version") != DIAGNOSTICS_SCHEMA_VERSION', script)
         self.assertIn('for field in ("topology", "node_id", "location", "capabilities")', script)
         self.assertIn('payload.get("artifacts", {}).get("drift") != "none"', script)
         self.assertIn('payload.get("verdict") != "verified"', script)
@@ -240,7 +241,7 @@ class PackageTests(unittest.TestCase):
 
     def test_package_exposes_version_via_getattr(self) -> None:
         package = importlib.import_module("vpn_installer")
-        self.assertEqual(package.__version__, "0.20.0")
+        self.assertEqual(package.__version__, "0.20.1")
         with self.assertRaises(AttributeError):
             package.__getattr__("nope")
 

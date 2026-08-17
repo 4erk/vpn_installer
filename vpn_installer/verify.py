@@ -88,10 +88,6 @@ def _required_snapshot_services(capabilities: frozenset[str]) -> frozenset[str]:
     return frozenset(required)
 
 
-def _has_compatibility_migration(snapshot: DiagnosticsSnapshot) -> bool:
-    return bool(snapshot.migration) and snapshot.migration.get("state") != "native"
-
-
 def _release_within_complete_log_retention(snapshot: DiagnosticsSnapshot) -> bool:
     installed_at = str(snapshot.release.get("installed_at", ""))
     try:
@@ -105,10 +101,6 @@ def _release_within_complete_log_retention(snapshot: DiagnosticsSnapshot) -> boo
 
 
 def _verify_snapshot(snapshot: DiagnosticsSnapshot, *, expected_plan: NodePlan | None = None) -> DiagnosticsSnapshot:
-    if _has_compatibility_migration(snapshot):
-        snapshot.verdict = "inconclusive"
-        snapshot.reasons = ["native diagnostics schema 4 is required for live verification"]
-        return snapshot
     if not snapshot.has_capability_contract:
         snapshot.verdict = "inconclusive"
         snapshot.reasons = ["canonical topology/node/location/capabilities evidence is missing"]
@@ -294,7 +286,7 @@ def _collect_agent_snapshot(target) -> DiagnosticsSnapshot:
 
 
 def _reconcile_public_capabilities(snapshot: DiagnosticsSnapshot, public_vless: dict[str, object]) -> DiagnosticsSnapshot:
-    if _has_compatibility_migration(snapshot) or snapshot.collector_status != "ok":
+    if snapshot.collector_status != "ok":
         return snapshot
     functional = public_vless.get("functional", {})
     functional_verdict = functional.get("verdict") if isinstance(functional, dict) else None
@@ -1260,9 +1252,9 @@ def verify_live_workflow(
     accept_same_node_for_install: bool = False,
 ) -> int:
     print_header("Live verification")
-    deployment_name, env_path, env, _state, targets, _preflights_by_role = workflows.prepare_remote_session(
+    deployment_name, env_path, env, _state, targets, _preflights_by_node = workflows.prepare_remote_session(
         deployment,
-        roles=None,
+        nodes=None,
         require_privilege=False,
         validate_os=False,
         allow_create=False,

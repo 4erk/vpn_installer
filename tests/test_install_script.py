@@ -75,9 +75,6 @@ class InstallScriptContractTests(unittest.TestCase):
             gateway_location="foreign",
         )
         env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
-        env["EXIT_PUBLIC_IP"] = ""
-        env.pop("RU_PUBLIC_IP", None)
-        env.pop("FOREIGN_PUBLIC_IP", None)
         text = render_env_text(env)
         self.assertNotIn("RU_PUBLIC_IP", text)
         self.assertNotIn("FOREIGN_PUBLIC_IP", text)
@@ -95,14 +92,14 @@ class InstallScriptContractTests(unittest.TestCase):
         env.pop("FOREIGN_PUBLIC_IP", None)
         path.write_text(render_env_text(env), encoding="utf-8")
 
-    def render_single(self, root: Path, *, legacy_role: bool = False) -> tuple[Path, subprocess.CompletedProcess[str]]:
+    def render_single(self, root: Path) -> tuple[Path, subprocess.CompletedProcess[str]]:
         root.mkdir(parents=True, exist_ok=True)
         env_path = root / "single.env"
         output = root / "rendered"
         self.write_single_env(env_path)
-        selector = ("--role", "ru-gateway") if legacy_role else ("--node", "gateway")
         result = self.run_bash(
-            *selector,
+            "--node",
+            "gateway",
             "--env-file",
             env_path.as_posix(),
             "--render-only",
@@ -148,8 +145,9 @@ class InstallScriptContractTests(unittest.TestCase):
         text = INSTALL_SCRIPT.read_text(encoding="utf-8")
         self.assertIn("render-node", text)
         self.assertIn("validate-bundle", text)
-        self.assertIn("adapt-schema2", text)
+        self.assertIn("validate-installed", text)
         self.assertNotIn("render-role", text)
+        self.assertNotIn("--role", text)
         self.assertNotIn("from vpn_installer.manifest import", text)
         self.assertNotIn("def canonical_digest", text)
         self.assertNotIn("RU_PUBLIC_IP", text)
@@ -159,7 +157,7 @@ class InstallScriptContractTests(unittest.TestCase):
         self.assertIn('VPNSTACK_ACCEPTANCE_PATH="${VPNSTACK_ROOT}/last-acceptance.json"', text)
         self.assertIn("installed node ${previous_node} does not match requested node ${requested_node}", text)
         self.assertIn('verify_previous_owned_path "${previous_contract}" "${path}"', text)
-        self.assertIn('elif [[ "${schema}" == "2" ]]; then', text)
+        self.assertIn("DIAGNOSTICS_SCHEMA_VERSION", text)
         self.assertIn('verify_snapshot_service_states "${snapshot}"', text)
         self.assertNotIn("restored schema-2 service is not active", text)
         self.assertLess(
@@ -171,7 +169,7 @@ class InstallScriptContractTests(unittest.TestCase):
             text.index('retire_previous_services "${PREVIOUS_CONTRACT}" "${staged_contract}"'),
         )
 
-    def test_render_only_writes_schema_three_single_gateway_bundle(self) -> None:
+    def test_render_only_writes_current_single_gateway_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             output, result = self.render_single(Path(temp))
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -179,8 +177,8 @@ class InstallScriptContractTests(unittest.TestCase):
             plan = json.loads((output / "install-plan.json").read_text(encoding="utf-8"))
             node_env = (output / "node.env").read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["schema_version"], 3)
-        self.assertEqual(plan["schema_version"], 3)
+        self.assertEqual(manifest["schema_version"], 4)
+        self.assertEqual(plan["schema_version"], 4)
         self.assertEqual(manifest["install_plan"], plan)
         self.assertEqual(plan["node_id"], "gateway")
         self.assertEqual(plan["topology"], "single")
@@ -195,14 +193,6 @@ class InstallScriptContractTests(unittest.TestCase):
         self.assertNotIn("wireguard-tools", plan["packages"])
         self.assertNotIn("interserver_transport.py", plan["artifacts"])
         self.assertNotIn("topology.py", plan["artifacts"])
-
-    def test_legacy_role_is_only_a_deprecated_cli_boundary(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            output, result = self.render_single(Path(temp), legacy_role=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            manifest = json.loads((output / "render-manifest.json").read_text(encoding="utf-8"))
-        self.assertIn("--role is deprecated; use --node gateway", result.stderr)
-        self.assertEqual(manifest["node_id"], "gateway")
 
     def test_dual_render_only_supports_both_canonical_nodes(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

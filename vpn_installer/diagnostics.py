@@ -12,7 +12,7 @@ except ImportError:  # Installed beside vpn-stack-agent.py as a standalone modul
     from log_classifier import BUCKETS  # type: ignore[no-redef]
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 COLLECTOR_STATUSES = frozenset({"ok", "error", "stale", "skipped", "not_applicable"})
 TOPOLOGIES = frozenset({"single", "dual"})
 NODE_IDS = frozenset({"gateway", "exit"})
@@ -57,10 +57,6 @@ def _utc_now() -> str:
 
 def _is_count(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
-
-
-def _mapping(value: object) -> dict[str, Any]:
-    return dict(value) if isinstance(value, Mapping) else {}
 
 
 @dataclass(frozen=True)
@@ -258,7 +254,6 @@ class DiagnosticsSnapshot:
     node_id: str = ""
     location: str = ""
     capabilities: tuple[str, ...] = ()
-    role: str = ""
     host: dict[str, Any] = field(default_factory=dict)
     collectors: dict[str, CollectorState] = field(default_factory=_default_collectors)
     log_windows: dict[str, LogWindowSnapshot] = field(default_factory=_default_log_windows)
@@ -282,7 +277,6 @@ class DiagnosticsSnapshot:
     maintenance: dict[str, Any] = field(default_factory=dict)
     redundancy: dict[str, Any] = field(default_factory=dict)
     component_verdicts: dict[str, str] = field(default_factory=dict)
-    migration: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.schema_version != SCHEMA_VERSION:
@@ -310,10 +304,8 @@ class DiagnosticsSnapshot:
             raise ValueError("canonical diagnostics contract must include topology, node_id, location, and capabilities")
         if self.topology == "single" and self.node_id == "exit":
             raise ValueError("single topology cannot contain an exit node")
-        if not isinstance(self.role, str):
-            raise TypeError("legacy role must be a string")
         if set(self.collectors) != set(COLLECTOR_NAMES):
-            raise ValueError("collector names must match the V4 contract")
+            raise ValueError("collector names must match the V5 contract")
         if not all(isinstance(value, CollectorState) for value in self.collectors.values()):
             raise TypeError("collectors must contain CollectorState values")
         self.collectors = {name: self.collectors[name] for name in COLLECTOR_NAMES}
@@ -342,7 +334,6 @@ class DiagnosticsSnapshot:
             "maintenance",
             "redundancy",
             "component_verdicts",
-            "migration",
         ):
             if not isinstance(getattr(self, name), dict):
                 raise TypeError(f"{name} must be an object")
@@ -410,253 +401,6 @@ class DiagnosticsSnapshot:
 
     @classmethod
     def from_agent(cls, payload: dict[str, Any]) -> "DiagnosticsSnapshot":
-        """Parse the agent protocol at its single schema/migration boundary."""
-        schema_version = payload.get("schema_version")
-        if schema_version == SCHEMA_VERSION:
-            return cls.from_dict(payload)
-        if schema_version == 3:
-            return cls.migrate_agent_v3(payload)
-        raise ValueError("unsupported vpn-stack-agent snapshot schema")
+        """Parse only the native agent protocol installed with this release."""
 
-    @staticmethod
-    def _legacy_contract(role: str) -> tuple[str, str, str, tuple[str, ...]]:
-        if role == "ru-gateway":
-            return (
-                "dual",
-                "gateway",
-                "ru",
-                (
-                    "interserver-client",
-                    "local-egress",
-                    "public-front",
-                    "router",
-                    "ru-split-routing",
-                    "web-admin",
-                ),
-            )
-        if role == "foreign-exit":
-            return "dual", "exit", "foreign", ("interserver-server", "nat-exit")
-        return "", "", "", ()
-
-    @classmethod
-    def migrate_agent_v3(cls, payload: Mapping[str, Any]) -> "DiagnosticsSnapshot":
-        """Convert V3 evidence without treating it as native or fresh."""
-
-        if payload.get("schema_version") != 3:
-            raise ValueError("migration boundary accepts only agent schema 3")
-        generated_at = payload.get("generated_at")
-        if not isinstance(generated_at, str) or not generated_at:
-            raise ValueError("legacy agent snapshot is missing generated_at")
-        v4_fields = {item.name for item in fields(cls)}
-        v3_fields = v4_fields - {"topology", "node_id", "location", "capabilities"}
-        unknown = set(payload) - v3_fields
-        missing = v3_fields - set(payload)
-        if unknown:
-            raise ValueError(f"unknown diagnostics snapshot fields: {sorted(unknown)}")
-        if missing:
-            raise ValueError(f"missing diagnostics snapshot fields: {sorted(missing)}")
-        collectors_value = payload.get("collectors")
-        windows_value = payload.get("log_windows")
-        if not isinstance(collectors_value, Mapping):
-            raise TypeError("collectors must be an object")
-        if not isinstance(windows_value, Mapping):
-            raise TypeError("log_windows must be an object")
-
-        migration_message = "migrated from schema 3; canonical collector applicability was not encoded"
-        collectors: dict[str, CollectorState] = {}
-        for name, raw_state in collectors_value.items():
-            state = CollectorState.from_dict(raw_state)
-            if state.status in {"ok", "stale"}:
-                message = "; ".join(value for value in (state.message, migration_message) if value)
-                state = CollectorState.stale(state.observed_at or generated_at, message)
-            collectors[str(name)] = state
-
-        log_windows: dict[str, LogWindowSnapshot] = {}
-        for name, raw_window in windows_value.items():
-            window = LogWindowSnapshot.from_dict(raw_window)
-            if window.collector.status in {"ok", "stale"}:
-                message = "; ".join(value for value in (window.collector.message, migration_message) if value)
-                window = LogWindowSnapshot(
-                    collector=CollectorState.stale(window.collector.observed_at or generated_at, message),
-                    since=window.since,
-                    until=window.until,
-                    counts=window.counts,
-                    top_destinations=window.top_destinations,
-                    top_sources=window.top_sources,
-                    samples=window.samples,
-                )
-            log_windows[str(name)] = window
-
-        role = str(payload.get("role", ""))
-        topology, node_id, location, capabilities = cls._legacy_contract(role)
-        normalized = dict(payload)
-        legacy_verdict = str(normalized.get("verdict", "inconclusive"))
-        legacy_reasons = list(normalized.get("reasons", [])) if isinstance(normalized.get("reasons"), list) else []
-        normalized.update(
-            {
-                "schema_version": SCHEMA_VERSION,
-                "topology": topology,
-                "node_id": node_id,
-                "location": location,
-                "capabilities": capabilities,
-                "collectors": collectors,
-                "log_windows": log_windows,
-                "verdict": "inconclusive",
-                "reasons": ["schema 3 diagnostics require a native schema 4 snapshot"],
-                "migration": {
-                    "source_schema_version": 3,
-                    "boundary": "DiagnosticsSnapshot.migrate_agent_v3",
-                    "warnings": [migration_message],
-                    "legacy_verdict": legacy_verdict,
-                    "legacy_reasons": legacy_reasons,
-                },
-            }
-        )
-        return cls(**normalized)
-
-    @classmethod
-    def migrate_agent_v2(cls, payload: Mapping[str, Any]) -> "DiagnosticsSnapshot":
-        """Convert deployed V2 agent output without treating inferred data as fresh."""
-        if payload.get("schema_version") != 2:
-            raise ValueError("migration boundary accepts only agent schema 2")
-        generated_at = payload.get("generated_at")
-        if not isinstance(generated_at, str) or not generated_at:
-            raise ValueError("legacy agent snapshot is missing generated_at")
-
-        source_keys = {
-            "services": "services",
-            "artifacts": "artifacts",
-            "wireguard": "wireguard",
-            "route_probes": "probes",
-            "logs": "logs",
-            "storage": "storage",
-            "network": "network",
-            "front": "front",
-            "transport": "transport",
-            "maintenance": "maintenance",
-        }
-        collectors: dict[str, CollectorState] = {}
-        for collector, source_key in source_keys.items():
-            if source_key not in payload or not isinstance(payload[source_key], Mapping):
-                collectors[collector] = CollectorState.error(f"schema 2 payload has no valid {source_key} section")
-            else:
-                collectors[collector] = CollectorState.stale(
-                    generated_at,
-                    "migrated from schema 2; collector success was not encoded",
-                )
-
-        logs = _mapping(payload.get("logs"))
-        minute_windows = _mapping(logs.get("windows_minutes"))
-        legacy_sources = {
-            "5m": minute_windows.get("5"),
-            "30m": minute_windows.get("30"),
-            "24h": minute_windows.get("1440"),
-            "since_release": logs.get("fresh"),
-        }
-        log_windows: dict[str, LogWindowSnapshot] = {}
-        migration_warnings: list[str] = []
-        legacy_dns_failed: dict[str, int] = {}
-        for window_name in LOG_WINDOW_KEYS:
-            source = legacy_sources[window_name]
-            if not isinstance(source, Mapping) or not isinstance(source.get("counts"), Mapping):
-                log_windows[window_name] = LogWindowSnapshot.unavailable(
-                    f"schema 2 payload has no {window_name} log data"
-                )
-                continue
-            old_counts = source["counts"]
-            counts: dict[str, int | None] = {}
-            for bucket in BUCKETS:
-                value = old_counts.get(bucket)
-                counts[bucket] = value if _is_count(value) else None
-            generic_dns_count = old_counts.get("dns_failed")
-            if _is_count(generic_dns_count):
-                legacy_dns_failed[window_name] = generic_dns_count
-                for bucket in ("dns_nodata", "dns_refused", "dns_servfail"):
-                    if bucket not in old_counts:
-                        counts[bucket] = 0 if generic_dns_count == 0 else None
-                if generic_dns_count:
-                    migration_warnings.append(
-                        f"{window_name}: dns_failed={generic_dns_count} cannot be split into V3 DNS buckets"
-                    )
-            top_destinations = {
-                str(bucket): {str(destination): count for destination, count in ranked.items() if _is_count(count)}
-                for bucket, ranked in _mapping(source.get("top_destinations")).items()
-                if bucket in BUCKETS and isinstance(ranked, Mapping)
-            }
-            top_sources = {
-                str(bucket): {str(source_name): count for source_name, count in ranked.items() if _is_count(count)}
-                for bucket, ranked in _mapping(source.get("top_sources")).items()
-                if bucket in BUCKETS and isinstance(ranked, Mapping)
-            }
-            samples = {
-                str(bucket): str(sample)
-                for bucket, sample in _mapping(source.get("samples")).items()
-                if bucket in BUCKETS
-            }
-            since = source.get("since") if isinstance(source.get("since"), str) else {
-                "5m": "5 minutes ago",
-                "30m": "30 minutes ago",
-                "24h": "1440 minutes ago",
-            }.get(window_name)
-            log_windows[window_name] = LogWindowSnapshot(
-                collector=CollectorState.stale(
-                    generated_at,
-                    "migrated from schema 2; collection errors were not distinguishable from empty logs",
-                ),
-                since=since,
-                until=generated_at,
-                counts=counts,
-                top_destinations=top_destinations,
-                top_sources=top_sources,
-                samples=samples,
-            )
-
-        artifacts = _mapping(payload.get("artifacts"))
-        artifact_files = _mapping(artifacts.get("files"))
-        sing_box_artifact = _mapping(artifact_files.get("sing-box.json"))
-        verdicts = _mapping(payload.get("verdicts"))
-        legacy_verdict = str(verdicts.get("overall", "inconclusive"))
-        reasons = [str(value) for value in verdicts.get("reasons", [])] if isinstance(verdicts.get("reasons", []), list) else []
-        if legacy_verdict == "verified":
-            legacy_verdict = "inconclusive"
-            reasons.append("schema 2 collector state is unknown; migrated evidence is stale")
-        legacy_role = str(payload.get("role", ""))
-        topology, node_id, location, capabilities = cls._legacy_contract(legacy_role)
-        return cls(
-            generated_at=generated_at,
-            deployment=str(payload.get("deployment", "")),
-            topology=topology,
-            node_id=node_id,
-            location=location,
-            capabilities=capabilities,
-            role=legacy_role,
-            host=_mapping(payload.get("host")),
-            collectors=collectors,
-            log_windows=log_windows,
-            services={str(key): str(value) for key, value in _mapping(payload.get("services")).items()},
-            installed_env_hash=str(artifacts.get("installed_env_sha256", "")),
-            installed_config_hash=str(sing_box_artifact.get("actual_sha256", "")),
-            rendered_config_hash=str(sing_box_artifact.get("expected_sha256", "")),
-            render_manifest=_mapping(artifacts.get("manifest")),
-            drift=str(artifacts.get("drift", "unknown")),
-            wg_state=_mapping(payload.get("wireguard")),
-            route_probes=_mapping(payload.get("probes")),
-            runtime_overrides={str(key): str(value) for key, value in _mapping(payload.get("runtime_overrides")).items()},
-            verdict=legacy_verdict,
-            reasons=reasons,
-            release=_mapping(payload.get("release")),
-            artifacts=artifacts,
-            storage=_mapping(payload.get("storage")),
-            network=_mapping(payload.get("network")),
-            front=_mapping(payload.get("front")),
-            transport=_mapping(payload.get("transport")),
-            maintenance=_mapping(payload.get("maintenance")),
-            redundancy=_mapping(payload.get("redundancy")),
-            component_verdicts={str(key): str(value) for key, value in verdicts.items() if key not in {"overall", "reasons"}},
-            migration={
-                "source_schema_version": 2,
-                "boundary": "DiagnosticsSnapshot.migrate_agent_v2",
-                "warnings": migration_warnings,
-                "legacy_dns_failed": legacy_dns_failed,
-            },
-        )
+        return cls.from_dict(payload)

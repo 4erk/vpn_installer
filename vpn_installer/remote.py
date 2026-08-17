@@ -15,7 +15,8 @@ from pathlib import Path
 from typing import Any
 
 from .common import STATE_DIR, command_exists, fail, print_header, run_command
-from .diagnostics import DiagnosticsSnapshot
+from .diagnostics import SCHEMA_VERSION as DIAGNOSTICS_SCHEMA_VERSION, DiagnosticsSnapshot
+from .upgrade_0200 import Upgrade0200Error, upgrade_diagnostics_snapshot
 from .models import AppError, RemoteTarget
 from .runtime_deps import ensure_python_package
 
@@ -616,7 +617,7 @@ def preflight_script(
     *,
     run_live_probes: bool = False,
 ) -> str:
-    """Minimal bootstrap probe for hosts that predate the schema-2 agent."""
+    """Minimal bootstrap probe for fresh hosts without the managed agent."""
     del fresh_since_epoch, run_live_probes
     quoted_interface = shlex.quote(wg_interface)
     return "\n".join(
@@ -626,14 +627,9 @@ def preflight_script(
             "service_state() { systemctl is-active \"$1\" 2>/dev/null || true; }",
             "os_id=''; os_version=''",
             "if [[ -r /etc/os-release ]]; then . /etc/os-release; os_id=\"${ID:-}\"; os_version=\"${VERSION_ID:-}\"; fi",
-            "installed=0; node_id=''; role=''; deployment_name=''; installed_at=''",
+            "installed=0; node_id=''; deployment_name=''; installed_at=''",
             "[[ -r /etc/vpn-stack/node-id ]] && node_id=\"$(tr -d '\\r\\n' </etc/vpn-stack/node-id)\"",
             "[[ -r /etc/vpn-stack/installed-at ]] && installed_at=\"$(tr -d '\\r\\n' </etc/vpn-stack/installed-at)\"",
-            "# One-release fallback for pre-0.20 metadata.",
-            "if [[ -z \"$role\" && -r /etc/vpn-stack/role ]]; then role=\"$(tr -d '\\r\\n' </etc/vpn-stack/role)\"; fi",
-            "if [[ -z \"$installed_at\" && -r /etc/vpn-stack/installed_at ]]; then installed_at=\"$(tr -d '\\r\\n' </etc/vpn-stack/installed_at)\"; fi",
-            "if [[ -z \"$node_id\" ]]; then case \"$role\" in ru-gateway) node_id=gateway ;; foreign-exit) node_id=exit ;; esac; fi",
-            "if [[ -z \"$role\" ]]; then case \"$node_id\" in gateway) role=ru-gateway ;; exit) role=foreign-exit ;; esac; fi",
             "[[ -n \"$node_id\" && -n \"$installed_at\" ]] && installed=1",
             "if [[ -r /etc/vpn-stack/deployment.env ]]; then deployment_name=\"$(awk -F= '$1 == \"DEPLOY_NAME\" {gsub(/^\"|\"$/, \"\", $2); print $2; exit}' /etc/vpn-stack/deployment.env)\"; fi",
             "default_iface=\"$(ip route show default 2>/dev/null | awk '/default/ {print $5; exit}')\"",
@@ -654,7 +650,6 @@ def preflight_script(
             "printf 'installed=%s\\n' \"$installed\"",
             "printf 'deployment_name=%s\\n' \"$deployment_name\"",
             "printf 'node_id=%s\\n' \"$node_id\"",
-            "printf 'role=%s\\n' \"$role\"",
             "printf 'installed_at=%s\\n' \"$installed_at\"",
             "printf 'sing_box=%s\\n' \"$(service_state sing-box.service)\"",
             "printf 'xray=%s\\n' \"$(service_state vpn-stack-xray.service)\"",
@@ -678,7 +673,13 @@ def remote_preflight(
     run_live_probes: bool = False,
 ) -> dict[str, str]:
     try:
-        return bootstrap_from_snapshot(remote_agent_snapshot(target, live_probes=run_live_probes, compact=not run_live_probes))
+        return bootstrap_from_snapshot(
+            remote_compatible_agent_snapshot(
+                target,
+                live_probes=run_live_probes,
+                compact=not run_live_probes,
+            )
+        )
     except (AppError, ValueError, json.JSONDecodeError):
         installed = ssh_capture(
             target,
@@ -687,7 +688,7 @@ def remote_preflight(
         ).strip()
         if installed == "1":
             raise
-        # Only unmanaged/bootstrap hosts may use the legacy collector.
+        # Only fresh unmanaged hosts may use the bootstrap collector.
     return parse_kv_output(
         ssh_capture(
             target,
@@ -696,14 +697,40 @@ def remote_preflight(
     )
 
 
-def remote_agent_snapshot(target: RemoteTarget, *, live_probes: bool = False, profile: str = "light", compact: bool = False) -> dict[str, Any]:
+def _remote_agent_payload(target: RemoteTarget, *, live_probes: bool = False, profile: str = "light", compact: bool = False) -> dict[str, Any]:
     command = "test -r /usr/local/lib/vpn-stack/vpn-stack-agent.py && /usr/bin/python3 /usr/local/lib/vpn-stack/vpn-stack-agent.py snapshot"
     if live_probes:
         command += f" --live-probes --profile {shlex.quote(profile)}"
     if compact:
         command += " --compact"
-    payload = json.loads(ssh_capture(target, command, command_timeout=180 if live_probes else 90))
-    if int(payload.get("schema_version", 0)) not in {3, 4}:
+    return json.loads(ssh_capture(target, command, command_timeout=180 if live_probes else 90))
+
+
+def remote_compatible_agent_snapshot(
+    target: RemoteTarget,
+    *,
+    live_probes: bool = False,
+    profile: str = "light",
+    compact: bool = False,
+) -> dict[str, Any]:
+    """Read a snapshot for non-mutating UI during the bounded 0.20.0 transition."""
+
+    payload = _remote_agent_payload(target, live_probes=live_probes, profile=profile, compact=compact)
+    if not isinstance(payload, dict):
+        raise AppError("vpn-stack-agent returned an invalid snapshot payload")
+    if payload.get("schema_version") == DIAGNOSTICS_SCHEMA_VERSION:
+        return payload
+    try:
+        return upgrade_diagnostics_snapshot(payload, target_schema=DIAGNOSTICS_SCHEMA_VERSION)
+    except Upgrade0200Error as exc:
+        raise AppError("vpn-stack-agent returned an unsupported snapshot schema or release") from exc
+
+
+def remote_agent_snapshot(target: RemoteTarget, *, live_probes: bool = False, profile: str = "light", compact: bool = False) -> dict[str, Any]:
+    payload = _remote_agent_payload(target, live_probes=live_probes, profile=profile, compact=compact)
+    if not isinstance(payload, dict):
+        raise AppError("vpn-stack-agent returned an invalid snapshot payload")
+    if int(payload.get("schema_version", 0)) != DIAGNOSTICS_SCHEMA_VERSION:
         raise AppError("vpn-stack-agent returned an unsupported snapshot schema")
     return payload
 
@@ -733,7 +760,6 @@ def bootstrap_from_snapshot(snapshot: dict[str, Any]) -> dict[str, str]:
         "node": normalized.node_id,
         "location": normalized.location,
         "capabilities": ",".join(normalized.capabilities),
-        "role": normalized.role,
         "installed": "1" if normalized.release.get("release_id") else "0",
         "release_id": str(normalized.release.get("release_id", "")),
         "installed_at": str(normalized.release.get("installed_at", "")),

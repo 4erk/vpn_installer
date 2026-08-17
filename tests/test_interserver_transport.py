@@ -38,7 +38,7 @@ def canonical_dual_env(name: str = "demo") -> dict[str, str]:
     env = generate_default_env(name)
     env.update(
         {
-            "CONFIG_SCHEMA": "2",
+            "CONFIG_SCHEMA": "3",
             "TOPOLOGY": "dual",
             "GATEWAY_LOCATION": "ru",
             "GATEWAY_PUBLIC_IP": "203.0.113.10",
@@ -168,18 +168,11 @@ class InterserverTransportIdentityTests(unittest.TestCase):
             "25b3b25f46c98c59ca6425d474e92fef2862f316896bed29dfd890efaf8a37c5",
         )
 
-    def test_interserver_transport_rejects_legacy_address_aliases(self) -> None:
-        env = canonical_dual_env()
-        env["FOREIGN_PUBLIC_IP"] = env["EXIT_PUBLIC_IP"]
-
-        with self.assertRaisesRegex(ValueError, "legacy public IP aliases"):
-            build_ru_transport_topology(env)
-
     def test_interserver_transport_rejects_single_topology(self) -> None:
         env = generate_default_env("single", topology="single", gateway_location="ru")
         env.update(
             {
-                "CONFIG_SCHEMA": "2",
+                "CONFIG_SCHEMA": "3",
                 "TOPOLOGY": "single",
                 "GATEWAY_LOCATION": "ru",
                 "GATEWAY_PUBLIC_IP": "203.0.113.10",

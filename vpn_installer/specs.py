@@ -47,11 +47,6 @@ class DeploymentSpec:
     def topology(self) -> TopologySpec:
         return TopologySpec.from_env(self.values)
 
-    def for_role(self, role: str) -> "NodeDeploymentSpec":
-        """One-release compatibility adapter; new code must use for_node()."""
-
-        return self.for_node(role)
-
     def for_node(self, node_id: str) -> "NodeDeploymentSpec":
         return NodeDeploymentSpec(deployment=self, node_id=normalize_node_id(node_id))
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from .admin_tunnel import admin_tunnel_workflow
+from .admin_access import admin_access_workflow
 from .android import DEFAULT_HIDDIFY_PACKAGE, android_diagnose
 from .common import cli_entrypoint, error_summary
 from .config import load_existing_deployment_env
@@ -12,24 +12,17 @@ from .models import AppError, UserCancelled
 from .prompts import select_existing_deployment
 from .verify import verify_live_workflow
 from .workflows import cleanup_local_workflow, client_check_workflow, install_workflow, maintain_workflow, menu_workflow, remote_action_workflow, routes_workflow, status_workflow
-from .topology import LEGACY_ROLE_FOREIGN, LEGACY_ROLE_RU, LOCATIONS, NODE_EXIT, NODE_GATEWAY, TOPOLOGIES, TopologySpec
+from .topology import LOCATIONS, NODE_EXIT, NODE_GATEWAY, TOPOLOGIES, TopologySpec
 
-NODE_CHOICES = ["all", NODE_GATEWAY, NODE_EXIT, LEGACY_ROLE_RU, LEGACY_ROLE_FOREIGN]
 CANONICAL_NODE_CHOICES = ["all", NODE_GATEWAY, NODE_EXIT]
 
 
 def add_node_selector(parser: argparse.ArgumentParser) -> None:
-    selector = parser.add_mutually_exclusive_group()
-    selector.add_argument("--node", choices=CANONICAL_NODE_CHOICES, help="Какой узел затронуть: gateway, exit или all.")
-    selector.add_argument(
-        "--role",
-        choices=NODE_CHOICES,
-        help="Deprecated alias для --node; будет удалён в следующем патче.",
-    )
+    parser.add_argument("--node", choices=CANONICAL_NODE_CHOICES, help="Какой узел затронуть: gateway, exit или all.")
 
 
 def selected_node(args: argparse.Namespace) -> str:
-    return str(getattr(args, "node", None) or getattr(args, "role", None) or "all")
+    return str(getattr(args, "node", None) or "all")
 
 
 def resolve_route_outbound(env: dict[str, str], requested: str | None) -> str:
@@ -95,17 +88,13 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--non-interactive", action="store_true", help="Не задавать вопросы; брать подключение из state/env.")
     status.set_defaults(func=lambda args: status_workflow(args.deployment, selected_node(args), non_interactive=args.non_interactive))
 
-    admin = subparsers.add_parser("admin", help="Открыть loopback-доступ к web-admin через SSH tunnel.")
+    admin = subparsers.add_parser("admin", help="Показать адрес web-admin для dual topology.")
     admin.add_argument("--deployment", help="Имя deployment.")
-    admin.add_argument("--local-port", type=int, help="Локальный loopback-порт; по умолчанию равен ADMIN_WEB_PORT.")
-    admin.add_argument("--open-browser", action="store_true", help="Открыть web-admin в браузере после запуска tunnel.")
-    admin.add_argument("--non-interactive", action="store_true", help="Не задавать вопросы; брать подключение из state/env.")
+    admin.add_argument("--open-browser", action="store_true", help="Открыть web-admin в браузере.")
     admin.set_defaults(
-        func=lambda args: admin_tunnel_workflow(
+        func=lambda args: admin_access_workflow(
             args.deployment,
-            local_port=args.local_port,
             open_browser=args.open_browser,
-            non_interactive=args.non_interactive,
         )
     )
 
@@ -189,7 +178,7 @@ def build_parser() -> argparse.ArgumentParser:
     client_log.add_argument("--path", required=True, help="Путь к текстовому client log.")
     client_log.add_argument("--deployment", help="Имя deployment для проверки маршрута до серверов.")
     add_node_selector(client_log)
-    client_log.set_defaults(func=lambda args: diagnose_client_log_workflow(args.path, deployment=args.deployment, role=selected_node(args)))
+    client_log.set_defaults(func=lambda args: diagnose_client_log_workflow(args.path, deployment=args.deployment, node=selected_node(args)))
     front = diagnose_subparsers.add_parser("front", help="Проверить публичный RU:443 front и source IP конкретного клиента.")
     front.add_argument("--deployment", help="Имя deployment.")
     front.add_argument("--source-ip", help="Публичный IP проблемного устройства/сети, если известен.")

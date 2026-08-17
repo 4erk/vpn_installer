@@ -55,7 +55,17 @@ class StatusOutputTests(unittest.TestCase):
         )
         lines = format_snapshot_summary(
             DiagnosticsSnapshot(
-                role="ru-gateway",
+                topology="dual",
+                node_id="gateway",
+                location="ru",
+                capabilities=(
+                    "interserver-client",
+                    "local-egress",
+                    "public-front",
+                    "router",
+                    "ru-split-routing",
+                    "web-admin",
+                ),
                 drift="none",
                 verdict="degraded",
                 collectors=ok_collectors(),
@@ -170,9 +180,9 @@ class StatusOutputTests(unittest.TestCase):
             )
         )
         rendered = "\n".join(lines)
-        self.assertIn("role: ru-gateway", rendered)
+        self.assertIn("node: gateway", rendered)
         self.assertIn("drift: none", rendered)
-        self.assertIn("snapshot schema: 4", rendered)
+        self.assertIn("snapshot schema: 5", rendered)
         self.assertIn("collector status: ok", rendered)
         self.assertIn(
             "log window 5m: status=ok (observed=2026-07-20T08:00:00Z), "
@@ -225,7 +235,10 @@ class StatusOutputTests(unittest.TestCase):
         rendered = "\n".join(
             format_snapshot_summary(
                 DiagnosticsSnapshot(
-                    role="foreign-exit",
+                    topology="dual",
+                    node_id="exit",
+                    location="foreign",
+                    capabilities=("interserver-server", "nat-exit"),
                     transport={
                         "interserver": {
                             "mode": "hysteria2-egress",
@@ -245,7 +258,10 @@ class StatusOutputTests(unittest.TestCase):
         rendered = "\n".join(
             format_snapshot_summary(
                 DiagnosticsSnapshot(
-                    role="ru-gateway",
+                    topology="dual",
+                    node_id="gateway",
+                    location="ru",
+                    capabilities=("interserver-client", "local-egress", "public-front", "router"),
                     transport={
                         "interserver": {
                             "mode": "stable-wireguard-overlay",
@@ -268,7 +284,10 @@ class StatusOutputTests(unittest.TestCase):
         rendered = "\n".join(
             format_snapshot_summary(
                 DiagnosticsSnapshot(
-                    role="ru-gateway",
+                    topology="dual",
+                    node_id="gateway",
+                    location="ru",
+                    capabilities=("interserver-client", "local-egress", "public-front", "router"),
                     network={
                         "recent_front_interval": {
                             "observed_at": "2026-07-30T20:02:00+00:00",
@@ -355,8 +374,7 @@ class StatusOutputTests(unittest.TestCase):
                     topology="single",
                     node_id="gateway",
                     location="foreign",
-                    capabilities=("local-egress", "public-front", "router", "web-admin"),
-                    role="foreign-exit",
+                    capabilities=("local-egress", "public-front", "router"),
                     collectors=collectors,
                     log_windows=collected_windows(),
                     front={"reality_target": "example.org:443"},
@@ -380,16 +398,14 @@ class StatusOutputTests(unittest.TestCase):
         self.assertIn("Reality target: target=example.org:443", rendered)
         self.assertIn("collector status: ok", rendered)
         self.assertIn("wireguard=not_applicable (single topology)", rendered)
-        self.assertNotIn("role: foreign-exit", rendered)
         self.assertNotIn("wg_qdisc=", rendered)
         self.assertNotIn("wireguard policy:", rendered)
         self.assertNotIn("interserver transport:", rendered)
 
-    def test_dual_formatter_matrix_uses_interserver_capabilities_not_role(self) -> None:
+    def test_dual_formatter_matrix_uses_interserver_capabilities(self) -> None:
         cases = (
             (
                 "gateway",
-                "foreign-exit",
                 ("interserver-client", "local-egress", "public-front", "router"),
                 {
                     "mode": "stable-wireguard-overlay",
@@ -400,7 +416,6 @@ class StatusOutputTests(unittest.TestCase):
             ),
             (
                 "exit",
-                "ru-gateway",
                 ("interserver-server", "nat-exit"),
                 {
                     "mode": "hysteria2-egress",
@@ -410,7 +425,7 @@ class StatusOutputTests(unittest.TestCase):
                 "listener=active, source=203.0.113.10",
             ),
         )
-        for node_id, legacy_role, capabilities, interserver, expected in cases:
+        for node_id, capabilities, interserver, expected in cases:
             with self.subTest(node_id=node_id):
                 rendered = "\n".join(
                     format_snapshot_summary(
@@ -419,7 +434,6 @@ class StatusOutputTests(unittest.TestCase):
                             node_id=node_id,
                             location="ru" if node_id == "gateway" else "foreign",
                             capabilities=capabilities,
-                            role=legacy_role,
                             transport={"interserver": interserver},
                         )
                     )
@@ -427,7 +441,6 @@ class StatusOutputTests(unittest.TestCase):
                 self.assertIn("topology: dual", rendered)
                 self.assertIn(f"node: {node_id}", rendered)
                 self.assertIn(expected, rendered)
-                self.assertNotIn(f"role: {legacy_role}", rendered)
 
 
 if __name__ == "__main__":

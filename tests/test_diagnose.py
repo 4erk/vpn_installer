@@ -10,6 +10,7 @@ from vpn_installer import diagnose
 from vpn_installer.models import RemoteTarget
 from vpn_installer.localnet import LocalRoute
 from vpn_installer.topology import (
+    CONFIG_SCHEMA_VERSION,
     LOCATION_FOREIGN,
     LOCATION_RU,
     NODE_EXIT,
@@ -22,7 +23,7 @@ from vpn_installer.topology import (
 
 def topology_env(mode: str, gateway_location: str) -> dict[str, str]:
     return {
-        "CONFIG_SCHEMA": "2",
+        "CONFIG_SCHEMA": str(CONFIG_SCHEMA_VERSION),
         "DEPLOY_NAME": "demo",
         "TOPOLOGY": mode,
         "GATEWAY_LOCATION": gateway_location,
@@ -35,7 +36,7 @@ def topology_env(mode: str, gateway_location: str) -> dict[str, str]:
 
 def target(node_id: str, location: str) -> RemoteTarget:
     host = "94.232.248.35" if location == LOCATION_RU else "132.243.21.108"
-    return RemoteTarget(role=node_id, location=location, public_ip=host, ssh_host=host, ssh_user="root")
+    return RemoteTarget(node_id=node_id, location=location, public_ip=host, ssh_host=host, ssh_user="root")
 
 
 class DiagnoseTests(unittest.TestCase):
@@ -148,7 +149,7 @@ class DiagnoseTests(unittest.TestCase):
                 patch.object(diagnose, "local_route_to_server", return_value=LocalRoute("94.232.248.35", "singbox_tun", "172.18.0.2", "172.18.0.1")),
                 patch("sys.stdout", new_callable=__import__("io").StringIO) as stream,
             ):
-                self.assertEqual(diagnose.diagnose_client_log_workflow(str(log_path), deployment="demo", role=NODE_GATEWAY), 1)
+                self.assertEqual(diagnose.diagnose_client_log_workflow(str(log_path), deployment="demo", node=NODE_GATEWAY), 1)
         output = stream.getvalue()
         self.assertIn("client_front_connect_failed: 1", output)
         self.assertIn("dns_timeout: 1", output)

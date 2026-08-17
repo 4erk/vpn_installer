@@ -15,7 +15,7 @@ class PublicTransportTests(unittest.TestCase):
         env = generate_default_env("demo")
         env.update(
             {
-                "CONFIG_SCHEMA": "2",
+                "CONFIG_SCHEMA": "3",
                 "TOPOLOGY": "dual",
                 "GATEWAY_LOCATION": "ru",
                 "GATEWAY_PUBLIC_IP": "203.0.113.10",
@@ -30,7 +30,7 @@ class PublicTransportTests(unittest.TestCase):
         env = generate_default_env("single", topology="single", gateway_location="foreign")
         env.update(
             {
-                "CONFIG_SCHEMA": "2",
+                "CONFIG_SCHEMA": "3",
                 "TOPOLOGY": "single",
                 "GATEWAY_LOCATION": "foreign",
                 "GATEWAY_PUBLIC_IP": "192.0.2.44",
@@ -118,13 +118,6 @@ class PublicTransportTests(unittest.TestCase):
         self.assertEqual(vless.fragment, "single-foreign-gateway")
         self.assertEqual(hysteria.hostname, env["GATEWAY_PUBLIC_IP"])
         self.assertEqual(outbound["server"], env["GATEWAY_PUBLIC_IP"])
-
-    def test_public_transport_rejects_legacy_address_aliases(self) -> None:
-        env = self.make_env()
-        env["RU_PUBLIC_IP"] = env["GATEWAY_PUBLIC_IP"]
-
-        with self.assertRaisesRegex(ValueError, "legacy public IP aliases"):
-            render_public_hy2_outbound(env)
 
 
 if __name__ == "__main__":

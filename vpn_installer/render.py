@@ -27,12 +27,10 @@ from .interserver_transport import (
     derive_transport_password,
     foreign_underlay_wireguard_peer,
 )
-from .manifest import finalize_node_files, render_manifest, render_node_env_text, required_asset_names  # render_manifest is the one-release API adapter.
+from .manifest import finalize_node_files, render_manifest, render_node_env_text, required_asset_names
 from .models import (
     DEFAULT_ASSET_TIMEOUT,
     REQUIRED_ENV_VARS,
-    ROLE_FOREIGN,
-    ROLE_RU,
 )
 from .network_profile import (
     CONNTRACK_MAX,
@@ -57,16 +55,15 @@ SERVER_RENDER_MODULES = (
     "admin_apply.py",
     "admin_web.py",
     "common.py",
+    "compatibility.py",
     "config.py",
     "diagnostics.py",
     "dns_policy.py",
     "install_contract.py",
     "install_support.py",
     "interserver_transport.py",
-    "legacy_install_contract.py",
     "log_classifier.py",
     "manifest.py",
-    "migration.py",
     "models.py",
     "network_profile.py",
     "public_transport.py",
@@ -77,6 +74,7 @@ SERVER_RENDER_MODULES = (
     "specs.py",
     "system_resolver.py",
     "topology.py",
+    "upgrade_0200.py",
 )
 
 SERVER_AGENT_BASE_MODULES = (
@@ -372,12 +370,6 @@ def render_gateway_xray(env: dict[str, str]) -> str:
     return render_json(payload)
 
 
-def render_ru_xray(env: dict[str, str]) -> str:
-    """Compatibility wrapper; the public front belongs to the gateway capability."""
-
-    return render_gateway_xray(env)
-
-
 def render_foreign_singbox(env: dict[str, str]) -> str:
     return render_json(
         {
@@ -572,16 +564,43 @@ def render_foreign_nftables(env: dict[str, str], wan_iface: str) -> str:
     return "\n".join(lines)
 
 
-def render_ru_firewall_nftables(env: dict[str, str]) -> str:
+def render_ru_firewall_nftables(env: dict[str, str], *, web_admin: bool = False) -> str:
     lines = [
         "table inet vpnstack {",
     ]
+    if web_admin:
+        lines.extend(
+            [
+                "",
+                "  set admin_clients_ipv4 {",
+                "    type ipv4_addr",
+                "    flags dynamic,timeout",
+                "    timeout 3m",
+                "  }",
+                "",
+                "  set admin_clients_ipv6 {",
+                "    type ipv6_addr",
+                "    flags dynamic,timeout",
+                "    timeout 3m",
+                "  }",
+            ]
+        )
     lines.extend(
         [
             "",
             "  chain prerouting_raw {",
             "    type filter hook prerouting priority raw;",
             "    policy accept;",
+            *(
+                [
+                    f'    meta nfproto ipv4 tcp dport {env["RU_LISTEN_PORT"]} update @admin_clients_ipv4 {{ ip saddr timeout 3m }}',
+                    f'    meta nfproto ipv6 tcp dport {env["RU_LISTEN_PORT"]} update @admin_clients_ipv6 {{ ip6 saddr timeout 3m }}',
+                    f'    meta nfproto ipv4 udp dport {env["RU_LISTEN_PORT"]} update @admin_clients_ipv4 {{ ip saddr timeout 3m }}',
+                    f'    meta nfproto ipv6 udp dport {env["RU_LISTEN_PORT"]} update @admin_clients_ipv6 {{ ip6 saddr timeout 3m }}',
+                ]
+                if web_admin
+                else []
+            ),
             f'    tcp dport {env["RU_LISTEN_PORT"]} counter notrack comment "vpnstack-xray-in-notrack"',
             f'    udp dport {env["RU_LISTEN_PORT"]} counter notrack comment "vpnstack-hy2-in-notrack"',
             "  }",
@@ -607,6 +626,9 @@ def render_ru_firewall_nftables(env: dict[str, str]) -> str:
     lines.append(f"    tcp dport {env['SSH_PORT']} counter accept")
     lines.append(f"    tcp dport {env['RU_LISTEN_PORT']} counter accept")
     lines.append(f"    udp dport {env['RU_LISTEN_PORT']} counter accept")
+    if web_admin:
+        lines.append(f"    tcp dport {env['ADMIN_WEB_PORT']} ip saddr @admin_clients_ipv4 counter accept")
+        lines.append(f"    tcp dport {env['ADMIN_WEB_PORT']} ip6 saddr @admin_clients_ipv6 counter accept")
     lines.extend(["  }", "}", ""])
     return "\n".join(lines)
 
@@ -710,7 +732,7 @@ def render_xray_service() -> str:
     )
 
 
-def render_singbox_service(role: str, *, operator_routing: bool = True) -> str:
+def render_singbox_service(node_id: str, *, operator_routing: bool = True) -> str:
     service_lines = [
             "[Unit]",
             "Description=vpn-stack sing-box router",
@@ -720,7 +742,7 @@ def render_singbox_service(role: str, *, operator_routing: bool = True) -> str:
             "[Service]",
             "Type=simple",
     ]
-    if normalize_node_id(role) == NODE_GATEWAY and operator_routing:
+    if normalize_node_id(node_id) == NODE_GATEWAY and operator_routing:
         service_lines.append(
             "ExecStartPre=/usr/bin/python3 /etc/vpn-stack/current/admin_apply.py --base /etc/vpn-stack/current/sing-box.json --config /etc/sing-box/config.json --rules /etc/vpn-stack/admin-routing-rules.json --no-restart"
         )
@@ -757,7 +779,7 @@ def render_sshd_hardening(env: dict[str, str]) -> str:
     )
 
 
-def render_sysctl(role: str) -> str:
+def render_sysctl(node_id: str) -> str:
     lines = [
         f"net.core.default_qdisc={FQ_KIND}",
         f"net.core.rmem_max={UDP_RMEM_MAX}",
@@ -771,7 +793,7 @@ def render_sysctl(role: str) -> str:
         f"net.ipv4.tcp_mtu_probe_floor={TCP_MTU_PROBE_FLOOR}",
         f"net.ipv4.tcp_no_metrics_save={TCP_NO_METRICS_SAVE}",
     ]
-    if normalize_node_id(role) == NODE_GATEWAY:
+    if normalize_node_id(node_id) == NODE_GATEWAY:
         lines.append("net.ipv4.conf.all.src_valid_mark=1")
     else:
         lines.extend(("net.ipv4.ip_forward=1", "net.ipv6.conf.all.forwarding=1"))
@@ -933,10 +955,6 @@ def render_client_profiles(env: dict[str, str]) -> Path:
     return _client_artifacts.render_client_profiles(env, out_dir=OUT_DIR)
 
 
-def preview_dir_for_role(preview_root: Path, role: str) -> Path:
-    return preview_dir_for_node(preview_root, normalize_node_id(role))
-
-
 def preview_dir_for_node(preview_root: Path, node_id: str) -> Path:
     return preview_root / normalize_node_id(node_id)
 
@@ -969,7 +987,7 @@ def rendered_files_for_node(env: dict[str, str], node_id: str, *, assets: dict[s
             "sing-box.service": render_singbox_service(NODE_GATEWAY),
             "admin_apply.py": server_script_asset("admin_apply.py"),
             "xray.json": render_gateway_xray(env),
-            "nftables.conf": render_ru_firewall_nftables(env),
+            "nftables.conf": render_ru_firewall_nftables(env, web_admin=CAP_WEB_ADMIN in plan.capabilities),
             "vpn-stack-nft-apply.sh": render_nft_apply_script(),
             "vpn-stack-nftables.service": render_nftables_service(),
             "sshd-vpn-stack.conf": render_sshd_hardening(env),
@@ -1025,22 +1043,10 @@ def rendered_files_for_node(env: dict[str, str], node_id: str, *, assets: dict[s
     )
 
 
-def rendered_files_for_role(env: dict[str, str], role: str, *, assets: dict[str, Path] | None = None) -> dict[str, str]:
-    """Deprecated input adapter. Runtime compilation uses canonical node IDs."""
-
-    return rendered_files_for_node(env, normalize_node_id(role), assets=assets)
-
-
 def write_node_rendered_files(env: dict[str, str], node_id: str, output_dir: Path, *, assets: dict[str, Path] | None = None) -> Path:
     for name, content in rendered_files_for_node(env, node_id, assets=assets).items():
         write_private_text(output_dir / name, content)
     return output_dir
-
-
-def write_role_rendered_files(env: dict[str, str], role: str, output_dir: Path, *, assets: dict[str, Path] | None = None) -> Path:
-    """Deprecated input adapter for install bundles produced before schema 2."""
-
-    return write_node_rendered_files(env, normalize_node_id(role), output_dir, assets=assets)
 
 
 def copy_python_package(target_root: Path) -> Path:

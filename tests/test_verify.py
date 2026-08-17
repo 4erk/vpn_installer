@@ -19,7 +19,6 @@ from vpn_installer.topology import (
     TOPOLOGY_DUAL,
     TOPOLOGY_SINGLE,
     TopologySpec,
-    legacy_role_for_node,
 )
 from vpn_installer.verify import (
     FALLBACK_CAPACITY_REFERENCE_BYTES_PER_SECOND,
@@ -38,8 +37,6 @@ from vpn_installer.verify import (
 from vpn_installer.vless_verify import parse_vless_uri
 
 
-ROLE_RU = legacy_role_for_node(NODE_GATEWAY)
-ROLE_FOREIGN = legacy_role_for_node(NODE_EXIT)
 FIRST_LOAD_OK = {"attempts": 9, "successes": 9, "failures": 0, "average_total_seconds": 0.2, "max_total_seconds": 0.4}
 UDP_DNS_OK = {
     "ok": True,
@@ -114,7 +111,7 @@ def client_env(
 def remote_target(topology: TopologySpec, node_id: str, *, ssh_host: str | None = None) -> RemoteTarget:
     node = topology.node(node_id)
     return RemoteTarget(
-        role=legacy_role_for_node(node_id),
+        node_id=node_id,
         location=node.location,
         public_ip=node.public_ip,
         ssh_host=ssh_host or node.public_ip,
@@ -258,32 +255,25 @@ class VerifyTests(unittest.TestCase):
         self.addCleanup(out_patch.stop)
 
     def test_verify_snapshot_requires_drift_free_manifest(self) -> None:
-        verified = _verify_snapshot(acceptance_snapshot(ROLE_RU, drift="server-mutated"))
+        verified = _verify_snapshot(acceptance_snapshot(NODE_GATEWAY, drift="server-mutated"))
         self.assertEqual(verified.verdict, "failed")
         self.assertIn("installed config hash differs from render manifest", verified.reasons)
 
     def test_verify_snapshot_treats_stale_transport_observer_as_degraded(self) -> None:
         snapshot = acceptance_snapshot(
-            ROLE_RU,
+            NODE_GATEWAY,
             transport={"interserver": {"adaptive_state": {"state": "healthy", "fresh": False, "reason": "selected underlay is healthy"}}},
         )
         verified = _verify_snapshot(snapshot)
         self.assertEqual(verified.verdict, "degraded")
         self.assertEqual(verified.reasons, ["interserver_adaptation=stale"])
 
-    def test_verify_snapshot_rejects_stale_or_migrated_evidence(self) -> None:
-        stale = acceptance_snapshot(ROLE_FOREIGN, generated_at="2026-01-01T00:00:00+00:00")
+    def test_verify_snapshot_rejects_stale_evidence(self) -> None:
+        stale = acceptance_snapshot(NODE_EXIT, generated_at="2026-01-01T00:00:00+00:00")
         self.assertEqual(_verify_snapshot(stale).verdict, "inconclusive")
-        migrated = DiagnosticsSnapshot.migrate_agent_v2(
-            {"schema_version": 2, "generated_at": datetime.now(timezone.utc).isoformat(), "verdicts": {"overall": "verified"}}
-        )
-        self.assertEqual(_verify_snapshot(migrated).verdict, "inconclusive")
 
-    def test_verify_snapshot_accepts_native_v4_contract_metadata(self) -> None:
-        snapshot = acceptance_snapshot(
-            NODE_GATEWAY,
-            migration={"state": "native", "source_schema": 3, "target_schema": 3},
-        )
+    def test_verify_snapshot_accepts_native_v5_contract_metadata(self) -> None:
+        snapshot = acceptance_snapshot(NODE_GATEWAY)
 
         verified = _verify_snapshot(snapshot)
 
@@ -316,7 +306,7 @@ class VerifyTests(unittest.TestCase):
         windows["since_release"] = LogWindowSnapshot.unavailable("retention expired")
         old_release = (datetime.now(timezone.utc) - timedelta(days=15)).isoformat()
         snapshot = acceptance_snapshot(
-            ROLE_FOREIGN,
+            NODE_EXIT,
             release={"installed_at": old_release},
             log_windows=windows,
         )
@@ -324,7 +314,7 @@ class VerifyTests(unittest.TestCase):
 
         recent_release = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
         snapshot = acceptance_snapshot(
-            ROLE_FOREIGN,
+            NODE_EXIT,
             release={"installed_at": recent_release},
             log_windows=windows,
         )
@@ -333,17 +323,17 @@ class VerifyTests(unittest.TestCase):
         self.assertTrue(any(reason.startswith("log window since_release unavailable") for reason in verified.reasons))
 
     def test_verify_snapshot_requires_complete_agent_verdicts(self) -> None:
-        verified = _verify_snapshot(acceptance_snapshot(ROLE_RU, component_verdicts={"server_path": "verified"}))
+        verified = _verify_snapshot(acceptance_snapshot(NODE_GATEWAY, component_verdicts={"server_path": "verified"}))
         self.assertEqual(verified.verdict, "failed")
         self.assertIn("agent verdict fields are incomplete", verified.reasons)
 
     def test_verify_snapshot_requires_public_front_keepalive_policy(self) -> None:
-        verified = _verify_snapshot(acceptance_snapshot(ROLE_RU, front={}))
+        verified = _verify_snapshot(acceptance_snapshot(NODE_GATEWAY, front={}))
         self.assertEqual(verified.verdict, "failed")
         self.assertIn("public TCP front keepalive policy is missing", verified.reasons)
 
     def test_verify_snapshot_requires_root_filesystem_integrity_fields(self) -> None:
-        verified = _verify_snapshot(acceptance_snapshot(ROLE_FOREIGN, storage={}))
+        verified = _verify_snapshot(acceptance_snapshot(NODE_EXIT, storage={}))
         self.assertEqual(verified.verdict, "failed")
         self.assertIn("root filesystem integrity fields are missing", verified.reasons)
 
@@ -354,25 +344,25 @@ class VerifyTests(unittest.TestCase):
             "client_observation": "not-applicable",
             "host_integrity": "failed",
         }
-        verified = _verify_snapshot(acceptance_snapshot(ROLE_FOREIGN, component_verdicts=verdicts))
+        verified = _verify_snapshot(acceptance_snapshot(NODE_EXIT, component_verdicts=verdicts))
         self.assertEqual(verified.verdict, "failed")
         self.assertIn("agent host_integrity failed", verified.reasons)
 
     def test_verify_snapshot_degrades_for_front_socket_churn(self) -> None:
         verdicts = {"server_path": "verified", "public_front": "verified", "public_quic": "verified", "client_observation": "degraded", "host_integrity": "verified"}
-        verified = _verify_snapshot(acceptance_snapshot(ROLE_RU, component_verdicts=verdicts))
+        verified = _verify_snapshot(acceptance_snapshot(NODE_GATEWAY, component_verdicts=verdicts))
         self.assertEqual(verified.verdict, "degraded")
         self.assertIn("public TCP front shows active data-path degradation", verified.reasons)
 
     def test_verify_snapshot_degrades_for_one_measured_lossy_client(self) -> None:
         verdicts = {"server_path": "verified", "public_front": "verified", "public_quic": "verified", "client_observation": "client_specific", "host_integrity": "verified"}
-        verified = _verify_snapshot(acceptance_snapshot(ROLE_RU, component_verdicts=verdicts))
+        verified = _verify_snapshot(acceptance_snapshot(NODE_GATEWAY, component_verdicts=verdicts))
         self.assertEqual(verified.verdict, "degraded")
 
     def test_verify_snapshot_degrades_when_plpmtud_is_disabled(self) -> None:
         verified = _verify_snapshot(
             acceptance_snapshot(
-                ROLE_RU,
+                NODE_GATEWAY,
                 network={
                     "tcp_adaptation": {
                         "qdisc": "fq",
@@ -395,7 +385,7 @@ class VerifyTests(unittest.TestCase):
     def test_verify_snapshot_degrades_when_udp_receive_profile_is_inactive(self) -> None:
         verified = _verify_snapshot(
             acceptance_snapshot(
-                ROLE_FOREIGN,
+                NODE_EXIT,
                 network={
                     "tcp_adaptation": {
                         "qdisc": "fq",
@@ -418,7 +408,7 @@ class VerifyTests(unittest.TestCase):
     def test_verify_snapshot_degrades_when_udp_send_default_is_inactive(self) -> None:
         verified = _verify_snapshot(
             acceptance_snapshot(
-                ROLE_FOREIGN,
+                NODE_EXIT,
                 network={
                     "tcp_adaptation": {
                         "qdisc": "fq",
@@ -439,21 +429,21 @@ class VerifyTests(unittest.TestCase):
         self.assertIn("UDP socket buffer profile is not active", verified.reasons)
 
     def test_verify_snapshot_fails_when_fq_flow_limit_is_not_managed(self) -> None:
-        snapshot = acceptance_snapshot(ROLE_FOREIGN)
+        snapshot = acceptance_snapshot(NODE_EXIT)
         snapshot.network["tcp_adaptation"]["qdisc_flow_limit"] = 100
         verified = _verify_snapshot(snapshot)
         self.assertEqual(verified.verdict, "failed")
         self.assertIn("managed fq profile is not active", verified.reasons)
 
     def test_verify_snapshot_requires_acceptance_probes(self) -> None:
-        verified = _verify_snapshot(acceptance_snapshot(ROLE_FOREIGN, route_probes={"profile": "light", "ok": True}))
+        verified = _verify_snapshot(acceptance_snapshot(NODE_EXIT, route_probes={"profile": "light", "ok": True}))
         self.assertEqual(verified.verdict, "failed")
         self.assertIn("acceptance probes did not run", verified.reasons)
 
     def test_verify_snapshot_degrades_external_capability_without_failing_release_gate(self) -> None:
         verified = _verify_snapshot(
             acceptance_snapshot(
-                ROLE_RU,
+                NODE_GATEWAY,
                 route_probes={"profile": "acceptance", "ok": False, "release_gate_ok": True},
             )
         )
@@ -463,7 +453,7 @@ class VerifyTests(unittest.TestCase):
     def test_verify_snapshot_fails_when_release_gate_fails(self) -> None:
         verified = _verify_snapshot(
             acceptance_snapshot(
-                ROLE_RU,
+                NODE_GATEWAY,
                 route_probes={"profile": "acceptance", "ok": False, "release_gate_ok": False},
             )
         )
@@ -471,7 +461,7 @@ class VerifyTests(unittest.TestCase):
         self.assertIn("acceptance release gate failed", verified.reasons)
 
     def test_public_vless_supersedes_only_matching_external_capability_degradation(self) -> None:
-        snapshot = acceptance_snapshot(ROLE_RU)
+        snapshot = acceptance_snapshot(NODE_GATEWAY)
         snapshot.verdict = "degraded"
         snapshot.reasons = ["external capability probe failed"]
         reconciled = _reconcile_public_capabilities(snapshot, {"verdict": "verified"})
@@ -486,7 +476,7 @@ class VerifyTests(unittest.TestCase):
 
     def test_public_vless_does_not_hide_a_failed_transport_fallback(self) -> None:
         snapshot = acceptance_snapshot(
-            ROLE_RU,
+            NODE_GATEWAY,
             route_probes={
                 "profile": "acceptance",
                 "ok": False,
@@ -503,7 +493,7 @@ class VerifyTests(unittest.TestCase):
     def test_verify_snapshot_requires_foreign_singbox_service(self) -> None:
         verified = _verify_snapshot(
             acceptance_snapshot(
-                ROLE_FOREIGN,
+                NODE_EXIT,
                 services={"sing-box": "inactive", "wireguard": "active", "nftables": "active", "resolver": "active"},
             )
         )
@@ -511,12 +501,12 @@ class VerifyTests(unittest.TestCase):
         self.assertIn("sing-box=inactive", verified.reasons)
 
     def test_verify_snapshot_requires_managed_resolver(self) -> None:
-        verified = _verify_snapshot(acceptance_snapshot(ROLE_FOREIGN, services={"sing-box": "active", "wireguard": "active", "nftables": "active"}))
+        verified = _verify_snapshot(acceptance_snapshot(NODE_EXIT, services={"sing-box": "active", "wireguard": "active", "nftables": "active"}))
         self.assertEqual(verified.verdict, "failed")
         self.assertIn("resolver=missing", verified.reasons)
 
     def test_verify_snapshot_rejects_skipped_required_collector(self) -> None:
-        snapshot = acceptance_snapshot(ROLE_RU)
+        snapshot = acceptance_snapshot(NODE_GATEWAY)
         snapshot.collectors["route_probes"] = CollectorState.skipped("not requested")
 
         verified = _verify_snapshot(snapshot)
@@ -535,7 +525,7 @@ class VerifyTests(unittest.TestCase):
             patch("vpn_installer.verify.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), env, {}, targets, {})),
             patch("vpn_installer.verify.workflows.print_summary"),
             patch("vpn_installer.verify._capture_client_front", return_value={"events": {"accepted_tcp": 0}, "front": {"flows": {}}}),
-            patch("vpn_installer.verify._collect_agent_snapshot", side_effect=[acceptance_snapshot(ROLE_RU, drift="server-mutated"), acceptance_snapshot(ROLE_FOREIGN)]),
+            patch("vpn_installer.verify._collect_agent_snapshot", side_effect=[acceptance_snapshot(NODE_GATEWAY, drift="server-mutated"), acceptance_snapshot(NODE_EXIT)]),
             patch("vpn_installer.verify._verify_public_vless_uri", return_value=verified_public_vless_evidence(topology)),
             patch("vpn_installer.verify._verify_public_hysteria2", return_value={"verdict": "verified", "result": {}}),
         ):
@@ -548,12 +538,12 @@ class VerifyTests(unittest.TestCase):
             remote_target(topology, NODE_GATEWAY, ssh_host="gateway.example"),
             remote_target(topology, NODE_EXIT, ssh_host="exit.example"),
         ]
-        broken = acceptance_snapshot(ROLE_RU, route_probes={"profile": "acceptance", "ok": False}, component_verdicts={"server_path": "failed", "public_front": "verified", "public_quic": "verified", "client_observation": "observed", "host_integrity": "verified"})
+        broken = acceptance_snapshot(NODE_GATEWAY, route_probes={"profile": "acceptance", "ok": False}, component_verdicts={"server_path": "failed", "public_front": "verified", "public_quic": "verified", "client_observation": "observed", "host_integrity": "verified"})
         with (
             patch("vpn_installer.verify.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), env, {}, targets, {})),
             patch("vpn_installer.verify.workflows.print_summary"),
             patch("vpn_installer.verify._capture_client_front", return_value={"events": {"accepted_tcp": 0}, "front": {"flows": {}}}),
-            patch("vpn_installer.verify._collect_agent_snapshot", side_effect=[broken, acceptance_snapshot(ROLE_FOREIGN)]),
+            patch("vpn_installer.verify._collect_agent_snapshot", side_effect=[broken, acceptance_snapshot(NODE_EXIT)]),
             patch("vpn_installer.verify._verify_public_vless_uri", return_value=verified_public_vless_evidence(topology)),
             patch("vpn_installer.verify._verify_public_hysteria2", return_value={"verdict": "verified", "result": {}}),
         ):
@@ -615,7 +605,7 @@ class VerifyTests(unittest.TestCase):
         self.assertEqual(sequence, ["public-vless", "public-hysteria2", f"snapshot:{NODE_GATEWAY}", f"snapshot:{NODE_EXIT}"])
         self.assertFalse(prepare.call_args.kwargs["run_live_probes"])
         self.assertFalse(prepare.call_args.kwargs["enforce_safe_route"])
-        self.assertIsNone(prepare.call_args.kwargs["roles"])
+        self.assertIsNone(prepare.call_args.kwargs["nodes"])
 
     def test_verify_live_workflow_single_uses_gateway_runner_and_marks_exit_not_applicable(self) -> None:
         env = client_env(TOPOLOGY_SINGLE, gateway_location="foreign")
@@ -643,7 +633,7 @@ class VerifyTests(unittest.TestCase):
         self.assertEqual(observed_runner_nodes, [NODE_GATEWAY])
         self.assertEqual(collect.call_count, 1)
         verify_hysteria2.assert_not_called()
-        self.assertIsNone(prepare.call_args.kwargs["roles"])
+        self.assertIsNone(prepare.call_args.kwargs["nodes"])
         report_path = next((Path(self.temp_out.name) / "diagnostics").glob("*/live-verify.json"))
         report = json.loads(report_path.read_text(encoding="utf-8"))
         self.assertEqual(report["topology"], TOPOLOGY_SINGLE)
@@ -1039,7 +1029,7 @@ class VerifyTests(unittest.TestCase):
         run_profile.assert_not_called()
 
     def test_detached_runner_reports_its_stderr_when_it_exits_without_result(self) -> None:
-        target = RemoteTarget(role=ROLE_FOREIGN, ssh_host="foreign.example")
+        target = RemoteTarget(node_id=NODE_EXIT, ssh_host="foreign.example")
         with patch("vpn_installer.verify.ssh_capture", return_value="exited\nvpn-vless-runner phase=throughput-curl-exit-56\n"):
             with self.assertRaisesRegex(RuntimeError, "throughput-curl-exit-56"):
                 _wait_for_vless_runner(target, "4242", "/tmp/result.json", "/tmp/runner.stderr", "/tmp/controller.lease", throughput_seconds=30)

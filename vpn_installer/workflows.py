@@ -18,6 +18,7 @@ from .config import (
     load_env_file,
     merge_env_with_defaults,
     merge_node_env_with_defaults,
+    normalize_deployment_env,
     parse_env_text,
     render_env_text,
     require_env,
@@ -26,8 +27,7 @@ from .config import (
 from .error_logging import log_exception
 from .diagnostics import DiagnosticsSnapshot
 from .localnet import assert_server_route_not_self_tunneled, local_route_to_server, route_uses_self_tunnel
-from .models import AppError, ROLE_FOREIGN, ROLE_META, ROLE_RU, RemoteTarget, UserCancelled
-from .migration import migrate_env
+from .models import AppError, NODE_META, RemoteTarget, UserCancelled
 from .manifest import project_node_env
 from .network_profile import FQ_KIND
 from .prompts import (
@@ -43,21 +43,29 @@ from .prompts import (
     select_node_for_menu,
     validate_target_settings,
 )
-from .remote import ensure_remote_privilege, ensure_target_host_key, fetch_remote_deployment_env, print_preflight, remote_agent_snapshot, remote_preflight, scp_upload, ssh_capture, ssh_stream
-from .roles import execution_roles, requested_roles
+from .remote import ensure_remote_privilege, ensure_target_host_key, fetch_remote_deployment_env, print_preflight, remote_agent_snapshot, remote_compatible_agent_snapshot, remote_preflight, scp_upload, ssh_capture, ssh_stream
 from .client_artifacts import client_artifact_paths
 from .render import deployment_out_dir, package_bundle, package_control_bundle, render_all_artifacts, render_config_artifacts
-from .state import load_state, state_json_path, state_legacy_path, write_state
+from .state import load_state, state_json_path, write_state
 from .status_output import format_snapshot_summary
 from .targets import (
     apply_env_connection_overrides,
     build_target,
     can_fetch_remote_env,
     remote_env_matches_target,
-    role_env_prefix,
+    node_env_prefix,
     update_env_with_targets,
 )
-from .topology import LOCATION_RU, TopologySpec, legacy_role_for_node, normalize_node_id
+from .topology import (
+    CAP_WEB_ADMIN,
+    LOCATION_RU,
+    NODE_EXIT,
+    NODE_GATEWAY,
+    TopologySpec,
+    execution_node_ids,
+    normalize_node_id,
+    requested_node_ids,
+)
 
 
 def is_audit_failure(exc: BaseException) -> bool:
@@ -74,23 +82,16 @@ def load_remote_authoritative_env(
     """Validate installed node projections without reconstructing deployment secrets."""
 
     for target in targets:
-        preflight = preflights.get(target.role, {})
+        preflight = preflights.get(target.node_id, {})
         if not remote_env_matches_target(target, deployment_name, preflight):
             continue
         if not can_fetch_remote_env(target):
             continue
         remote_env_text = fetch_remote_deployment_env(target)
-        parsed_remote_env = parse_env_text(remote_env_text)
-        if parsed_remote_env.get("NODE_ID", "").strip():
-            remote_env = merge_node_env_with_defaults(parsed_remote_env, deployment_name)
-        else:
-            # One-release schema-2 boundary: normalize the former full
-            # deployment env before comparing its capability projection.
-            remote_env = merge_env_with_defaults(
-                migrate_env(parsed_remote_env).env,
-                deployment_name,
-                fallback_defaults=env,
-            )
+        parsed_remote_env = normalize_deployment_env(parse_env_text(remote_env_text))
+        if not parsed_remote_env.get("NODE_ID", "").strip():
+            raise AppError(f"{target.label}: installed release has no canonical NODE_ID")
+        remote_env = merge_node_env_with_defaults(parsed_remote_env, deployment_name)
         observed = project_node_env(remote_env, target.node_id)
         expected = project_node_env(env, target.node_id)
         differences = [
@@ -174,7 +175,7 @@ def verify_target_interactively(
                 ensure_remote_privilege(target, preflight, prompt_yes_no=prompt_yes_no, prompt_secret=prompt_secret)
             return target, preflight
         except Exception as exc:  # noqa: BLE001
-            log_path = log_exception("ssh.preflight", exc, extra={"role": target.role, "host": target.ssh_host})
+            log_path = log_exception("ssh.preflight", exc, extra={"node_id": target.node_id, "host": target.ssh_host})
             warn(error_summary(exc))
             if log_path:
                 print(f"Технические детали: {log_path}")
@@ -209,13 +210,13 @@ def verify_target_non_interactively(
     if not target.saved_connection:
         raise AppError(
             f"{target.label}: нет полного сохранённого подключения для non-interactive режима. "
-            f"Задай state через обычный запуск или env {role_env_prefix(target.role)}_PUBLIC_IP/{role_env_prefix(target.role)}_SSH_HOST."
+            f"Задай state через обычный запуск или env {node_env_prefix(target.node_id)}_PUBLIC_IP/{node_env_prefix(target.node_id)}_SSH_HOST."
         )
     validate_target_settings(target)
     if target.auth_mode == "password" and not target.ssh_password:
         raise AppError(
             f"{target.label}: для non-interactive password-входа нужен env "
-            f"{role_env_prefix(target.role)}_SSH_PASSWORD или VPN_SSH_PASSWORD."
+            f"{node_env_prefix(target.node_id)}_SSH_PASSWORD или VPN_SSH_PASSWORD."
         )
     backend = "встроенный password backend" if target.auth_mode == "password" else "OpenSSH publickey-only"
     print(f"Проверяю подключение к {target.label}: {target.ssh_user}@{target.ssh_host}:{target.ssh_port} ({backend})")
@@ -252,7 +253,7 @@ def verify_target_non_interactively(
 def prepare_remote_session(
     deployment_arg: str | None,
     *,
-    roles: list[str] | None,
+    nodes: list[str] | None,
     require_privilege: bool,
     validate_os: bool = True,
     allow_create: bool = False,
@@ -273,7 +274,7 @@ def prepare_remote_session(
         env_path = DEPLOYMENTS_DIR / f"{deployment_name}.env"
         is_new = not env_path.exists()
         if not is_new and (topology_mode is not None or gateway_location is not None):
-            current_env = migrate_env(load_env_file(env_path)).env
+            current_env = normalize_deployment_env(load_env_file(env_path))
             current_topology = TopologySpec.from_env(current_env, require_addresses=False)
             requested_mode = topology_mode or current_topology.mode
             requested_location = gateway_location or current_topology.gateway.location
@@ -299,19 +300,18 @@ def prepare_remote_session(
         deployment_name = select_existing_deployment(deployment_arg)
         env_path, env = load_existing_deployment_env(deployment_name)
     topology = TopologySpec.from_env(env, require_addresses=False)
-    configured_roles = [legacy_role_for_node(node.node_id) for node in topology.nodes]
-    selected_roles = configured_roles if roles is None else [role for role in roles if role in configured_roles]
-    if not selected_roles:
+    configured_nodes = [node.node_id for node in topology.nodes]
+    selected_nodes = configured_nodes if nodes is None else [node_id for node_id in nodes if node_id in configured_nodes]
+    if not selected_nodes:
         raise AppError(f"Запрошенный сервер отсутствует в topology={topology.mode}.")
-    roles = selected_roles
     state = load_state(deployment_name)
     print_header("Параметры deployment")
     print(f"deployment: {deployment_name}")
     targets: list[RemoteTarget] = []
     preflights: dict[str, dict[str, str]] = {}
     wg_interface = (env.get("WG_INTERFACE", "").strip() or "wg0")
-    for role in roles:
-        target = apply_env_connection_overrides(build_target(role, env, state))
+    for node_id in selected_nodes:
+        target = apply_env_connection_overrides(build_target(node_id, env, state))
         if non_interactive:
             target, preflight = verify_target_non_interactively(
                 target,
@@ -336,7 +336,7 @@ def prepare_remote_session(
                 run_live_probes=run_live_probes,
             )
         targets.append(target)
-        preflights[role] = preflight
+        preflights[node_id] = preflight
     update_env_with_targets(env, targets)
     synced_from_remote = False
     if sync_remote_env:
@@ -352,7 +352,7 @@ def cleanup_remote_workdir(target: RemoteTarget, remote_root: str) -> None:
     try:
         ssh_stream(target, f"rm -rf {shlex.quote(remote_root)}")
     except Exception as exc:  # noqa: BLE001
-        log_exception("ssh.cleanup", exc, extra={"role": target.role, "host": target.ssh_host})
+        log_exception("ssh.cleanup", exc, extra={"node_id": target.node_id, "host": target.ssh_host})
         warn(f"Не удалось очистить временную папку на {target.label}: {error_summary(exc)}")
 
 
@@ -540,7 +540,7 @@ def filter_targets_for_action(
         return targets
     actionable: list[RemoteTarget] = []
     for target in targets:
-        preflight = preflights.get(target.role, {})
+        preflight = preflights.get(target.node_id, {})
         installed = preflight.get("installed", "0")
         if installed != "1":
             print(f"{target.label}: стек не найден на сервере, действие {action} пропущено.")
@@ -549,7 +549,7 @@ def filter_targets_for_action(
     return actionable
 
 
-def install_remote_role(target: RemoteTarget, deployment_name: str, env: dict[str, str], action: str) -> None:
+def install_remote_node(target: RemoteTarget, deployment_name: str, env: dict[str, str], action: str) -> None:
     node_id = target.node_id
     remote_parent = f"vpn-installer/{deployment_name}/{node_id}"
     remote_root = f"{remote_parent}/{time.time_ns()}"
@@ -593,20 +593,20 @@ def install_remote_role(target: RemoteTarget, deployment_name: str, env: dict[st
     cleanup_remote_workdir(target, remote_root)
 
 
-def expected_release_id_for_role(env: dict[str, str], role: str) -> str:
-    node_id = normalize_node_id(role)
+def expected_release_id_for_node(env: dict[str, str], node_id: str) -> str:
+    node_id = normalize_node_id(node_id)
     manifest_path = deployment_out_dir(env) / "preview" / node_id / "render-manifest.json"
     try:
         payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
-        raise AppError(f"Не удалось прочитать release manifest для {role}: {exc}") from exc
+        raise AppError(f"Не удалось прочитать release manifest для {node_id}: {exc}") from exc
     release_id = str(payload.get("release_id", "")).strip()
     if not release_id:
-        raise AppError(f"Release manifest для {role} не содержит release_id.")
+        raise AppError(f"Release manifest для {node_id} не содержит release_id.")
     return release_id
 
 
-def install_remote_role_with_recovery(
+def install_remote_node_with_recovery(
     target: RemoteTarget,
     deployment_name: str,
     env: dict[str, str],
@@ -614,14 +614,14 @@ def install_remote_role_with_recovery(
     wg_interface: str,
 ) -> None:
     if action not in {"install", "reinstall"}:
-        install_remote_role(target, deployment_name, env, action)
+        install_remote_node(target, deployment_name, env, action)
         return
 
-    expected_release_id = expected_release_id_for_role(env, target.role)
+    expected_release_id = expected_release_id_for_node(env, target.node_id)
     baseline = wait_for_remote_install_idle(target)
     command_error: Exception | None = None
     try:
-        install_remote_role(target, deployment_name, env, action)
+        install_remote_node(target, deployment_name, env, action)
     except Exception as exc:  # noqa: BLE001
         command_error = exc
         warn(f"{target.label}: {action} завершился ошибкой. Сверяю transaction, current и acceptance на сервере.")
@@ -630,7 +630,7 @@ def install_remote_role_with_recovery(
     except Exception as reconciliation_error:  # noqa: BLE001
         transaction = getattr(reconciliation_error, "vpn_transaction_state", {})
         failure = AppError(f"{target.label}: не удалось согласовать состояние после {action}: {reconciliation_error}")
-        setattr(failure, "remote_role_changed", install_cutover_observed(baseline, transaction, expected_release_id))
+        setattr(failure, "remote_node_changed", install_cutover_observed(baseline, transaction, expected_release_id))
         if transaction.get("state") == "idle" and command_error is not None:
             remote_root = str(getattr(command_error, "vpn_remote_root", ""))
             if remote_root:
@@ -644,8 +644,8 @@ def install_remote_role_with_recovery(
     mismatches = []
     if observed.get("installed") != "1":
         mismatches.append("stack is not installed")
-    if observed.get("role") != target.role:
-        mismatches.append(f"role={observed.get('role', '') or 'missing'}")
+    if observed.get("node") != target.node_id:
+        mismatches.append(f"node={observed.get('node', '') or 'missing'}")
     if observed.get("deployment_name") != deployment_name:
         mismatches.append(f"deployment={observed.get('deployment_name', '') or 'missing'}")
     if observed.get("release_id") != expected_release_id:
@@ -672,7 +672,7 @@ def install_remote_role_with_recovery(
         )
         setattr(
             failure,
-            "remote_role_changed",
+            "remote_node_changed",
             install_cutover_observed(baseline, observed, expected_release_id),
         )
         if command_error is not None:
@@ -743,22 +743,22 @@ def wait_for_ru_transport_ready(
 
 
 def settle_transport_after_install(
-    role: str,
+    node_id: str,
     target_map: dict[str, RemoteTarget],
     preflights: dict[str, dict[str, str]] | None,
     env: dict[str, str],
 ) -> None:
     topology = TopologySpec.from_env(env, require_addresses=False)
-    if not topology.is_dual or ROLE_RU not in target_map:
+    if not topology.is_dual or NODE_GATEWAY not in target_map:
         return
-    if role == ROLE_RU:
-        wait_for_ru_transport_ready(target_map[ROLE_RU])
+    if node_id == NODE_GATEWAY:
+        wait_for_ru_transport_ready(target_map[NODE_GATEWAY])
         return
-    if role == ROLE_FOREIGN and preflights and preflights.get(ROLE_RU, {}).get("installed") == "1":
-        wait_for_ru_transport_ready(target_map[ROLE_RU])
+    if node_id == NODE_EXIT and preflights and preflights.get(NODE_GATEWAY, {}).get("installed") == "1":
+        wait_for_ru_transport_ready(target_map[NODE_GATEWAY])
 
 
-def verify_rollback_role(
+def verify_rollback_node(
     target: RemoteTarget,
     deployment_name: str,
     wg_interface: str,
@@ -774,7 +774,7 @@ def verify_rollback_role(
     expected = {"installed": "1" if expected_release_id else "0"}
     if expected_release_id:
         expected.update(
-            role=target.role,
+            node=target.node_id,
             deployment_name=deployment_name,
             release_id=expected_release_id,
             drift="none",
@@ -867,43 +867,42 @@ def verify_postcutover(
         raise AppError("Свежая проверка полного VLESS-пути после установки не пройдена.")
 
 
-def rollback_changed_roles(
-    changed_roles: list[str],
+def rollback_changed_nodes(
+    changed_nodes: list[str],
     target_map: dict[str, RemoteTarget],
     deployment_name: str,
     env: dict[str, str],
     previous_release_ids: dict[str, str] | None = None,
 ) -> None:
-    """Restore every changed server in reverse cutover order and prove each role."""
+    """Restore every changed server in reverse cutover order and prove each node."""
 
     failures: list[str] = []
     wg_interface = env.get("WG_INTERFACE", "").strip() or "wg0"
     previous_release_ids = previous_release_ids or {}
-    admin_required = env.get("ADMIN_WEB_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
     topology = TopologySpec.from_env(env, require_addresses=False)
-    for role in reversed(changed_roles):
-        target = target_map[role]
+    for node_id in reversed(changed_nodes):
+        target = target_map[node_id]
         plan = topology.plan(target.node_id)
         try:
-            install_remote_role(target, deployment_name, env, "rollback")
-            verify_rollback_role(
+            install_remote_node(target, deployment_name, env, "rollback")
+            verify_rollback_node(
                 target,
                 deployment_name,
                 wg_interface,
-                previous_release_ids.get(role, ""),
+                previous_release_ids.get(node_id, ""),
                 wireguard_required=plan.requires_wireguard,
                 public_front_required=plan.requires_xray,
-                admin_required=admin_required and role == ROLE_RU,
+                admin_required=CAP_WEB_ADMIN in plan.capabilities,
             )
         except Exception as exc:  # noqa: BLE001
             failures.append(f"{target.label}: {exc}")
-    if not failures and all(previous_release_ids.get(role, "") for role in changed_roles):
+    if not failures and all(previous_release_ids.get(node_id, "") for node_id in changed_nodes):
         try:
             verify_postcutover(deployment_name, throughput_seconds=0, require_native_agent=False)
         except Exception as exc:  # noqa: BLE001
             failures.append(f"полный VLESS-путь после отката: {exc}")
     if failures:
-        raise AppError("Откат изменённых ролей не завершён: " + "; ".join(failures))
+        raise AppError("Откат изменённых узлов не завершён: " + "; ".join(failures))
 
 
 def finalize_install_output(env: dict[str, str], deployment_name: str) -> None:
@@ -937,7 +936,7 @@ def finalize_install_output(env: dict[str, str], deployment_name: str) -> None:
 def load_env_for_render(env_path: Path) -> dict[str, str]:
     if not env_path.exists():
         fail(f"Не найден deployment env: {env_path}")
-    env = merge_env_with_defaults(migrate_env(load_env_file(env_path)).env, sanitize_name(env_path.stem))
+    env = merge_env_with_defaults(normalize_deployment_env(load_env_file(env_path)), sanitize_name(env_path.stem))
     write_private_text(env_path, render_env_text(env))
     return apply_ru_direct_overlays(env, env_path)
 
@@ -949,45 +948,46 @@ def run_selected_remote_action(
     env: dict[str, str],
     targets: list[RemoteTarget],
     *,
-    role_arg: str = "all",
+    node_arg: str = "all",
     preflights: dict[str, dict[str, str]] | None = None,
 ) -> None:
-    target_map = {target.role: target for target in targets}
-    requested = requested_roles(role_arg)
-    available_roles = [role for role in requested if role in target_map]
+    target_map = {target.node_id: target for target in targets}
+    topology = TopologySpec.from_env(env)
+    requested = requested_node_ids(node_arg)
+    available_nodes = [node_id for node_id in requested if node_id in target_map]
     wg_interface = (env.get("WG_INTERFACE", "").strip() or "wg0")
     if action in {"install", "reinstall"}:
         print_header("Локальная сборка артефактов")
         render_all_artifacts(env_path, env)
-    changed_roles: list[str] = []
+    changed_nodes: list[str] = []
     previous_release_ids = {
-        role: str((preflights or {}).get(role, {}).get("release_id", ""))
-        for role in available_roles
+        node_id: str((preflights or {}).get(node_id, {}).get("release_id", ""))
+        for node_id in available_nodes
     }
     try:
-        for role in execution_roles(action, available_roles):
-            target = target_map[role]
+        for node_id in execution_node_ids(action, topology, tuple(available_nodes)):
+            target = target_map[node_id]
             try:
-                install_remote_role_with_recovery(target, deployment_name, env, action, wg_interface)
+                install_remote_node_with_recovery(target, deployment_name, env, action, wg_interface)
             except Exception as exc:  # noqa: BLE001
-                if getattr(exc, "remote_role_changed", False) and role not in changed_roles:
-                    changed_roles.append(role)
+                if getattr(exc, "remote_node_changed", False) and node_id not in changed_nodes:
+                    changed_nodes.append(node_id)
                 raise
             if action in {"install", "reinstall"}:
-                changed_roles.append(role)
-                settle_transport_after_install(role, target_map, preflights, env)
+                changed_nodes.append(node_id)
+                settle_transport_after_install(node_id, target_map, preflights, env)
             if action not in {"install", "reinstall"}:
                 print_preflight(target, remote_preflight(target, wg_interface))
-        if changed_roles:
+        if changed_nodes:
             verify_postcutover(deployment_name)
     except Exception as exc:  # noqa: BLE001
-        if not changed_roles:
+        if not changed_nodes:
             raise
         try:
-            rollback_changed_roles(changed_roles, target_map, deployment_name, env, previous_release_ids)
+            rollback_changed_nodes(changed_nodes, target_map, deployment_name, env, previous_release_ids)
         except AppError as rollback_exc:
             raise AppError(f"{exc} Автоматический откат также завершился ошибкой: {rollback_exc}") from exc
-        raise AppError(f"{exc} Изменённые роли автоматически возвращены к предыдущему релизу.") from exc
+        raise AppError(f"{exc} Изменённые узлы автоматически возвращены к предыдущему релизу.") from exc
 
 
 def install_workflow(
@@ -1001,7 +1001,7 @@ def install_workflow(
     print_header("Установка / обновление VPN")
     deployment_name, env_path, env, state, targets, preflights = prepare_remote_session(
         deployment,
-        roles=None,
+        nodes=None,
         require_privilege=True,
         allow_create=True,
         persist_local=True,
@@ -1012,18 +1012,18 @@ def install_workflow(
         gateway_location=gateway_location,
     )
     topology = TopologySpec.from_env(env)
-    roles = [target.role for target in targets]
+    nodes = [target.node_id for target in targets]
     if topology.is_dual:
-        ensure_foreign_wan_interface(env, preflights[ROLE_FOREIGN])
+        ensure_foreign_wan_interface(env, preflights[NODE_EXIT])
     write_private_text(env_path, render_env_text(env))
     write_state(deployment_name, targets, existing_state=state, topology=TopologySpec.from_env(env, require_addresses=False).mode)
     print_summary(deployment_name, env, targets)
-    target_map = {target.role: target for target in targets}
+    target_map = {target.node_id: target for target in targets}
     actions = {
-        role: ("reinstall" if preflights[role].get("installed") == "1" else "install")
+        node_id: ("reinstall" if preflights[node_id].get("installed") == "1" else "install")
         if non_interactive
-        else ask_install_action(role, deployment_name, preflights[role], label=target_map[role].label)
-        for role in roles
+        else ask_install_action(node_id, deployment_name, preflights[node_id], label=target_map[node_id].label)
+        for node_id in nodes
     }
     if all(action == "skip" for action in actions.values()):
         print("Все серверы пропущены.")
@@ -1037,51 +1037,51 @@ def install_workflow(
     render_all_artifacts(env_path, env)
     step += 1
     previous_release_ids = {
-        role: str(preflights.get(role, {}).get("release_id", ""))
-        for role in roles
+        node_id: str(preflights.get(node_id, {}).get("release_id", ""))
+        for node_id in nodes
     }
-    changed_roles: list[str] = []
+    changed_nodes: list[str] = []
     try:
-        for role in execution_roles("install", roles):
-            action = actions[role]
+        for node_id in execution_node_ids("install", topology, tuple(nodes)):
+            action = actions[node_id]
             if action == "skip":
                 continue
-            print_step(step, total_steps, f"{target_map[role].label}: {action}")
+            print_step(step, total_steps, f"{target_map[node_id].label}: {action}")
             try:
-                install_remote_role_with_recovery(
-                    target_map[role],
+                install_remote_node_with_recovery(
+                    target_map[node_id],
                     deployment_name,
                     env,
                     action,
                     env.get("WG_INTERFACE", "").strip() or "wg0",
                 )
             except Exception as exc:  # noqa: BLE001
-                if getattr(exc, "remote_role_changed", False) and role not in changed_roles:
-                    changed_roles.append(role)
+                if getattr(exc, "remote_node_changed", False) and node_id not in changed_nodes:
+                    changed_nodes.append(node_id)
                 raise
-            changed_roles.append(role)
-            settle_transport_after_install(role, target_map, preflights, env)
+            changed_nodes.append(node_id)
+            settle_transport_after_install(node_id, target_map, preflights, env)
             step += 1
         verify_postcutover(deployment_name)
     except Exception as exc:  # noqa: BLE001
-        if not changed_roles:
+        if not changed_nodes:
             raise
         try:
-            rollback_changed_roles(changed_roles, target_map, deployment_name, env, previous_release_ids)
+            rollback_changed_nodes(changed_nodes, target_map, deployment_name, env, previous_release_ids)
         except AppError as rollback_exc:
             raise AppError(f"{exc} Автоматический откат также завершился ошибкой: {rollback_exc}") from exc
-        raise AppError(f"{exc} Изменённые роли автоматически возвращены к предыдущему релизу.") from exc
+        raise AppError(f"{exc} Изменённые узлы автоматически возвращены к предыдущему релизу.") from exc
     finalize_install_output(env, deployment_name)
     print(f"Deployment env: {env_path}")
     print(f"Локальное состояние: {state_json_path(deployment_name)}")
     return 0
 
 
-def status_workflow(deployment: str | None, role: str, *, non_interactive: bool = False) -> int:
-    roles = requested_roles(role)
+def status_workflow(deployment: str | None, node: str, *, non_interactive: bool = False) -> int:
+    nodes = requested_node_ids(node)
     deployment_name, env_path, env, _state, targets, _preflights = prepare_remote_session(
         deployment,
-        roles=roles,
+        nodes=nodes,
         require_privilege=False,
         validate_os=False,
         allow_create=False,
@@ -1094,9 +1094,9 @@ def status_workflow(deployment: str | None, role: str, *, non_interactive: bool 
     exit_code = 0
     for target in targets:
         try:
-            snapshot = DiagnosticsSnapshot.from_agent(remote_agent_snapshot(target, compact=True))
+            snapshot = DiagnosticsSnapshot.from_agent(remote_compatible_agent_snapshot(target, compact=True))
         except Exception as exc:  # noqa: BLE001
-            log_exception("status.snapshot", exc, extra={"role": target.role, "host": target.ssh_host})
+            log_exception("status.snapshot", exc, extra={"node_id": target.node_id, "host": target.ssh_host})
             warn(f"{target.label}: structured snapshot unavailable: {error_summary(exc)}")
             exit_code = 1
             continue
@@ -1127,10 +1127,10 @@ def maintain_workflow(
     yes: bool = False,
 ) -> int:
     """Apply OS maintenance in egress-first order with a live acceptance gate."""
-    roles = requested_roles("all")
+    nodes = requested_node_ids("all")
     deployment_name, _env_path, env, _state, targets, _preflights = prepare_remote_session(
         deployment,
-        roles=roles,
+        nodes=nodes,
         require_privilege=True,
         validate_os=False,
         allow_create=False,
@@ -1140,12 +1140,13 @@ def maintain_workflow(
         enforce_safe_route=False,
         sync_remote_env=refresh_assets,
     )
-    target_map = {target.role: target for target in targets}
-    roles = list(target_map)
+    target_map = {target.node_id: target for target in targets}
+    nodes = list(target_map)
+    topology = TopologySpec.from_env(env)
     if not apply_updates and not refresh_assets:
         print_header("Обслуживание серверов")
-        for role in execution_roles("install", roles):
-            target = target_map[role]
+        for node_id in execution_node_ids("install", topology, tuple(nodes)):
+            target = target_map[node_id]
             snapshot = DiagnosticsSnapshot.from_agent(remote_agent_snapshot(target))
             maintenance = snapshot.maintenance
             print(
@@ -1164,9 +1165,9 @@ def maintain_workflow(
         print_header("Транзакционное обновление rule assets")
         render_config_artifacts(_env_path, env, fetch_assets_first=True)
         package_bundle(env)
-        for role in execution_roles("install", roles):
-            target = target_map[role]
-            install_remote_role_with_recovery(
+        for node_id in execution_node_ids("install", topology, tuple(nodes)):
+            target = target_map[node_id]
+            install_remote_node_with_recovery(
                 target,
                 deployment_name,
                 env,
@@ -1175,8 +1176,8 @@ def maintain_workflow(
             )
             verify_postcutover(deployment_name)
 
-    for role in execution_roles("install", roles) if apply_updates else ():
-        target = target_map[role]
+    for node_id in execution_node_ids("install", topology, tuple(nodes)) if apply_updates else ():
+        target = target_map[node_id]
         print_header(f"Обслуживание {target.label}")
         ssh_stream(
             target,
@@ -1186,9 +1187,9 @@ def maintain_workflow(
         )
         snapshot = DiagnosticsSnapshot.from_agent(remote_agent_snapshot(target, live_probes=True, profile="acceptance"))
         verdicts = snapshot.component_verdicts
-        if verdicts.get("server_path") != "verified" or (role == ROLE_RU and verdicts.get("public_front") != "verified"):
+        if verdicts.get("server_path") != "verified" or (node_id == NODE_GATEWAY and verdicts.get("public_front") != "verified"):
             raise AppError(f"{target.label}: maintenance acceptance failed: {snapshot.reasons}")
-        if snapshot.migration or snapshot.collector_status != "ok":
+        if snapshot.collector_status != "ok":
             raise AppError(f"{target.label}: maintenance acceptance evidence is incomplete")
         if reboot and snapshot.maintenance.get("reboot_required"):
             ssh_stream(target, "systemctl reboot", as_root=True)
@@ -1217,7 +1218,7 @@ def routes_workflow(
 
     deployment_name, _env_path, _env, _state, targets, _preflights = prepare_remote_session(
         deployment,
-        roles=[ROLE_RU],
+        nodes=[NODE_GATEWAY],
         require_privilege=True,
         validate_os=False,
         allow_create=False,
@@ -1242,11 +1243,11 @@ def routes_workflow(
     return 0
 
 
-def remote_action_workflow(deployment: str | None, role: str, action: str, *, non_interactive: bool = False, yes: bool = False) -> int:
-    roles = requested_roles(role)
+def remote_action_workflow(deployment: str | None, node: str, action: str, *, non_interactive: bool = False, yes: bool = False) -> int:
+    nodes = requested_node_ids(node)
     deployment_name, env_path, env, state, targets, preflights = prepare_remote_session(
         deployment,
-        roles=roles,
+        nodes=nodes,
         require_privilege=True,
         allow_create=False,
         persist_local=True,
@@ -1254,9 +1255,9 @@ def remote_action_workflow(deployment: str | None, role: str, action: str, *, no
         non_interactive=non_interactive,
         sync_remote_env=action in {"install", "reinstall"},
     )
-    roles = [target.role for target in targets]
-    if action in {"install", "reinstall"} and ROLE_FOREIGN in roles:
-        ensure_foreign_wan_interface(env, preflights[ROLE_FOREIGN])
+    nodes = [target.node_id for target in targets]
+    if action in {"install", "reinstall"} and NODE_EXIT in nodes:
+        ensure_foreign_wan_interface(env, preflights[NODE_EXIT])
         write_private_text(env_path, render_env_text(env))
         write_state(deployment_name, targets, existing_state=state, topology=TopologySpec.from_env(env, require_addresses=False).mode)
     targets = filter_targets_for_action(action, targets, preflights)
@@ -1268,7 +1269,7 @@ def remote_action_workflow(deployment: str | None, role: str, action: str, *, no
     if not yes and not prompt_yes_no(f"Продолжить действие {action}?", default=False):
         print("Остановлено пользователем.")
         return 0
-    run_selected_remote_action(action, deployment_name, env_path, env, targets, role_arg=role, preflights=preflights)
+    run_selected_remote_action(action, deployment_name, env_path, env, targets, node_arg=node, preflights=preflights)
     if action in {"install", "reinstall"}:
         finalize_install_output(env, deployment_name)
     else:
@@ -1278,24 +1279,21 @@ def remote_action_workflow(deployment: str | None, role: str, action: str, *, no
     return 0
 
 
-def client_check_workflow(deployment: str | None, role: str) -> int:
+def client_check_workflow(deployment: str | None, node: str) -> int:
     ensure_directories()
     deployment_name = select_existing_deployment(deployment)
     env_path, env = load_existing_deployment_env(deployment_name)
     state = load_state(deployment_name)
-    configured_roles = {
-        legacy_role_for_node(node.node_id)
-        for node in TopologySpec.from_env(env, require_addresses=False).nodes
-    }
-    selected_roles = [candidate for candidate in requested_roles(role) if candidate in configured_roles]
-    if not selected_roles:
+    configured_nodes = {item.node_id for item in TopologySpec.from_env(env, require_addresses=False).nodes}
+    selected_nodes = [candidate for candidate in requested_node_ids(node) if candidate in configured_nodes]
+    if not selected_nodes:
         raise AppError("Запрошенный сервер отсутствует в topology deployment.")
     print_header("Проверка клиентских маршрутов")
     print(f"deployment: {deployment_name}")
     failed = False
     route_failed = False
-    for selected_role in selected_roles:
-        target = build_target(selected_role, env, state)
+    for selected_node in selected_nodes:
+        target = build_target(selected_node, env, state)
         route = local_route_to_server(target)
         public_ip = target.public_ip or target.ssh_host or "-"
         if route is None:
@@ -1342,7 +1340,7 @@ def cleanup_local_workflow(deployment: str | None, *, drop_env: bool, drop_runti
     if out_dir.is_dir():
         shutil.rmtree(out_dir)
         removed.append(str(out_dir))
-    for path in (state_json_path(deployment_name), state_legacy_path(deployment_name)):
+    for path in (state_json_path(deployment_name),):
         if path.is_file():
             path.unlink()
             removed.append(str(path))
@@ -1440,11 +1438,11 @@ def menu_workflow() -> int:
         if choice == "cleanup-local":
             run_menu_action(lambda: cleanup_local_workflow(None, drop_env=False, drop_runtime=False), return_to="главное меню")
             continue
-        role = select_node_for_menu(choice)
+        node = select_node_for_menu(choice)
         if choice == "install":
             run_menu_action(lambda: install_workflow(None), return_to="главное меню")
             continue
         if choice == "status":
-            run_menu_action(lambda selected_role=role: status_workflow(None, selected_role), return_to="главное меню")
+            run_menu_action(lambda selected_node=node: status_workflow(None, selected_node), return_to="главное меню")
             continue
-        run_menu_action(lambda selected_role=role, action_name=choice: remote_action_workflow(None, selected_role, action_name), return_to="главное меню")
+        run_menu_action(lambda selected_node=node, action_name=choice: remote_action_workflow(None, selected_node, action_name), return_to="главное меню")

@@ -180,7 +180,7 @@ class AdminWebTests(unittest.TestCase):
                 self.assertEqual(admin_web.main(["init-auth", "operator", "new-password", "--force"]), 0)
                 self.assertTrue(admin_web.check_basic_auth(self.basic_header("operator", "new-password")))
                 self.assertEqual(admin_web.main([]), 0)
-            self.assertEqual(created[0].address, ("127.0.0.1", 11333))
+            self.assertEqual(created[0].address, ("0.0.0.0", 11333))
             self.assertTrue(created[0].served)
 
     def test_http_routes_crud_and_settings_flow(self) -> None:

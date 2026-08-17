@@ -16,9 +16,8 @@ from .prompts import select_existing_deployment
 from .remote import ssh_capture
 from .state import load_state
 from .client_artifacts import client_artifact_paths
-from .roles import requested_roles
 from .targets import build_target
-from .topology import NODE_EXIT, NODE_GATEWAY, NodePlan, TopologySpec, normalize_node_id
+from .topology import NODE_EXIT, NODE_GATEWAY, NodePlan, TopologySpec, normalize_node_id, requested_node_ids
 from .workflows import prepare_remote_session
 
 _SOURCE_IP_RE = re.compile(r"^[0-9A-Fa-f:.]+$")
@@ -78,7 +77,7 @@ def diagnose_front_workflow(deployment: str | None, *, source_ip: str | None = N
         raise AppError("--minutes должен быть в диапазоне 5..1440")
     deployment_name, _env_path, env, _state, targets, _preflights = prepare_remote_session(
         deployment,
-        roles=requested_roles(NODE_GATEWAY),
+        nodes=requested_node_ids(NODE_GATEWAY),
         require_privilege=True,
         validate_os=False,
         allow_create=False,
@@ -151,7 +150,7 @@ def diagnose_server_client_workflow(deployment: str | None, *, source_ip: str, m
         raise AppError("--since должен быть в диапазоне 5..1440")
     deployment_name, _env_path, env, _state, targets, _preflights = prepare_remote_session(
         deployment,
-        roles=requested_roles(NODE_GATEWAY),
+        nodes=requested_node_ids(NODE_GATEWAY),
         require_privilege=True,
         validate_os=False,
         allow_create=False,
@@ -295,10 +294,10 @@ def _run_iperf_smoke(output_dir: Path, topology: TopologySpec, targets: list[Rem
         _cleanup_iperf_rules(exit_target)
 
 
-def diagnose_path_workflow(deployment: str | None, role: str, *, iperf: bool = False, non_interactive: bool = False) -> int:
+def diagnose_path_workflow(deployment: str | None, node: str, *, iperf: bool = False, non_interactive: bool = False) -> int:
     deployment_name, _env_path, env, _state, targets, _preflights = prepare_remote_session(
         deployment,
-        roles=requested_roles(role),
+        nodes=requested_node_ids(node),
         require_privilege=True,
         validate_os=False,
         allow_create=False,
@@ -308,7 +307,7 @@ def diagnose_path_workflow(deployment: str | None, role: str, *, iperf: bool = F
         enforce_safe_route=False,
     )
     topology = _topology_from_env(env)
-    plans = _selected_node_plans(topology, role)
+    plans = _selected_node_plans(topology, node)
     output_dir = _diagnostic_run_dir(deployment_name)
     output_dir.mkdir(parents=True, exist_ok=True)
     print_header("Path diagnostics")
@@ -371,7 +370,7 @@ def _print_nonzero_bucket_summary(summary: dict[str, object]) -> None:
             print(f"  sample: {sample}")
 
 
-def diagnose_client_log_workflow(log_path: str, deployment: str | None = None, role: str = "all") -> int:
+def diagnose_client_log_workflow(log_path: str, deployment: str | None = None, node: str = "all") -> int:
     path = Path(log_path)
     if not path.is_file():
         raise AppError(f"Файл лога не найден: {path}")
@@ -399,7 +398,7 @@ def diagnose_client_log_workflow(log_path: str, deployment: str | None = None, r
     state = load_state(deployment_name)
     route_failed = False
     print_header("Client route diagnostics")
-    for plan in _selected_node_plans(topology, role):
+    for plan in _selected_node_plans(topology, node):
         target = build_target(plan.node_id, env, state)
         route_info = local_route_to_server(target)
         public_ip = plan.public_ip or target.ssh_host or "-"

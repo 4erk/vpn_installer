@@ -9,10 +9,8 @@ CAP_INTERSERVER_CLIENT = "interserver-client"
 CAP_INTERSERVER_SERVER = "interserver-server"
 
 
-def _uses_capability(snapshot: DiagnosticsSnapshot, capability: str, *, legacy_role: str) -> bool:
-    if snapshot.has_capability_contract:
-        return snapshot.has_capability(capability)
-    return snapshot.role == legacy_role
+def _uses_capability(snapshot: DiagnosticsSnapshot, capability: str) -> bool:
+    return snapshot.has_capability(capability)
 
 
 def _collector_label(state: CollectorState) -> str:
@@ -66,7 +64,7 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
             )
         )
     else:
-        lines.append(f"role: {snapshot.role or '-'}")
+        lines.append("node contract: unavailable")
     lines.extend(
         (
             f"drift: {snapshot.drift}",
@@ -77,23 +75,14 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
             ),
         )
     )
-    has_public_front = _uses_capability(snapshot, CAP_PUBLIC_FRONT, legacy_role="ru-gateway")
-    has_interserver_client = _uses_capability(snapshot, CAP_INTERSERVER_CLIENT, legacy_role="ru-gateway")
-    has_interserver_server = _uses_capability(snapshot, CAP_INTERSERVER_SERVER, legacy_role="foreign-exit")
+    has_public_front = _uses_capability(snapshot, CAP_PUBLIC_FRONT)
+    has_interserver_client = _uses_capability(snapshot, CAP_INTERSERVER_CLIENT)
+    has_interserver_server = _uses_capability(snapshot, CAP_INTERSERVER_SERVER)
     has_interserver = has_interserver_client or has_interserver_server
     if snapshot.verdict == "inconclusive" and snapshot.route_probes.get("profile") == "none":
         lines.append(f"live probes: not run by read-only status; use {cli_command('verify live')} for route acceptance")
     for window_name in LOG_WINDOW_KEYS:
         lines.extend(_format_log_window(window_name, snapshot.log_windows[window_name]))
-    if snapshot.migration:
-        warnings = snapshot.migration.get("warnings", [])
-        details = [
-            f"source_schema={snapshot.migration.get('source_schema_version', '-')}",
-            f"boundary={snapshot.migration.get('boundary', '-')}",
-        ]
-        if warnings:
-            details.append("warnings=" + " | ".join(str(value) for value in warnings))
-        lines.append("migration: " + ", ".join(details))
     if snapshot.runtime_overrides:
         overrides = ", ".join(f"{key}={value}" for key, value in sorted(snapshot.runtime_overrides.items()) if value)
         if overrides:

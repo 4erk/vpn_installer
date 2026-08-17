@@ -208,7 +208,7 @@ class AuditRunnerTests(unittest.TestCase):
         runner = self.make_runner()
         env_path, env = runner.create_env("demo", {"WAN_INTERFACE": "eth9"})
         self.assertTrue(env_path.is_file())
-        self.assertEqual(env["CONFIG_SCHEMA"], "2")
+        self.assertEqual(env["CONFIG_SCHEMA"], "3")
         self.assertEqual(env["TOPOLOGY"], TOPOLOGY_DUAL)
         self.assertEqual(env["GATEWAY_PUBLIC_IP"], "203.0.113.10")
         self.assertEqual(env["EXIT_PUBLIC_IP"], "198.51.100.20")
@@ -219,8 +219,8 @@ class AuditRunnerTests(unittest.TestCase):
     def test_create_env_covers_canonical_topology_matrix(self) -> None:
         runner = self.make_runner()
         cases = (
-            ("single-ru", TOPOLOGY_SINGLE, LOCATION_RU, "203.0.113.10", ""),
-            ("single-foreign", TOPOLOGY_SINGLE, LOCATION_FOREIGN, "198.51.100.10", ""),
+            ("single-ru", TOPOLOGY_SINGLE, LOCATION_RU, "203.0.113.10", None),
+            ("single-foreign", TOPOLOGY_SINGLE, LOCATION_FOREIGN, "198.51.100.10", None),
             ("dual", TOPOLOGY_DUAL, LOCATION_RU, "203.0.113.10", "198.51.100.20"),
         )
         for name, topology, location, gateway_ip, exit_ip in cases:
@@ -232,9 +232,10 @@ class AuditRunnerTests(unittest.TestCase):
                 )
                 loaded = load_env_file(env_path)
                 self.assertEqual(loaded, env)
-                self.assertEqual(env["CONFIG_SCHEMA"], "2")
+                self.assertEqual(env["CONFIG_SCHEMA"], "3")
                 self.assertEqual(env["GATEWAY_PUBLIC_IP"], gateway_ip)
-                self.assertEqual(env["EXIT_PUBLIC_IP"], exit_ip)
+                self.assertEqual(env.get("EXIT_PUBLIC_IP"), exit_ip)
+                self.assertEqual(env.get("WAN_INTERFACE"), "eth1" if topology == TOPOLOGY_DUAL else None)
                 spec = TopologySpec.from_env(env)
                 self.assertEqual(spec.mode, topology)
                 self.assertEqual(spec.gateway.location, location)
@@ -275,7 +276,7 @@ class AuditRunnerTests(unittest.TestCase):
         runner = self.make_runner()
         env_path, out_dir = runner.ensure_quick_env()
         env = load_env_file(env_path)
-        self.assertEqual(env["CONFIG_SCHEMA"], "2")
+        self.assertEqual(env["CONFIG_SCHEMA"], "3")
         self.assertEqual(env["TOPOLOGY"], TOPOLOGY_DUAL)
         self.assertEqual(env["GATEWAY_PUBLIC_IP"], "203.0.113.10")
         self.assertEqual(env["EXIT_PUBLIC_IP"], "198.51.100.20")

@@ -13,7 +13,8 @@ class ManifestTopologyTests(unittest.TestCase):
         env = generate_default_env("demo", topology=topology, gateway_location=location)
         gateway_ip = "203.0.113.10" if location == "ru" else "198.51.100.10"
         env["GATEWAY_PUBLIC_IP"] = gateway_ip
-        env["EXIT_PUBLIC_IP"] = "198.51.100.20" if topology == TOPOLOGY_DUAL else ""
+        if topology == TOPOLOGY_DUAL:
+            env["EXIT_PUBLIC_IP"] = "198.51.100.20"
         return env
 
     def rendered_files(self, env: dict[str, str], node_id: str) -> dict[str, str]:
@@ -33,7 +34,7 @@ class ManifestTopologyTests(unittest.TestCase):
             files["vpn-stack-transport.service"] = "[Unit]\n[Service]\n"
         return files
 
-    def test_schema_three_matrix_is_capability_driven(self) -> None:
+    def test_current_schema_matrix_is_capability_driven(self) -> None:
         cases = (
             (TOPOLOGY_SINGLE, "ru", NODE_GATEWAY),
             (TOPOLOGY_SINGLE, "foreign", NODE_GATEWAY),
@@ -48,8 +49,8 @@ class ManifestTopologyTests(unittest.TestCase):
                 manifest = json.loads(files["render-manifest.json"])
                 install_plan = json.loads(files["install-plan.json"])
 
-                self.assertEqual(manifest["schema_version"], 3)
-                self.assertEqual(manifest["install_plan"]["schema_version"], 3)
+                self.assertEqual(manifest["schema_version"], 4)
+                self.assertEqual(manifest["install_plan"]["schema_version"], 4)
                 self.assertEqual(manifest["topology"], topology)
                 self.assertEqual(manifest["node_id"], node_id)
                 self.assertEqual(manifest["location"], plan.location)
@@ -91,24 +92,19 @@ class ManifestTopologyTests(unittest.TestCase):
         self.assertNotIn("journald-vpn-stack.conf", manifest["artifacts"])
         self.assertNotIn("journald-vpn-stack.conf", manifest["install_plan"]["artifacts"])
 
-    def test_disabled_admin_has_no_service_artifacts_or_projected_credentials(self) -> None:
-        for topology in (TOPOLOGY_SINGLE, TOPOLOGY_DUAL):
-            with self.subTest(topology=topology):
-                env = self.make_env(topology)
-                env["ADMIN_WEB_ENABLED"] = "0"
-                env["ADMIN_WEB_USERNAME"] = "operator"
-                env["ADMIN_WEB_PASSWORD"] = "secret-password"
-                plan = TopologySpec.from_env(env).plan(NODE_GATEWAY)
-                projected = project_node_env(env, plan)
-                specs = artifact_specs(plan, env=env)
-
-                self.assertNotIn("admin", plan.required_services)
-                self.assertEqual(projected["ADMIN_WEB_ENABLED"], "0")
-                self.assertNotIn("ADMIN_WEB_USERNAME", projected)
-                self.assertNotIn("ADMIN_WEB_PASSWORD", projected)
-                self.assertNotIn("admin_web.py", specs)
-                self.assertEqual(specs["admin_apply.py"].capability, "router")
-                self.assertNotIn("vpn-stack-admin.service", specs)
+    def test_admin_contract_exists_only_on_dual_gateway(self) -> None:
+        single = self.make_env(TOPOLOGY_SINGLE)
+        dual = self.make_env(TOPOLOGY_DUAL)
+        single_plan = TopologySpec.from_env(single).plan(NODE_GATEWAY)
+        dual_plan = TopologySpec.from_env(dual).plan(NODE_GATEWAY)
+        single_projected = project_node_env(single, single_plan)
+        dual_projected = project_node_env(dual, dual_plan)
+        self.assertNotIn("admin", single_plan.required_services)
+        self.assertNotIn("ADMIN_WEB_USERNAME", single_projected)
+        self.assertNotIn("admin_web.py", artifact_specs(single_plan, env=single))
+        self.assertIn("admin", dual_plan.required_services)
+        self.assertIn("ADMIN_WEB_USERNAME", dual_projected)
+        self.assertIn("admin_web.py", artifact_specs(dual_plan, env=dual))
 
     def test_node_env_projection_excludes_other_node_private_secrets(self) -> None:
         env = self.make_env(TOPOLOGY_DUAL)
@@ -179,13 +175,10 @@ class ManifestTopologyTests(unittest.TestCase):
         self.assertEqual(first_manifest["release_id"], second_manifest["release_id"])
         self.assertNotEqual(first_manifest["env_sha256"], second_manifest["env_sha256"])
 
-    def test_legacy_role_is_normalized_to_canonical_node(self) -> None:
+    def test_removed_role_name_is_rejected(self) -> None:
         env = self.make_env(TOPOLOGY_DUAL)
-        manifest = json.loads(render_manifest(render_env_text(env), "ru-gateway", self.rendered_files(env, NODE_GATEWAY)))
-        self.assertEqual(manifest["node"]["id"], NODE_GATEWAY)
-        self.assertEqual(manifest["role"], "ru-gateway")
-        self.assertEqual(manifest["compatibility"]["legacy_role"], "ru-gateway")
-        self.assertEqual(manifest["compatibility"]["remove_in"], "0.20.1")
+        with self.assertRaisesRegex(ValueError, "unsupported node"):
+            render_manifest(render_env_text(env), "ru-gateway", self.rendered_files(env, NODE_GATEWAY))
 
     def test_unknown_artifact_is_rejected(self) -> None:
         env = self.make_env(TOPOLOGY_SINGLE)

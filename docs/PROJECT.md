@@ -14,12 +14,12 @@ dual:   клиент -> RU gateway Xray/Reality -> sing-box routing policy
 - `out/<deployment>/client/vless-uri.txt` является главным и неизменным клиентским контрактом.
 - Xray на узле `gateway` владеет основным публичным VLESS/Reality TCP front. Gateway `sing-box` владеет router; в `dual` он дополнительно использует межсерверный overlay, а в `single` отправляет трафик через локальный egress.
 - Routing policy, health и проверка не меняют локальные VPN-клиенты и их профили.
-- Web-admin на `gateway` сохраняется. Он управляет только явными operator rules и показывает лишь выходы, скомпилированные для выбранной топологии; rules проходят validation и применяются атомарно.
+- Web-admin существует только на публичном `gateway` в topology `dual`. Он управляет явными operator rules, показывает два скомпилированных выхода и защищён Basic Auth вместе с firewall gate для source IP, недавно достигшего публичного VPN ingress.
 - `VPN_SSH_BIND_ADDRESS` - временный control-plane input, не часть deployment env. Он привязывает SSH/SFTP к физическому локальному адресу, когда default route клиента находится в TUN, и не меняет client/server dataplane.
 
 Узлы:
 
-- `gateway`: публичный Xray front, sing-box router, web-admin и локальный egress; находится в России или за рубежом.
+- `gateway`: публичный Xray front, sing-box router и локальный egress; в `dual` дополнительно получает interserver client и web-admin capabilities. Находится в России или за рубежом.
 - `exit`: существует только в `dual`; WireGuard peer, NAT и зарубежный egress.
 
 ## Источники истины
@@ -28,17 +28,23 @@ dual:   клиент -> RU gateway Xray/Reality -> sing-box routing policy
 - `DeploymentSpec`, `TopologySpec`, `NodeSpec`, `NodePlan` и `RoutingPolicy` - единственная Python-модель topology, capabilities и traffic classes.
 - renderer сериализует эту модель в sing-box, Xray, WireGuard, nftables, systemd и managed OS drop-ins. Он не принимает route decisions.
 - `install.sh` только bootstrap и транзакционная доставка уже rendered artifacts; у него нет собственных routing defaults.
-- `/etc/vpn-stack/render-manifest.json` schema 3 хранит topology, node capabilities, install plan, policy, hashes, pinned binaries и runtime facts. Каждый node получает только собственный `node.env` и принадлежащие ему secrets/artifacts.
+- `/etc/vpn-stack/render-manifest.json` schema 4 хранит topology, node capabilities, install plan schema 4, policy, hashes, pinned binaries, runtime facts и окно совместимых установленных версий. Каждый node получает только собственный `node.env` и принадлежащие ему secrets/artifacts.
 
-Target-side render не объединяет `node.env` с общими defaults и не генерирует ключи. Он принимает только точную schema-2 проекцию capability, отклоняет неизвестные поля и cross-node secrets, затем сверяет полученный payload с manifest/install-plan. Legacy full deployment env нормализуется только локальным контроллером перед сборкой и отдельным schema-2 install adapter при первом обновлении.
+Target-side render не объединяет `node.env` с общими defaults и не генерирует ключи. Он принимает только точную `CONFIG_SCHEMA=3` проекцию capability, отклоняет неизвестные поля и cross-node secrets, затем сверяет payload с manifest/install-plan. Установленный `0.20.0` проверяется до cutover отдельной ограниченной границей `upgrade_0200.py`; старые форматы не проходят через current renderer.
 
-`single` не компилирует и не устанавливает WireGuard, interserver transport, его пакеты, сервисы, secrets или probes. `dual` устанавливает interserver capability только на оба участвующих узла. Отсутствующая capability имеет состояние `not_applicable`, а не ложное `healthy`.
+`single` не компилирует и не устанавливает WireGuard, interserver transport, web-admin, их пакеты, сервисы, credentials, secrets, firewall rules или probes. `dual` устанавливает interserver capability на оба участвующих узла, а web-admin только на gateway. Отсутствующая capability имеет состояние `not_applicable`, а не ложное `healthy`.
 
 Topology и физическое расположение gateway неизменяемы внутри существующего deployment. Смена состава серверов выполняется новым deployment с отдельной acceptance-проверкой; старый удаляется только после успешного полного VLESS verify. Это предотвращает частичный cross-server cutover и потерю rollback target.
 
 Публичная operator-точка входа зависит от платформы: `.\vpn.cmd` на Windows и `./vpn.sh` на Linux. Прямой запуск `vpn.ps1` или `python -m vpn_installer` является внутренним/dev-сценарием и не должен использоваться в пользовательских инструкциях.
 
-Серверные runtime rules web-admin хранятся отдельно в `/etc/vpn-stack/admin-routing-rules.json`. Это единственный поддерживаемый routing overlay. Автоматических learned-routes, timeout promotion, offload mutation и log-based blocking нет; qdisc является декларативной частью единого managed network profile, а не реакцией на журнальные строки.
+Серверные operator rules хранятся отдельно в `/etc/vpn-stack/admin-routing-rules.json`. В `dual` ими управляют web-admin или CLI, в `single` только CLI. Это единственный поддерживаемый routing overlay. Автоматических learned-routes, timeout promotion, offload mutation и log-based blocking нет; qdisc является декларативной частью единого managed network profile, а не реакцией на журнальные строки.
+
+## Совместимость релиза
+
+`0.20.1` поддерживает только fresh install, точный переход с `0.20.0` и повторную установку `0.20.1`. Manifest объявляет `installed_min=0.20.0`, `installed_max=0.20.1`. Неподдерживаемый установленный релиз отклоняется до managed transaction; удалить его нужно `vpn.cmd`/`vpn.sh` из совпадающего Git-тега, после чего выполняется fresh install.
+
+Публичный CLI использует только `--node gateway|exit|all`. Role aliases, универсальные readers старых схем и неограниченные migration chains отсутствуют. Единственная переходная реализация и её план удаления описаны в [DEPRECATIONS.md](./DEPRECATIONS.md).
 
 ## Network adaptation
 
@@ -78,7 +84,7 @@ Foreign-классы всегда остаются на `to-foreign`. Health и 
 
 `vpn-stack-agent` - stdlib-only серверный executable. Он предоставляет operator-команды `snapshot`, `probe`, `health`, `front`, `client`, `routes` и `assets`; внутренние `transport-reconcile`/`transport-watch` управляют только endpoint стабильного overlay. Transport probe проверяет внутренний WG независимо от DNS, а холодный relay подтверждается ответом удалённого SSH, а не локальным SOCKS accept. Старую association agent закрывает только после proof нового пути; ошибка активации атомарно возвращает старый endpoint и открывает bounded circuit breaker. Нормализация log buckets вынесена в отдельный `log_classifier.py`, который поставляется и хешируется вместе с agent.
 
-Snapshot schema 4 содержит:
+Snapshot diagnostics schema 5 содержит:
 
 - service state, manifest drift и hashes всех managed artifacts, включая resolver drop-in и состояние `/etc/resolv.conf` stub;
 - root filesystem source/type, ext4 state и runtime error counters, время последней проверки и `fs_passno` загрузочного `fsck`;
@@ -103,7 +109,7 @@ Health выполняется раз в две минуты и имеет сос
 
 ## Установка и обслуживание
 
-Install/reinstall собирает release во временном каталоге внутри `/etc/vpn-stack/releases`, проверяет sing-box, Xray, nftables, WireGuard, systemd, manifest и assets, затем публикует immutable content-addressed tree и атомарно переключает `current`. Target-side acceptance дополнительно требует чистый ext4 root и включённую загрузочную проверку. Revision snapshot охватывает manifest, configs, rules/assets, resolver drop-in и `/etc/resolv.conf`, runtime health state, admin auth, `current`/`previous` и состояния всех затрагиваемых сервисов. Неудачные service start, drift или core route acceptance возвращают весь этот набор; уже опубликованный release не перезаписывается повторной установкой. Внешние capability probes выводятся отдельно: временный отказ raw IPv6 при исправном core path даёт `degraded` и проваливает полный live verify, но не откатывает тот же конфиг, который не может изменить состояние внешнего endpoint.
+Install/reinstall собирает release во временном каталоге внутри `/etc/vpn-stack/releases`, проверяет capability-owned sing-box, Xray, nftables, systemd и assets, а в `dual` также WireGuard/interserver и web-admin artifacts. Затем installer публикует immutable content-addressed tree и атомарно переключает `current`. Target-side acceptance дополнительно требует чистый ext4 root и включённую загрузочную проверку. Revision snapshot охватывает manifest, configs, rules/assets, resolver drop-in и `/etc/resolv.conf`, runtime health state, `current`/`previous`, состояния всех затрагиваемых сервисов и только в `dual` admin auth. Неудачные service start, drift или core route acceptance возвращают весь этот набор; уже опубликованный release не перезаписывается повторной установкой. Внешние capability probes выводятся отдельно: временный отказ raw IPv6 при исправном core path даёт `degraded` и проваливает полный live verify, но не откатывает тот же конфиг, который не может изменить состояние внешнего endpoint.
 
 APT-пакеты устанавливаются до managed snapshot и считаются монотонными prerequisites хоста: автоматический rollback не удаляет пакеты и не пытается откатывать версии через APT. Транзакционная гарантия начинается после успешной подготовки prerequisites и охватывает только явно принадлежащие проекту artifacts, links, services и runtime-state.
 
@@ -132,7 +138,7 @@ Server-side route acceptance использует HTTP `HEAD`: его задач
 - `status`: read-only agent snapshot. Без live probes его `inconclusive` означает только отсутствие route acceptance; это явно выводится вместе с командой `verify live`.
 - `verify live`: full server acceptance plus independent public VLESS/TCP and Hysteria2/QUIC contracts.
 - `diagnose path|front|client`: structured incident evidence.
-- `routes list|add|remove`: CLI к тому же backend, который использует web-admin.
+- `routes list|add|remove`: CLI к operator-rules backend; в `dual` тот же backend использует web-admin.
 - `maintain`: security-update/reboot reporting and controlled rollout.
 - `audit quick`: быстрые compiler/contracts checks; `audit all`: единственный instrumented branch-coverage run с minimum 80% плюс Docker/lab failure injection. Критические policy, health recovery, manifest, public VLESS и transaction paths дополнительно закреплены behaviour tests.
 

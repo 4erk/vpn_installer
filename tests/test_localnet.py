@@ -14,7 +14,8 @@ from vpn_installer.localnet import (
     valid_ip,
     windows_route_to_ip,
 )
-from vpn_installer.models import AppError, ROLE_RU, RemoteTarget
+from vpn_installer.models import AppError, RemoteTarget
+from vpn_installer.topology import NODE_GATEWAY
 
 
 class LocalNetTests(unittest.TestCase):
@@ -50,10 +51,10 @@ class LocalNetTests(unittest.TestCase):
     def test_local_route_to_server_skips_unsupported_platform(self) -> None:
         with patch("vpn_installer.localnet.os.name", "posix"):
             self.assertFalse(local_route_check_supported())
-            self.assertIsNone(local_route_to_server(RemoteTarget(role=ROLE_RU, public_ip="203.0.113.10")))
+            self.assertIsNone(local_route_to_server(RemoteTarget(node_id=NODE_GATEWAY, public_ip="203.0.113.10")))
 
     def test_assert_server_route_blocks_self_tunnel_unless_overridden(self) -> None:
-        target = RemoteTarget(role=ROLE_RU, public_ip="203.0.113.10")
+        target = RemoteTarget(node_id=NODE_GATEWAY, public_ip="203.0.113.10")
         route = LocalRoute(target_ip="203.0.113.10", interface_alias="singbox_tun")
         with patch("vpn_installer.localnet.local_route_to_server", return_value=route):
             with self.assertRaises(AppError):
@@ -62,13 +63,13 @@ class LocalNetTests(unittest.TestCase):
             self.assertEqual(assert_server_route_not_self_tunneled(target, {"CLIENT_TUN_NAME": "singbox_tun"}), route)
 
     def test_assert_server_route_allows_lan_route(self) -> None:
-        target = RemoteTarget(role=ROLE_RU, public_ip="203.0.113.10")
+        target = RemoteTarget(node_id=NODE_GATEWAY, public_ip="203.0.113.10")
         route = LocalRoute(target_ip="203.0.113.10", interface_alias="Беспроводная сеть")
         with patch("vpn_installer.localnet.local_route_to_server", return_value=route):
             self.assertEqual(assert_server_route_not_self_tunneled(target, {"CLIENT_TUN_NAME": "singbox_tun"}), route)
 
     def test_assert_server_route_allows_explicitly_bound_management_path(self) -> None:
-        target = RemoteTarget(role=ROLE_RU, public_ip="203.0.113.10", ssh_bind_address="192.168.0.101")
+        target = RemoteTarget(node_id=NODE_GATEWAY, public_ip="203.0.113.10", ssh_bind_address="192.168.0.101")
         route = LocalRoute(target_ip="203.0.113.10", interface_alias="singbox_tun")
         with patch("vpn_installer.localnet.local_route_to_server", return_value=route):
             self.assertEqual(assert_server_route_not_self_tunneled(target, {"CLIENT_TUN_NAME": "singbox_tun"}), route)

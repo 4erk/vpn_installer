@@ -9,16 +9,7 @@ from typing import Any, Iterable
 
 from .topology import CAP_PUBLIC_FRONT, NODE_GATEWAY, TopologySpec
 
-_LEGACY_PUBLIC_IP_KEYS = ("RU_PUBLIC_IP", "FOREIGN_PUBLIC_IP")
-
-
 def _gateway_public_ip(env: dict[str, str]) -> str:
-    legacy_keys = [key for key in _LEGACY_PUBLIC_IP_KEYS if key in env]
-    if legacy_keys:
-        raise ValueError(
-            "legacy public IP aliases are not accepted by client drift detection: "
-            + ", ".join(legacy_keys)
-        )
     plan = TopologySpec.from_env(env).plan(NODE_GATEWAY)
     if CAP_PUBLIC_FRONT not in plan.capabilities:
         raise ValueError("gateway topology does not provide the public-front capability")

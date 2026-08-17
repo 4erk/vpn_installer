@@ -8,14 +8,23 @@ import textwrap
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .. import VERSION
 from ..common import INSTALL_SCRIPT_PATH, ROOT_DIR
-from ..diagnostics import COLLECTOR_NAMES, LOG_WINDOW_KEYS, CollectorState, DiagnosticsSnapshot, LogWindowSnapshot
+from ..diagnostics import (
+    COLLECTOR_NAMES,
+    LOG_WINDOW_KEYS,
+    CollectorState,
+    DiagnosticsSnapshot,
+    LogWindowSnapshot,
+)
 from ..log_classifier import BUCKETS
+from ..manifest import MANIFEST_SCHEMA_VERSION
 from ..render import render_all_artifacts
 from ..topology import (
     CAP_INTERSERVER_CLIENT,
     CAP_PUBLIC_FRONT,
     CAP_WEB_ADMIN,
+    CONFIG_SCHEMA_VERSION,
     LOCATION_FOREIGN,
     LOCATION_RU,
     NODE_EXIT,
@@ -25,6 +34,7 @@ from ..topology import (
     NodeSpec,
     TopologySpec,
 )
+from ..upgrade_0200 import SOURCE_DIAGNOSTICS_SCHEMA, SOURCE_MANIFEST_SCHEMA
 from .runner import (
     AUDIT_COMMAND_TIMEOUT_SECONDS,
     AUDIT_IMAGE,
@@ -38,7 +48,7 @@ from .runner import (
     write_text,
 )
 
-SCHEMA2_MIGRATION_TIMEOUT_SECONDS = 45
+UPGRADE_0200_TIMEOUT_SECONDS = 45
 TRANSACTION_ACCEPTANCE_TIMEOUT_SECONDS = 45
 TRANSACTION_ACCEPTANCE_GATES = (
     "acceptance-marker-path",
@@ -46,7 +56,7 @@ TRANSACTION_ACCEPTANCE_GATES = (
     "single-rollback-without-wireguard",
     "node-mismatch-rejection",
     "sigkill-production-cutover-reconciliation",
-    "schema2-rollback-verification",
+    "release-0200-rollback-verification",
 )
 
 
@@ -121,125 +131,152 @@ def run(runner: AuditRunner) -> None:
     runner.ensure_audit_image()
     runner.record("docker-unmanaged-remove-purge-render-only", lambda: test_unmanaged_remove_purge_render_only(runner))
     runner.record("docker-asset-fail-fast", lambda: test_asset_fail_fast(runner))
-    runner.record("docker-schema2-to-schema3-migration", lambda: test_schema2_to_schema3_migration(runner))
+    runner.record("docker-0200-to-0201-transition", lambda: test_0200_to_0201_transition(runner))
     runner.record("docker-install-rollback-state", lambda: test_install_rollback_state(runner))
     runner.record("docker-node-scoped-workflows", lambda: test_node_scoped_workflows(runner))
 
 
-def schema2_fixture_builder_text() -> str:
+def release_0200_fixture_builder_text() -> str:
     return textwrap.dedent(
         """\
         from __future__ import annotations
 
         import hashlib
         import json
+        import re
         import shutil
         import sys
         from pathlib import Path
 
-        from vpn_installer.config import load_env_file
-        from vpn_installer.legacy_install_contract import _COMMON_ARTIFACT_PATHS, _GATEWAY_ARTIFACT_PATHS
-        from vpn_installer.topology import LEGACY_ROLE_FOREIGN, LEGACY_ROLE_RU
+        from vpn_installer.audit.docker import acceptance_snapshot_fixture
+        from vpn_installer.upgrade_0200 import (
+            SOURCE_CONFIG_SCHEMA,
+            SOURCE_DIAGNOSTICS_SCHEMA,
+            SOURCE_INSTALL_PLAN_SCHEMA,
+            SOURCE_MANIFEST_SCHEMA,
+            previous_role,
+        )
 
 
         def digest(payload: bytes) -> str:
             return hashlib.sha256(payload).hexdigest()
 
 
-        role = sys.argv[1]
-        current = Path(sys.argv[2])
-        target_env = Path(sys.argv[3])
-        if role not in {LEGACY_ROLE_RU, LEGACY_ROLE_FOREIGN}:
-            raise SystemExit(f"unsupported fixture role: {role}")
-        if current.exists():
-            shutil.rmtree(current)
-        current.mkdir(parents=True)
+        def canonical_digest(value: object) -> str:
+            return digest(json.dumps(value, sort_keys=True, separators=(",", ":")).encode())
 
-        deployment = load_env_file(target_env)["DEPLOY_NAME"]
-        env_payload = f'DEPLOY_NAME="{deployment}"\\n'.encode()
+
+        node_id = sys.argv[1]
+        current_bundle = Path(sys.argv[2])
+        release = Path(sys.argv[3])
+        sing_box_binary = Path(sys.argv[4])
+        if node_id not in {"gateway", "exit"}:
+            raise SystemExit(f"unsupported fixture node: {node_id}")
+        if release.exists():
+            shutil.rmtree(release)
+        release.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(current_bundle, release)
+
+        env_path = release / "node.env"
+        env_text = env_path.read_text(encoding="utf-8")
+        env_text, replacements = re.subn(
+            r"^CONFIG_SCHEMA=.*$",
+            f'CONFIG_SCHEMA="{SOURCE_CONFIG_SCHEMA}"',
+            env_text,
+            count=1,
+            flags=re.MULTILINE,
+        )
+        if replacements != 1:
+            raise SystemExit("current fixture has no CONFIG_SCHEMA")
+        env_path.write_text(env_text, encoding="utf-8")
+
+        source_snapshot = acceptance_snapshot_fixture("verified", node_id=node_id)
+        source_snapshot.update(
+            {
+                "schema_version": SOURCE_DIAGNOSTICS_SCHEMA,
+                "role": previous_role(node_id),
+                "migration": {"state": "native"},
+                "release": {
+                    "version": "0.20.0",
+                    "release_id": f"0.20.0-audit-{node_id}",
+                    "installed_at": "2026-08-17T00:00:00+00:00",
+                },
+            }
+        )
+        source_snapshot_json = json.dumps(source_snapshot, separators=(",", ":"))
+        agent_path = release / "vpn-stack-agent.py"
+        agent_path.write_text(
+            "from pathlib import Path\\n"
+            "from datetime import datetime, timezone\\n"
+            "import json\\n"
+            "import sys\\n"
+            f"PAYLOAD = json.loads({source_snapshot_json!r})\\n"
+            "if sys.argv[1:] == ['network-apply']:\\n"
+            "    Path('/work/result/release-0200-network-apply.marker').write_text('applied\\\\n', encoding='utf-8')\\n"
+            "    print(json.dumps({'verdict': 'applied'}))\\n"
+            "elif sys.argv[1:2] == ['snapshot']:\\n"
+            "    now = datetime.now(timezone.utc).isoformat()\\n"
+            "    PAYLOAD['generated_at'] = now\\n"
+            "    for state in PAYLOAD['collectors'].values():\\n"
+            "        if state.get('status') == 'ok': state['observed_at'] = now\\n"
+            "    print(json.dumps(PAYLOAD, separators=(',', ':')))\\n"
+            "else:\\n"
+            "    raise SystemExit('unsupported fixture command')\\n",
+            encoding="utf-8",
+        )
+
+        manifest_path = release / "render-manifest.json"
+        plan_path = release / "install-plan.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        artifacts = manifest["artifacts"]
+        for name, entry in artifacts.items():
+            entry["sha256"] = digest((release / name).read_bytes())
+
+        plan["schema_version"] = SOURCE_INSTALL_PLAN_SCHEMA
+        plan["artifacts"] = artifacts
+        manifest.update(
+            {
+                "schema_version": SOURCE_MANIFEST_SCHEMA,
+                "version": "0.20.0",
+                "release_id": f"0.20.0-audit-{node_id}",
+                "role": previous_role(node_id),
+                "env_sha256": digest(env_path.read_bytes()),
+                "node_env_sha256": digest(env_path.read_bytes()),
+                "config_sha256": artifacts["sing-box.json"]["sha256"],
+                "artifacts": artifacts,
+                "install_plan": plan,
+                "install_plan_sha256": canonical_digest(plan),
+            }
+        )
+        manifest.pop("update_compatibility", None)
+        manifest.pop("compatibility", None)
+        plan_path.write_text(json.dumps(plan, indent=2, sort_keys=True) + "\\n", encoding="utf-8")
+        manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\\n", encoding="utf-8")
+
+        binary_dir = release / "bin"
+        binary_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(sing_box_binary, binary_dir / "sing-box")
+        if "xray" in manifest["binaries"]:
+            raise SystemExit("the 0.20.0 audit fixture requires an explicit Xray binary")
+
+        for name, entry in artifacts.items():
+            destination = Path(entry["install_path"])
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(release / name, destination)
+        for name, entry in manifest["assets"].items():
+            source = release / "assets" / name
+            destination = Path(entry["install_path"])
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
         deployment_env = Path("/etc/vpn-stack/deployment.env")
         deployment_env.parent.mkdir(parents=True, exist_ok=True)
-        deployment_env.write_bytes(env_payload)
-
-        paths = dict(_COMMON_ARTIFACT_PATHS)
-        if role == LEGACY_ROLE_RU:
-            paths.update(_GATEWAY_ARTIFACT_PATHS)
-        paths["wg0.conf"] = "/etc/wireguard/wg0.conf"
-        artifacts = {}
-        for name, manifest_path in paths.items():
-            if name == "vpn-stack-agent.py":
-                payload = (
-                    "from pathlib import Path\\n"
-                    "import json\\n"
-                    "import sys\\n"
-                    "if sys.argv[1:] == ['network-apply']:\\n"
-                    "    Path('/work/result/schema2-network-apply.marker').write_text('applied\\\\n', encoding='utf-8')\\n"
-                    "    print(json.dumps({'verdict': 'applied'}))\\n"
-                    "else:\\n"
-                    "    raise SystemExit('unsupported fixture command')\\n"
-                ).encode()
-            else:
-                payload = f"{role}:artifact:{name}\\n".encode()
-            (current / name).write_bytes(payload)
-            artifacts[name] = {
-                "sha256": digest(payload),
-                "install_path": manifest_path,
-                "required": True,
-            }
-            effective_paths = [manifest_path]
-            if role == LEGACY_ROLE_FOREIGN and name == "sing-box.json":
-                effective_paths.append("/etc/sing-box/config.json")
-            for effective_path in effective_paths:
-                live = Path(effective_path)
-                live.parent.mkdir(parents=True, exist_ok=True)
-                live.write_bytes(payload)
-
-        asset_names = {"geoip-ru.srs", "geosite-ru.srs"} if role == LEGACY_ROLE_RU else set()
-        assets = {}
-        for name in asset_names:
-            payload = f"{role}:asset:{name}\\n".encode()
-            release_asset = current / "assets" / name
-            release_asset.parent.mkdir(parents=True, exist_ok=True)
-            release_asset.write_bytes(payload)
-            install_path = f"/var/lib/vpn-stack/rules/{name}"
-            live = Path(install_path)
-            live.parent.mkdir(parents=True, exist_ok=True)
-            live.write_bytes(payload)
-            assets[name] = {"sha256": digest(payload), "install_path": install_path, "required": True}
-
-        binary_services = {"sing-box": "sing-box.service"}
-        if role == LEGACY_ROLE_RU:
-            binary_services["xray"] = "vpn-stack-xray.service"
-        binaries = {}
-        for name, service in binary_services.items():
-            payload = f"{role}:binary:{name}\\n".encode()
-            binary = current / "bin" / name
-            binary.parent.mkdir(parents=True, exist_ok=True)
-            binary.write_bytes(payload)
-            binaries[name] = {
-                "version": "1.2.3",
-                "archive_sha256": digest(f"{role}:archive:{name}".encode()),
-                "sha256": digest(payload),
-                "path": f"/etc/vpn-stack/current/bin/{name}",
-                "service": service,
-            }
-
-        manifest = {
-            "schema_version": 2,
-            "version": "0.19.10",
-            "release_id": "0.19.10-0123456789ab",
-            "role": role,
-            "env_sha256": digest(env_payload),
-            "artifacts": artifacts,
-            "assets": assets,
-            "binaries": binaries,
-        }
-        (current / "render-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        shutil.copy2(env_path, deployment_env)
         """
     )
 
 
-def schema2_migration_acceptance_script() -> str:
+def upgrade_0200_acceptance_script() -> str:
     return textwrap.dedent(
         """\
         set -euo pipefail
@@ -247,121 +284,205 @@ def schema2_migration_acceptance_script() -> str:
         support() { PYTHONPATH=/work python3 -m vpn_installer.install_support "$@"; }
         meta_value() { awk -F '\t' -v key="$2" '$1 == key { print $2 }' "$1/meta.tsv"; }
 
-        gateway_release=/etc/vpn-stack/releases/schema2-gateway
-        gateway_contract=/work/contracts/schema2-gateway
-        single_bundle=/work/schema3-single-gateway
-        single_contract=/work/contracts/schema3-single-gateway
-        mkdir -p /work/contracts /work/assets
+        current_bundle=/work/current-exit
+        current_contract=/work/contracts/current-exit
+        source_release=/etc/vpn-stack/releases/release-0200-exit
+        source_contract=/work/contracts/release-0200-exit
+        mkdir -p /work/contracts /work/assets /work/result
         echo __GEOSITE_SRS_BASE64__ | base64 -d >/work/assets/geosite-ru.srs
         echo __GEOIP_SRS_BASE64__ | base64 -d >/work/assets/geoip-ru.srs
 
-        PYTHONPATH=/work python3 /work/build-schema2.py ru-gateway "$gateway_release" /work/single.env
-        support adapt-schema2 \
-          --current-release "$gateway_release" \
-          --deployment-env /etc/vpn-stack/deployment.env \
-          --contract-dir "$gateway_contract"
         support render-node \
-          --node gateway \
-          --env-file /work/single.env \
+          --node exit \
+          --env-file /work/dual.env \
           --assets-dir /work/assets \
-          --output-dir "$single_bundle"
+          --output-dir "$current_bundle"
         support validate-bundle \
-          --bundle "$single_bundle" \
-          --expected-node gateway \
+          --bundle "$current_bundle" \
+          --expected-node exit \
           --external-assets /work/assets \
-          --require-assets \
-          --contract-dir "$single_contract"
+          --contract-dir "$current_contract"
+        PYTHONPATH=/work python3 /work/build-release-0200.py \
+          exit "$current_bundle" "$source_release" /usr/local/bin/sing-box
+        support validate-installed \
+          --current-release "$source_release" \
+          --expected-node exit \
+          --contract-dir "$source_contract"
 
-        test "$(meta_value "$gateway_contract" schema_version)" = 2
-        test "$(meta_value "$gateway_contract" topology)" = dual
-        test "$(meta_value "$gateway_contract" node_id)" = gateway
-        test "$(meta_value "$single_contract" schema_version)" = 3
-        test "$(meta_value "$single_contract" topology)" = single
-        test "$(meta_value "$single_contract" node_id)" = gateway
-        test "$(meta_value "$gateway_contract" deployment)" = "$(meta_value "$single_contract" deployment)"
-        test "$(meta_value "$gateway_contract" compatibility_adapter)" = schema2-install-contract
-        test -n "$(meta_value "$gateway_contract" remove_in)"
-        for contract_meta in /work/contracts/*/meta.tsv; do
-          if test "$(meta_value "${contract_meta%/meta.tsv}" schema_version)" = 3 \
-            && test "$(meta_value "${contract_meta%/meta.tsv}" topology)" = dual; then
-            echo "intermediate dual schema-3 contract is not allowed" >&2
-            exit 60
-          fi
-        done
+        test "$(meta_value "$source_contract" version)" = 0.20.0
+        test "$(meta_value "$source_contract" schema_version)" = __SOURCE_MANIFEST_SCHEMA__
+        test "$(meta_value "$current_contract" version)" = __CURRENT_VERSION__
+        test "$(meta_value "$current_contract" schema_version)" = __CURRENT_MANIFEST_SCHEMA__
 
-        cut -f2 "$gateway_contract/artifacts.tsv" | sort -u >/work/schema2.paths
-        cut -f2 "$single_contract/artifacts.tsv" | sort -u >/work/schema3.paths
-        comm -23 /work/schema2.paths /work/schema3.paths >/work/retired.paths
-        cut -f2 "$gateway_contract/services.tsv" | sort -u >/work/schema2.services
-        cut -f2 "$single_contract/services.tsv" | sort -u >/work/schema3.services
-        comm -23 /work/schema2.services /work/schema3.services >/work/retired.services
-        grep -Fq $'wg0.conf\t/etc/wireguard/wg0.conf\tmanaged\t' "$gateway_contract/artifacts.tsv"
-        grep -Fxq $'transport\tvpn-stack-transport.service\tmanaged' "$gateway_contract/services.tsv"
-        grep -Fxq /etc/wireguard/wg0.conf /work/retired.paths
-        grep -Fxq /usr/local/lib/vpn-stack/interserver_transport.py /work/retired.paths
-        grep -Fxq wg-quick@wg0.service /work/retired.services
-        grep -Fxq vpn-stack-transport.service /work/retired.services
+        PYTHONPATH=/work python3 - "$source_release" /work/result <<'PY'
+        import json
+        import shutil
+        import sys
+        from pathlib import Path
 
-        printf 'corrupt\n' >/etc/xray/config.json
-        corrupt_contract=/work/contracts/corrupt
-        if support adapt-schema2 \
-          --current-release "$gateway_release" \
-          --deployment-env /etc/vpn-stack/deployment.env \
-          --contract-dir "$corrupt_contract" >/work/corrupt.out 2>/work/corrupt.err; then
-          echo "corrupt schema-2 install was accepted" >&2
-          exit 61
-        fi
-        grep -Fq 'owned live path was modified: /etc/xray/config.json' /work/corrupt.err
-        test ! -d "$corrupt_contract" || test -z "$(find "$corrupt_contract" -type f -print -quit)"
+        from vpn_installer import VERSION
+        from vpn_installer.compatibility import CompatibilityError, CompatibilityWindow
+        from vpn_installer.config import load_env_file
+        from vpn_installer.diagnostics import SCHEMA_VERSION as DIAGNOSTICS_SCHEMA_VERSION
+        from vpn_installer.install_contract import InstallContractError, validate_installed_bundle
+        from vpn_installer.manifest import INSTALL_PLAN_SCHEMA_VERSION, MANIFEST_SCHEMA_VERSION
+        from vpn_installer.topology import CONFIG_SCHEMA_VERSION
+        from vpn_installer.upgrade_0200 import (
+            SOURCE_CONFIG_SCHEMA,
+            SOURCE_DIAGNOSTICS_SCHEMA,
+            SOURCE_INSTALL_PLAN_SCHEMA,
+            SOURCE_MANIFEST_SCHEMA,
+            SOURCE_STATE_SCHEMA,
+            Upgrade0200Error,
+            upgrade_diagnostics_snapshot,
+            upgrade_env,
+            upgrade_state,
+        )
 
-        foreign_release=/etc/vpn-stack/releases/schema2-foreign
-        foreign_contract=/work/contracts/schema2-foreign
-        PYTHONPATH=/work python3 /work/build-schema2.py foreign-exit "$foreign_release" /work/single.env
-        cmp -s "$foreign_release/sing-box.json" /etc/vpn-stack/sing-box.base.json
-        cmp -s "$foreign_release/sing-box.json" /etc/sing-box/config.json
-        support adapt-schema2 \
-          --current-release "$foreign_release" \
-          --deployment-env /etc/vpn-stack/deployment.env \
-          --contract-dir "$foreign_contract"
-        grep -Fq $'sing-box.json\t/etc/sing-box/config.json\tmanaged\t' "$foreign_contract/artifacts.tsv"
-        grep -Fq $'sing-box.json\t/etc/vpn-stack/sing-box.base.json\tmanaged\t' "$foreign_contract/artifacts.tsv"
+        source_release = Path(sys.argv[1])
+        result_dir = Path(sys.argv[2])
+        assert VERSION == "0.20.1"
+        assert (
+            SOURCE_CONFIG_SCHEMA,
+            SOURCE_STATE_SCHEMA,
+            SOURCE_MANIFEST_SCHEMA,
+            SOURCE_INSTALL_PLAN_SCHEMA,
+            SOURCE_DIAGNOSTICS_SCHEMA,
+        ) == (2, 2, 3, 3, 4)
+        assert (
+            CONFIG_SCHEMA_VERSION,
+            MANIFEST_SCHEMA_VERSION,
+            INSTALL_PLAN_SCHEMA_VERSION,
+            DIAGNOSTICS_SCHEMA_VERSION,
+        ) == (3, 4, 4, 5)
 
-        mkdir -p /work/result
-        cp /work/retired.paths /work/retired.services /work/corrupt.err /work/result/
-        cp "$gateway_contract/meta.tsv" /work/result/schema2-gateway-meta.tsv
-        cp "$single_contract/meta.tsv" /work/result/schema3-single-gateway-meta.tsv
-        cp "$foreign_contract/artifacts.tsv" /work/result/schema2-foreign-artifacts.tsv
+        source_env = load_env_file(source_release / "node.env")
+        upgraded_env = upgrade_env(source_env)
+        assert upgraded_env["CONFIG_SCHEMA"] == str(CONFIG_SCHEMA_VERSION)
+        source_state = {
+            "schema_version": SOURCE_STATE_SCHEMA,
+            "topology": "dual",
+            "updated_at": "2026-08-17T00:00:00Z",
+            "nodes": {"gateway": {}, "exit": {}},
+        }
+        upgraded_state = upgrade_state(source_state)
+        assert upgraded_state["schema_version"] == CONFIG_SCHEMA_VERSION
+        source_diagnostics = {
+            "schema_version": SOURCE_DIAGNOSTICS_SCHEMA,
+            "release": {"version": "0.20.0"},
+            "role": "foreign-exit",
+            "migration": {"state": "native"},
+        }
+        upgraded_diagnostics = upgrade_diagnostics_snapshot(
+            source_diagnostics,
+            target_schema=DIAGNOSTICS_SCHEMA_VERSION,
+        )
+        assert upgraded_diagnostics["schema_version"] == DIAGNOSTICS_SCHEMA_VERSION
+        assert "role" not in upgraded_diagnostics and "migration" not in upgraded_diagnostics
+
+        for invalid in ("0.19.10", "0.20.2"):
+            candidate = result_dir / f"out-of-window-{invalid}"
+            shutil.copytree(source_release, candidate)
+            manifest_path = candidate / "render-manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["version"] = invalid
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            try:
+                validate_installed_bundle(candidate, "exit", result_dir / f"contract-{invalid}")
+            except InstallContractError as exc:
+                assert f"installed release {invalid} cannot be updated" in str(exc)
+                assert f"tag {invalid}" in str(exc)
+            else:
+                raise AssertionError(f"out-of-window release accepted: {invalid}")
+
+        for mutate in (
+            lambda value: value.update(CONFIG_SCHEMA="1"),
+            lambda value: value.update(CONFIG_SCHEMA="4"),
+        ):
+            invalid_env = dict(source_env)
+            mutate(invalid_env)
+            try:
+                upgrade_env(invalid_env)
+            except Upgrade0200Error:
+                pass
+            else:
+                raise AssertionError("out-of-window config schema was accepted")
+        for invalid_schema in (1, 3):
+            try:
+                upgrade_state({**source_state, "schema_version": invalid_schema})
+            except Upgrade0200Error:
+                pass
+            else:
+                raise AssertionError("out-of-window state schema was accepted")
+        try:
+            upgrade_diagnostics_snapshot(
+                {**source_diagnostics, "schema_version": 5},
+                target_schema=DIAGNOSTICS_SCHEMA_VERSION,
+            )
+        except Upgrade0200Error:
+            pass
+        else:
+            raise AssertionError("out-of-window diagnostics schema was accepted")
+
+        result = {
+            "from": {
+                "version": "0.20.0",
+                "config": SOURCE_CONFIG_SCHEMA,
+                "state": SOURCE_STATE_SCHEMA,
+                "manifest": SOURCE_MANIFEST_SCHEMA,
+                "install_plan": SOURCE_INSTALL_PLAN_SCHEMA,
+                "diagnostics": SOURCE_DIAGNOSTICS_SCHEMA,
+            },
+            "to": {
+                "version": VERSION,
+                "config": CONFIG_SCHEMA_VERSION,
+                "state": CONFIG_SCHEMA_VERSION,
+                "manifest": MANIFEST_SCHEMA_VERSION,
+                "install_plan": INSTALL_PLAN_SCHEMA_VERSION,
+                "diagnostics": DIAGNOSTICS_SCHEMA_VERSION,
+            },
+            "window": CompatibilityWindow.current().to_manifest(),
+        }
+        (result_dir / "transition.json").write_text(json.dumps(result, indent=2) + "\\n", encoding="utf-8")
+        PY
         """
     ).replace("__GEOSITE_SRS_BASE64__", VALID_GEOSITE_SRS_BASE64).replace(
         "__GEOIP_SRS_BASE64__", VALID_GEOIP_SRS_BASE64
+    ).replace(
+        "__SOURCE_MANIFEST_SCHEMA__", str(SOURCE_MANIFEST_SCHEMA)
+    ).replace(
+        "__CURRENT_MANIFEST_SCHEMA__", str(MANIFEST_SCHEMA_VERSION)
+    ).replace(
+        "__CURRENT_VERSION__", VERSION
     )
 
 
-def test_schema2_to_schema3_migration(runner: AuditRunner) -> dict[str, str]:
+def test_0200_to_0201_transition(runner: AuditRunner) -> dict[str, str]:
     env_path, env = runner.create_env(
-        "schema2-migration",
-        topology=TOPOLOGY_SINGLE,
+        "upgrade-0200",
+        {"FOREIGN_BLOCK_RU": "0"},
+        topology=TOPOLOGY_DUAL,
         gateway_location=LOCATION_RU,
     )
-    fixture_builder = runner.work_dir / "schema2-migration" / "build-schema2.py"
-    write_text(fixture_builder, schema2_fixture_builder_text())
-    result_dir = runner.work_dir / "schema2-migration-result"
-    container = f"audit-schema2-migration-{runner.run_id}"
+    fixture_builder = runner.work_dir / "upgrade-0200" / "build-release-0200.py"
+    write_text(fixture_builder, release_0200_fixture_builder_text())
+    result_dir = runner.work_dir / "upgrade-0200-result"
+    container = f"audit-upgrade-0200-{runner.run_id}"
     with runner.docker_container(container, AUDIT_IMAGE):
         runner.docker_exec(container, "mkdir -p /work")
         runner.docker_copy(container, ROOT_DIR / "vpn_installer", "/work")
-        runner.docker_copy(container, env_path, "/work/single.env")
-        runner.docker_copy(container, fixture_builder, "/work/build-schema2.py")
+        runner.docker_copy(container, env_path, "/work/dual.env")
+        runner.docker_copy(container, fixture_builder, "/work/build-release-0200.py")
         runner.docker_exec(
             container,
-            schema2_migration_acceptance_script(),
-            timeout_seconds=SCHEMA2_MIGRATION_TIMEOUT_SECONDS,
+            upgrade_0200_acceptance_script(),
+            timeout_seconds=UPGRADE_0200_TIMEOUT_SECONDS,
         )
         runner.docker_cp_from(container, "/work/result", result_dir)
     return {
         "container": container,
         "deployment": env["DEPLOY_NAME"],
-        "transition": "schema2-dual-gateway->schema3-single-gateway",
+        "transition": "0.20.0(2/2/3/3/4)->0.20.1(3/3/4/4/5)",
         "artifacts": str(result_dir),
     }
 
@@ -436,7 +557,7 @@ def test_asset_fail_fast(runner: AuditRunner) -> dict[str, str]:
     return {"env_path": str(env_path)}
 
 
-def transaction_rollback_acceptance_script(verified_snapshot: str) -> str:
+def transaction_rollback_acceptance_script(verified_snapshot: str, upgrade_deployment: str) -> str:
     return (
         textwrap.dedent(
             r"""
@@ -449,8 +570,10 @@ def transaction_rollback_acceptance_script(verified_snapshot: str) -> str:
             : >/work/result/gates.tsv
             echo __GEOSITE_SRS_BASE64__ | base64 -d >/work/assets/geosite-ru.srs
             echo __GEOIP_SRS_BASE64__ | base64 -d >/work/assets/geoip-ru.srs
-            single_bundle=/work/schema3-single-gateway
-            single_contract=/work/schema3-single-contract
+            single_bundle=/work/current-single-gateway
+            single_contract=/work/current-single-contract
+            exit_bundle=/work/current-dual-exit
+            exit_contract=/work/current-exit-contract
             support render-node \
               --node gateway \
               --env-file /work/deployment.env \
@@ -462,6 +585,16 @@ def transaction_rollback_acceptance_script(verified_snapshot: str) -> str:
               --external-assets /work/assets \
               --require-assets \
               --contract-dir "$single_contract"
+            support render-node \
+              --node exit \
+              --env-file /work/dual.env \
+              --assets-dir /work/assets \
+              --output-dir "$exit_bundle"
+            support validate-bundle \
+              --bundle "$exit_bundle" \
+              --expected-node exit \
+              --external-assets /work/assets \
+              --contract-dir "$exit_contract"
 
             export VPNSTACK_ROOT=/etc/vpn-stack
             export VPNSTACK_INSTALL_LIBRARY_ONLY=1
@@ -476,7 +609,7 @@ def transaction_rollback_acceptance_script(verified_snapshot: str) -> str:
               local action="${1:-}"
               local unit="${2:-}"
               if [[ "$action" == daemon-reload && "${SIGKILL_AFTER_CURRENT:-0}" == 1 && -L "$VPNSTACK_CURRENT_RELEASE" ]]; then
-                if [[ "$(manifest_schema "$VPNSTACK_CURRENT_RELEASE/render-manifest.json")" == 3 ]]; then
+                if [[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["schema_version"])' "$VPNSTACK_CURRENT_RELEASE/render-manifest.json")" == __CURRENT_MANIFEST_SCHEMA__ ]]; then
                   printf 'after-current-before-acceptance\n' >/work/result/crash-window.marker
                   while true; do :; done
                 fi
@@ -553,6 +686,11 @@ def transaction_rollback_acceptance_script(verified_snapshot: str) -> str:
             PY
             pass_gate failed-acceptance-evidence
 
+            cat >"$agent_path" <<'PY'
+            import json
+            print(__VERIFIED_SNAPSHOT__)
+            PY
+
             printf 'single-before\n' >"$VPNSTACK_NODE_PATH"
             single_scope=/work/single-scope
             build_operation_scope "$single_contract" "" "$single_scope"
@@ -571,15 +709,15 @@ def transaction_rollback_acceptance_script(verified_snapshot: str) -> str:
             ! grep -Fq 'wg-quick@' "$SYSTEMCTL_LOG"
             pass_gate single-rollback-without-wireguard
 
-            schema3_check_release="$VPNSTACK_RELEASES_DIR/schema3-check"
+            current_check_release="$VPNSTACK_RELEASES_DIR/current-check"
             mkdir -p "$VPNSTACK_RELEASES_DIR"
-            cp -a "$single_bundle" "$schema3_check_release"
-            mkdir -p "$schema3_check_release/assets"
-            cp /work/assets/geosite-ru.srs /work/assets/geoip-ru.srs "$schema3_check_release/assets/"
-            ln -s "$schema3_check_release" "$VPNSTACK_CURRENT_RELEASE"
+            cp -a "$single_bundle" "$current_check_release"
+            mkdir -p "$current_check_release/assets"
+            cp /work/assets/geosite-ru.srs /work/assets/geoip-ru.srs "$current_check_release/assets/"
+            ln -s "$current_check_release" "$VPNSTACK_CURRENT_RELEASE"
             NODE=exit
             if (current_release_contract /work/node-mismatch-contract) 2>/work/node-mismatch.err; then
-              echo 'schema-3 node mismatch was accepted' >&2
+              echo 'current node mismatch was accepted' >&2
               exit 74
             fi
             grep -Fq 'installed node is gateway, not exit' /work/node-mismatch.err
@@ -588,11 +726,12 @@ def transaction_rollback_acceptance_script(verified_snapshot: str) -> str:
             pass_gate node-mismatch-rejection
 
             rm -rf -- "$VPNSTACK_ROOT"
-            schema2_release="$VPNSTACK_RELEASES_DIR/schema2-old"
-            PYTHONPATH=/work python3 /work/build-schema2.py ru-gateway "$schema2_release" /work/deployment.env
-            ln -s "$schema2_release" "$VPNSTACK_CURRENT_RELEASE"
-            schema2_release_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release_id"])' "$schema2_release/render-manifest.json")"
-            python3 - "$VPNSTACK_ACCEPTANCE_PATH" "$schema2_release_id" <<'PY'
+            release_0200="$VPNSTACK_RELEASES_DIR/release-0200"
+            PYTHONPATH=/work python3 /work/build-release-0200.py \
+              exit "$exit_bundle" "$release_0200" /usr/local/bin/sing-box
+            ln -s "$release_0200" "$VPNSTACK_CURRENT_RELEASE"
+            release_0200_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release_id"])' "$release_0200/render-manifest.json")"
+            python3 - "$VPNSTACK_ACCEPTANCE_PATH" "$release_0200_id" <<'PY'
             import json
             import sys
             from pathlib import Path
@@ -600,8 +739,8 @@ def transaction_rollback_acceptance_script(verified_snapshot: str) -> str:
             Path(sys.argv[1]).write_text(
                 json.dumps(
                     {
-                        "deployment": "audit-install-rollback",
-                        "node_id": "gateway",
+                        "deployment": __UPGRADE_DEPLOYMENT__,
+                        "node_id": "exit",
                         "release": {"release_id": sys.argv[2]},
                     },
                     separators=(",", ":"),
@@ -610,20 +749,26 @@ def transaction_rollback_acceptance_script(verified_snapshot: str) -> str:
                 encoding="utf-8",
             )
             PY
-            cp "$VPNSTACK_ACCEPTANCE_PATH" /work/schema2-acceptance.json
-            WORK_DIR=/work/schema2-contract-work
+            cp "$VPNSTACK_ACCEPTANCE_PATH" /work/release-0200-acceptance.json
+            WORK_DIR=/work/release-0200-contract-work
             mkdir -p "$WORK_DIR"
             PREVIOUS_CONTRACT=""
             prepare_previous_contract
-            test "$(contract_value "$PREVIOUS_CONTRACT" schema_version)" = 2
-            cp "$PREVIOUS_CONTRACT/services.tsv" /work/schema2-services.tsv
-            grep -Fqx $'admin\tvpn-stack-admin.service\tmanaged' /work/schema2-services.tsv
+            test "$(contract_value "$PREVIOUS_CONTRACT" version)" = 0.20.0
+            test "$(contract_value "$PREVIOUS_CONTRACT" schema_version)" = __SOURCE_MANIFEST_SCHEMA__
+            cp "$PREVIOUS_CONTRACT/services.tsv" /work/release-0200-services.tsv
+            grep -Fqx $'wireguard\twg-quick@wg0.service\tmanaged' /work/release-0200-services.tsv
+            ! grep -Fq $'transport\t' /work/release-0200-services.tsv
+            ! grep -Fq $'admin\t' /work/release-0200-services.tsv
 
             (
               set -euo pipefail
               trap on_exit EXIT
               install_packages_from_plan() { :; }
-              stage_binaries() { mkdir -p "$1/bin"; }
+              stage_binaries() {
+                mkdir -p "$1/bin"
+                cp /usr/local/bin/sing-box "$1/bin/sing-box"
+              }
               validate_staged_payloads() { :; }
               verify_target_units() { :; }
               apply_planned_host_files() { :; }
@@ -645,8 +790,8 @@ def transaction_rollback_acceptance_script(verified_snapshot: str) -> str:
                 support "${args[@]}"
               }
               ACTION=reinstall
-              NODE=gateway
-              ENV_FILE=/work/deployment.env
+              NODE=exit
+              ENV_FILE=/work/dual.env
               ASSETS_DIR=/work/assets
               SIGKILL_AFTER_CURRENT=1
               exec 9>"$INSTALL_LOCK_PATH"
@@ -669,48 +814,61 @@ def transaction_rollback_acceptance_script(verified_snapshot: str) -> str:
             test "$crash_status" = 137
             ! grep -Fq 'Installation failed; restoring the pre-install snapshot.' /work/crash.err
             flock -n "$INSTALL_LOCK_PATH" -c true
-            test "$(manifest_schema "$VPNSTACK_CURRENT_RELEASE/render-manifest.json")" = 3
-            schema3_release="$(readlink -f "$VPNSTACK_CURRENT_RELEASE")"
-            test "$schema3_release" != "$schema2_release"
-            cmp -s "$VPNSTACK_ACCEPTANCE_PATH" /work/schema2-acceptance.json
+            test "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["schema_version"])' "$VPNSTACK_CURRENT_RELEASE/render-manifest.json")" = __CURRENT_MANIFEST_SCHEMA__
+            current_release="$(readlink -f "$VPNSTACK_CURRENT_RELEASE")"
+            test "$current_release" != "$release_0200"
+            cmp -s "$VPNSTACK_ACCEPTANCE_PATH" /work/release-0200-acceptance.json
             snapshot="$(readlink -f "$VPNSTACK_LATEST_SNAPSHOT")"
-            cp "$snapshot/service-state.tsv" /work/schema2-service-state.tsv
+            cp "$snapshot/service-state.tsv" /work/release-0200-service-state.tsv
 
             : >"$SYSTEMCTL_LOG"
-            rollback_action >/work/schema2-rollback.out
-            grep -Fq 'Rollback snapshot restored:' /work/schema2-rollback.out
-            test "$(readlink -f "$VPNSTACK_CURRENT_RELEASE")" = "$schema2_release"
-            test "$(manifest_schema "$VPNSTACK_CURRENT_RELEASE/render-manifest.json")" = 2
-            cmp -s "$VPNSTACK_ACCEPTANCE_PATH" /work/schema2-acceptance.json
+            rollback_action >/work/release-0200-rollback.out
+            grep -Fq 'Rollback snapshot restored:' /work/release-0200-rollback.out
+            test "$(readlink -f "$VPNSTACK_CURRENT_RELEASE")" = "$release_0200"
+            test "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["schema_version"])' "$VPNSTACK_CURRENT_RELEASE/render-manifest.json")" = __SOURCE_MANIFEST_SCHEMA__
+            python3 - "$VPNSTACK_ACCEPTANCE_PATH" <<'PY'
+            import json
+            import sys
+
+            payload = json.load(open(sys.argv[1], encoding="utf-8"))
+            assert payload["schema_version"] == __SOURCE_DIAGNOSTICS_SCHEMA__
+            assert payload["node_id"] == "exit"
+            assert payload["release"]["version"] == "0.20.0"
+            assert payload["verdict"] == "verified"
+            PY
             test -f /etc/wireguard/wg0.conf
-            grep -Fxq applied /work/result/schema2-network-apply.marker
+            grep -Fxq applied /work/result/release-0200-network-apply.marker
             pass_gate sigkill-production-cutover-reconciliation
 
             verified_services=0
-            admin_state_verified=0
+            wireguard_state_verified=0
             while IFS=$'\t' read -r name unit ownership expected_enabled expected_active; do
               [[ "$ownership" == managed || "$ownership" == borrowed ]]
               grep -Fxq "is-enabled $unit" "$SYSTEMCTL_LOG"
               grep -Fxq "is-active $unit" "$SYSTEMCTL_LOG"
-              if [[ "$name" == admin ]]; then
-                test "$expected_enabled" = disabled
-                test "$expected_active" = inactive
-                admin_state_verified=1
+              if [[ "$name" == wireguard ]]; then
+                test "$expected_enabled" = enabled
+                test "$expected_active" = active
+                wireguard_state_verified=1
               fi
               verified_services=$((verified_services + 1))
-            done </work/schema2-service-state.tsv
+            done </work/release-0200-service-state.tsv
             test "$verified_services" -gt 0
-            test "$admin_state_verified" = 1
+            test "$wireguard_state_verified" = 1
             test "$(grep -c '^is-enabled ' "$SYSTEMCTL_LOG")" = "$verified_services"
             test "$(grep -c '^is-active ' "$SYSTEMCTL_LOG")" = "$verified_services"
-            cp "$SYSTEMCTL_LOG" /work/result/schema2-service-verification.log
-            pass_gate schema2-rollback-verification
+            cp "$SYSTEMCTL_LOG" /work/result/release-0200-service-verification.log
+            pass_gate release-0200-rollback-verification
             test "$(wc -l </work/result/gates.tsv)" = 6
             """
         ).lstrip()
         .replace("__GEOSITE_SRS_BASE64__", VALID_GEOSITE_SRS_BASE64)
         .replace("__GEOIP_SRS_BASE64__", VALID_GEOIP_SRS_BASE64)
         .replace("__VERIFIED_SNAPSHOT__", verified_snapshot)
+        .replace("__UPGRADE_DEPLOYMENT__", json.dumps(upgrade_deployment))
+        .replace("__SOURCE_DIAGNOSTICS_SCHEMA__", str(SOURCE_DIAGNOSTICS_SCHEMA))
+        .replace("__SOURCE_MANIFEST_SCHEMA__", str(SOURCE_MANIFEST_SCHEMA))
+        .replace("__CURRENT_MANIFEST_SCHEMA__", str(MANIFEST_SCHEMA_VERSION))
     )
 
 
@@ -718,6 +876,12 @@ def test_install_rollback_state(runner: AuditRunner) -> dict[str, str]:
     env_path, env = runner.create_env(
         "install-rollback",
         topology=TOPOLOGY_SINGLE,
+        gateway_location=LOCATION_RU,
+    )
+    dual_env_path, dual_env = runner.create_env(
+        "install-rollback-upgrade",
+        {"FOREIGN_BLOCK_RU": "0"},
+        topology=TOPOLOGY_DUAL,
         gateway_location=LOCATION_RU,
     )
     verified_snapshot = repr(
@@ -731,19 +895,20 @@ def test_install_rollback_state(runner: AuditRunner) -> dict[str, str]:
             separators=(",", ":"),
         )
     )
-    fixture_builder = runner.work_dir / "install-rollback" / "build-schema2.py"
-    write_text(fixture_builder, schema2_fixture_builder_text())
+    fixture_builder = runner.work_dir / "install-rollback" / "build-release-0200.py"
+    write_text(fixture_builder, release_0200_fixture_builder_text())
     result_dir = runner.work_dir / "install-rollback-result"
     container = f"audit-install-rollback-{runner.run_id}"
     with runner.docker_container(container, AUDIT_IMAGE):
         runner.docker_exec(container, "mkdir -p /work")
         runner.docker_copy(container, INSTALL_SCRIPT_PATH, "/work/install.sh")
         runner.docker_copy(container, env_path, "/work/deployment.env")
+        runner.docker_copy(container, dual_env_path, "/work/dual.env")
         runner.docker_copy(container, ROOT_DIR / "vpn_installer", "/work")
-        runner.docker_copy(container, fixture_builder, "/work/build-schema2.py")
+        runner.docker_copy(container, fixture_builder, "/work/build-release-0200.py")
         runner.docker_exec(
             container,
-            transaction_rollback_acceptance_script(verified_snapshot),
+            transaction_rollback_acceptance_script(verified_snapshot, dual_env["DEPLOY_NAME"]),
             timeout_seconds=TRANSACTION_ACCEPTANCE_TIMEOUT_SECONDS,
         )
         runner.docker_cp_from(container, "/work/result", result_dir)
@@ -755,10 +920,10 @@ def test_install_rollback_state(runner: AuditRunner) -> dict[str, str]:
     crash_marker = result_dir / "crash-window.marker"
     if not crash_marker.is_file() or crash_marker.read_text(encoding="utf-8").strip() != "after-current-before-acceptance":
         raise AuditFailure("transaction crash-window marker is missing")
-    service_verification = result_dir / "schema2-service-verification.log"
+    service_verification = result_dir / "release-0200-service-verification.log"
     service_evidence = service_verification.read_text(encoding="utf-8") if service_verification.is_file() else ""
-    if "is-enabled vpn-stack-admin.service" not in service_evidence or "is-active vpn-stack-admin.service" not in service_evidence:
-        raise AuditFailure("schema-2 rollback service verification evidence is missing")
+    if "is-enabled wg-quick@wg0.service" not in service_evidence or "is-active wg-quick@wg0.service" not in service_evidence:
+        raise AuditFailure("0.20.0 rollback service verification evidence is missing")
     return {
         "container": container,
         "deployment": env["DEPLOY_NAME"],
@@ -785,7 +950,7 @@ def prepare_mock_state(runner: AuditRunner, action: str) -> tuple[Path, Path]:
         state_path,
         json.dumps(
             {
-                "schema_version": 2,
+                "schema_version": CONFIG_SCHEMA_VERSION,
                 "topology": TOPOLOGY_DUAL,
                 "updated_at": "2026-04-11T00:00:00Z",
                 "nodes": {
@@ -808,7 +973,6 @@ def prepare_mock_state(runner: AuditRunner, action: str) -> tuple[Path, Path]:
                         "auth_mode": "key",
                     },
                 },
-                "migration": {"state": "native", "legacy_inputs": []},
             },
             ensure_ascii=False,
             indent=2,
@@ -970,9 +1134,9 @@ def test_node_scoped_workflows(runner: AuditRunner) -> dict[str, str]:
                 manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
                 if manifest.get("node_id") != node_id:
                     raise RuntimeError(f"manifest node mismatch for {{node_id}}")
-            wf.install_remote_role(target, deployment_name, env, action)
+            wf.install_remote_node(target, deployment_name, env, action)
 
-        wf.install_remote_role_with_recovery = accepted_install
+        wf.install_remote_node_with_recovery = accepted_install
 
         status_env = Path("/work/deployments/{status_env.name}")
         status_state = Path("/work/state/{status_state.name}")

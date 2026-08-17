@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
-from vpn_installer import admin_tunnel, cli
+from vpn_installer import cli
+from vpn_installer.admin_access import admin_access_workflow
+from vpn_installer.models import AppError
 
 
 class CliTests(unittest.TestCase):
@@ -69,21 +71,16 @@ class CliTests(unittest.TestCase):
         self.assertTrue(args.drop_env)
         self.assertTrue(args.drop_runtime)
 
-    def test_reinstall_parser_keeps_deprecated_role_alias(self) -> None:
+    def test_reinstall_parser_rejects_removed_role_alias(self) -> None:
         parser = cli.build_parser()
-        args = parser.parse_args(["reinstall", "--deployment", "demo", "--role", "ru-gateway"])
-        self.assertEqual(args.role, "ru-gateway")
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["reinstall", "--deployment", "demo", "--role", "ru-gateway"])
 
     def test_reinstall_parser_uses_canonical_node(self) -> None:
         parser = cli.build_parser()
         args = parser.parse_args(["reinstall", "--deployment", "demo", "--node", "gateway"])
         self.assertEqual(args.node, "gateway")
         self.assertEqual(cli.selected_node(args), "gateway")
-
-    def test_node_and_deprecated_role_are_mutually_exclusive(self) -> None:
-        parser = cli.build_parser()
-        with self.assertRaises(SystemExit):
-            parser.parse_args(["status", "--node", "gateway", "--role", "ru-gateway"])
 
     def test_reinstall_dispatch_forwards_unattended_flags(self) -> None:
         with patch("vpn_installer.cli.remote_action_workflow", return_value=0) as mocked:
@@ -98,58 +95,37 @@ class CliTests(unittest.TestCase):
             self.assertEqual(cli.main(["status", "--deployment", "demo", "--node", "all", "--non-interactive"]), 0)
         mocked.assert_called_once_with("demo", "all", non_interactive=True)
 
-    def test_admin_dispatches_loopback_ssh_tunnel(self) -> None:
-        with patch("vpn_installer.cli.admin_tunnel_workflow", return_value=0) as mocked:
+    def test_admin_dispatches_public_dual_access(self) -> None:
+        with patch("vpn_installer.cli.admin_access_workflow", return_value=0) as mocked:
             self.assertEqual(
-                cli.main(["admin", "--deployment", "demo", "--local-port", "18080", "--open-browser", "--non-interactive"]),
+                cli.main(["admin", "--deployment", "demo", "--open-browser"]),
                 0,
             )
-        mocked.assert_called_once_with("demo", local_port=18080, open_browser=True, non_interactive=True)
+        mocked.assert_called_once_with("demo", open_browser=True)
 
-    def test_admin_tunnel_uses_gateway_ssh_transport_and_loopback_forward(self) -> None:
+    def test_admin_access_uses_dual_gateway_public_address(self) -> None:
         env = {
-            "TOPOLOGY": "single",
-            "GATEWAY_LOCATION": "foreign",
-            "GATEWAY_PUBLIC_IP": "198.51.100.20",
-            "ADMIN_WEB_ENABLED": "1",
-            "ADMIN_WEB_PORT": "11333",
+            "TOPOLOGY": "dual",
+            "GATEWAY_LOCATION": "ru",
+            "GATEWAY_PUBLIC_IP": "203.0.113.10",
+            "EXIT_PUBLIC_IP": "198.51.100.20",
+            "ADMIN_WEB_PORT": "11444",
         }
-        target = object()
-        transport = MagicMock()
-        transport.is_active.return_value = True
-        client = MagicMock()
-        client.get_transport.return_value = transport
-        server = MagicMock()
-        server.serve_forever.side_effect = KeyboardInterrupt
+        with patch("vpn_installer.admin_access.load_existing_deployment_env", return_value=(None, env)), patch(
+            "vpn_installer.admin_access.webbrowser.open"
+        ) as browser:
+            self.assertEqual(admin_access_workflow("demo", open_browser=True), 0)
+        browser.assert_called_once_with("http://203.0.113.10:11444", new=2)
 
-        with patch(
-            "vpn_installer.workflows.prepare_remote_session",
-            return_value=("demo", None, env, {}, [target], {}),
-        ) as prepare, patch("vpn_installer.admin_tunnel.paramiko_connect", return_value=client) as connect, patch(
-            "vpn_installer.admin_tunnel._ForwardServer", return_value=server
-        ) as forward:
-            self.assertEqual(admin_tunnel.admin_tunnel_workflow("demo", non_interactive=True), 0)
-
-        self.assertEqual(prepare.call_args.kwargs["roles"], ["ru-gateway"])
-        connect.assert_called_once_with(target)
-        forward.assert_called_once_with(11333, transport, 11333)
-        server.server_close.assert_called_once_with()
-        client.close.assert_called_once_with()
-
-    def test_admin_tunnel_rejects_disabled_capability_before_ssh(self) -> None:
+    def test_admin_access_rejects_single_topology(self) -> None:
         env = {
             "TOPOLOGY": "single",
             "GATEWAY_LOCATION": "ru",
             "GATEWAY_PUBLIC_IP": "203.0.113.10",
-            "ADMIN_WEB_ENABLED": "0",
         }
-        with patch(
-            "vpn_installer.workflows.prepare_remote_session",
-            return_value=("demo", None, env, {}, [object()], {}),
-        ), patch("vpn_installer.admin_tunnel.paramiko_connect") as connect:
-            with self.assertRaisesRegex(cli.AppError, "Web-admin отключён"):
-                admin_tunnel.admin_tunnel_workflow("demo")
-        connect.assert_not_called()
+        with patch("vpn_installer.admin_access.load_existing_deployment_env", return_value=(None, env)):
+            with self.assertRaisesRegex(AppError, "только в dual"):
+                admin_access_workflow("demo")
 
     def test_android_diagnose_dispatch(self) -> None:
         with patch("vpn_installer.cli.android_diagnose", return_value=0) as mocked:
@@ -164,7 +140,7 @@ class CliTests(unittest.TestCase):
     def test_client_log_diagnose_dispatch(self) -> None:
         with patch("vpn_installer.cli.diagnose_client_log_workflow", return_value=1) as mocked:
             self.assertEqual(cli.main(["diagnose", "client-log", "--path", "client.log", "--deployment", "demo", "--node", "gateway"]), 1)
-        mocked.assert_called_once_with("client.log", deployment="demo", role="gateway")
+        mocked.assert_called_once_with("client.log", deployment="demo", node="gateway")
 
     def test_routes_accepts_single_topology_local_egress(self) -> None:
         parser = cli.build_parser()

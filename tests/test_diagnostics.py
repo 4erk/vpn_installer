@@ -40,7 +40,7 @@ class DiagnosticsTests(unittest.TestCase):
         )
         self.assertEqual(classify_interserver_adaptation({"state": "healthy", "fresh": True}), ("", ""))
 
-    def test_snapshot_v4_roundtrips_without_shell_parsing(self) -> None:
+    def test_snapshot_v5_roundtrips_without_shell_parsing(self) -> None:
         windows = empty_windows()
         windows["5m"] = LogWindowSnapshot.collected(
             {bucket: 2 if bucket == "ipv4_literal_timeout" else 0 for bucket in BUCKETS},
@@ -55,7 +55,6 @@ class DiagnosticsTests(unittest.TestCase):
             node_id="gateway",
             location="ru",
             capabilities=("public-front", "router", "local-egress", "interserver-client"),
-            role="ru-gateway",
             collectors=ok_collectors(),
             log_windows=windows,
             services={"sing-box": "active"},
@@ -66,7 +65,7 @@ class DiagnosticsTests(unittest.TestCase):
 
         restored = DiagnosticsSnapshot.from_json(snapshot.to_json())
 
-        self.assertEqual(restored.schema_version, 4)
+        self.assertEqual(restored.schema_version, 5)
         self.assertEqual(restored.deployment, "demo")
         self.assertEqual(restored.topology, "dual")
         self.assertEqual(restored.node_id, "gateway")
@@ -78,88 +77,15 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual(restored.drift, "none")
         self.assertEqual(restored.storage["root_filesystem"]["verdict"], "verified")
 
-    def test_generic_parser_rejects_legacy_schema(self) -> None:
+    def test_generic_parser_rejects_non_native_schema(self) -> None:
         with self.assertRaisesRegex(ValueError, "unsupported diagnostics snapshot schema"):
             DiagnosticsSnapshot.from_json('{"schema_version":2}')
 
-    def test_legacy_agent_migration_is_explicit_and_never_marks_data_fresh(self) -> None:
-        empty_summary = {"counts": {"dns_failed": 0}}
-        payload = {
-            "schema_version": 2,
-            "generated_at": OBSERVED_AT,
-            "deployment": "demo",
-            "role": "ru-gateway",
-            "services": {"sing-box": "active"},
-            "artifacts": {"drift": "none", "files": {}},
-            "wireguard": {},
-            "probes": {"profile": "none", "ok": None},
-            "logs": {
-                "fresh": {"since": "2026-08-06T17:30:00+00:00", "counts": {"dns_failed": 3}},
-                "windows_minutes": {"5": empty_summary, "30": empty_summary, "1440": empty_summary},
-            },
-            "storage": {},
-            "network": {},
-            "front": {},
-            "transport": {},
-            "maintenance": {},
-            "verdicts": {"overall": "verified", "reasons": []},
-        }
-
-        migrated = DiagnosticsSnapshot.migrate_agent_v2(payload)
-
-        self.assertEqual(migrated.schema_version, 4)
-        self.assertEqual(migrated.collector_status, "stale")
-        self.assertEqual(migrated.verdict, "inconclusive")
-        self.assertEqual(migrated.migration["boundary"], "DiagnosticsSnapshot.migrate_agent_v2")
-        self.assertEqual(migrated.log_windows["5m"].counts["dns_nodata"], 0)
-        self.assertIsNone(migrated.log_windows["since_release"].counts["dns_nodata"])
-        self.assertIsNone(migrated.log_windows["since_release"].counts["dns_refused"])
-        self.assertIsNone(migrated.log_windows["since_release"].counts["dns_servfail"])
-        self.assertIn("cannot be split", migrated.migration["warnings"][0])
-
-    def test_agent_adapter_rejects_v2_outside_the_offline_migration_helper(self) -> None:
-        payload = {
-            "schema_version": 2,
-            "generated_at": OBSERVED_AT,
-            "services": {},
-            "artifacts": {},
-            "wireguard": {},
-            "probes": {},
-            "logs": {"fresh": {"counts": {}}, "windows_minutes": {}},
-            "storage": {},
-            "network": {},
-            "front": {},
-            "transport": {},
-            "maintenance": {},
-            "verdicts": {"overall": "inconclusive", "reasons": []},
-        }
-        with self.assertRaisesRegex(ValueError, "unsupported vpn-stack-agent snapshot schema"):
+    def test_agent_parser_rejects_non_native_schema(self) -> None:
+        payload = DiagnosticsSnapshot().to_dict()
+        payload["schema_version"] = 2
+        with self.assertRaisesRegex(ValueError, "unsupported diagnostics snapshot schema"):
             DiagnosticsSnapshot.from_agent(payload)
-
-    def test_agent_adapter_migrates_v3_as_stale_inconclusive_evidence(self) -> None:
-        payload = DiagnosticsSnapshot(
-            role="ru-gateway",
-            collectors=ok_collectors(),
-            log_windows=empty_windows(),
-            verdict="verified",
-        ).to_dict()
-        payload["schema_version"] = 3
-        for name in ("topology", "node_id", "location", "capabilities"):
-            del payload[name]
-
-        migrated = DiagnosticsSnapshot.from_agent(payload)
-
-        self.assertEqual(migrated.schema_version, 4)
-        self.assertEqual(migrated.verdict, "inconclusive")
-        self.assertEqual(migrated.collector_status, "stale")
-        self.assertEqual(migrated.topology, "dual")
-        self.assertEqual(migrated.node_id, "gateway")
-        self.assertEqual(migrated.location, "ru")
-        self.assertIn("public-front", migrated.capabilities)
-        self.assertEqual(migrated.migration["source_schema_version"], 3)
-        self.assertEqual(migrated.migration["boundary"], "DiagnosticsSnapshot.migrate_agent_v3")
-        self.assertTrue(all(state.status == "stale" for state in migrated.collectors.values()))
-        self.assertTrue(all(window.collector.status == "stale" for window in migrated.log_windows.values()))
 
     def test_strict_parser_rejects_missing_fixed_window(self) -> None:
         payload = DiagnosticsSnapshot().to_dict()
@@ -204,7 +130,7 @@ class DiagnosticsTests(unittest.TestCase):
             topology="single",
             node_id="gateway",
             location="foreign",
-            capabilities=("local-egress", "public-front", "router", "web-admin"),
+            capabilities=("local-egress", "public-front", "router"),
             collectors=collectors,
             log_windows=empty_windows(),
         )
@@ -218,8 +144,8 @@ class DiagnosticsTests(unittest.TestCase):
 
     def test_native_contract_matrix_roundtrips_single_and_dual_nodes(self) -> None:
         cases = (
-            ("single-ru", "single", "gateway", "ru", ("local-egress", "public-front", "router", "web-admin")),
-            ("single-foreign", "single", "gateway", "foreign", ("local-egress", "public-front", "router", "web-admin")),
+            ("single-ru", "single", "gateway", "ru", ("local-egress", "public-front", "router")),
+            ("single-foreign", "single", "gateway", "foreign", ("local-egress", "public-front", "router")),
             ("dual-gateway", "dual", "gateway", "ru", ("interserver-client", "local-egress", "public-front", "router", "ru-split-routing", "web-admin")),
             ("dual-exit", "dual", "exit", "foreign", ("interserver-server", "nat-exit")),
         )

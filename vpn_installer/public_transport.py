@@ -12,16 +12,7 @@ from .topology import CAP_PUBLIC_FRONT, NODE_GATEWAY, NodePlan, TopologySpec
 
 PUBLIC_HY2_INBOUND_TAG = "public-hy2-in"
 PUBLIC_HY2_OUTBOUND_TAG = "ru-gateway-quic"
-_LEGACY_PUBLIC_IP_KEYS = ("RU_PUBLIC_IP", "FOREIGN_PUBLIC_IP")
-
-
 def _public_gateway_plan(env: dict[str, str]) -> NodePlan:
-    legacy_keys = [key for key in _LEGACY_PUBLIC_IP_KEYS if key in env]
-    if legacy_keys:
-        raise ValueError(
-            "legacy public IP aliases are not accepted by public transport: "
-            + ", ".join(legacy_keys)
-        )
     plan = TopologySpec.from_env(env).plan(NODE_GATEWAY)
     if CAP_PUBLIC_FRONT not in plan.capabilities:
         raise ValueError("gateway topology does not provide the public-front capability")

@@ -12,7 +12,7 @@ from pathlib import Path
 
 from .common import DEPLOYMENTS_DIR, env_line, fail, parse_env_value, read_text, sanitize_name, write_text
 from .interserver_transport import generate_transport_identity, generate_x25519_pair, validate_transport_identity
-from .migration import migrate_env
+from .upgrade_0200 import upgrade_env
 from .models import (
     ALLOW_EMPTY_OVERRIDE,
     DEFAULT_ASSET_TIMEOUT,
@@ -22,6 +22,7 @@ from .models import (
 )
 from .topology import (
     CONFIG_SCHEMA_VERSION,
+    DUAL_ONLY_ENV_KEYS,
     LOCATION_RU,
     TOPOLOGY_DUAL,
     TopologySpec,
@@ -40,74 +41,6 @@ MERGED_SOURCE_DEFAULT_KEYS = {
     "RU_GEOIP_URL",
     "FOREIGN_RU_IPV4_LIST_URL",
     "FOREIGN_RU_IPV6_LIST_URL",
-}
-
-DEPRECATED_ENV_KEYS = {
-    # Public web-admin access was replaced by the loopback-only SSH tunnel.
-    # Compatibility boundary: remove in 0.20.1.
-    "ADMIN_WEB_BIND",
-    "ADMIN_WEB_ACTIVE_CLIENT_REQUIRED",
-    "ADMIN_WEB_ACTIVE_CLIENT_TIMEOUT_SECONDS",
-    "ADMIN_WEB_ALLOW_TUNNEL_CLIENTS",
-    "ADMIN_WEB_ALLOWED_CIDR",
-    "ADMIN_WEB_ALLOW_WG",
-    "CLIENT_COMPAT_UUID",
-    "RU_COMPAT_LISTEN_PORTS",
-    "RU_REALITY_HANDSHAKE_SERVER",
-    "RU_REALITY_HANDSHAKE_PORT",
-    "RU_LITERAL_POLICY",
-    "RU_IPV6_LITERAL_POLICY",
-    "RU_IPV6_POLICY",
-    "RU_GEOIP_DIRECT",
-    "TO_FOREIGN_CONNECT_TIMEOUT",
-    "TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT",
-    "TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT",
-    "HEALTH_ROUTE_FAIL_CACHE_TTL_SECONDS",
-    "HEALTH_ROUTE_FAIL_THRESHOLD",
-    "HEALTH_GOOD_CACHE_TTL_SECONDS",
-    "HEALTH_THROUGHPUT_URL",
-    "SUBSCRIPTION_PORT",
-    "SUBSCRIPTION_TOKEN",
-    "SSH_INPUT_RATE",
-    "SSH_INPUT_BURST",
-    "RU_HTTPS_INPUT_RATE",
-    "RU_HTTPS_INPUT_BURST",
-    "RU_DIRECT_DNS_SERVER",
-    "RU_DIRECT_DNS_PORT",
-    "GUARD_ENABLED",
-    "GUARD_INTERVAL_MINUTES",
-    "GUARD_LOOKBACK_MINUTES",
-    "GUARD_BLOCK_TIMEOUT",
-    "GUARD_SSH_FAILURE_THRESHOLD",
-    "GUARD_REALITY_INVALID_THRESHOLD",
-    "GUARD_REALITY_BLOCK_ENABLED",
-    "DISABLE_NIC_OFFLOADS",
-    "RUNTIME_QDISC",
-    "WG_KEEPALIVE",
-    "HEALTHCHECK_URL",
-    "HEALTH_THROUGHPUT_URLS",
-    "HEALTH_UPLOAD_URL",
-    "HEALTH_UPLOAD_BYTES",
-    "HEALTH_DEEP_PROBE_INTERVAL_MINUTES",
-    "HEALTH_MIN_FOREIGN_DIRECT_DOWNLOAD_BPS",
-    "HEALTH_MIN_RU_WG_DOWNLOAD_BPS",
-    "HEALTH_MIN_FOREIGN_DIRECT_UPLOAD_BPS",
-    "HEALTH_MIN_RU_WG_UPLOAD_BPS",
-    "HEALTH_MAX_FOREIGN_RU_PING_LOSS_PCT",
-    "HEALTH_MAX_FOREIGN_INTERNET_PING_LOSS_PCT",
-    "HEALTH_HANDSHAKE_GRACE_SECONDS",
-    "HEALTH_HANDSHAKE_MIN_GRACE_SECONDS",
-    "HEALTH_HANDSHAKE_GRACE_MULTIPLIER",
-    "HEALTH_SELF_HEAL",
-    "HEALTH_SELF_HEAL_COOLDOWN_MINUTES",
-    "HEALTH_SELF_HEAL_MAX_ACTIONS_PER_HOUR",
-    "HEALTH_SELF_HEAL_CONFIRMATIONS",
-    "HEALTH_TARGET_PROBE_URLS",
-    "HEALTH_RU_DIRECT_TARGET_PROBE_URLS",
-    "HEALTH_TARGET_CONNECT_TIMEOUT_SECONDS",
-    "HEALTH_TARGET_MAX_TIME_SECONDS",
-    "HEALTH_CHECK_INTERVAL_MINUTES",
-    "RU_BLOCK_QUIC",
 }
 
 REMOTE_ENV_CRITICAL_KEYS = {
@@ -213,6 +146,17 @@ def load_env_file(path: Path) -> dict[str, str]:
     return parse_env_text(read_text(path))
 
 
+def normalize_deployment_env(source: dict[str, str]) -> dict[str, str]:
+    schema = source.get("CONFIG_SCHEMA", "").strip()
+    if schema == str(CONFIG_SCHEMA_VERSION):
+        return source.copy()
+    if schema == "2":
+        return upgrade_env(source)
+    raise ValueError(
+        f"unsupported CONFIG_SCHEMA={schema or '<empty>'}; release 0.20.1 accepts only schema 2 or 3"
+    )
+
+
 def render_env_text(env: dict[str, str]) -> str:
     normalized = env.copy()
     normalized.update(TopologySpec.from_env(normalized, require_addresses=False).canonical_env_values())
@@ -224,14 +168,14 @@ def render_env_text(env: dict[str, str]) -> str:
                 lines.append("")
             lines.append(comment)
         for key in keys:
-            if key in DEPRECATED_ENV_KEYS:
+            if key not in normalized:
                 continue
             lines.append(env_line(key, normalized.get(key, "")))
             seen_keys.add(key)
     extra_keys = sorted(
         key
         for key in normalized
-        if key not in seen_keys and key not in DEPRECATED_ENV_KEYS
+        if key not in seen_keys
     )
     if extra_keys:
         lines.extend(["", "# Extra values"])
@@ -256,14 +200,14 @@ def generate_default_env(
         raise ValueError("transport identity must be complete")
     if public_transport_identity is not None and not all(public_transport_identity.get(key, "").strip() for key in PUBLIC_TRANSPORT_IDENTITY_KEYS):
         raise ValueError("public transport identity must be complete")
-    transport_identity = transport_identity or (generate_transport_identity() if dual else {key: "" for key in TRANSPORT_IDENTITY_KEYS})
+    transport_identity = transport_identity or (generate_transport_identity() if dual else {})
     if public_transport_identity is None:
         generated_public_identity = generate_transport_identity()
         public_transport_identity = {
             public_key: generated_public_identity[interserver_key]
             for public_key, interserver_key in zip(PUBLIC_TRANSPORT_IDENTITY_KEYS, TRANSPORT_IDENTITY_KEYS)
         }
-    return {
+    defaults = {
         "CONFIG_SCHEMA": str(CONFIG_SCHEMA_VERSION),
         "DEPLOY_NAME": deploy_name,
         "TOPOLOGY": topology,
@@ -324,7 +268,6 @@ def generate_default_env(
         "JOURNAL_LIMIT_ENABLED": "1",
         "JOURNAL_SYSTEM_MAX_USE": "256M",
         "JOURNAL_MAX_RETENTION_SEC": "14day",
-        "ADMIN_WEB_ENABLED": "1",
         "ADMIN_WEB_PORT": "11333",
         "ADMIN_WEB_USERNAME": "user",
         "ADMIN_WEB_PASSWORD": "password",
@@ -337,6 +280,10 @@ def generate_default_env(
         "CLIENT_ROUTE_EXCLUDE_V4": "",
         "CLIENT_ROUTE_EXCLUDE_V6": "",
     }
+    if not dual:
+        for key in DUAL_ONLY_ENV_KEYS:
+            defaults.pop(key, None)
+    return defaults
 
 
 def base64_std(data: bytes) -> str:
@@ -420,15 +367,6 @@ def merge_env_with_defaults(
         if fallback_defaults and all(fallback_defaults.get(key, "").strip() for key in PUBLIC_TRANSPORT_IDENTITY_KEYS)
         else None
     )
-    if existing_public_identity is None and existing_transport_identity is not None:
-        # One release migration boundary: old deployments used the same TLS
-        # identity for public and interserver Hysteria2. Persisting explicit
-        # public keys keeps existing client artifacts stable while allowing the
-        # two identities to rotate independently afterwards.
-        existing_public_identity = {
-            public_key: existing_transport_identity[interserver_key]
-            for public_key, interserver_key in zip(PUBLIC_TRANSPORT_IDENTITY_KEYS, TRANSPORT_IDENTITY_KEYS)
-        }
     defaults = generate_default_env(
         deploy_name,
         transport_identity=existing_transport_identity or fallback_transport_identity,
@@ -445,9 +383,12 @@ def merge_env_with_defaults(
             }
         )
     merged = defaults.copy()
+    if topology_mode != TOPOLOGY_DUAL:
+        existing = {key: value for key, value in existing.items() if key not in DUAL_ONLY_ENV_KEYS}
+    unknown = sorted(set(existing) - set(defaults))
+    if unknown:
+        raise ValueError(f"unsupported deployment env keys for schema {CONFIG_SCHEMA_VERSION}: {', '.join(unknown)}")
     for key, value in existing.items():
-        if key in DEPRECATED_ENV_KEYS:
-            continue
         if key in TRANSPORT_IDENTITY_KEYS and existing_transport_identity is None:
             continue
         if key in PUBLIC_TRANSPORT_IDENTITY_KEYS and existing_public_identity is None:
@@ -455,10 +396,14 @@ def merge_env_with_defaults(
         if value or key in ALLOW_EMPTY_OVERRIDE:
             merged[key] = value
     for key in MERGED_CSV_DEFAULT_KEYS:
+        if key not in defaults:
+            continue
         if existing.get(key):
             merged[key] = _merge_csv_defaults(existing[key], defaults[key])
         merged[key] = _normalize_policy_csv(key, merged[key])
     for key in MERGED_SOURCE_DEFAULT_KEYS:
+        if key not in defaults:
+            continue
         if existing.get(key):
             merged[key] = _merge_source_defaults(existing[key], defaults[key])
     merged["DEPLOY_NAME"] = deploy_name
@@ -473,10 +418,6 @@ def merge_env_with_defaults(
             or merged.get("EXIT_PUBLIC_IP", "").strip()
             or (fallback_defaults or {}).get("EXIT_PUBLIC_IP", "").strip()
         )
-    else:
-        merged["EXIT_PUBLIC_IP"] = ""
-        for key in DUAL_REQUIRED_ENV_VARS:
-            merged[key] = ""
     merged["CONFIG_SCHEMA"] = str(CONFIG_SCHEMA_VERSION)
     merged["TOPOLOGY"] = topology_mode
     merged["GATEWAY_LOCATION"] = gateway_location
@@ -520,7 +461,7 @@ def overlay_file_path(env_path: Path, deploy_name: str, overlay_name: str) -> Pa
 
 
 def apply_ru_direct_overlays(env: dict[str, str], env_path: Path | None) -> dict[str, str]:
-    if env_path is None:
+    if env_path is None or not TopologySpec.from_env(env, require_addresses=False).is_dual:
         return env.copy()
     deploy_name = env.get("DEPLOY_NAME", "").strip() or sanitize_name(env_path.stem)
     effective = env.copy()
@@ -541,7 +482,7 @@ def apply_ru_direct_overlays(env: dict[str, str], env_path: Path | None) -> dict
 def critical_env_view(env: dict[str, str]) -> dict[str, str]:
     relevant_keys = set(REMOTE_ENV_CRITICAL_KEYS)
     relevant_keys.update(key for key in env if key.startswith("WG_"))
-    return {key: env.get(key, "") for key in sorted(relevant_keys)}
+    return {key: env[key] for key in sorted(relevant_keys) if key in env}
 
 
 def generate_example_env() -> dict[str, str]:
@@ -581,7 +522,7 @@ def ensure_deployment_env(
     gateway_location: str | None = None,
 ) -> dict[str, str]:
     if env_path.exists():
-        source = migrate_env(load_env_file(env_path)).env
+        source = normalize_deployment_env(load_env_file(env_path))
         if topology is not None:
             source["TOPOLOGY"] = topology
         if gateway_location is not None:
@@ -600,7 +541,7 @@ def load_existing_deployment_env(deployment_name: str) -> tuple[Path, dict[str, 
     env_path = DEPLOYMENTS_DIR / f"{deployment_name}.env"
     if not env_path.exists():
         fail(f"Не найден deployment env: {env_path}")
-    return env_path, merge_env_with_defaults(migrate_env(load_env_file(env_path)).env, deployment_name)
+    return env_path, merge_env_with_defaults(normalize_deployment_env(load_env_file(env_path)), deployment_name)
 
 
 def validate_ip_literal(raw_value: str) -> str:

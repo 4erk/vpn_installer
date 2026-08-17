@@ -47,17 +47,7 @@ UNDERLAY_WG_FOREIGN_ADDRESS = "10.75.0.2/32"
 UNDERLAY_WG_MTU = 1420
 X25519_P = 2**255 - 19
 X25519_A24 = 121665
-_LEGACY_PUBLIC_IP_KEYS = ("RU_PUBLIC_IP", "FOREIGN_PUBLIC_IP")
-
-
 def _interserver_exit_public_ip(env: dict[str, str]) -> str:
-    legacy_keys = [key for key in _LEGACY_PUBLIC_IP_KEYS if key in env]
-    if legacy_keys:
-        raise ValueError(
-            "legacy public IP aliases are not accepted by interserver transport: "
-            + ", ".join(legacy_keys)
-        )
-
     try:
         from .topology import (
             CAP_INTERSERVER_CLIENT,

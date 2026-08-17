@@ -9,15 +9,13 @@ from .config import (
     load_env_file,
     merge_env_with_defaults,
     merge_node_env_with_defaults,
+    normalize_deployment_env,
     render_example_env_text,
 )
-from .install_contract import InstallContractError, validate_bundle
-from .legacy_install_contract import adapt_schema2_install
-from .models import ROLE_FOREIGN, ROLE_RU
-from .migration import migrate_env
-from .render import write_node_rendered_files, write_role_rendered_files
+from .install_contract import InstallContractError, validate_bundle, validate_installed_bundle, validate_previous_0200_bundle
+from .render import write_node_rendered_files
 from .specs import DeploymentSpec
-from .topology import CONFIG_SCHEMA_VERSION, TopologySpec, legacy_role_for_node, normalize_node_id
+from .topology import CONFIG_SCHEMA_VERSION, TopologySpec, normalize_node_id
 
 
 def load_runtime_env(env_file: Path, overrides: dict[str, str] | None = None) -> dict[str, str]:
@@ -30,7 +28,7 @@ def load_runtime_env(env_file: Path, overrides: dict[str, str] | None = None) ->
             )
         loaded = source
     else:
-        loaded = migrate_env(source).env
+        loaded = normalize_deployment_env(source)
     deploy_name = loaded.get("DEPLOY_NAME", "").strip() or sanitize_name(env_file.stem)
     if projected_node:
         candidate = loaded.copy()
@@ -51,16 +49,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="vpn-install-support")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    render_role = subparsers.add_parser("render-role", help="Render one role into a flat directory.")
-    render_role.add_argument("--role", choices=[ROLE_RU, ROLE_FOREIGN], required=True)
-    render_role.add_argument("--env-file", type=Path, required=True)
-    render_role.add_argument("--output-dir", type=Path, required=True)
-    render_role.add_argument("--assets-dir", type=Path, help="Directory with already fetched rule assets.")
-    render_role.add_argument("--set", dest="overrides", action="append", default=[], help="Override env values for this render, e.g. WAN_INTERFACE=eth1")
-    render_role.set_defaults(func=cmd_render_role)
-
     render_node = subparsers.add_parser("render-node", help="Render one canonical topology node and its install plan.")
-    render_node.add_argument("--node", required=True, help="Canonical node id (gateway or exit); legacy role aliases are normalized at this boundary.")
+    render_node.add_argument("--node", required=True, help="Canonical node id: gateway or exit.")
     render_node.add_argument("--env-file", type=Path, required=True)
     render_node.add_argument("--output-dir", type=Path, required=True)
     render_node.add_argument("--assets-dir", type=Path, help="Directory with already fetched rule assets.")
@@ -71,7 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
     write_example.add_argument("--output", type=Path, required=True)
     write_example.set_defaults(func=cmd_write_example_env)
 
-    validate = subparsers.add_parser("validate-bundle", help="Validate a schema-3 bundle and emit its TSV install contract.")
+    validate = subparsers.add_parser("validate-bundle", help="Validate a current bundle and emit its TSV install contract.")
     validate.add_argument("--bundle", type=Path, required=True)
     validate.add_argument("--expected-node", required=True)
     validate.add_argument("--contract-dir", type=Path, required=True)
@@ -80,14 +70,23 @@ def build_parser() -> argparse.ArgumentParser:
     validate.add_argument("--require-binaries", action="store_true")
     validate.set_defaults(func=cmd_validate_bundle)
 
-    adapt_schema2 = subparsers.add_parser(
-        "adapt-schema2",
-        help="Validate one installed schema-2 release and emit migration-only ownership.",
+    previous = subparsers.add_parser(
+        "validate-previous-0200",
+        help="Validate the sole supported previous release and emit its TSV ownership contract.",
     )
-    adapt_schema2.add_argument("--current-release", type=Path, required=True)
-    adapt_schema2.add_argument("--deployment-env", type=Path, required=True)
-    adapt_schema2.add_argument("--contract-dir", type=Path, required=True)
-    adapt_schema2.set_defaults(func=cmd_adapt_schema2)
+    previous.add_argument("--current-release", type=Path, required=True)
+    previous.add_argument("--expected-node", required=True)
+    previous.add_argument("--contract-dir", type=Path, required=True)
+    previous.set_defaults(func=cmd_validate_previous_0200)
+
+    installed = subparsers.add_parser(
+        "validate-installed",
+        help="Validate an installed release selected by the current compatibility window.",
+    )
+    installed.add_argument("--current-release", type=Path, required=True)
+    installed.add_argument("--expected-node", required=True)
+    installed.add_argument("--contract-dir", type=Path, required=True)
+    installed.set_defaults(func=cmd_validate_installed)
 
     return parser
 
@@ -104,15 +103,6 @@ def _parse_overrides(items: list[str]) -> dict[str, str]:
 
 def _load_assets(assets_dir: Path | None) -> dict[str, Path] | None:
     return {path.name: path for path in assets_dir.glob("*") if path.is_file()} if assets_dir and assets_dir.is_dir() else None
-
-
-def cmd_render_role(args: argparse.Namespace) -> int:
-    overrides = _parse_overrides(args.overrides)
-    env = load_runtime_env(args.env_file, overrides=overrides)
-    node_id = normalize_node_id(args.role)
-    TopologySpec.from_env(env).plan(node_id)
-    write_role_rendered_files(env, legacy_role_for_node(node_id), args.output_dir, assets=_load_assets(args.assets_dir))
-    return 0
 
 
 def cmd_render_node(args: argparse.Namespace) -> int:
@@ -144,9 +134,25 @@ def cmd_validate_bundle(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_adapt_schema2(args: argparse.Namespace) -> int:
+def cmd_validate_previous_0200(args: argparse.Namespace) -> int:
     try:
-        adapt_schema2_install(args.current_release, args.deployment_env, args.contract_dir)
+        validate_previous_0200_bundle(
+            args.current_release,
+            normalize_node_id(args.expected_node),
+            args.contract_dir,
+        )
+    except InstallContractError as exc:
+        raise SystemExit(str(exc)) from None
+    return 0
+
+
+def cmd_validate_installed(args: argparse.Namespace) -> int:
+    try:
+        validate_installed_bundle(
+            args.current_release,
+            normalize_node_id(args.expected_node),
+            args.contract_dir,
+        )
     except InstallContractError as exc:
         raise SystemExit(str(exc)) from None
     return 0

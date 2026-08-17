@@ -499,8 +499,9 @@ class AuditRunner:
         env["GATEWAY_PUBLIC_IP"] = (
             "203.0.113.10" if gateway_location == LOCATION_RU else "198.51.100.10"
         )
-        env["EXIT_PUBLIC_IP"] = "198.51.100.20" if topology == TOPOLOGY_DUAL else ""
-        env["WAN_INTERFACE"] = "eth1"
+        if topology == TOPOLOGY_DUAL:
+            env["EXIT_PUBLIC_IP"] = "198.51.100.20"
+            env["WAN_INTERFACE"] = "eth1"
         env.update(requested)
         TopologySpec.from_env(env)
         env_path = self.work_dir / "env" / f"{deploy_name}.env"

@@ -16,17 +16,13 @@ VPNSTACK_INSTALL_PLAN_PATH="${VPNSTACK_ROOT}/install-plan.json"
 VPNSTACK_DEPLOYMENT_PATH="${VPNSTACK_ROOT}/deployment.env"
 VPNSTACK_NODE_PATH="${VPNSTACK_ROOT}/node-id"
 VPNSTACK_INSTALLED_AT_PATH="${VPNSTACK_ROOT}/installed-at"
-VPNSTACK_LEGACY_ROLE_PATH="${VPNSTACK_ROOT}/role"
-VPNSTACK_LEGACY_INSTALLED_AT_PATH="${VPNSTACK_ROOT}/installed_at"
 VPNSTACK_REMOVED_AT_PATH="${VPNSTACK_ROOT}/removed-at"
 VPNSTACK_ACCEPTANCE_PATH="${VPNSTACK_ROOT}/last-acceptance.json"
 VPNSTACK_FAILED_ACCEPTANCE_PATH="${VPNSTACK_ROOT}/last-failed-acceptance.json"
-VPNSTACK_LEGACY_ACCEPTANCE_PATH="${VPNSTACK_ROOT}/acceptance.json"
 INSTALL_LOCK_PATH="${VPNSTACK_INSTALL_LOCK_PATH:-/run/lock/vpn-stack-install.lock}"
 SYSTEMCTL_BIN="${SYSTEMCTL_BIN:-systemctl}"
 
 NODE=""
-LEGACY_ROLE=""
 ENV_FILE=""
 OUTPUT_DIR=""
 ASSETS_DIR=""
@@ -47,10 +43,6 @@ Usage:
   install.sh --node <gateway|exit> --env-file <file> [--assets-dir <dir>]
              [--action <install|reinstall|rollback|remove|purge|status>]
   install.sh --node <gateway|exit> --env-file <file> --render-only --output-dir <dir>
-
-Deprecated for one release:
-  --role ru-gateway      maps to --node gateway
-  --role foreign-exit   maps to --node exit
 EOF
 }
 
@@ -87,11 +79,6 @@ parse_cli() {
       --node)
         require_value "$1" "${2:-}"
         NODE="$2"
-        shift 2
-        ;;
-      --role)
-        require_value "$1" "${2:-}"
-        LEGACY_ROLE="$2"
         shift 2
         ;;
       --env-file)
@@ -132,19 +119,6 @@ parse_cli() {
     ""|gateway|exit) ;;
     *) die "unsupported node: ${NODE}" ;;
   esac
-  if [[ -n "${LEGACY_ROLE}" ]]; then
-    local mapped=""
-    case "${LEGACY_ROLE}" in
-      ru-gateway) mapped="gateway" ;;
-      foreign-exit) mapped="exit" ;;
-      *) die "unsupported legacy role: ${LEGACY_ROLE}" ;;
-    esac
-    warn "--role is deprecated; use --node ${mapped}"
-    if [[ -n "${NODE}" && "${NODE}" != "${mapped}" ]]; then
-      die "--node and --role select different nodes"
-    fi
-    NODE="${mapped}"
-  fi
   case "${ACTION}" in
     install|reinstall|rollback|remove|purge|status) ;;
     *) die "unsupported action: ${ACTION}" ;;
@@ -220,17 +194,17 @@ validate_bundle() {
   "${PYTHON_BIN}" "${args[@]}"
 }
 
-adapt_schema2_contract() {
+validate_installed_contract() {
   local current_release="$1"
-  local deployment_env="$2"
+  local expected_node="$2"
   local contract_dir="$3"
   rm -rf -- "${contract_dir}"
   mkdir -p "${contract_dir}"
   "${PYTHON_BIN}" -c \
     'import sys; sys.path.insert(0, sys.argv[1]); from vpn_installer.install_support import main; raise SystemExit(main(sys.argv[2:]))' \
-    "${SCRIPT_DIR}" adapt-schema2 \
+    "${SCRIPT_DIR}" validate-installed \
     --current-release "${current_release}" \
-    --deployment-env "${deployment_env}" \
+    --expected-node "${expected_node}" \
     --contract-dir "${contract_dir}"
 }
 
@@ -292,7 +266,7 @@ render_only_action() {
   rm -rf -- "${contract}"
   contract=""
   trap - RETURN
-  echo "Rendered schema-3 node bundle: ${OUTPUT_DIR}"
+  echo "Rendered current node bundle: ${OUTPUT_DIR}"
 }
 
 safe_operational_path() {
@@ -329,12 +303,9 @@ ${VPNSTACK_MANIFEST_PATH}
 ${VPNSTACK_INSTALL_PLAN_PATH}
 ${VPNSTACK_NODE_PATH}
 ${VPNSTACK_INSTALLED_AT_PATH}
-${VPNSTACK_LEGACY_ROLE_PATH}
-${VPNSTACK_LEGACY_INSTALLED_AT_PATH}
 ${VPNSTACK_REMOVED_AT_PATH}
 ${VPNSTACK_ACCEPTANCE_PATH}
 ${VPNSTACK_FAILED_ACCEPTANCE_PATH}
-${VPNSTACK_LEGACY_ACCEPTANCE_PATH}
 ${VPNSTACK_ROOT}/health-state.json
 /etc/sing-box/config.json
 EOF
@@ -961,26 +932,21 @@ publish_staged_release() {
   STAGED_RELEASE_DIR=""
 }
 
-manifest_schema() {
-  local manifest="$1"
-  "${PYTHON_BIN}" - "${manifest}" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-value = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-print(value.get("schema_version", 0))
-PY
-}
-
 manifest_node() {
   local manifest="$1"
-  "${PYTHON_BIN}" - "${manifest}" <<'PY'
+  "${PYTHON_BIN}" - "${manifest}" "${SCRIPT_DIR}" <<'PY'
 import json
 import sys
 from pathlib import Path
 
+sys.path.insert(0, sys.argv[2])
+from vpn_installer.compatibility import require_compatible_installed
+
 value = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+try:
+    require_compatible_installed(value)
+except ValueError as exc:
+    raise SystemExit(str(exc)) from None
 node = value.get("node_id") or (value.get("node") or {}).get("id")
 if node not in {"gateway", "exit"}:
     raise SystemExit("manifest has no canonical node")
@@ -999,21 +965,10 @@ prepare_previous_contract() {
   [[ -d "${current}" && -f "${current}/render-manifest.json" ]] ||
     die "current release link is incomplete"
   PREVIOUS_RELEASE_DIR="${current}"
-  local schema=""
-  schema="$(manifest_schema "${current}/render-manifest.json")"
-  if [[ "${schema}" == "3" ]]; then
-    local current_node=""
-    current_node="$(manifest_node "${current}/render-manifest.json")"
-    PREVIOUS_CONTRACT="${WORK_DIR}/previous-contract"
-    validate_bundle "${current}" "${current_node}" "${PREVIOUS_CONTRACT}" "" 1 1
-  elif [[ "${schema}" == "2" ]]; then
-    [[ -f "${VPNSTACK_DEPLOYMENT_PATH}" ]] ||
-      die "schema-2 deployment metadata is missing: ${VPNSTACK_DEPLOYMENT_PATH}"
-    PREVIOUS_CONTRACT="${WORK_DIR}/previous-contract"
-    adapt_schema2_contract "${current}" "${VPNSTACK_DEPLOYMENT_PATH}" "${PREVIOUS_CONTRACT}"
-  else
-    die "unsupported installed manifest schema: ${schema}"
-  fi
+  local current_node=""
+  current_node="$(manifest_node "${current}/render-manifest.json")"
+  PREVIOUS_CONTRACT="${WORK_DIR}/previous-contract"
+  validate_installed_contract "${current}" "${current_node}" "${PREVIOUS_CONTRACT}"
 }
 
 contract_artifact_path() {
@@ -1203,7 +1158,7 @@ record_install_metadata() {
   local node="$1"
   printf '%s\n' "${node}" >"${VPNSTACK_NODE_PATH}"
   date -u +'%Y-%m-%dT%H:%M:%SZ' >"${VPNSTACK_INSTALLED_AT_PATH}"
-  rm -f -- "${VPNSTACK_REMOVED_AT_PATH}" "${VPNSTACK_LEGACY_ROLE_PATH}" "${VPNSTACK_LEGACY_INSTALLED_AT_PATH}"
+  rm -f -- "${VPNSTACK_REMOVED_AT_PATH}"
   chmod 0644 "${VPNSTACK_NODE_PATH}" "${VPNSTACK_INSTALLED_AT_PATH}"
 }
 
@@ -1291,12 +1246,22 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, sys.argv[3])
+from vpn_installer.compatibility import TRANSITION_SOURCE_VERSION
+from vpn_installer.diagnostics import SCHEMA_VERSION as DIAGNOSTICS_SCHEMA_VERSION
 from vpn_installer.install_contract import is_planned_install_maintenance
+from vpn_installer.upgrade_0200 import upgrade_diagnostics_snapshot
 
 payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 manifest = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
-if payload.get("schema_version") != 4:
-    raise SystemExit("post-activation agent did not return diagnostics schema 4")
+if manifest.get("version") == TRANSITION_SOURCE_VERSION:
+    payload = upgrade_diagnostics_snapshot(
+        payload,
+        target_schema=DIAGNOSTICS_SCHEMA_VERSION,
+    )
+if payload.get("schema_version") != DIAGNOSTICS_SCHEMA_VERSION:
+    raise SystemExit(
+        f"post-activation agent did not return diagnostics schema {DIAGNOSTICS_SCHEMA_VERSION}"
+    )
 for field in ("topology", "node_id", "location", "capabilities"):
     if payload.get(field) != manifest.get(field):
         raise SystemExit(f"post-activation canonical field mismatch: {field}")
@@ -1326,7 +1291,11 @@ verdicts = payload.get("component_verdicts", {})
 if verdicts.get("server_path") != "verified":
     raise SystemExit(f"post-activation server path failed: {payload.get('reasons', [])}")
 if "public-front" in manifest.get("capabilities", []) and verdicts.get("public_front") != "verified":
-    raise SystemExit("post-activation public front is not verified")
+    raise SystemExit(
+        "post-activation public front is not verified: "
+        f"node={manifest.get('node_id')}, version={manifest.get('version')}, "
+        f"verdict={verdicts.get('public_front')}"
+    )
 if verdicts.get("host_integrity") != "verified":
     raise SystemExit(f"post-activation host integrity is {verdicts.get('host_integrity')}")
 if payload.get("artifacts", {}).get("drift") != "none":
@@ -1416,10 +1385,8 @@ install_action() {
   retire_previous_payloads "${PREVIOUS_CONTRACT}" "${staged_contract}"
   record_install_metadata "${NODE}"
   verify_active_release "${staged_contract}"
-  rm -f -- "${VPNSTACK_LEGACY_ACCEPTANCE_PATH}"
-
   TRANSACTION_ACTIVE=0
-  echo "Installed node ${NODE} from schema-3 plan $(contract_value "${staged_contract}" release_id)."
+  echo "Installed node ${NODE} from current plan $(contract_value "${staged_contract}" release_id)."
 }
 
 current_release_contract() {
@@ -1428,17 +1395,13 @@ current_release_contract() {
   local current=""
   current="$(readlink -f "${VPNSTACK_CURRENT_RELEASE}")"
   [[ -d "${current}" ]] || die "current release link is invalid"
-  local schema=""
-  schema="$(manifest_schema "${current}/render-manifest.json")"
-  [[ "${schema}" == "3" ]] ||
-    die "operation requires explicit schema-3 ownership; installed schema is ${schema}"
   local current_node=""
   current_node="$(manifest_node "${current}/render-manifest.json")"
   if [[ -n "${NODE}" && "${NODE}" != "${current_node}" ]]; then
     die "installed node is ${current_node}, not ${NODE}"
   fi
   NODE="${current_node}"
-  validate_bundle "${current}" "${NODE}" "${output_contract}" "" 1 1
+  validate_installed_contract "${current}" "${NODE}" "${output_contract}"
 }
 
 rollback_action() {
@@ -1457,22 +1420,12 @@ rollback_action() {
     local contract="${WORK_DIR}/rollback-contract"
     local current=""
     current="$(readlink -f "${VPNSTACK_CURRENT_RELEASE}")"
-    local schema=""
-    schema="$(manifest_schema "${current}/render-manifest.json")"
-    if [[ "${schema}" == "3" ]]; then
-      local current_node=""
-      current_node="$(manifest_node "${current}/render-manifest.json")"
-      validate_bundle "${current}" "${current_node}" "${contract}" "" 1 1
-      PUBLISHED_RELEASE_DIR="${current}"
-      verify_active_release "${contract}"
-    elif [[ "${schema}" == "2" ]]; then
-      [[ -f "${VPNSTACK_DEPLOYMENT_PATH}" ]] ||
-        die "restored schema-2 deployment metadata is missing"
-      adapt_schema2_contract "${current}" "${VPNSTACK_DEPLOYMENT_PATH}" "${contract}"
-      NODE="$(contract_value "${contract}" node_id)"
-    else
-      die "rollback restored unsupported manifest schema: ${schema}"
-    fi
+    local current_node=""
+    current_node="$(manifest_node "${current}/render-manifest.json")"
+    validate_installed_contract "${current}" "${current_node}" "${contract}"
+    NODE="${current_node}"
+    PUBLISHED_RELEASE_DIR="${current}"
+    verify_active_release "${contract}"
   fi
   echo "Rollback snapshot restored: ${snapshot}"
 }
@@ -1497,9 +1450,9 @@ remove_action() {
       *) die "refusing to purge unsafe vpn-stack root: ${VPNSTACK_ROOT}" ;;
     esac
     rm -rf -- "${VPNSTACK_ROOT}"
-    echo "Purged schema-3 managed node ${NODE}."
+    echo "Purged managed node ${NODE}."
   else
-    echo "Removed schema-3 managed node ${NODE}; releases and rollback data were retained."
+    echo "Removed managed node ${NODE}; releases and rollback data were retained."
   fi
 }
 

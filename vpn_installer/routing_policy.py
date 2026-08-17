@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import textwrap
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Iterable
 
 from .dns_policy import GLOBAL_FOREIGN_DOMAINS, GLOBAL_FOREIGN_DOMAIN_SUFFIXES, CONNECTIVITY_CHECK_IPV6_ONLY_DOMAINS
@@ -112,7 +112,6 @@ class RoutingPolicy:
     control_route_rules: tuple[dict[str, Any], ...]
     outbounds: tuple[dict[str, Any], ...]
     final_outbound: str
-    deprecated_overrides: tuple[str, ...] = field(default_factory=tuple)
 
     @property
     def classes(self) -> dict[str, RouteClass]:
@@ -167,7 +166,6 @@ class RoutingPolicy:
             "final_outbound": self.final_outbound,
             "policy_version": self.policy_version,
             "traffic_classes": {item.name: item.metadata() for item in self.traffic},
-            "deprecated_overrides": list(self.deprecated_overrides),
         }
 
 
@@ -321,16 +319,7 @@ def build_ru_routing_policy(env: dict[str, str]) -> RoutingPolicy:
         {"type": "direct", "tag": "direct-ru", "domain_resolver": {"server": "dns-ru-direct", "strategy": "ipv4_only"}},
         stable_overlay,
     )
-    deprecated = tuple(
-        key
-        for key in (
-            "RU_LITERAL_POLICY", "RU_IPV6_LITERAL_POLICY", "RU_IPV6_POLICY", "RU_GEOIP_DIRECT",
-            "TO_FOREIGN_CONNECT_TIMEOUT", "TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT", "TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT",
-            "RU_BLOCK_QUIC",
-        )
-        if key in env
-    )
-    policy = RoutingPolicy(POLICY_VERSION, traffic, tuple(control_rules), outbounds, "to-foreign", deprecated)
+    policy = RoutingPolicy(POLICY_VERSION, traffic, tuple(control_rules), outbounds, "to-foreign")
     missing = set(TRAFFIC_CLASSES) - set(policy.classes)
     if missing:
         raise ValueError(f"routing policy is incomplete: {', '.join(sorted(missing))}")

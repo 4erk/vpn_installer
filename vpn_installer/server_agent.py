@@ -213,8 +213,7 @@ PROC_MOUNTS_PATH = Path("/proc/self/mounts")
 EXT4_SYSFS_ROOT = Path("/sys/fs/ext4")
 SYS_DEV_BLOCK_ROOT = Path("/sys/dev/block")
 
-MANIFEST_CAPABILITY_SCHEMA_VERSION = 3
-LEGACY_RUNTIME_REMOVE_IN = "0.20.1"
+MANIFEST_CAPABILITY_SCHEMA_VERSION = 4
 TOPOLOGY_SINGLE = "single"
 TOPOLOGY_DUAL = "dual"
 NODE_GATEWAY = "gateway"
@@ -230,8 +229,6 @@ CAP_INTERSERVER_CLIENT = "interserver-client"
 CAP_INTERSERVER_SERVER = "interserver-server"
 CAP_NAT_EXIT = "nat-exit"
 INTERSERVER_CAPABILITIES = frozenset({CAP_INTERSERVER_CLIENT, CAP_INTERSERVER_SERVER})
-LEGACY_ROLE_GATEWAY = "ru-gateway"
-LEGACY_ROLE_EXIT = "foreign-exit"
 SERVICE_UNIT_DEFAULTS = {
     "wireguard": "wg-quick@{wg_interface}.service",
     "nftables": NFTABLES_SERVICE,
@@ -255,15 +252,11 @@ def _string_array(value: object, field: str) -> tuple[str, ...]:
 def _expected_capabilities(
     topology: str,
     node_id: str,
-    *,
-    admin_web_enabled: bool = True,
 ) -> frozenset[str]:
     if node_id == NODE_GATEWAY:
         capabilities = {CAP_PUBLIC_FRONT, CAP_ROUTER, CAP_LOCAL_EGRESS}
-        if admin_web_enabled:
-            capabilities.add(CAP_WEB_ADMIN)
         if topology == TOPOLOGY_DUAL:
-            capabilities.update({CAP_RU_SPLIT_ROUTING, CAP_INTERSERVER_CLIENT})
+            capabilities.update({CAP_RU_SPLIT_ROUTING, CAP_INTERSERVER_CLIENT, CAP_WEB_ADMIN})
         return frozenset(capabilities)
     if topology == TOPOLOGY_DUAL and node_id == NODE_EXIT:
         return frozenset({CAP_INTERSERVER_SERVER, CAP_NAT_EXIT})
@@ -283,82 +276,8 @@ def _expected_required_services(capabilities: frozenset[str]) -> tuple[str, ...]
     return tuple(services)
 
 
-def _compatibility_role_for_node(node_id: str) -> str:
-    return LEGACY_ROLE_GATEWAY if node_id == NODE_GATEWAY else LEGACY_ROLE_EXIT
-
-
-def _adapt_legacy_runtime_manifest(manifest: Mapping[str, Any], env: Mapping[str, str]) -> dict[str, Any] | None:
-    """Boundary adapter for schema 1/2 manifests. Remove in 0.20.1."""
-
-    raw_schema = manifest.get("schema_version")
-    try:
-        schema = int(raw_schema)
-    except (TypeError, ValueError):
-        schema = 0
-    if schema not in {0, 1, 2}:
-        return None
-    role = str(manifest.get("role") or env.get("ROLE") or "")
-    if schema == 0 and role not in {LEGACY_ROLE_GATEWAY, LEGACY_ROLE_EXIT}:
-        return None
-
-    artifacts = manifest.get("artifacts")
-    if not isinstance(artifacts, Mapping) or not artifacts:
-        legacy_hashes = manifest.get("artifact_sha256", {})
-        artifacts = {
-            str(name): {"sha256": str(digest), "install_path": ""}
-            for name, digest in legacy_hashes.items()
-        } if isinstance(legacy_hashes, Mapping) else {}
-
-    if role == LEGACY_ROLE_GATEWAY:
-        node_id = NODE_GATEWAY
-        location = LOCATION_RU
-        capabilities = _expected_capabilities(TOPOLOGY_DUAL, node_id)
-        required_services = ("wireguard", "nftables", "sing-box", "resolver", "xray", "admin", "health_timer", "transport")
-    elif role == LEGACY_ROLE_EXIT:
-        node_id = NODE_EXIT
-        location = LOCATION_FOREIGN
-        capabilities = _expected_capabilities(TOPOLOGY_DUAL, node_id)
-        required_services = ("wireguard", "nftables", "sing-box", "resolver", "health_timer")
-    else:
-        return {
-            "contract": None,
-            "artifacts": dict(artifacts),
-            "drift_manifest_valid": schema >= 2,
-            "error": "legacy manifest does not identify a supported role",
-        }
-    return {
-        "contract": {
-            "topology": TOPOLOGY_DUAL,
-            "node_id": node_id,
-            "location": location,
-            "capabilities": capabilities,
-            "required_services": required_services,
-            "service_units": {
-                name: SERVICE_UNIT_DEFAULTS[name]
-                for name in required_services
-            },
-            "role": role,
-            "migration": {
-                "state": "deprecated",
-                "source_schema": schema,
-                "target_schema": MANIFEST_CAPABILITY_SCHEMA_VERSION,
-                "remove_in": LEGACY_RUNTIME_REMOVE_IN,
-                "message": "legacy role manifest is accepted only at the runtime boundary",
-            },
-        },
-        "artifacts": dict(artifacts),
-        "drift_manifest_valid": schema >= 2,
-    }
-
-
-def runtime_contract(manifest: Mapping[str, Any], env: Mapping[str, str]) -> dict[str, Any]:
+def runtime_contract(manifest: Mapping[str, Any]) -> dict[str, Any]:
     """Validate the installed node contract without importing installer code."""
-
-    legacy = _adapt_legacy_runtime_manifest(manifest, env)
-    if legacy is not None:
-        if not isinstance(legacy.get("contract"), Mapping):
-            raise RuntimeError(str(legacy.get("error") or "legacy manifest is invalid"))
-        return dict(legacy["contract"])
     raw_schema = manifest.get("schema_version")
     try:
         schema = int(raw_schema)
@@ -382,17 +301,7 @@ def runtime_contract(manifest: Mapping[str, Any], env: Mapping[str, str]) -> dic
         raise RuntimeError("dual topology node location does not match the contract")
 
     capabilities = frozenset(_string_array(manifest.get("capabilities"), "capabilities"))
-    admin_web_enabled = str(env.get("ADMIN_WEB_ENABLED", "1")).strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-    expected_capabilities = _expected_capabilities(
-        topology,
-        node_id,
-        admin_web_enabled=admin_web_enabled,
-    )
+    expected_capabilities = _expected_capabilities(topology, node_id)
     if capabilities != expected_capabilities:
         raise RuntimeError("manifest capabilities do not match topology and node")
     required_services = _string_array(manifest.get("required_services"), "required_services")
@@ -413,6 +322,8 @@ def runtime_contract(manifest: Mapping[str, Any], env: Mapping[str, str]) -> dic
     install_plan = manifest.get("install_plan")
     if not isinstance(install_plan, Mapping):
         raise RuntimeError("manifest install plan is missing")
+    if install_plan.get("schema_version") != MANIFEST_CAPABILITY_SCHEMA_VERSION:
+        raise RuntimeError("manifest install plan schema is unsupported")
     for field, expected in (("topology", topology), ("node_id", node_id), ("location", location)):
         if str(install_plan.get(field, "")) != expected:
             raise RuntimeError(f"install plan {field} conflicts with manifest")
@@ -442,8 +353,6 @@ def runtime_contract(manifest: Mapping[str, Any], env: Mapping[str, str]) -> dic
         "capabilities": capabilities,
         "required_services": required_services,
         "service_units": service_units,
-        "role": _compatibility_role_for_node(node_id),
-        "migration": {"state": "native", "source_schema": schema, "target_schema": schema},
     }
 
 
@@ -453,7 +362,7 @@ def contract_has(contract: Mapping[str, Any], capability: str) -> bool:
 
 def installed_runtime_contract() -> dict[str, Any]:
     manifest = read_json(MANIFEST_PATH, {})
-    return runtime_contract(manifest if isinstance(manifest, Mapping) else {}, parse_env())
+    return runtime_contract(manifest if isinstance(manifest, Mapping) else {})
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -768,7 +677,7 @@ def _private_reject_policy(config: Any, manifest: dict[str, Any], contract: Mapp
     verified = has_router and drift == "none" and ordered
     reason = ""
     if not has_router:
-        reason = f"installed role is {contract.get('role') or 'unknown'}"
+        reason = f"installed node is {contract.get('node_id') or 'unknown'}"
     elif drift != "none":
         reason = f"installed drift is {drift}"
     elif not ordered:
@@ -811,7 +720,7 @@ def private_reject_correlations(since: str, inbound: str, targets: Iterable[str]
     manifest = manifest_snapshot()
     raw_manifest = manifest.get("manifest", {})
     try:
-        contract = runtime_contract(raw_manifest if isinstance(raw_manifest, Mapping) else {}, parse_env())
+        contract = runtime_contract(raw_manifest if isinstance(raw_manifest, Mapping) else {})
     except RuntimeError:
         contract = {}
     policy = _private_reject_policy(read_json(SINGBOX_CONFIG_PATH, {}), manifest, contract)
@@ -928,12 +837,10 @@ def fresh_log_since() -> tuple[str, int]:
 
 
 def installed_at_value() -> str:
-    for name in ("installed-at", "installed_at"):
-        try:
-            return (ROOT / name).read_text(encoding="utf-8").strip()
-        except OSError:
-            continue
-    return ""
+    try:
+        return (ROOT / "installed-at").read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
 
 
 def service_exec_path(service: str) -> str:
@@ -947,14 +854,11 @@ def service_exec_path(service: str) -> str:
 def manifest_snapshot() -> dict[str, Any]:
     manifest = read_json(MANIFEST_PATH, {})
     manifest_mapping = manifest if isinstance(manifest, Mapping) else {}
-    env = parse_env()
-    legacy = _adapt_legacy_runtime_manifest(manifest_mapping, env)
     try:
-        legacy_contract = legacy.get("contract") if legacy is not None else None
-        contract = dict(legacy_contract) if isinstance(legacy_contract, Mapping) else runtime_contract(manifest_mapping, env)
+        contract = runtime_contract(manifest_mapping)
     except RuntimeError:
         contract = {}
-    entries = legacy["artifacts"] if legacy is not None else manifest_mapping.get("artifacts", {})
+    entries = manifest_mapping.get("artifacts", {})
     checked: dict[str, dict[str, str]] = {}
     mismatches: list[str] = []
     for name, raw_entry in sorted(entries.items()):
@@ -1044,7 +948,7 @@ def manifest_snapshot() -> dict[str, Any]:
         }
         if operator["state"] != "ok":
             mismatches.append("effective-config")
-    manifest_valid = bool(legacy.get("drift_manifest_valid")) if legacy is not None else bool(contract)
+    manifest_valid = bool(contract)
     return {
         "manifest": manifest,
         "files": checked,
@@ -1274,7 +1178,7 @@ def apply_qdisc_profile(*, include_overlay: bool = True) -> dict[str, Any]:
 def apply_network_profile() -> dict[str, Any]:
     env = parse_env()
     manifest = read_json(MANIFEST_PATH, {})
-    contract = runtime_contract(manifest if isinstance(manifest, Mapping) else {}, env)
+    contract = runtime_contract(manifest if isinstance(manifest, Mapping) else {})
     has_interserver = bool(contract.get("capabilities", frozenset()) & INTERSERVER_CAPABILITIES)
     qdisc = apply_qdisc_profile(include_overlay=has_interserver)
     if contract_has(contract, CAP_INTERSERVER_CLIENT):
@@ -3365,7 +3269,7 @@ def collect_runtime_facts(*, live_probes: bool = False, profile: str = "light", 
     manifest = manifest_data.get("manifest", {})
     contract_error = ""
     try:
-        contract = runtime_contract(manifest if isinstance(manifest, Mapping) else {}, env)
+        contract = runtime_contract(manifest if isinstance(manifest, Mapping) else {})
     except RuntimeError as exc:
         contract_error = str(exc)
         contract = {
@@ -3375,14 +3279,11 @@ def collect_runtime_facts(*, live_probes: bool = False, profile: str = "light", 
             "capabilities": frozenset(),
             "required_services": (),
             "service_units": {},
-            "role": "unknown",
-            "migration": {"state": "invalid", "message": contract_error},
         }
     topology = str(contract.get("topology", ""))
     node_id = str(contract.get("node_id", ""))
     location = str(contract.get("location", ""))
     capabilities = frozenset(str(value) for value in contract.get("capabilities", ()))
-    role = str(contract.get("role", "unknown"))
     has_interserver = bool(capabilities & INTERSERVER_CAPABILITIES)
     has_interserver_client = CAP_INTERSERVER_CLIENT in capabilities
     has_interserver_server = CAP_INTERSERVER_SERVER in capabilities
@@ -3505,8 +3406,6 @@ def collect_runtime_facts(*, live_probes: bool = False, profile: str = "light", 
         "node_id": node_id,
         "location": location,
         "capabilities": sorted(capabilities),
-        "role": role,
-        "migration": dict(contract.get("migration", {})),
         "contract_error": contract_error,
         "required_services": list(contract.get("required_services", ())),
         "service_units": dict(service_units),
@@ -3592,13 +3491,11 @@ def _collector_state(condition: bool, generated_at: str, message: str) -> Collec
 def diagnostics_snapshot(**snapshot_options: Any) -> dict[str, Any]:
     facts = collect_runtime_facts(**snapshot_options)
     generated_at = str(facts["generated_at"])
-    role = str(facts.get("role", ""))
     topology = str(facts.get("topology", ""))
     node_id = str(facts.get("node_id", ""))
     location = str(facts.get("location", ""))
     raw_capabilities = facts.get("capabilities", ())
     capabilities = tuple(str(value) for value in raw_capabilities) if isinstance(raw_capabilities, (list, tuple, set, frozenset)) else ()
-    migration = facts.get("migration", {}) if isinstance(facts.get("migration"), Mapping) else {}
     capability_set = frozenset(capabilities)
     has_interserver = bool(capability_set & INTERSERVER_CAPABILITIES)
     has_public_front = CAP_PUBLIC_FRONT in capability_set
@@ -3693,7 +3590,6 @@ def diagnostics_snapshot(**snapshot_options: Any) -> dict[str, Any]:
         node_id=node_id,
         location=location,
         capabilities=capabilities,
-        role=role,
         host=dict(facts.get("host", {})),
         collectors=collectors,
         log_windows=log_windows,
@@ -3716,7 +3612,6 @@ def diagnostics_snapshot(**snapshot_options: Any) -> dict[str, Any]:
         maintenance=dict(maintenance),
         redundancy=dict(facts.get("redundancy", {})),
         component_verdicts={str(key): str(value) for key, value in verdicts.items() if key not in {"overall", "reasons"}},
-        migration=dict(migration),
     )
     return payload.to_dict()
 
@@ -4091,7 +3986,7 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "probe":
         env = parse_env()
         manifest = read_json(MANIFEST_PATH, {})
-        payload = run_confirmed_probes(env, runtime_contract(manifest if isinstance(manifest, Mapping) else {}, env), args.profile)
+        payload = run_confirmed_probes(env, runtime_contract(manifest if isinstance(manifest, Mapping) else {}), args.profile)
     elif args.command == "client":
         payload = front_client_snapshot(args.source, args.since)
     elif args.command == "front":

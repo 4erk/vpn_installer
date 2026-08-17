@@ -1,4 +1,4 @@
-# Topology refactor 0.20.0
+# Topology refactor 0.20.1
 
 This file is the implementation ledger for the single/dual topology migration. A release is not complete while any required checkbox remains open.
 
@@ -11,14 +11,16 @@ This file is the implementation ledger for the single/dual topology migration. A
 - [x] A dual exit never receives Reality private keys, client credentials, or web-admin credentials.
 - [x] Install, rollback, remove, health, and drift control touch only resources owned by the compiled node plan.
 - [x] Missing capabilities are reported as not applicable, never as healthy or failed.
-- [x] Web-admin remains available on every gateway and only exposes egresses compiled for that topology.
+- [x] A single gateway has no WireGuard, interserver, or web-admin dependencies.
+- [x] Web-admin exists only on the public gateway in `dual` and exposes only the two compiled egresses.
+- [x] Its public port is firewall-gated to a recent source address that reached the TCP/UDP VPN ingress.
 - [x] Installation acceptance uses the generated primary VLESS URI and never changes the local default route or active VPN client.
 
 ## Delivery slices
 
 - [x] Characterization tests for the current dual URI, route order, bundles, manifests, and install order.
 - [x] Canonical `DeploymentSpec`, `TopologySpec`, `NodeSpec`, and `NodePlan`.
-- [x] One-time local migration from `RU_*`/`FOREIGN_*` topology fields to gateway/exit fields.
+- [x] One bounded transition from canonical `0.20.0` formats to `0.20.1`; pre-`0.20.0` inputs are rejected.
 - [x] Minimal per-node runtime configuration and secret projection.
 - [x] Capability-driven renderer, artifacts, package set, services, probes, and manifest.
 - [x] Single gateway routing and DNS without fake interserver state.
@@ -27,18 +29,13 @@ This file is the implementation ledger for the single/dual topology migration. A
 - [x] Unit, Docker, lab, interrupted-install, and rollback matrix for `single-ru`, `single-foreign`, and `dual`.
 - [x] Documentation, changelog, migration evidence, release audit, and production acceptance.
 
-Production acceptance completed on 2026-08-17 for deployment `1`: both schema-3 nodes report `drift: none`, diagnostics schema 4 reports no classified events since release, and an independent runner verified the unchanged primary VLESS URI through gateway, Xray, router, interserver transport, and exit egress.
+The `0.20.1` release gate requires config schema 3, manifest/install-plan schema 4 and diagnostics schema 5 on every installed node. Production acceptance is complete only after the unchanged primary VLESS URI passes the public gateway, Xray, router, optional interserver transport and selected egress.
 
-## Deprecation boundary
+## Compatibility boundary
 
-Release `0.20.0` may read the following legacy inputs only at the local migration boundary:
+Release `0.20.1` supports fresh install, exact `0.20.0 -> 0.20.1`, and same-version reinstall only. Its compatible installed range is `0.20.0..0.20.1`; all CLI node selection uses only `--node gateway|exit|all`.
 
-- `RU_PUBLIC_IP` and `FOREIGN_PUBLIC_IP`;
-- state keys `ru-gateway` and `foreign-exit`;
-- CLI role aliases `ru-gateway` and `foreign-exit`;
-- installed manifests whose role uses either legacy value.
-
-The compiler and all newly installed runtime files must use canonical topology/node fields. Successful migration records config schema 2, manifest schema 3 and `legacy_inputs=[]`. The follow-up cleanup patch removes the boundary readers after every managed node reports manifest schema 3 and diagnostics schema 4.
+The complete `0.20.0` adapter is isolated in `vpn_installer/upgrade_0200.py` and is removed in `0.20.2`. That release raises its minimum installed version to `0.20.1` without a planned schema bump. See [DEPRECATIONS.md](./DEPRECATIONS.md) for the exact validators and removal list.
 
 ## Acceptance matrix
 

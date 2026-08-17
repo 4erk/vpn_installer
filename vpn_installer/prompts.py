@@ -16,7 +16,7 @@ from .config import (
     validate_ssh_port,
     validate_ssh_user,
 )
-from .models import ROLE_FOREIGN, ROLE_META, ROLE_RU, RemoteTarget
+from .models import NODE_META, RemoteTarget
 from .topology import (
     LOCATION_FOREIGN,
     LOCATION_RU,
@@ -295,29 +295,29 @@ def select_existing_deployment(cli_name: str | None) -> str:
             return existing[selection - 1]
 
 
-def ask_install_action(role: str, deployment_name: str, preflight: dict[str, str], *, label: str | None = None) -> str:
-    target_label = label or ROLE_META[role]["label"]
+def ask_install_action(node_id: str, deployment_name: str, preflight: dict[str, str], *, label: str | None = None) -> str:
+    target_label = label or NODE_META[node_id]["label"]
     if preflight.get("installed") != "1":
         print(f"На {target_label} стек не найден.")
         return prompt_choice(
             f"Что делать с {target_label}?",
-            [("install", "Установить роль"), ("skip", "Пока ничего не делать")],
+            [("install", "Установить узел"), ("skip", "Пока ничего не делать")],
             default="install",
         )
-    existing_role = preflight.get("role", "")
+    existing_node = preflight.get("node", "")
     existing_deployment = preflight.get("deployment_name", "")
-    if existing_role and existing_role != role:
-        print(f"На {target_label} уже стоит роль {existing_role} (deployment: {existing_deployment or '-'})")
+    if existing_node and existing_node != node_id:
+        print(f"На {target_label} уже установлен узел {existing_node} (deployment: {existing_deployment or '-'})")
         return prompt_choice(
             f"Что делать с {target_label}?",
-            [("reinstall", "Переустановить и обновить роль"), ("skip", "Пока ничего не делать")],
+            [("reinstall", "Переустановить и обновить узел"), ("skip", "Пока ничего не делать")],
             default="skip",
         )
     if existing_deployment and existing_deployment != deployment_name:
         print(f"На сервере уже найден другой deployment: {existing_deployment}")
     return prompt_choice(
         f"Что делать с {target_label}?",
-        [("reinstall", "Обновить / переустановить роль"), ("skip", "Пока ничего не делать")],
+        [("reinstall", "Обновить / переустановить узел"), ("skip", "Пока ничего не делать")],
         default="reinstall",
     )
 
@@ -334,7 +334,3 @@ def select_node_for_menu(command_name: str) -> str:
         ],
         default="all",
     )
-
-
-# One-release import alias. Remove in 0.20.1.
-select_role_for_menu = select_node_for_menu

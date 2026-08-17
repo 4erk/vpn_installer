@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .topology import LOCATION_FOREIGN, NODE_EXIT, NODE_GATEWAY, normalize_node_id
+
 
 class AppError(RuntimeError):
     pass
@@ -11,11 +13,9 @@ class UserCancelled(AppError):
     pass
 
 
-ROLE_RU = "ru-gateway"
-ROLE_FOREIGN = "foreign-exit"
-ROLE_META = {
-    ROLE_RU: {"label": "Сервер входа", "prefix": "RU", "public_ip_key": "GATEWAY_PUBLIC_IP"},
-    ROLE_FOREIGN: {"label": "Сервер выхода", "prefix": "FOREIGN", "public_ip_key": "EXIT_PUBLIC_IP"},
+NODE_META = {
+    NODE_GATEWAY: {"label": "Сервер входа", "prefix": "GATEWAY", "public_ip_key": "GATEWAY_PUBLIC_IP"},
+    NODE_EXIT: {"label": "Сервер выхода", "prefix": "EXIT", "public_ip_key": "EXIT_PUBLIC_IP"},
 }
 
 ALLOW_EMPTY_OVERRIDE = {
@@ -54,7 +54,6 @@ ENV_SECTIONS = [
     (
         "# Optional web admin for server-side routing exceptions",
         [
-            "ADMIN_WEB_ENABLED",
             "ADMIN_WEB_PORT",
             "ADMIN_WEB_USERNAME",
             "ADMIN_WEB_PASSWORD",
@@ -82,7 +81,7 @@ DEFAULT_ASSET_TIMEOUT = 30
 
 @dataclass
 class RemoteTarget:
-    role: str
+    node_id: str
     location: str = ""
     public_ip: str = ""
     ssh_host: str = ""
@@ -96,20 +95,14 @@ class RemoteTarget:
     sudo_password: str = ""
     saved_connection: bool = False
 
+    def __post_init__(self) -> None:
+        self.node_id = normalize_node_id(self.node_id)
+
     @property
     def label(self) -> str:
-        from .topology import LOCATION_FOREIGN, NODE_GATEWAY, legacy_role_for_node, normalize_node_id
-
-        node_id = normalize_node_id(self.role)
-        if node_id == NODE_GATEWAY and self.location == LOCATION_FOREIGN:
+        if self.node_id == NODE_GATEWAY and self.location == LOCATION_FOREIGN:
             return "VPN-шлюз (зарубежный сервер)"
-        return ROLE_META[legacy_role_for_node(node_id)]["label"]
-
-    @property
-    def node_id(self) -> str:
-        from .topology import normalize_node_id
-
-        return normalize_node_id(self.role)
+        return NODE_META[self.node_id]["label"]
 
     def to_state(self) -> dict[str, str]:
         return {

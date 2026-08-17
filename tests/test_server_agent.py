@@ -18,22 +18,23 @@ from vpn_installer.render import render_ru_singbox
 
 
 class ServerAgentTests(unittest.TestCase):
-    def test_installed_at_prefers_canonical_hyphenated_metadata(self) -> None:
+    def test_installed_at_uses_only_canonical_hyphenated_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "installed-at").write_text("2026-08-16T12:00:00Z\n", encoding="utf-8")
-            (root / "installed_at").write_text("legacy\n", encoding="utf-8")
+            (root / "installed_at").write_text("ignored\n", encoding="utf-8")
             with patch.object(server_agent, "ROOT", root):
                 self.assertEqual(server_agent.installed_at_value(), "2026-08-16T12:00:00Z")
+                (root / "installed-at").unlink()
+                self.assertEqual(server_agent.installed_at_value(), "")
 
     @staticmethod
     def gateway_contract(*, topology: str = "dual") -> dict[str, object]:
-        capabilities = {"public-front", "router", "web-admin", "local-egress"}
+        capabilities = {"public-front", "router", "local-egress"}
+        required_services = ["nftables", "sing-box", "resolver", "health_timer", "xray"]
         if topology == "dual":
-            capabilities.update({"ru-split-routing", "interserver-client"})
-        required_services = ["nftables", "sing-box", "resolver", "health_timer", "xray", "admin"]
-        if topology == "dual":
-            required_services.extend(["wireguard", "transport"])
+            capabilities.update({"ru-split-routing", "interserver-client", "web-admin"})
+            required_services.extend(["admin", "wireguard", "transport"])
         return {
             "topology": topology,
             "node_id": "gateway",
@@ -63,8 +64,8 @@ class ServerAgentTests(unittest.TestCase):
 
     @staticmethod
     def single_manifest() -> dict[str, object]:
-        capabilities = ["local-egress", "public-front", "router", "web-admin"]
-        required = ["nftables", "sing-box", "resolver", "health_timer", "xray", "admin"]
+        capabilities = ["local-egress", "public-front", "router"]
+        required = ["nftables", "sing-box", "resolver", "health_timer", "xray"]
         services = [
             {"name": name, "unit": server_agent.SERVICE_UNIT_DEFAULTS[name].format(wg_interface="wg0")}
             for name in required
@@ -76,7 +77,7 @@ class ServerAgentTests(unittest.TestCase):
             "required_services": required,
         }
         return {
-            "schema_version": 3,
+            "schema_version": 4,
             "topology": "single",
             "node_id": "gateway",
             "location": "foreign",
@@ -84,7 +85,7 @@ class ServerAgentTests(unittest.TestCase):
             "required_services": required,
             "node": node,
             "install_plan": {
-                "schema_version": 3,
+                "schema_version": 4,
                 "topology": "single",
                 "node_id": "gateway",
                 "location": "foreign",
@@ -95,36 +96,17 @@ class ServerAgentTests(unittest.TestCase):
         }
 
     def test_runtime_contract_is_fail_closed_and_accepts_native_single_gateway(self) -> None:
-        contract = server_agent.runtime_contract(self.single_manifest(), {})
+        contract = server_agent.runtime_contract(self.single_manifest())
 
         self.assertEqual(contract["topology"], "single")
         self.assertEqual(contract["node_id"], "gateway")
         self.assertNotIn("interserver-client", contract["capabilities"])
-        self.assertEqual(contract["migration"]["state"], "native")
+        self.assertEqual(contract["capabilities"], frozenset({"local-egress", "public-front", "router"}))
         with self.assertRaisesRegex(RuntimeError, "unsupported render manifest schema"):
-            server_agent.runtime_contract({"schema_version": 99}, {})
+            server_agent.runtime_contract({"schema_version": 99})
 
-    def test_runtime_contract_accepts_canonical_disabled_web_admin(self) -> None:
-        manifest = self.single_manifest()
-        capabilities = ["local-egress", "public-front", "router"]
-        required = ["nftables", "sing-box", "resolver", "health_timer", "xray"]
-        manifest.update(capabilities=capabilities, required_services=required)
-        manifest["node"] = {
-            **manifest["node"],  # type: ignore[misc]
-            "capabilities": capabilities,
-            "required_services": required,
-        }
-        manifest["install_plan"] = {
-            **manifest["install_plan"],  # type: ignore[misc]
-            "capabilities": capabilities,
-            "required_services": required,
-            "services": [
-                {"name": name, "unit": server_agent.SERVICE_UNIT_DEFAULTS[name].format(wg_interface="wg0")}
-                for name in required
-            ],
-        }
-
-        contract = server_agent.runtime_contract(manifest, {"ADMIN_WEB_ENABLED": "0"})
+    def test_runtime_contract_single_excludes_web_admin(self) -> None:
+        contract = server_agent.runtime_contract(self.single_manifest())
 
         self.assertNotIn("web-admin", contract["capabilities"])
         self.assertNotIn("admin", contract["required_services"])
@@ -134,50 +116,17 @@ class ServerAgentTests(unittest.TestCase):
         manifest["install_plan"] = {**manifest["install_plan"], "capabilities": ["local-egress"]}  # type: ignore[index]
 
         with self.assertRaisesRegex(RuntimeError, "install plan capabilities conflict"):
-            server_agent.runtime_contract(manifest, {})
-
-    def test_schema_three_ignores_legacy_role_and_uses_canonical_identity(self) -> None:
-        manifest = {**self.single_manifest(), "role": "foreign-exit"}
-
-        contract = server_agent.runtime_contract(manifest, {"ROLE": "foreign-exit"})
-
-        self.assertEqual(contract["node_id"], "gateway")
-        self.assertEqual(contract["location"], "foreign")
-        self.assertIn("router", contract["capabilities"])
-        self.assertEqual(contract["role"], "ru-gateway")
-        self.assertEqual(contract["migration"], {"state": "native", "source_schema": 3, "target_schema": 3})
-
-    def test_legacy_runtime_boundary_is_explicit_and_expires_in_0201(self) -> None:
-        for schema, role, node_id in ((1, "ru-gateway", "gateway"), (2, "foreign-exit", "exit")):
-            with self.subTest(schema=schema, role=role):
-                contract = server_agent.runtime_contract({"schema_version": schema, "role": role}, {})
-
-                self.assertEqual(contract["topology"], "dual")
-                self.assertEqual(contract["node_id"], node_id)
-                self.assertEqual(contract["migration"]["state"], "deprecated")
-                self.assertEqual(contract["migration"]["source_schema"], schema)
-                self.assertEqual(contract["migration"]["remove_in"], "0.20.1")
-                boundary = server_agent._adapt_legacy_runtime_manifest(
-                    {"schema_version": schema, "role": role},
-                    {},
-                )
-                self.assertIsNotNone(boundary)
-                self.assertEqual(boundary["drift_manifest_valid"], schema >= 2)  # type: ignore[index]
-
-        with self.assertRaisesRegex(RuntimeError, "does not identify a supported role"):
-            server_agent.runtime_contract({"schema_version": 2}, {})
+            server_agent.runtime_contract(manifest)
 
     def test_single_recovery_never_touches_interserver_services(self) -> None:
         current = {
             **self.gateway_contract(topology="single"),
-            "required_services": ["nftables", "sing-box", "resolver", "health_timer", "xray", "admin"],
             "services": {
                 "nftables": "active",
                 "sing-box": "active",
                 "resolver": "active",
                 "health_timer": "active",
                 "xray": "active",
-                "admin": "active",
                 "wireguard": "failed",
                 "transport": "failed",
             },
@@ -189,7 +138,7 @@ class ServerAgentTests(unittest.TestCase):
         self.assertEqual(action, "none")
         run_mock.assert_not_called()
 
-    def test_agent_emits_native_diagnostics_v3_end_to_end(self) -> None:
+    def test_agent_emits_native_diagnostics_v5_end_to_end(self) -> None:
         generated_at = "2026-08-06T18:00:00+00:00"
         installed_at = "2026-08-06T17:59:00+00:00"
         empty_logs = server_agent.summarize_lines([])
@@ -197,11 +146,10 @@ class ServerAgentTests(unittest.TestCase):
             **self.gateway_contract(),
             "generated_at": generated_at,
             "deployment": "demo",
-            "role": "ru-gateway",
             "host": {"hostname": "ru", "login_user": "root", "is_root": True},
             "release": {"release_id": "release-1", "installed_at": installed_at},
             "services": {name: "active" for name in ("wireguard", "nftables", "sing-box", "resolver", "xray", "admin", "health_timer", "transport")},
-            "artifacts": {"manifest": {"schema_version": 3, "release_id": "release-1"}, "drift": "none", "files": {"sing-box.json": {"actual_sha256": "a", "expected_sha256": "a"}}},
+            "artifacts": {"manifest": {"schema_version": 4, "release_id": "release-1"}, "drift": "none", "files": {"sing-box.json": {"actual_sha256": "a", "expected_sha256": "a"}}},
             "wireguard": {"interface": "wg0", "state": "up", "peers": []},
             "probes": {"profile": "acceptance", "ok": True},
             "storage": {"root_filesystem": {"source": "/dev/vda1", "verdict": "verified"}},
@@ -221,7 +169,7 @@ class ServerAgentTests(unittest.TestCase):
             payload = server_agent.diagnostics_snapshot(live_probes=True, full_logs=True, include_maintenance=True)
 
         snapshot = DiagnosticsSnapshot.from_agent(payload)
-        self.assertEqual(snapshot.schema_version, 4)
+        self.assertEqual(snapshot.schema_version, 5)
         self.assertEqual(snapshot.collector_status, "ok")
         self.assertEqual(snapshot.host["login_user"], "root")
         self.assertEqual(snapshot.log_windows["since_release"].counts["dns_timeout"], 0)
@@ -233,11 +181,10 @@ class ServerAgentTests(unittest.TestCase):
             **self.gateway_contract(),
             "generated_at": generated_at,
             "deployment": "demo",
-            "role": "ru-gateway",
             "host": {},
             "release": {"installed_at": generated_at},
             "services": {name: "active" for name in ("wireguard", "nftables", "sing-box", "resolver", "xray")},
-            "artifacts": {"manifest": {"schema_version": 3}, "drift": "none", "files": {}},
+            "artifacts": {"manifest": {"schema_version": 4}, "drift": "none", "files": {}},
             "wireguard": {"interface": "wg0", "state": "up"},
             "probes": {"profile": "none", "ok": None},
             "storage": {"root_filesystem": {"verdict": "verified"}},
@@ -279,7 +226,6 @@ class ServerAgentTests(unittest.TestCase):
         facts = {
             **self.exit_contract(),
             "generated_at": datetime.now(timezone.utc).isoformat(),
-            "role": "foreign-exit",
             "release": {},
             "logs": {"collector_error": error, "windows_minutes": windows, "fresh": fresh},
         }
@@ -535,7 +481,21 @@ class ServerAgentTests(unittest.TestCase):
             env_path = root / "env"
             env_path.write_text("DEPLOY_NAME=demo\n", encoding="utf-8")
             manifest = root / "manifest.json"
-            manifest.write_text(json.dumps({"schema_version": 2, "env_sha256": server_agent.sha256_file(env_path), "assets": {"geosite-ru.srs": {"sha256": server_agent.sha256_file(asset), "install_path": str(asset)}}}), encoding="utf-8")
+            manifest.write_text(
+                json.dumps(
+                    {
+                        **self.single_manifest(),
+                        "env_sha256": server_agent.sha256_file(env_path),
+                        "assets": {
+                            "geosite-ru.srs": {
+                                "sha256": server_agent.sha256_file(asset),
+                                "install_path": str(asset),
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
             with patch.object(server_agent, "MANIFEST_PATH", manifest), patch.object(
                 server_agent, "ENV_PATH", env_path
             ), patch.object(server_agent, "release_tree_snapshot", return_value={"state": "ok"}):
@@ -552,7 +512,7 @@ class ServerAgentTests(unittest.TestCase):
             manifest.write_text(
                 json.dumps(
                     {
-                        "schema_version": 2,
+                        **self.single_manifest(),
                         "binaries": {"sing-box": {"version": "1.13.12", "path": str(binary), "sha256": server_agent.sha256_file(binary)}},
                     }
                 ),
@@ -576,7 +536,7 @@ class ServerAgentTests(unittest.TestCase):
             manifest.write_text(
                 json.dumps(
                     {
-                        "schema_version": 2,
+                        **self.single_manifest(),
                         "binaries": {
                             "sing-box": {
                                 "path": str(binary),
@@ -609,7 +569,10 @@ class ServerAgentTests(unittest.TestCase):
             releases = root / "releases"
             candidate = releases / "candidate"
             candidate.mkdir(parents=True)
-            (candidate / "render-manifest.json").write_text('{"schema_version": 2}\n', encoding="utf-8")
+            (candidate / "render-manifest.json").write_text(
+                json.dumps(self.single_manifest()) + "\n",
+                encoding="utf-8",
+            )
             (candidate / "agent.py").write_text("print('ok')\n", encoding="utf-8")
             digest = server_agent.release_tree_digest(candidate)
             release = releases / f"0.18.0-test-{digest[:12]}"
@@ -634,7 +597,7 @@ class ServerAgentTests(unittest.TestCase):
             env_path.write_text("DEPLOY_NAME=demo\n", encoding="utf-8")
             manifest = root / "manifest.json"
             manifest.write_text(
-                json.dumps({"schema_version": 2, "env_sha256": server_agent.sha256_file(env_path)}),
+                json.dumps({**self.single_manifest(), "env_sha256": server_agent.sha256_file(env_path)}),
                 encoding="utf-8",
             )
             with patch.object(server_agent, "MANIFEST_PATH", manifest), patch.object(
@@ -739,7 +702,7 @@ class ServerAgentTests(unittest.TestCase):
         self.assertIn("error counter is unavailable", result["reason"])
 
     def test_health_requires_two_failed_cycles_before_recovery(self) -> None:
-        failed = {"verdicts": {"server_path": "failed"}, "services": {}, "role": "ru-gateway"}
+        failed = {**self.gateway_contract(), "verdicts": {"server_path": "failed"}, "services": {}}
         with tempfile.TemporaryDirectory() as tmp:
             state = Path(tmp) / "health.json"
             lock = Path(tmp) / "lock"
@@ -768,8 +731,8 @@ class ServerAgentTests(unittest.TestCase):
         recover.assert_not_called()
 
     def test_health_does_not_combine_different_hard_failures(self) -> None:
-        server_failed = {"verdicts": {"server_path": "failed", "host_integrity": "verified"}, "services": {}, "role": "ru-gateway"}
-        host_failed = {"verdicts": {"server_path": "verified", "host_integrity": "failed"}, "services": {}, "role": "ru-gateway"}
+        server_failed = {**self.gateway_contract(), "verdicts": {"server_path": "failed", "host_integrity": "verified"}, "services": {}}
+        host_failed = {**self.gateway_contract(), "verdicts": {"server_path": "verified", "host_integrity": "failed"}, "services": {}}
         with tempfile.TemporaryDirectory() as tmp:
             with (
                 patch.object(server_agent, "HEALTH_STATE_PATH", Path(tmp) / "health.json"),
@@ -786,7 +749,7 @@ class ServerAgentTests(unittest.TestCase):
         recover.assert_not_called()
 
     def test_failed_recovery_does_not_start_cooldown(self) -> None:
-        failed = {"verdicts": {"server_path": "failed", "host_integrity": "verified"}, "services": {}, "role": "ru-gateway"}
+        failed = {**self.gateway_contract(), "verdicts": {"server_path": "failed", "host_integrity": "verified"}, "services": {}}
         with tempfile.TemporaryDirectory() as tmp:
             with (
                 patch.object(server_agent, "HEALTH_STATE_PATH", Path(tmp) / "health.json"),
@@ -805,6 +768,7 @@ class ServerAgentTests(unittest.TestCase):
 
     def test_health_never_restarts_services_for_filesystem_corruption(self) -> None:
         failed = {
+            **self.exit_contract(),
             "generated_at": "2026-08-01T20:00:00+00:00",
             "verdicts": {
                 "server_path": "verified",
@@ -812,7 +776,6 @@ class ServerAgentTests(unittest.TestCase):
                 "client_observation": "not-applicable",
             },
             "services": {},
-            "role": "foreign-exit",
             "probes": {"requirements": {"foreign_direct": True}},
             "network": {"interfaces": {}, "protocol_counters": {}, "softnet_counters": {}, "conntrack": {}},
         }
@@ -835,9 +798,9 @@ class ServerAgentTests(unittest.TestCase):
     def test_health_reports_udp_buffer_drops_as_degraded_without_recovery(self) -> None:
         def healthy(udp_drops: int) -> dict[str, object]:
             return {
+                **self.exit_contract(),
                 "verdicts": {"server_path": "verified"},
                 "services": {},
-                "role": "foreign-exit",
                 "probes": {"requirements": {"foreign_direct": True}},
                 "network": {
                     "interfaces": {"eth0": {"rx_missed_errors": 0}},
@@ -865,9 +828,9 @@ class ServerAgentTests(unittest.TestCase):
 
     def test_health_reports_recent_conntrack_exhaustion_without_recovery(self) -> None:
         current = {
+            **self.gateway_contract(),
             "verdicts": {"server_path": "verified"},
             "services": {},
-            "role": "ru-gateway",
             "probes": {"requirements": {"ru_direct": True, "via_wg": True, "router": True}},
             "network": {
                 "interfaces": {},
@@ -956,7 +919,7 @@ class ServerAgentTests(unittest.TestCase):
 
     def test_health_log_summary_omits_persistent_flow_counters(self) -> None:
         payload = {
-            "schema_version": 2,
+            "schema_version": 5,
             "updated_at": "2026-08-03T20:12:26+00:00",
             "state": "degraded",
             "consecutive_failures": 0,
@@ -982,10 +945,10 @@ class ServerAgentTests(unittest.TestCase):
 
     def test_health_reports_client_specific_front_loss_without_recovery(self) -> None:
         current = {
+            **self.gateway_contract(),
             "generated_at": "2026-07-20T08:00:00+00:00",
             "verdicts": {"server_path": "verified", "client_observation": "client_specific"},
             "services": {},
-            "role": "ru-gateway",
             "probes": {"requirements": {"ru_direct": True, "via_wg": True, "router": True}},
             "network": {"interfaces": {}, "protocol_counters": {}, "softnet_counters": {}, "conntrack": {}},
             "front": {
@@ -1195,7 +1158,12 @@ class ServerAgentTests(unittest.TestCase):
         self.assertEqual(counters["TcpExtTCPDSACKRecv"], 7)
 
     def test_snapshot_includes_bootstrap_identity_for_lifecycle_preflight(self) -> None:
-        manifest = {"role": "ru-gateway", "version": "0.11.0", "release_id": "release-1", "policy_version": "0.11.0", "schema_version": 2}
+        manifest = {
+            **self.single_manifest(),
+            "version": "0.20.1",
+            "release_id": "release-1",
+            "policy_version": "0.20.1",
+        }
         with (
             patch.object(server_agent, "parse_env", return_value={"DEPLOY_NAME": "demo", "WAN_INTERFACE": "eth0", "WG_INTERFACE": "wg0", "RU_LISTEN_PORT": "443"}),
             patch.object(server_agent, "manifest_snapshot", return_value={"manifest": manifest, "drift": "none", "files": {}}),

@@ -41,7 +41,6 @@ class RenderTests(unittest.TestCase):
     def make_single_env(self, location: str) -> dict[str, str]:
         env = generate_default_env("demo", topology="single", gateway_location=location)
         env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
-        env["WAN_INTERFACE"] = "eth1"
         return env
 
     def test_single_gateway_router_has_no_interserver_runtime(self) -> None:
@@ -83,22 +82,20 @@ class RenderTests(unittest.TestCase):
                 self.assertNotIn("wg0.conf", files)
                 self.assertNotIn("vpn-stack-transport.service", files)
                 self.assertIn("xray.json", files)
-                self.assertIn("vpn-stack-admin.service", files)
-
-    def test_disabled_admin_is_absent_from_single_and_dual_gateway_artifacts(self) -> None:
-        for env in (self.make_single_env("foreign"), self.make_env()):
-            with self.subTest(topology=env["TOPOLOGY"]):
-                env["ADMIN_WEB_ENABLED"] = "0"
-                files = render.rendered_files_for_node(env, "gateway")
-                manifest = json.loads(files["render-manifest.json"])
-
                 self.assertNotIn("admin_web.py", files)
-                self.assertIn("admin_apply.py", files)
                 self.assertNotIn("vpn-stack-admin.service", files)
-                self.assertIn("admin_apply.py", files["sing-box.service"])
-                self.assertNotIn("ADMIN_WEB_USERNAME", files["node.env"])
-                self.assertNotIn("ADMIN_WEB_PASSWORD", files["node.env"])
-                self.assertNotIn("admin", manifest["required_services"])
+
+    def test_web_admin_is_compiled_only_for_dual_gateway(self) -> None:
+        single_files = render.rendered_files_for_node(self.make_single_env("foreign"), "gateway")
+        dual_files = render.rendered_files_for_node(self.make_env(), "gateway")
+        single_manifest = json.loads(single_files["render-manifest.json"])
+        dual_manifest = json.loads(dual_files["render-manifest.json"])
+        self.assertNotIn("admin_web.py", single_files)
+        self.assertNotIn("vpn-stack-admin.service", single_files)
+        self.assertNotIn("admin", single_manifest["required_services"])
+        self.assertIn("admin_web.py", dual_files)
+        self.assertIn("vpn-stack-admin.service", dual_files)
+        self.assertIn("admin", dual_manifest["required_services"])
 
     def test_enabled_admin_gateway_keeps_operator_rules_hook(self) -> None:
         files = render.rendered_files_for_node(self.make_env(), "gateway")
@@ -211,13 +208,13 @@ class RenderTests(unittest.TestCase):
 
     def test_ru_server_config_accepts_single_primary_vless_user(self) -> None:
         env = self.make_env()
-        payload = json.loads(render.render_ru_xray(env))
+        payload = json.loads(render.render_gateway_xray(env))
         clients = payload["inbounds"][0]["settings"]["clients"]
         self.assertEqual(clients, [{"id": env["CLIENT_UUID"], "flow": env["CLIENT_FLOW"], "email": "demo-client"}])
 
     def test_ru_server_config_uses_plain_vless_inbound_without_multiplex(self) -> None:
         env = self.make_env()
-        payload = json.loads(render.render_ru_xray(env))
+        payload = json.loads(render.render_gateway_xray(env))
         self.assertNotIn("multiplex", payload["inbounds"][0])
         self.assertEqual(
             payload["inbounds"][0]["streamSettings"]["sockopt"],
@@ -233,7 +230,7 @@ class RenderTests(unittest.TestCase):
     def test_ru_server_config_renders_xray_public_443_and_local_singbox_router(self) -> None:
         env = self.make_env()
         router_payload = json.loads(render.render_ru_singbox(env))
-        xray_payload = json.loads(render.render_ru_xray(env))
+        xray_payload = json.loads(render.render_gateway_xray(env))
         self.assertEqual([inbound["listen_port"] for inbound in router_payload["inbounds"]], [2080, 443, 19091, 19093, 19094])
         self.assertEqual(
             [inbound["tag"] for inbound in router_payload["inbounds"]],
@@ -287,7 +284,7 @@ class RenderTests(unittest.TestCase):
 
     def test_ru_server_reality_sets_explicit_time_tolerance_by_default(self) -> None:
         env = self.make_env()
-        payload = json.loads(render.render_ru_xray(env))
+        payload = json.loads(render.render_gateway_xray(env))
         reality = payload["inbounds"][0]["streamSettings"]["realitySettings"]
         self.assertEqual(payload["inbounds"][0]["port"], 443)
         self.assertEqual(reality["target"], "r.bing.com:443")
@@ -296,14 +293,14 @@ class RenderTests(unittest.TestCase):
 
     def test_ru_server_reality_accepts_primary_and_empty_short_id_by_default(self) -> None:
         env = self.make_env()
-        payload = json.loads(render.render_ru_xray(env))
+        payload = json.loads(render.render_gateway_xray(env))
         reality = payload["inbounds"][0]["streamSettings"]["realitySettings"]
         self.assertEqual(reality["shortIds"], [env["RU_REALITY_SHORT_ID"], ""])
 
     def test_ru_server_reality_keeps_custom_sni_and_target_consistent(self) -> None:
         env = self.make_env()
         env["RU_REALITY_SERVER_NAME"] = "www.cloudflare.com"
-        payload = json.loads(render.render_ru_xray(env))
+        payload = json.loads(render.render_gateway_xray(env))
         reality = payload["inbounds"][0]["streamSettings"]["realitySettings"]
         self.assertEqual(reality["serverNames"], ["www.cloudflare.com"])
         self.assertEqual(reality["target"], "www.cloudflare.com:443")
@@ -311,14 +308,14 @@ class RenderTests(unittest.TestCase):
     def test_ru_server_reality_can_disable_empty_short_id_compat(self) -> None:
         env = self.make_env()
         env["RU_REALITY_ACCEPT_EMPTY_SHORT_ID"] = "0"
-        payload = json.loads(render.render_ru_xray(env))
+        payload = json.loads(render.render_gateway_xray(env))
         reality = payload["inbounds"][0]["streamSettings"]["realitySettings"]
         self.assertEqual(reality["shortIds"], [env["RU_REALITY_SHORT_ID"]])
 
     def test_ru_server_reality_can_render_explicit_time_tolerance(self) -> None:
         env = self.make_env()
         env["RU_REALITY_MAX_TIME_DIFFERENCE"] = "30s"
-        payload = json.loads(render.render_ru_xray(env))
+        payload = json.loads(render.render_gateway_xray(env))
         reality = payload["inbounds"][0]["streamSettings"]["realitySettings"]
         self.assertNotIn("maxTimeDiff", reality)
 
@@ -564,7 +561,8 @@ class RenderTests(unittest.TestCase):
                 gateway_yaml = (cloud_dir / "gateway.yaml").read_text(encoding="utf-8")
                 exit_yaml = (cloud_dir / "exit.yaml").read_text(encoding="utf-8")
                 self.assertIn("/root/vpn-stack/vpn_installer/install_support.py", gateway_yaml)
-                self.assertIn("/root/vpn-stack/vpn_installer/legacy_install_contract.py", gateway_yaml)
+                self.assertIn("/root/vpn-stack/vpn_installer/upgrade_0200.py", gateway_yaml)
+                self.assertNotIn("/root/vpn-stack/vpn_installer/legacy_install_contract.py", gateway_yaml)
                 self.assertIn("./install.sh --node gateway", gateway_yaml)
                 self.assertIn("--assets-dir /root/vpn-stack/assets", gateway_yaml)
                 self.assertNotIn("--assets-dir /root/vpn-stack/assets", exit_yaml)
@@ -718,9 +716,9 @@ class RenderTests(unittest.TestCase):
                 self.assertEqual(marker.read_text(encoding="utf-8"), "keep\n")
                 self.assertTrue((client_dir / "vless-uri.txt").is_file())
 
-    def test_rendered_files_for_role_contains_core_contract(self) -> None:
+    def test_rendered_files_for_node_contains_core_contract(self) -> None:
         env = self.make_env()
-        files = render.rendered_files_for_role(env, render.ROLE_RU)
+        files = render.rendered_files_for_node(env, render.NODE_GATEWAY)
         self.assertIn("sing-box.json", files)
         self.assertIn("xray.json", files)
         self.assertIn(f"{env['WG_INTERFACE']}.conf", files)
@@ -746,7 +744,7 @@ class RenderTests(unittest.TestCase):
         self.assertIn("admin_web.py", files)
         self.assertIn("vpn-stack-admin.service", files)
         self.assertIn("vpn-stack-xray.service", files)
-        foreign_files = render.rendered_files_for_role(env, render.ROLE_FOREIGN)
+        foreign_files = render.rendered_files_for_node(env, render.NODE_EXIT)
         self.assertIn("interserver_transport.py", foreign_files)
         self.assertIn("network_profile.py", foreign_files)
         self.assertNotIn("vpn-stack-transport.service", foreign_files)
@@ -756,8 +754,8 @@ class RenderTests(unittest.TestCase):
 
     def test_runtime_dropins_are_renderer_owned_and_role_specific(self) -> None:
         env = self.make_env()
-        ru_files = render.rendered_files_for_role(env, render.ROLE_RU)
-        foreign_files = render.rendered_files_for_role(env, render.ROLE_FOREIGN)
+        ru_files = render.rendered_files_for_node(env, render.NODE_GATEWAY)
+        foreign_files = render.rendered_files_for_node(env, render.NODE_EXIT)
         self.assertIn("net.ipv4.tcp_mtu_probing=1", ru_files["sysctl-vpn-stack.conf"])
         self.assertIn("net.ipv4.tcp_mtu_probing=1", foreign_files["sysctl-vpn-stack.conf"])
         self.assertIn("net.ipv4.tcp_mtu_probe_floor=536", ru_files["sysctl-vpn-stack.conf"])
@@ -774,7 +772,7 @@ class RenderTests(unittest.TestCase):
         self.assertIn("StaleRetentionSec=1h", foreign_files["resolved-vpn-stack.conf"])
         self.assertIn(f"SystemMaxUse={env['JOURNAL_SYSTEM_MAX_USE']}", ru_files["journald-vpn-stack.conf"])
         env["JOURNAL_LIMIT_ENABLED"] = "0"
-        self.assertNotIn("journald-vpn-stack.conf", render.rendered_files_for_role(env, render.ROLE_RU))
+        self.assertNotIn("journald-vpn-stack.conf", render.rendered_files_for_node(env, render.NODE_GATEWAY))
 
     def test_ru_wireguard_hooks_are_restart_safe(self) -> None:
         env = self.make_env()
@@ -876,15 +874,14 @@ class RenderTests(unittest.TestCase):
         self.assertNotIn("table ip nat", rules)
         self.assertNotIn("table ip6 nat", rules)
 
-    def test_render_ru_nftables_ignores_legacy_public_admin_inputs(self) -> None:
+    def test_render_ru_nftables_gates_dual_admin_by_recent_public_vpn_source(self) -> None:
         env = self.make_env()
-        env["ADMIN_WEB_ALLOWED_CIDR"] = "203.0.113.4/32"
-        env["ADMIN_WEB_ACTIVE_CLIENT_REQUIRED"] = "1"
-        env["ADMIN_WEB_ALLOW_WG"] = "1"
-        rules = render.render_ru_firewall_nftables(env)
-
-        self.assertNotIn("admin_clients_ipv4", rules)
-        self.assertNotIn("tcp dport 11333", rules)
+        rules = render.render_ru_firewall_nftables(env, web_admin=True)
+        self.assertIn("set admin_clients_ipv4", rules)
+        self.assertIn("set admin_clients_ipv6", rules)
+        self.assertIn("timeout 3m", rules)
+        self.assertIn(f"tcp dport {env['ADMIN_WEB_PORT']} ip saddr @admin_clients_ipv4", rules)
+        self.assertNotIn("0.0.0.0/0", rules)
 
     def test_render_foreign_nftables_admits_ssh_without_log_driven_blocks(self) -> None:
         env = self.make_env()
@@ -910,7 +907,7 @@ class RenderTests(unittest.TestCase):
         self.assertNotIn("notrack", rules)
 
     def test_nft_apply_owns_only_vpn_stack_tables_and_is_reloadable(self) -> None:
-        rendered = render.rendered_files_for_role(self.make_env(), render.ROLE_RU)
+        rendered = render.rendered_files_for_node(self.make_env(), render.NODE_GATEWAY)
         script = render.render_nft_apply_script()
         service = render.render_nftables_service()
         self.assertIn("vpn-stack-nft-apply.sh", rendered)
@@ -985,8 +982,8 @@ class RenderTests(unittest.TestCase):
             self.assertNotIn("delete table ip6 nat", calls)
 
     def test_render_sysctl_reserves_conntrack_capacity_without_timeout_tuning(self) -> None:
-        for role in (render.ROLE_RU, render.ROLE_FOREIGN):
-            config = render.render_sysctl(role)
+        for node_id in (render.NODE_GATEWAY, render.NODE_EXIT):
+            config = render.render_sysctl(node_id)
             self.assertIn("net.netfilter.nf_conntrack_max=32768", config)
             self.assertNotIn("nf_conntrack_tcp_timeout", config)
         self.assertEqual(render.render_modules_load(), "nf_conntrack\n")
@@ -1000,7 +997,7 @@ class RenderTests(unittest.TestCase):
         self.assertIn(f'    iifname "{env["WG_INTERFACE"]}" oifname "eth0" ip daddr @ru_ipv4 drop', rules)
         self.assertIn(f'    iifname "{env["WG_INTERFACE"]}" oifname "eth0" ip6 daddr @ru_ipv6 drop', rules)
 
-    def test_write_role_rendered_files_and_package_bundle(self) -> None:
+    def test_write_node_rendered_files_and_package_bundle(self) -> None:
         env = self.make_env()
         with tempfile.TemporaryDirectory() as tmp:
             with patch.object(render, "OUT_DIR", Path(tmp)):
@@ -1009,8 +1006,8 @@ class RenderTests(unittest.TestCase):
                 assets_dir.mkdir(parents=True, exist_ok=True)
                 for asset_name in ("geosite-ru.srs", "geoip-ru.srs", "ru-ipv4.zone", "ru-ipv6.zone"):
                     (assets_dir / asset_name).write_text("dummy\n", encoding="utf-8")
-                render.write_role_rendered_files(env, render.ROLE_RU, out_dir / "preview" / "ru")
-                render.write_role_rendered_files(env, render.ROLE_FOREIGN, out_dir / "preview" / "foreign")
+                render.write_node_rendered_files(env, render.NODE_GATEWAY, out_dir / "preview" / "ru")
+                render.write_node_rendered_files(env, render.NODE_EXIT, out_dir / "preview" / "foreign")
                 server_dir = out_dir / "server"
                 server_dir.mkdir(parents=True, exist_ok=True)
                 (server_dir / "gateway.env").write_text(render.render_node_env_text(env, "gateway"), encoding="utf-8")
@@ -1081,14 +1078,14 @@ class RenderTests(unittest.TestCase):
                 path = Path(tmp) / name
                 path.write_text(name, encoding="utf-8")
                 assets[name] = path
-            ru_manifest = json.loads(render.rendered_files_for_role(env, render.ROLE_RU, assets=assets)["render-manifest.json"])
-            foreign_manifest = json.loads(render.rendered_files_for_role(env, render.ROLE_FOREIGN, assets=assets)["render-manifest.json"])
+            ru_manifest = json.loads(render.rendered_files_for_node(env, render.NODE_GATEWAY, assets=assets)["render-manifest.json"])
+            foreign_manifest = json.loads(render.rendered_files_for_node(env, render.NODE_EXIT, assets=assets)["render-manifest.json"])
         self.assertEqual(set(ru_manifest["assets"]), {"geoip-ru.srs", "geosite-ru.srs"})
         self.assertEqual(set(foreign_manifest["assets"]), {"ru-ipv4.zone", "ru-ipv6.zone"})
 
     def test_role_manifest_tracks_modules_load_at_installed_path(self) -> None:
         env = self.make_env()
-        manifest = json.loads(render.rendered_files_for_role(env, render.ROLE_RU)["render-manifest.json"])
+        manifest = json.loads(render.rendered_files_for_node(env, render.NODE_GATEWAY)["render-manifest.json"])
         modules = manifest["artifacts"]["modules-vpn-stack.conf"]
         self.assertEqual(modules["install_path"], "/etc/modules-load.d/90-vpn-stack.conf")
         self.assertTrue(modules["required"])
@@ -1096,14 +1093,14 @@ class RenderTests(unittest.TestCase):
     def test_manifest_rejects_unmapped_rendered_artifact(self) -> None:
         env = self.make_env()
         with self.assertRaisesRegex(ValueError, "missing installed artifact path: unknown.conf"):
-            render.render_manifest(render.render_env_text(env), render.ROLE_RU, {"unknown.conf": "value\n"})
+            render.render_manifest(render.render_env_text(env), render.NODE_GATEWAY, {"unknown.conf": "value\n"})
 
     def test_manifest_recognizes_dynamic_wireguard_config_by_structure(self) -> None:
         env = self.make_env()
         manifest = json.loads(
             render.render_manifest(
                 render.render_env_text(env),
-                render.ROLE_RU,
+                render.NODE_GATEWAY,
                 {"tunnel42.conf": "[Interface]\nPrivateKey = test\n"},
             )
         )
@@ -1111,8 +1108,8 @@ class RenderTests(unittest.TestCase):
 
     def test_role_manifest_is_deterministic(self) -> None:
         env = self.make_env()
-        first = render.rendered_files_for_role(env, render.ROLE_RU)["render-manifest.json"]
-        second = render.rendered_files_for_role(env, render.ROLE_RU)["render-manifest.json"]
+        first = render.rendered_files_for_node(env, render.NODE_GATEWAY)["render-manifest.json"]
+        second = render.rendered_files_for_node(env, render.NODE_GATEWAY)["render-manifest.json"]
         self.assertEqual(first, second)
         self.assertNotIn("generated_at", json.loads(first))
 
@@ -1131,8 +1128,8 @@ class RenderTests(unittest.TestCase):
             command = [
                 preferred_bash() or "bash",
                 str(install_sh),
-                "--role",
-                "ru-gateway",
+                "--node",
+                "gateway",
                 "--env-file",
                 str(env_file),
                 "--render-only",

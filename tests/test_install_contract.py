@@ -76,7 +76,7 @@ class InstallContractTests(unittest.TestCase):
     def contract_payload(contract_dir: Path) -> dict[str, bytes]:
         return {name: (contract_dir / name).read_bytes() for name in CONTRACT_FILES}
 
-    def test_function_and_cli_emit_identical_schema_three_tsv_contract(self) -> None:
+    def test_function_and_cli_emit_identical_schema_four_tsv_contract(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             bundle = self.render_single_gateway(root)
@@ -99,7 +99,7 @@ class InstallContractTests(unittest.TestCase):
             self.assertEqual(result, 0)
             self.assertEqual(self.contract_payload(cli_contract), self.contract_payload(direct_contract))
             meta = (direct_contract / "meta.tsv").read_text(encoding="utf-8").splitlines()
-            self.assertEqual(meta[0], "schema_version\t3")
+            self.assertEqual(meta[0], "schema_version\t4")
             self.assertIn("topology\tsingle", meta)
             self.assertIn("node_id\tgateway", meta)
             self.assertIn("location\tforeign", meta)

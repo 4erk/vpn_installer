@@ -8,6 +8,7 @@ from typing import Mapping
 
 from . import VERSION
 from .common import env_line, parse_env_value
+from .compatibility import CompatibilityWindow
 from .diagnostics import sha256_text
 from .routing_policy import POLICY_VERSION
 from .topology import (
@@ -17,6 +18,7 @@ from .topology import (
     CAP_PUBLIC_FRONT,
     CAP_RU_SPLIT_ROUTING,
     CAP_WEB_ADMIN,
+    CONFIG_SCHEMA_VERSION,
     LOCATION_FOREIGN,
     LOCATION_RU,
     NODE_EXIT,
@@ -25,12 +27,11 @@ from .topology import (
     NodePlan,
     NodeSpec,
     TopologySpec,
-    legacy_role_for_node,
     normalize_node_id,
 )
 
-MANIFEST_SCHEMA_VERSION = 3
-INSTALL_PLAN_SCHEMA_VERSION = 3
+MANIFEST_SCHEMA_VERSION = 4
+INSTALL_PLAN_SCHEMA_VERSION = 4
 
 SING_BOX_VERSION = "1.13.12"
 SING_BOX_LINUX_AMD64_ARCHIVE_SHA256 = "1540533adb3df24f5ad5f14b5c7ca3dbc2401b10a1c1eb278fcadcada47ec6c4"
@@ -62,12 +63,12 @@ COMMON_NODE_ENV_KEYS = (
     "SSH_MAX_STARTUPS",
     "SSH_PER_SOURCE_MAX_STARTUPS",
     "SSH_PER_SOURCE_NETBLOCK_SIZE",
-    "WAN_INTERFACE",
     "SING_BOX_LOG_LEVEL",
     "JOURNAL_LIMIT_ENABLED",
     "JOURNAL_SYSTEM_MAX_USE",
     "JOURNAL_MAX_RETENTION_SEC",
 )
+EXIT_NODE_ENV_KEYS = ("WAN_INTERFACE",)
 GATEWAY_NODE_ENV_KEYS = (
     "CLIENT_UUID",
     "CLIENT_FLOW",
@@ -81,7 +82,6 @@ GATEWAY_NODE_ENV_KEYS = (
     "PUBLIC_HY2_CERTIFICATE_B64",
     "PUBLIC_HY2_PRIVATE_KEY_B64",
     "RU_BLOCK_IP_CIDR",
-    "ADMIN_WEB_ENABLED",
 )
 WEB_ADMIN_ENV_KEYS = (
     "ADMIN_WEB_PORT",
@@ -199,7 +199,7 @@ def _parse_env_text(env_text: str) -> dict[str, str]:
     return env
 
 
-def _legacy_dual_topology() -> TopologySpec:
+def _default_dual_topology() -> TopologySpec:
     return TopologySpec(
         mode=TOPOLOGY_DUAL,
         gateway=NodeSpec(NODE_GATEWAY, LOCATION_RU, ""),
@@ -211,7 +211,7 @@ def resolve_node_plan(node: str | NodePlan, env: Mapping[str, str] | None = None
     if isinstance(node, NodePlan):
         return node
     node_id = normalize_node_id(node)
-    topology = TopologySpec.from_env(env, require_addresses=False) if env is not None else _legacy_dual_topology()
+    topology = TopologySpec.from_env(env, require_addresses=False) if env is not None else _default_dual_topology()
     return topology.plan(node_id)
 
 
@@ -269,7 +269,7 @@ def project_node_env(env: Mapping[str, str], node: str | NodePlan) -> dict[str, 
     plan = resolve_node_plan(node, env)
     topology = TopologySpec.from_env(env, require_addresses=False)
     projected: dict[str, str] = {
-        "CONFIG_SCHEMA": str(env.get("CONFIG_SCHEMA", "2") or "2"),
+        "CONFIG_SCHEMA": str(env.get("CONFIG_SCHEMA", CONFIG_SCHEMA_VERSION) or CONFIG_SCHEMA_VERSION),
         "DEPLOY_NAME": str(env.get("DEPLOY_NAME", "")),
         "TOPOLOGY": plan.topology,
         "GATEWAY_LOCATION": topology.gateway.location,
@@ -284,6 +284,8 @@ def project_node_env(env: Mapping[str, str], node: str | NodePlan) -> dict[str, 
     keys = list(COMMON_NODE_ENV_KEYS)
     if plan.node_id == NODE_GATEWAY:
         keys.extend(GATEWAY_NODE_ENV_KEYS)
+    else:
+        keys.extend(EXIT_NODE_ENV_KEYS)
     if CAP_WEB_ADMIN in plan.capabilities:
         keys.extend(WEB_ADMIN_ENV_KEYS)
     if CAP_RU_SPLIT_ROUTING in plan.capabilities:
@@ -412,14 +414,14 @@ def build_install_plan(
 
 def render_manifest(
     env_text: str,
-    role: str,
+    node: str | NodePlan,
     rendered_files: dict[str, str],
     *,
     assets: dict[str, Path] | None = None,
     foreign_block_ru: bool = True,
 ) -> str:
     env = _parse_env_text(env_text)
-    plan = resolve_node_plan(role, env)
+    plan = resolve_node_plan(node, env)
     specs = artifact_specs(plan, env=env)
     if plan.requires_wireguard:
         for name, content in rendered_files.items():
@@ -428,7 +430,6 @@ def render_manifest(
     unknown = sorted(name for name, content in rendered_files.items() if name not in specs and not _known_artifact(name, content))
     if unknown:
         raise ValueError(f"missing installed artifact path: {', '.join(unknown)}")
-    ignored = sorted(name for name in rendered_files if name not in specs)
     artifacts = {
         name: {
             "sha256": sha256_text(content),
@@ -466,6 +467,7 @@ def render_manifest(
             "assets": asset_entries,
             "binaries": binaries,
             "install_plan": sha256_text(install_plan_text),
+            "update_compatibility": CompatibilityWindow.current().to_manifest(),
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -477,8 +479,7 @@ def render_manifest(
         "release_id": release_id,
         **_canonical_plan_fields(plan),
         "node": _node_descriptor(plan),
-        # One-release boundary for external schema-2 readers; schema-3 runtime uses node_id.
-        "role": legacy_role_for_node(plan.node_id),
+        "update_compatibility": CompatibilityWindow.current().to_manifest(),
         "env_sha256": sha256_text(env_text),
         "node_env_sha256": node_env_sha256,
         "config_sha256": artifacts.get("sing-box.json", {}).get("sha256", ""),
@@ -489,11 +490,6 @@ def render_manifest(
         "binaries": binaries,
         "install_plan_sha256": sha256_text(install_plan_text),
         "install_plan": install_plan,
-        "compatibility": {
-            "legacy_role": legacy_role_for_node(plan.node_id),
-            "ignored_rendered_artifacts": ignored,
-            "remove_in": "0.20.1",
-        },
     }
     return json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
 

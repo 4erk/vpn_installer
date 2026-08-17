@@ -13,15 +13,18 @@ import time
 from pathlib import Path
 from unittest.mock import patch
 
+from .. import VERSION
 from ..common import OUT_DIR, ROOT_DIR, RUNTIME_SITE_PACKAGES, cli_command
 from ..client_artifacts import PUBLIC_VLESS_OUTBOUND_TAG
+from ..compatibility import CompatibilityWindow
 from ..config import load_env_file
 from ..dns_policy import GLOBAL_FOREIGN_DOMAINS, GLOBAL_FOREIGN_DOMAIN_SUFFIXES
-from ..manifest import XRAY_VERSION, required_asset_names
+from ..manifest import INSTALL_PLAN_SCHEMA_VERSION, MANIFEST_SCHEMA_VERSION, XRAY_VERSION, required_asset_names
 from ..render import render_all_artifacts
 from ..runtime_deps import ensure_python_package
 from ..targets import build_target
 from ..topology import (
+    CONFIG_SCHEMA_VERSION,
     LOCATION_FOREIGN,
     LOCATION_RU,
     NODE_EXIT,
@@ -137,6 +140,9 @@ def run(runner: AuditRunner) -> None:
                 str(ROOT_DIR / "vpn_installer" / "client_drift.py"),
                 str(ROOT_DIR / "vpn_installer" / "launcher.py"),
                 str(ROOT_DIR / "vpn_installer" / "cli.py"),
+                str(ROOT_DIR / "vpn_installer" / "compatibility.py"),
+                str(ROOT_DIR / "vpn_installer" / "diagnostics.py"),
+                str(ROOT_DIR / "vpn_installer" / "install_contract.py"),
                 str(ROOT_DIR / "vpn_installer" / "install_support.py"),
                 str(ROOT_DIR / "vpn_installer" / "runtime_deps.py"),
                 str(ROOT_DIR / "vpn_installer" / "targets.py"),
@@ -147,6 +153,7 @@ def run(runner: AuditRunner) -> None:
                 str(ROOT_DIR / "vpn_installer" / "system_resolver.py"),
                 str(ROOT_DIR / "vpn_installer" / "routing_policy.py"),
                 str(ROOT_DIR / "vpn_installer" / "server_agent.py"),
+                str(ROOT_DIR / "vpn_installer" / "upgrade_0200.py"),
                 str(ROOT_DIR / "vpn_installer" / "vless_verify.py"),
                 str(ROOT_DIR / "vpn_installer" / "verify.py"),
                 str(ROOT_DIR / "vpn_installer" / "manifest.py"),
@@ -265,11 +272,10 @@ def test_install_ux_helpers() -> dict[str, str]:
     env_only_target = build_target(
         NODE_GATEWAY,
         {
-            "CONFIG_SCHEMA": "2",
+            "CONFIG_SCHEMA": str(CONFIG_SCHEMA_VERSION),
             "TOPOLOGY": TOPOLOGY_SINGLE,
             "GATEWAY_LOCATION": LOCATION_RU,
             "GATEWAY_PUBLIC_IP": "1.2.3.4",
-            "EXIT_PUBLIC_IP": "",
             "SSH_PORT": "22",
         },
         {},
@@ -279,7 +285,7 @@ def test_install_ux_helpers() -> dict[str, str]:
         prompted_target = prompt_server_connection(env_only_target, force_prompt=not env_only_target.saved_connection, confirm_existing=True)
 
     saved_state = {
-        "schema_version": 2,
+        "schema_version": CONFIG_SCHEMA_VERSION,
         "topology": TOPOLOGY_SINGLE,
         "nodes": {
             NODE_GATEWAY: {
@@ -296,11 +302,10 @@ def test_install_ux_helpers() -> dict[str, str]:
     saved_target = build_target(
         NODE_GATEWAY,
         {
-            "CONFIG_SCHEMA": "2",
+            "CONFIG_SCHEMA": str(CONFIG_SCHEMA_VERSION),
             "TOPOLOGY": TOPOLOGY_SINGLE,
             "GATEWAY_LOCATION": LOCATION_RU,
             "GATEWAY_PUBLIC_IP": "9.9.9.9",
-            "EXIT_PUBLIC_IP": "",
             "SSH_PORT": "22",
         },
         saved_state,
@@ -388,7 +393,16 @@ def validate_topology_artifacts(env: dict[str, str], out_dir: Path) -> dict[str,
         node_dir = out_dir / "preview" / node.node_id
         manifest_path = node_dir / "render-manifest.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        install_plan = json.loads((node_dir / "install-plan.json").read_text(encoding="utf-8"))
         expected_capabilities = sorted(plan.capabilities)
+        if manifest.get("schema_version") != MANIFEST_SCHEMA_VERSION or manifest.get("version") != VERSION:
+            raise AuditFailure(f"{node.node_id}: manifest release/schema mismatch")
+        if install_plan.get("schema_version") != INSTALL_PLAN_SCHEMA_VERSION:
+            raise AuditFailure(f"{node.node_id}: install plan schema mismatch")
+        if manifest.get("install_plan") != install_plan:
+            raise AuditFailure(f"{node.node_id}: standalone and embedded install plans differ")
+        if manifest.get("update_compatibility") != CompatibilityWindow.current().to_manifest():
+            raise AuditFailure(f"{node.node_id}: update compatibility window mismatch")
         if manifest.get("topology") != topology.mode:
             raise AuditFailure(f"{node.node_id}: manifest topology mismatch")
         if manifest.get("node_id") != node.node_id or manifest.get("location") != node.location:
@@ -413,8 +427,8 @@ def validate_topology_artifacts(env: dict[str, str], out_dir: Path) -> dict[str,
                 f"expected={expected_presence}, actual={component_presence}"
             )
         node_env = load_env_file(node_dir / "node.env")
-        if node_env.get("CONFIG_SCHEMA") != "2" or node_env.get("NODE_ID") != node.node_id:
-            raise AuditFailure(f"{node.node_id}: node.env is not canonical schema 2")
+        if node_env.get("CONFIG_SCHEMA") != str(CONFIG_SCHEMA_VERSION) or node_env.get("NODE_ID") != node.node_id:
+            raise AuditFailure(f"{node.node_id}: node.env is not canonical schema {CONFIG_SCHEMA_VERSION}")
         if not topology.is_dual and "EXIT_PUBLIC_IP" in node_env:
             raise AuditFailure("single topology leaked EXIT_PUBLIC_IP into node.env")
         matrix[node.node_id] = {
