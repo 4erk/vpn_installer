@@ -25,7 +25,7 @@
 
 | Функция | Точная переходная проверка |
 | --- | --- |
-| `upgrade_env()` | Принимает только строковый env с `CONFIG_SCHEMA=2`, canonical topology/node IP fields и согласованными `single|dual`/location. Отклоняет поля поколений до `0.20.0`, удаляет retired inputs и dual-only данные из `single`, затем выдаёт schema `3`. |
+| `upgrade_env()` | Принимает только строковый env с `CONFIG_SCHEMA=2`, canonical topology/node IP fields и согласованными `single|dual`/location. Отклоняет поля поколений до `0.20.0`, удаляет retired inputs и dual-only данные из `single`, переносит прежний common `WAN_INTERFACE` в ownership exit, затем выдаёт schema `3`. |
 | `upgrade_state()` | Принимает только state schema `2` с canonical `nodes.gateway|exit`; состав nodes обязан совпадать с topology. Выдаёт state schema `3` без migration metadata. |
 | `previous_node_plan()` | Восстанавливает только capability-plan, который мог скомпилировать `0.20.0`, чтобы проверить ownership прежнего bundle до транзакции. |
 | `previous_role()` | Сопоставляет canonical node с обязательным историческим manifest field только во время проверки bundle `0.20.0`. |

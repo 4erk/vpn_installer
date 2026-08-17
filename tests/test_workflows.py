@@ -414,7 +414,9 @@ class WorkflowTests(unittest.TestCase):
         local_env["EXIT_PUBLIC_IP"] = "198.51.100.20"
         previous = {**local_env, "CONFIG_SCHEMA": "2", "ADMIN_WEB_ENABLED": "1"}
         remote_text = render_node_env_text(previous, NODE_GATEWAY)
+        # 0.20.0 emitted WAN_INTERFACE as a common field on both nodes.
         remote_text += env_line("ADMIN_WEB_ENABLED", "1") + "\n"
+        remote_text += env_line("WAN_INTERFACE", "eth0") + "\n"
         target = RemoteTarget(
             node_id=NODE_GATEWAY,
             public_ip="203.0.113.10",

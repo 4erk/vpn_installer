@@ -75,6 +75,10 @@ def upgrade_env(source: Mapping[str, str]) -> dict[str, str]:
     if topology == TOPOLOGY_SINGLE:
         for key in DUAL_ONLY_ENV_KEYS:
             upgraded.pop(key, None)
+    elif upgraded.get("NODE_ID", "").strip() == NODE_GATEWAY:
+        # In 0.20.0 WAN_INTERFACE was a common node field. It became
+        # exit-owned in 0.20.1 and must not survive in a gateway projection.
+        upgraded.pop("WAN_INTERFACE", None)
     upgraded["CONFIG_SCHEMA"] = str(CONFIG_SCHEMA_VERSION)
     return upgraded
 

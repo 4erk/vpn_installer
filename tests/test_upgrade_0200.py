@@ -40,6 +40,22 @@ class Upgrade0200Tests(unittest.TestCase):
         self.assertFalse(DUAL_ONLY_ENV_KEYS & upgraded.keys())
         self.assertIn("web-admin", previous_node_plan(source, NODE_GATEWAY).capabilities)
 
+    def test_dual_gateway_node_upgrade_moves_wan_interface_to_exit_ownership(self) -> None:
+        gateway = env_0200()
+        gateway.update(
+            {
+                "NODE_ID": NODE_GATEWAY,
+                "NODE_LOCATION": "ru",
+                "NODE_PUBLIC_IP": gateway["GATEWAY_PUBLIC_IP"],
+                "WAN_INTERFACE": "eth0",
+            }
+        )
+        deployment = env_0200()
+        deployment["WAN_INTERFACE"] = "eth0"
+
+        self.assertNotIn("WAN_INTERFACE", upgrade_env(gateway))
+        self.assertEqual(upgrade_env(deployment)["WAN_INTERFACE"], "eth0")
+
     def test_pre_0200_aliases_and_wrong_schema_are_rejected(self) -> None:
         source = env_0200()
         source["RU_PUBLIC_IP"] = source["GATEWAY_PUBLIC_IP"]

@@ -27,6 +27,10 @@
 - Удалены общие legacy migration readers, role wrappers и прежний операторский переключатель web-admin. Совместимость с `0.20.0` сосредоточена в единственном модуле `vpn_installer/upgrade_0200.py` и точных version/schema validators.
 - В `0.20.2` этот модуль и все его call sites/tests удаляются целиком; минимальная обновляемая версия становится `0.20.1`, максимальная — `0.20.2`. Повышение config/state `3`, manifest/install-plan `4` или diagnostics `5` для этой очистки не планируется.
 
+### Fixed
+
+- Переходный reader корректно удаляет `WAN_INTERFACE`, который `0.20.0` ошибочно записывал в gateway node env как common field; полный deployment env и exit сохраняют значение. Это позволяет штатному production-upgrade пройти строгую capability projection без ослабления current validator.
+
 ## [0.20.0] - 2026-08-17
 
 ### Added
