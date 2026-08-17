@@ -28,11 +28,11 @@ class InstallContractTests(unittest.TestCase):
             root = Path(temp)
             bundle = root / "bundle"
             bundle.mkdir()
-            (bundle / "render-manifest.json").write_text('{"version":"0.20.1"}', encoding="utf-8")
+            (bundle / "render-manifest.json").write_text('{"version":"0.20.2"}', encoding="utf-8")
             with patch("vpn_installer.install_contract._validate_bundle") as validator:
                 validate_installed_bundle(bundle, "gateway", root / "contract")
 
-        self.assertEqual(validator.call_args.kwargs["expected_version"], "0.20.1")
+        self.assertEqual(validator.call_args.kwargs["expected_version"], "0.20.2")
         self.assertNotIn("require_current_compatibility", validator.call_args.kwargs)
 
     def test_installed_bundle_rejects_out_of_window_version_before_validation(self) -> None:

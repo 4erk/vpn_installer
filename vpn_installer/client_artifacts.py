@@ -343,6 +343,9 @@ def render_next_steps(env: dict[str, str], *, out_dir: Path | None = None) -> st
     paths = client_artifact_paths(env, out_dir=out_dir)
     status_command = cli_command(f"status --deployment {env['DEPLOY_NAME']} --node gateway")
     verify_command = cli_command(f"verify live --deployment {env['DEPLOY_NAME']}")
+    client_diagnose_command = cli_command(
+        f"diagnose client --deployment {env['DEPLOY_NAME']} --source <public-ip>"
+    )
     return "\n".join(
         [
             f"Deployment: {env['DEPLOY_NAME']}",
@@ -364,7 +367,7 @@ def render_next_steps(env: dict[str, str], *, out_dir: Path | None = None) -> st
             f"2. Для v2rayN скопируй строку из {paths['v2rayn_uri'].name} и выбери импорт share link из буфера; это тот же канонический VLESS URI без custom-config слоя.",
             f"3. Если клиенту нужен JSON-импорт, используй {paths['hiddify_json'].name}, {paths['windows_xray_json'].name} или {paths['android_xray_json'].name}. В них multiplex явно выключен: большие загрузки не делят один outer TCP stream.",
             f"4. Если клиентский JSON/TUN начинает отправлять на сервер private/fake IP вместо домена, `{cli_command('status')}` покажет это в отдельном bucket `blocked_private_fake`.",
-            f"5. Если импортированный URI переиспользует один TCP socket для разных сайтов, `{cli_command('diagnose client')}` покажет multiplex. Для VLESS используй mux-free JSON; не включай Mux в глобальных настройках клиента.",
+            f"5. Если импортированный URI переиспользует один TCP socket для разных сайтов, `{client_diagnose_command}` покажет multiplex. Для VLESS используй mux-free JSON; не включай Mux в глобальных настройках клиента.",
             f"6. Для импорта QUIC как обычного узла в Hiddify/v2rayN используй {paths['hysteria2_uri'].name}; VLESS URI остаётся основным вариантом для сетей без UDP.",
             f"7. Ручная смена клиентского VLESS/Hysteria2 узла действует только на новые соединения. Серверный underlay failover сохраняет открытые потоки внутри WireGuard overlay, но не может восстановить уже оборванный участок клиент -> RU.",
             f"8. Если сайты висят, сначала смотри серверные группы ошибок: {status_command}",

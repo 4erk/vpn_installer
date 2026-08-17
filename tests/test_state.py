@@ -20,12 +20,14 @@ class StateTests(unittest.TestCase):
                 ssh_host="203.0.113.10",
                 auth_mode="password",
                 ssh_password="secret",
+                save_ssh_password=True,
             )
             state.write_state("demo", [target], topology="single")
             payload = state.load_state("demo")
         self.assertEqual(payload["schema_version"], CONFIG_SCHEMA_VERSION)
         self.assertEqual(payload["nodes"][NODE_GATEWAY]["auth_mode"], "password")
         self.assertNotIn("ssh_password", payload["nodes"][NODE_GATEWAY])
+        self.assertNotIn("save_ssh_password", payload["nodes"][NODE_GATEWAY])
 
     def test_write_state_preserves_other_dual_node(self) -> None:
         existing = {

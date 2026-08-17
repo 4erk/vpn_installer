@@ -6,9 +6,10 @@ from functools import total_ordering
 from typing import Mapping
 
 from . import VERSION
+from .common import cli_entrypoint
 
 
-COMPATIBLE_INSTALLED_MIN = "0.20.1"
+COMPATIBLE_INSTALLED_MIN = "0.20.2"
 COMPATIBLE_INSTALLED_MAX = VERSION
 
 _VERSION_PATTERN = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
@@ -103,9 +104,10 @@ def incompatible_update_message(
     window: CompatibilityWindow | None = None,
 ) -> str:
     supported = window or CompatibilityWindow.current()
+    entrypoint = cli_entrypoint()
     return (
         f"installed release {installed} cannot be updated by {VERSION}; supported installed versions: "
-        f"{supported.minimum}..{supported.maximum}. Use vpn.cmd from tag {installed} to remove or purge "
+        f"{supported.minimum}..{supported.maximum}. Use {entrypoint} from tag {installed} to remove or purge "
         "that release, then install the current release."
     )
 

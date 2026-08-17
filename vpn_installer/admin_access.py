@@ -18,6 +18,19 @@ def _valid_port(value: int) -> int:
     return value
 
 
+def admin_url(env: dict[str, str]) -> str:
+    topology = TopologySpec.from_env(env, require_addresses=False)
+    if CAP_WEB_ADMIN not in topology.plan(NODE_GATEWAY).capabilities:
+        raise AppError("Web-admin доступен только в dual topology.")
+    if not topology.gateway.public_ip:
+        raise AppError("Для web-admin не указан публичный IP gateway.")
+    try:
+        port = _valid_port(int(env.get("ADMIN_WEB_PORT", str(DEFAULT_ADMIN_PORT))))
+    except ValueError as exc:
+        raise AppError("ADMIN_WEB_PORT должен быть целым числом") from exc
+    return f"http://{topology.gateway.public_ip}:{port}"
+
+
 def admin_access_workflow(
     deployment: str | None,
     *,
@@ -25,14 +38,7 @@ def admin_access_workflow(
 ) -> int:
     deployment_name = select_existing_deployment(deployment)
     _env_path, env = load_existing_deployment_env(deployment_name)
-    topology = TopologySpec.from_env(env)
-    if CAP_WEB_ADMIN not in topology.plan(NODE_GATEWAY).capabilities:
-        raise AppError("Web-admin доступен только в dual topology.")
-    try:
-        port = _valid_port(int(env.get("ADMIN_WEB_PORT", str(DEFAULT_ADMIN_PORT))))
-    except ValueError as exc:
-        raise AppError("ADMIN_WEB_PORT должен быть целым числом") from exc
-    url = f"http://{topology.gateway.public_ip}:{port}"
+    url = admin_url(env)
     print_header("Web-admin")
     print(f"deployment: {deployment_name}")
     print(f"Адрес: {url}")

@@ -7,13 +7,19 @@ show_vpn_help() {
   cat <<'EOF'
 Использование:
   ./vpn.sh
+  ./vpn.sh --version
   ./vpn.sh install
   ./vpn.sh status --deployment home-vpn
+
+Основные команды:
+  install, status, admin, verify live, diagnose, routes,
+  reinstall, maintain, remove, purge, cleanup-local, audit
 
 Если запустить без аргументов:
   откроется пошаговое меню с действиями:
   - Установить или обновить VPN
   - Проверить текущее состояние
+  - Показать адрес web-admin для двойной схемы
   - Переустановить
   - Удалить с серверов
   - Полная очистка
@@ -21,10 +27,11 @@ show_vpn_help() {
   - Самопроверка
 
 Что нужно заранее:
-  - российский и зарубежный сервер на Ubuntu 24.04
-  - публичный IPv4 у каждого
+  - один сервер для одиночной схемы или два для двойной
+  - Ubuntu 24.04 и публичный IPv4 у каждого используемого сервера
   - SSH-доступ по ключу или паролю
-  - установленный Hiddify на клиентском устройстве
+  - VPN-клиент с поддержкой VLESS/Reality
+  - Список команд: docs/COMMANDS.md
   - Как выбрать серверы: docs/PROVIDERS.md
   - Что внутри проекта: docs/PROJECT.md
   - При ошибке подробный лог: out/logs/runtime/latest-error.log

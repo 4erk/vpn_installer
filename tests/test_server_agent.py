@@ -1160,9 +1160,9 @@ class ServerAgentTests(unittest.TestCase):
     def test_snapshot_includes_bootstrap_identity_for_lifecycle_preflight(self) -> None:
         manifest = {
             **self.single_manifest(),
-            "version": "0.20.2",
+            "version": "0.21.0",
             "release_id": "release-1",
-            "policy_version": "0.20.2",
+            "policy_version": "0.21.0",
         }
         with (
             patch.object(server_agent, "parse_env", return_value={"DEPLOY_NAME": "demo", "WAN_INTERFACE": "eth0", "WG_INTERFACE": "wg0", "RU_LISTEN_PORT": "443"}),

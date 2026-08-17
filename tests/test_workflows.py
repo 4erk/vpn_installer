@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from io import StringIO
 from pathlib import Path
 from unittest.mock import Mock, call, patch
 
@@ -211,6 +212,7 @@ class WorkflowTests(unittest.TestCase):
     def test_finalize_install_output_prefers_vless_uri(self) -> None:
         env = generate_default_env("demo")
         env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
+        env["EXIT_PUBLIC_IP"] = "198.51.100.20"
         with tempfile.TemporaryDirectory() as tmp:
             paths = {
                 "vless_uri": Path(tmp) / "vless-uri.txt",
@@ -227,10 +229,11 @@ class WorkflowTests(unittest.TestCase):
             paths["vless_uri"].write_text("vless://demo\n", encoding="utf-8")
             paths["hiddify_uri_compat"].write_text("vless://demo\n", encoding="utf-8")
             paths["hiddify_json"].write_text('{"route":{"final":"ru-gateway"}}', encoding="utf-8")
-            with patch("vpn_installer.workflows.client_artifact_paths", return_value=paths):
+            with patch("vpn_installer.workflows.client_artifact_paths", return_value=paths), patch("sys.stdout", new_callable=StringIO) as stream:
                 with patch("vpn_installer.workflows.copy_to_clipboard", return_value=(False, "no clipboard")) as copy_mock:
                     workflows.finalize_install_output(env, "demo")
             copy_mock.assert_called_once_with("vless://demo\n")
+            self.assertIn("Web-admin: http://203.0.113.10:11333", stream.getvalue())
 
     def test_verify_target_interactively_cancel_raises_user_cancelled(self) -> None:
         target = RemoteTarget(node_id=NODE_GATEWAY, public_ip="203.0.113.10", ssh_host="203.0.113.10", ssh_port=22, ssh_user="root")
@@ -299,15 +302,41 @@ class WorkflowTests(unittest.TestCase):
             auth_mode="password",
             saved_connection=True,
         )
-        with self.assertRaises(AppError) as ctx:
-            workflows.verify_target_non_interactively(
+        with patch("vpn_installer.workflows.hydrate_runtime_auth", return_value=target):
+            with self.assertRaises(AppError) as ctx:
+                workflows.verify_target_non_interactively(
+                    target,
+                    env=generate_default_env("demo"),
+                    wg_interface="wg0",
+                    require_privilege=True,
+                    validate_os=True,
+                )
+        self.assertIn("VPN_GATEWAY_SSH_PASSWORD", str(ctx.exception))
+
+    def test_verify_target_non_interactively_accepts_system_stored_password(self) -> None:
+        target = RemoteTarget(
+            node_id=NODE_GATEWAY,
+            public_ip="203.0.113.10",
+            ssh_host="203.0.113.10",
+            ssh_port=22,
+            ssh_user="root",
+            auth_mode="password",
+            saved_connection=True,
+        )
+
+        def hydrate(value: RemoteTarget, **_kwargs: object) -> RemoteTarget:
+            value.ssh_password = "stored-secret"
+            return value
+
+        with patch("vpn_installer.workflows.hydrate_runtime_auth", side_effect=hydrate), patch("vpn_installer.workflows.assert_server_route_not_self_tunneled"), patch("vpn_installer.workflows.remote_preflight", return_value={"os_id": "ubuntu", "os_version": "24.04", "is_root": "1"}), patch("vpn_installer.workflows.print_preflight"):
+            updated, _result = workflows.verify_target_non_interactively(
                 target,
                 env=generate_default_env("demo"),
                 wg_interface="wg0",
                 require_privilege=True,
                 validate_os=True,
             )
-        self.assertIn("VPN_GATEWAY_SSH_PASSWORD", str(ctx.exception))
+        self.assertEqual(updated.ssh_password, "stored-secret")
 
     def test_verify_target_interactively_checks_remote_privilege(self) -> None:
         target = RemoteTarget(node_id=NODE_GATEWAY, public_ip="203.0.113.10", ssh_host="203.0.113.10", ssh_port=22, ssh_user="root")
@@ -1329,6 +1358,12 @@ class WorkflowTests(unittest.TestCase):
         with patch("vpn_installer.workflows.prompt_choice", side_effect=["status", "exit"]), patch("vpn_installer.workflows.select_node_for_menu", return_value="gateway"), patch("vpn_installer.workflows.status_workflow", return_value=0) as status:
             self.assertEqual(workflows.menu_workflow(), 0)
         status.assert_called_once_with(None, "gateway")
+
+        with patch("vpn_installer.workflows.prompt_choice", side_effect=["admin", "exit"]), patch("vpn_installer.workflows.admin_access_workflow", return_value=0) as admin, patch("sys.stdout", new_callable=StringIO) as stream:
+            self.assertEqual(workflows.menu_workflow(), 0)
+        admin.assert_called_once_with(None)
+        self.assertIn("VPN Installer", stream.getvalue())
+        self.assertIn(workflows.VERSION, stream.getvalue())
 
     def test_run_menu_action_handles_cancel_and_error_without_propagation(self) -> None:
         with patch("sys.stderr", new_callable=__import__("io").StringIO) as stream:

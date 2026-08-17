@@ -3,7 +3,7 @@ from __future__ import annotations
 import builtins
 import io
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from vpn_installer.models import AppError, RemoteTarget
 from vpn_installer.topology import NODE_EXIT, NODE_GATEWAY
@@ -12,6 +12,7 @@ from vpn_installer.prompts import (
     display_target_connection,
     has_saved_connection,
     hydrate_runtime_auth,
+    persist_runtime_auth,
     prompt_choice,
     prompt_server_connection,
     prompt_topology,
@@ -73,7 +74,7 @@ class PromptTests(unittest.TestCase):
 
     def test_prompt_server_connection_key_flow(self) -> None:
         target = RemoteTarget(node_id=NODE_GATEWAY, public_ip="203.0.113.10")
-        answers = iter(["203.0.113.10", "22", "root", "1", "n", ""])
+        answers = iter(["203.0.113.10", "22", "root", "2", "n", ""])
         with patch.object(builtins, "input", side_effect=lambda _prompt="": next(answers)):
             updated = prompt_server_connection(target, force_prompt=True, confirm_existing=True)
         self.assertEqual(updated.ssh_host, "203.0.113.10")
@@ -91,7 +92,7 @@ class PromptTests(unittest.TestCase):
         )
         answers = iter(["1"])
         with patch.object(builtins, "input", side_effect=lambda _prompt="": next(answers)):
-            with patch("getpass.getpass", return_value="secret"):
+            with patch("getpass.getpass", return_value="secret"), patch("vpn_installer.prompts.system_credential_store", return_value=None):
                 updated = prompt_server_connection(target, force_prompt=False, confirm_existing=True)
         self.assertEqual(updated.ssh_password, "secret")
         self.assertEqual(updated.auth_mode, "password")
@@ -109,6 +110,45 @@ class PromptTests(unittest.TestCase):
         ):
             self.assertEqual(hydrate_runtime_auth(gateway).ssh_password, "gateway-secret")
             self.assertEqual(hydrate_runtime_auth(exit_target).ssh_password, "exit-secret")
+
+    def test_runtime_password_uses_system_store_without_prompt(self) -> None:
+        store = Mock(label="test vault")
+        store.load.return_value = "saved-secret"
+        target = RemoteTarget(
+            node_id=NODE_GATEWAY,
+            ssh_host="ssh.example.test",
+            ssh_port=2222,
+            ssh_user="root",
+            auth_mode="password",
+        )
+        with patch.dict("os.environ", {}, clear=True), patch("vpn_installer.prompts.system_credential_store", return_value=store), patch("getpass.getpass") as getpass_mock:
+            updated = hydrate_runtime_auth(target)
+        self.assertEqual(updated.ssh_password, "saved-secret")
+        getpass_mock.assert_not_called()
+
+    def test_prompted_password_is_saved_only_after_explicit_persist(self) -> None:
+        store = Mock(label="test vault")
+        store.load.return_value = None
+        target = RemoteTarget(
+            node_id=NODE_GATEWAY,
+            ssh_host="ssh.example.test",
+            ssh_port=2222,
+            ssh_user="root",
+            auth_mode="password",
+        )
+        with patch.dict("os.environ", {}, clear=True), patch("vpn_installer.prompts.system_credential_store", return_value=store), patch("getpass.getpass", return_value="secret"), patch("vpn_installer.prompts.prompt_yes_no", return_value=True):
+            hydrate_runtime_auth(target, offer_save=True)
+        store.save.assert_not_called()
+        self.assertTrue(target.save_ssh_password)
+        with patch("vpn_installer.prompts.system_credential_store", return_value=store):
+            persist_runtime_auth(target)
+        store.save.assert_called_once()
+        self.assertFalse(target.save_ssh_password)
+
+    def test_remote_target_repr_hides_passwords(self) -> None:
+        rendered = repr(RemoteTarget(node_id=NODE_GATEWAY, ssh_password="ssh-secret", sudo_password="sudo-secret"))
+        self.assertNotIn("ssh-secret", rendered)
+        self.assertNotIn("sudo-secret", rendered)
 
     def test_select_deployment_blank_prefers_new(self) -> None:
         answers = iter(["", "my new vpn"])
@@ -132,7 +172,7 @@ class PromptTests(unittest.TestCase):
         target = RemoteTarget(node_id=NODE_GATEWAY, public_ip="203.0.113.10", ssh_host="203.0.113.10", ssh_user="root", auth_mode="password", saved_connection=True)
         with patch("sys.stdout", new_callable=io.StringIO) as stream:
             display_target_connection(target)
-        self.assertIn("будет запрошен заново", stream.getvalue())
+        self.assertIn("системного хранилища", stream.getvalue())
 
     def test_select_existing_deployment_uses_existing_list(self) -> None:
         with patch("vpn_installer.prompts.find_existing_deployments", return_value=["alpha", "beta"]), patch.object(builtins, "input", return_value="2"):

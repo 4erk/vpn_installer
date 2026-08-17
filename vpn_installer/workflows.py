@@ -9,6 +9,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from . import VERSION
+from .admin_access import admin_access_workflow, admin_url
 from .clipboard import copy_to_clipboard
 from .client_drift import find_client_drift
 from .common import DEPLOYMENTS_DIR, OUT_DIR, RUNTIME_DIR, INSTALL_SCRIPT_PATH, cli_command, ensure_directories, error_summary, fail, print_header, sanitize_name, warn, write_private_text
@@ -33,6 +35,8 @@ from .network_profile import FQ_KIND
 from .prompts import (
     ask_install_action,
     auth_mode_label,
+    hydrate_runtime_auth,
+    persist_runtime_auth,
     prompt_choice,
     prompt_secret,
     prompt_server_connection,
@@ -166,6 +170,7 @@ def verify_target_interactively(
                     run_live_probes=run_live_probes,
                 )
             print_preflight(target, preflight)
+            persist_runtime_auth(target)
             if validate_os:
                 if preflight.get("os_id") != "ubuntu":
                     fail(f"{target.label} должен быть Ubuntu.")
@@ -213,10 +218,11 @@ def verify_target_non_interactively(
             f"Задай state через обычный запуск или env {node_env_prefix(target.node_id)}_PUBLIC_IP/{node_env_prefix(target.node_id)}_SSH_HOST."
         )
     validate_target_settings(target)
+    target = hydrate_runtime_auth(target, interactive=False)
     if target.auth_mode == "password" and not target.ssh_password:
         raise AppError(
-            f"{target.label}: для non-interactive password-входа нужен env "
-            f"{node_env_prefix(target.node_id)}_SSH_PASSWORD или VPN_SSH_PASSWORD."
+            f"{target.label}: для non-interactive password-входа нужен пароль в системном хранилище или env "
+            f"{node_env_prefix(target.node_id)}_SSH_PASSWORD/VPN_SSH_PASSWORD."
         )
     backend = "встроенный password backend" if target.auth_mode == "password" else "OpenSSH publickey-only"
     print(f"Проверяю подключение к {target.label}: {target.ssh_user}@{target.ssh_host}:{target.ssh_port} ({backend})")
@@ -911,6 +917,9 @@ def finalize_install_output(env: dict[str, str], deployment_name: str) -> None:
     clipboard_ok, clipboard_message = copy_to_clipboard(uri_payload)
     print_header("Готово")
     print(f"Deployment: {deployment_name}")
+    topology = TopologySpec.from_env(env, require_addresses=False)
+    if CAP_WEB_ADMIN in topology.plan(NODE_GATEWAY).capabilities:
+        print(f"Web-admin: {admin_url(env)}")
     print(f"Основной простой VLESS URI: {paths['vless_uri']}")
     print(f"Hiddify URI alias: {paths['hiddify_uri_compat']}")
     print(f"Windows/v2rayN Xray JSON fallback: {paths['windows_xray_json']}")
@@ -998,7 +1007,7 @@ def install_workflow(
     topology_mode: str | None = None,
     gateway_location: str | None = None,
 ) -> int:
-    print_header("Установка / обновление VPN")
+    print_header(f"Установка / обновление VPN {VERSION}")
     deployment_name, env_path, env, state, targets, preflights = prepare_remote_session(
         deployment,
         nodes=None,
@@ -1414,12 +1423,13 @@ def audit_menu_workflow() -> int:
 
 def menu_workflow() -> int:
     while True:
-        print_header("VPN Installer")
+        print_header(f"VPN Installer {VERSION}")
         choice = prompt_choice(
             "Выбери действие",
             [
                 ("install", "Установить или обновить VPN"),
                 ("status", "Проверить текущее состояние"),
+                ("admin", "Показать адрес web-admin"),
                 ("reinstall", "Переустановить"),
                 ("remove", "Удалить с серверов"),
                 ("purge", "Полностью очистить состояние"),
@@ -1434,6 +1444,9 @@ def menu_workflow() -> int:
             return 0
         if choice == "audit":
             audit_menu_workflow()
+            continue
+        if choice == "admin":
+            run_menu_action(lambda: admin_access_workflow(None), return_to="главное меню")
             continue
         if choice == "cleanup-local":
             run_menu_action(lambda: cleanup_local_workflow(None, drop_env=False, drop_runtime=False), return_to="главное меню")

@@ -19,13 +19,19 @@ function Show-VpnHelp {
   @'
 Использование:
   .\vpn.cmd
+  .\vpn.cmd --version
   .\vpn.cmd install
   .\vpn.cmd status --deployment home-vpn
+
+Основные команды:
+  install, status, admin, verify live, diagnose, routes,
+  reinstall, maintain, remove, purge, cleanup-local, audit
 
 Если запустить без аргументов:
   откроется пошаговое меню с действиями:
   - Установить или обновить VPN
   - Проверить текущее состояние
+  - Показать адрес web-admin для двойной схемы
   - Переустановить
   - Удалить с серверов
   - Полная очистка
@@ -43,13 +49,14 @@ function Show-VpnHelp {
   - простой VLESS URI сохранится локально и станет основным профилем
   - будет попытка скопировать URI в буфер обмена
   - появится файл NEXT-STEPS.txt с дальнейшими шагами
-  - Как выбрать серверы: docs/PROVIDERS.md
-  - Что внутри проекта: docs/PROJECT.md
+  - Список команд: docs\COMMANDS.md
+  - Как выбрать серверы: docs\PROVIDERS.md
+  - Что внутри проекта: docs\PROJECT.md
 
 Подсказка:
   Enter в вопросах с дефолтом оставляет текущее значение.
   При ошибке подробный лог сохраняется в out\logs\runtime\latest-error.log
-  Публичная точка входа Windows: vpn.cmd. vpn.ps1 является внутренним bootstrap-файлом.
+  Публичная точка входа Windows: .\vpn.cmd. vpn.ps1 является внутренним bootstrap-файлом.
 '@ | Write-Host
 }
 

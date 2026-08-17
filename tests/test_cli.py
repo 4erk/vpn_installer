@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import unittest
+from io import StringIO
 from unittest.mock import patch
 
-from vpn_installer import cli
-from vpn_installer.admin_access import admin_access_workflow
+from vpn_installer import VERSION, cli
+from vpn_installer.admin_access import admin_access_workflow, admin_url
 from vpn_installer.models import AppError
 
 
@@ -49,6 +50,13 @@ class CliTests(unittest.TestCase):
         with patch("vpn_installer.cli.cli_entrypoint", return_value=r".\vpn.cmd"):
             parser = cli.build_parser()
         self.assertEqual(parser.prog, r".\vpn.cmd")
+
+    def test_version_flag_prints_current_package_version(self) -> None:
+        with patch("sys.stdout", new_callable=StringIO) as stream:
+            with self.assertRaises(SystemExit) as raised:
+                cli.main(["--version"])
+        self.assertEqual(raised.exception.code, 0)
+        self.assertIn(VERSION, stream.getvalue())
 
     def test_audit_dispatch(self) -> None:
         with patch("vpn_installer.audit.runner.main", return_value=0) as mocked:
@@ -116,6 +124,16 @@ class CliTests(unittest.TestCase):
         ) as browser:
             self.assertEqual(admin_access_workflow("demo", open_browser=True), 0)
         browser.assert_called_once_with("http://203.0.113.10:11444", new=2)
+
+    def test_admin_url_is_shared_with_install_output(self) -> None:
+        env = {
+            "TOPOLOGY": "dual",
+            "GATEWAY_LOCATION": "ru",
+            "GATEWAY_PUBLIC_IP": "203.0.113.10",
+            "EXIT_PUBLIC_IP": "198.51.100.20",
+            "ADMIN_WEB_PORT": "11444",
+        }
+        self.assertEqual(admin_url(env), "http://203.0.113.10:11444")
 
     def test_admin_access_rejects_single_topology(self) -> None:
         env = {

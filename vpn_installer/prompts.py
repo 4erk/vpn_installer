@@ -16,6 +16,7 @@ from .config import (
     validate_ssh_port,
     validate_ssh_user,
 )
+from .credential_store import SSHCredentialRef, CredentialStoreError, system_credential_store
 from .models import NODE_META, RemoteTarget
 from .topology import (
     LOCATION_FOREIGN,
@@ -155,12 +156,23 @@ def display_target_connection(target: RemoteTarget) -> None:
     if target.auth_mode == "key":
         print(f"SSH key: {target.identity_path or 'ssh-agent / стандартный ключ'}; password fallback отключён")
     elif target.saved_connection:
-        print("SSH password: будет запрошен заново и передан встроенным backend без запуска ssh.exe")
+        print("SSH password: будет взят из системного хранилища или запрошен без вывода на экран")
 
 
-def hydrate_runtime_auth(target: RemoteTarget) -> RemoteTarget:
-    target.ssh_password = ""
+def credential_ref(target: RemoteTarget) -> SSHCredentialRef:
+    return SSHCredentialRef(target.ssh_host, target.ssh_port, target.ssh_user)
+
+
+def hydrate_runtime_auth(
+    target: RemoteTarget,
+    *,
+    interactive: bool = True,
+    use_saved_password: bool = True,
+    offer_save: bool = False,
+) -> RemoteTarget:
     if target.auth_mode == "password":
+        if target.ssh_password:
+            return target
         env_names = (
             ["VPN_GATEWAY_SSH_PASSWORD", "VPN_RU_SSH_PASSWORD", "VPN_SSH_PASSWORD"]
             if target.node_id == NODE_GATEWAY
@@ -171,23 +183,64 @@ def hydrate_runtime_auth(target: RemoteTarget) -> RemoteTarget:
             if password:
                 target.ssh_password = password
                 return target
+        store = system_credential_store()
+        if use_saved_password and store is not None:
+            try:
+                password = store.load(credential_ref(target))
+            except CredentialStoreError as exc:
+                warn(str(exc))
+            else:
+                if password:
+                    target.ssh_password = password
+                    print(f"{target.label}: использую SSH-пароль из {store.label}.")
+                    return target
+        if not interactive:
+            return target
         while True:
             password = prompt_secret(f"{target.label}: SSH пароль")
             if password:
                 target.ssh_password = password
+                if offer_save:
+                    if store is None:
+                        warn("Безопасное системное хранилище недоступно; пароль останется только в памяти процесса.")
+                    elif prompt_yes_no(
+                        f"{target.label}: сохранить пароль в {store.label}? В файлы проекта он не попадёт",
+                        default=False,
+                    ):
+                        target.save_ssh_password = True
                 return target
             warn("SSH пароль не может быть пустым.")
     return target
 
 
+def persist_runtime_auth(target: RemoteTarget) -> None:
+    if target.auth_mode != "password" or not target.save_ssh_password or not target.ssh_password:
+        return
+    store = system_credential_store()
+    if store is None:
+        warn("Безопасное системное хранилище недоступно; SSH-пароль не сохранён.")
+        target.save_ssh_password = False
+        return
+    try:
+        store.save(credential_ref(target), target.ssh_password)
+    except CredentialStoreError as exc:
+        warn(str(exc))
+    else:
+        print(f"{target.label}: проверенный SSH-пароль сохранён в {store.label}.")
+    finally:
+        target.save_ssh_password = False
+
+
 def prompt_server_connection(target: RemoteTarget, *, force_prompt: bool = False, confirm_existing: bool = True) -> RemoteTarget:
     print_header(f"Подключение: {human_target_label(target)}")
+    use_saved_password = not force_prompt
     if target.saved_connection:
         try:
             validate_target_settings(target)
         except Exception as exc:  # noqa: BLE001
             warn(f"{target.label}: сохранённые SSH-данные повреждены или неполны, нужно ввести заново ({error_summary(exc)})")
             force_prompt = True
+            use_saved_password = False
         else:
             print("Найдены сохранённые SSH-данные:")
             display_target_connection(target)
@@ -202,7 +255,8 @@ def prompt_server_connection(target: RemoteTarget, *, force_prompt: bool = False
                 )
                 if action == "reuse":
                     print(f"{target.label}: использую сохранённое подключение, дальше будет реальная SSH-проверка.")
-                    return hydrate_runtime_auth(target)
+                    return hydrate_runtime_auth(target, offer_save=True)
+                use_saved_password = False
     elif target.public_ip:
         print(f"Подставлен public IP из deployment env: {target.public_ip}")
 
@@ -216,6 +270,7 @@ def prompt_server_connection(target: RemoteTarget, *, force_prompt: bool = False
         default=str(target.ssh_port or 22),
         validator=validate_ssh_port,
     )
+    target.ssh_port = int(ssh_port_raw)
     target.ssh_user = prompt_validated_value(
         f"{target.label}: SSH user (пример root или ubuntu)",
         default=target.ssh_user or "root",
@@ -223,8 +278,8 @@ def prompt_server_connection(target: RemoteTarget, *, force_prompt: bool = False
     )
     target.auth_mode = prompt_choice(
         f"{target.label}: способ входа",
-        [("key", "SSH key"), ("password", "SSH password")],
-        default=target.auth_mode or "key",
+        [("password", "SSH password"), ("key", "SSH key")],
+        default=(target.auth_mode if target.saved_connection else "password"),
     )
     use_custom_host_default = bool(target.ssh_host and target.ssh_host != target.public_ip)
     if prompt_yes_no(f"{target.label}: SSH адрес отличается от Public IP?", default=use_custom_host_default):
@@ -245,8 +300,12 @@ def prompt_server_connection(target: RemoteTarget, *, force_prompt: bool = False
         target.ssh_password = ""
     else:
         target.identity_path = ""
-        target = hydrate_runtime_auth(target)
-    target.ssh_port = int(ssh_port_raw)
+        target.ssh_password = ""
+        target = hydrate_runtime_auth(
+            target,
+            use_saved_password=use_saved_password,
+            offer_save=True,
+        )
     target.saved_connection = False
     validate_target_settings(target)
     print("Будет использовано подключение:")

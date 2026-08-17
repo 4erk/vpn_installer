@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .topology import LOCATION_FOREIGN, NODE_EXIT, NODE_GATEWAY, normalize_node_id
 
@@ -90,9 +90,10 @@ class RemoteTarget:
     auth_mode: str = "key"
     identity_path: str = ""
     ssh_bind_address: str = ""
-    ssh_password: str = ""
+    ssh_password: str = field(default="", repr=False)
     sudo_mode: str = "unknown"
-    sudo_password: str = ""
+    sudo_password: str = field(default="", repr=False)
+    save_ssh_password: bool = field(default=False, repr=False)
     saved_connection: bool = False
 
     def __post_init__(self) -> None:

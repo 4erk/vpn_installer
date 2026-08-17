@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 
+from . import VERSION
 from .admin_access import admin_access_workflow
 from .android import DEFAULT_HIDDIFY_PACKAGE, android_diagnose
 from .common import cli_entrypoint, error_summary
@@ -60,7 +61,8 @@ def dispatch_routes(args: argparse.Namespace, action: str) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog=cli_entrypoint(), description="Portable VPN installer.")
+    parser = argparse.ArgumentParser(prog=cli_entrypoint(), description="Установка и управление VPN через один или два сервера.")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
     subparsers = parser.add_subparsers(dest="command")
 
     menu = subparsers.add_parser("menu", help="Показать интерактивное меню.")

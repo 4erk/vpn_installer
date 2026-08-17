@@ -141,6 +141,7 @@ def run(runner: AuditRunner) -> None:
                 str(ROOT_DIR / "vpn_installer" / "launcher.py"),
                 str(ROOT_DIR / "vpn_installer" / "cli.py"),
                 str(ROOT_DIR / "vpn_installer" / "compatibility.py"),
+                str(ROOT_DIR / "vpn_installer" / "credential_store.py"),
                 str(ROOT_DIR / "vpn_installer" / "diagnostics.py"),
                 str(ROOT_DIR / "vpn_installer" / "install_contract.py"),
                 str(ROOT_DIR / "vpn_installer" / "install_support.py"),
@@ -279,8 +280,10 @@ def test_install_ux_helpers() -> dict[str, str]:
         },
         {},
     )
-    answers = iter(["1.2.3.4", "22", "root", "1", "n", ""])
-    with patch.object(builtins, "input", side_effect=lambda _prompt="": next(answers)):
+    answers = iter(["1.2.3.4", "22", "root", "", "n"])
+    with patch.object(builtins, "input", side_effect=lambda _prompt="": next(answers)), patch.object(
+        getpass, "getpass", return_value="secret"
+    ), patch("vpn_installer.prompts.system_credential_store", return_value=None):
         prompted_target = prompt_server_connection(env_only_target, force_prompt=not env_only_target.saved_connection, confirm_existing=True)
 
     saved_state = {
@@ -310,7 +313,9 @@ def test_install_ux_helpers() -> dict[str, str]:
         saved_state,
     )
     answers = iter(["1"])
-    with patch.object(builtins, "input", side_effect=lambda _prompt="": next(answers)), patch.object(getpass, "getpass", return_value="secret"):
+    with patch.object(builtins, "input", side_effect=lambda _prompt="": next(answers)), patch.object(
+        getpass, "getpass", return_value="secret"
+    ), patch("vpn_installer.prompts.system_credential_store", return_value=None):
         reused_target = prompt_server_connection(saved_target, force_prompt=False, confirm_existing=True)
 
     if selected != "my-new-vpn":
@@ -319,8 +324,12 @@ def test_install_ux_helpers() -> dict[str, str]:
         raise AuditFailure("первая установка не предлагает home-vpn по умолчанию")
     if env_only_target.saved_connection:
         raise AuditFailure("env без state не должен считаться сохранённым подключением")
-    if prompted_target.ssh_host != "1.2.3.4" or prompted_target.auth_mode != "key":
-        raise AuditFailure("не прошёл key-flow для prompt_server_connection")
+    if (
+        prompted_target.ssh_host != "1.2.3.4"
+        or prompted_target.auth_mode != "password"
+        or prompted_target.ssh_password != "secret"
+    ):
+        raise AuditFailure("не прошёл default password-flow для prompt_server_connection")
     if not reused_target.saved_connection or reused_target.auth_mode != "password" or reused_target.ssh_password != "secret":
         raise AuditFailure("не прошёл reuse password-flow для prompt_server_connection")
     return {
@@ -336,7 +345,7 @@ def test_vpn_menu_exit(runner: AuditRunner) -> dict[str, str]:
     completed = runner.run_command(
         "vpn-menu-exit",
         [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/c", str(VPN_CMD)],
-        input_text="8\n",
+        input_text="9\n",
         env={"VPN_NO_PAUSE": "1"},
     )
     output = completed.stdout + completed.stderr

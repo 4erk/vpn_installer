@@ -57,6 +57,7 @@ class ClientArtifactTests(unittest.TestCase):
         rendered = client_artifacts.render_next_steps(self.make_env())
 
         self.assertIn("status --deployment demo --node gateway", rendered)
+        self.assertIn("diagnose client --deployment demo --source <public-ip>", rendered)
         self.assertNotIn("--role ru-gateway", rendered)
 
     def test_render_client_profiles_honors_explicit_out_dir(self) -> None:
