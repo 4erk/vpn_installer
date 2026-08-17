@@ -6,7 +6,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, call, patch
 
-from vpn_installer.common import env_line
 from vpn_installer.config import generate_default_env, merge_env_with_defaults, render_env_text
 from vpn_installer.diagnostics import COLLECTOR_NAMES, LOG_WINDOW_KEYS, CollectorState, DiagnosticsSnapshot, LogWindowSnapshot
 from vpn_installer.localnet import LocalRoute
@@ -407,34 +406,6 @@ class WorkflowTests(unittest.TestCase):
         self.assertIs(synced_env, local_env)
         self.assertEqual(target.public_ip, "203.0.113.10")
         write_text_mock.assert_not_called()
-
-    def test_remote_0200_node_env_is_normalized_at_the_single_upgrade_boundary(self) -> None:
-        local_env = generate_default_env("demo")
-        local_env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
-        local_env["EXIT_PUBLIC_IP"] = "198.51.100.20"
-        previous = {**local_env, "CONFIG_SCHEMA": "2", "ADMIN_WEB_ENABLED": "1"}
-        remote_text = render_node_env_text(previous, NODE_GATEWAY)
-        # 0.20.0 emitted WAN_INTERFACE as a common field on both nodes.
-        remote_text += env_line("ADMIN_WEB_ENABLED", "1") + "\n"
-        remote_text += env_line("WAN_INTERFACE", "eth0") + "\n"
-        target = RemoteTarget(
-            node_id=NODE_GATEWAY,
-            public_ip="203.0.113.10",
-            ssh_host="203.0.113.10",
-            ssh_user="root",
-        )
-
-        with patch("vpn_installer.workflows.fetch_remote_deployment_env", return_value=remote_text):
-            synced_env, synced = workflows.load_remote_authoritative_env(
-                "demo",
-                Path("deployments/demo.env"),
-                local_env,
-                [target],
-                {NODE_GATEWAY: {"installed": "1", "deployment_name": "demo", "node": NODE_GATEWAY}},
-            )
-
-        self.assertFalse(synced)
-        self.assertIs(synced_env, local_env)
 
     def test_load_remote_authoritative_env_fails_closed_on_node_projection_drift(self) -> None:
         env = generate_default_env("demo")
@@ -1293,7 +1264,7 @@ class WorkflowTests(unittest.TestCase):
         env["EXIT_PUBLIC_IP"] = "198.51.100.20"
         ru = RemoteTarget(node_id=NODE_GATEWAY)
         payload = compact_snapshot(NODE_GATEWAY, "ru")
-        with patch("vpn_installer.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), env, {}, [ru], {})), patch("vpn_installer.workflows.print_summary") as mocked, patch("vpn_installer.workflows.remote_compatible_agent_snapshot", return_value=payload) as agent_snapshot:
+        with patch("vpn_installer.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), env, {}, [ru], {})), patch("vpn_installer.workflows.print_summary") as mocked, patch("vpn_installer.workflows.remote_agent_snapshot", return_value=payload) as agent_snapshot:
             self.assertEqual(workflows.status_workflow("demo", NODE_GATEWAY), 0)
         mocked.assert_called_once()
         agent_snapshot.assert_called_once_with(ru, compact=True)
@@ -1305,7 +1276,7 @@ class WorkflowTests(unittest.TestCase):
         ru = RemoteTarget(node_id=NODE_GATEWAY)
         foreign = RemoteTarget(node_id=NODE_EXIT)
         snapshots = [compact_snapshot(NODE_GATEWAY, "ru"), compact_snapshot(NODE_EXIT, "foreign")]
-        with patch("vpn_installer.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), env, {}, [ru, foreign], {})), patch("vpn_installer.workflows.print_summary"), patch("vpn_installer.workflows.remote_compatible_agent_snapshot", side_effect=snapshots) as agent_snapshot:
+        with patch("vpn_installer.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), env, {}, [ru, foreign], {})), patch("vpn_installer.workflows.print_summary"), patch("vpn_installer.workflows.remote_agent_snapshot", side_effect=snapshots) as agent_snapshot:
             self.assertEqual(workflows.status_workflow("demo", "all"), 0)
         self.assertEqual(agent_snapshot.call_count, 2)
         for call in agent_snapshot.call_args_list:
@@ -1342,7 +1313,7 @@ class WorkflowTests(unittest.TestCase):
                 return_value=("demo", Path("deployments/demo.env"), env, {}, [ru], {}),
             ),
             patch("vpn_installer.workflows.print_summary"),
-            patch("vpn_installer.workflows.remote_compatible_agent_snapshot", return_value=snapshot.to_dict()),
+            patch("vpn_installer.workflows.remote_agent_snapshot", return_value=snapshot.to_dict()),
         ):
             self.assertEqual(workflows.status_workflow("demo", NODE_GATEWAY), 0)
 

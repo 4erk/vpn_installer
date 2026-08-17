@@ -33,7 +33,6 @@ from vpn_installer.remote import (
     bootstrap_from_snapshot,
     print_preflight,
     remote_agent_snapshot,
-    remote_compatible_agent_snapshot,
     remote_preflight,
     scp_base_args,
     scp_upload,
@@ -533,30 +532,14 @@ class RemoteTests(unittest.TestCase):
         self.assertNotIn("test -x /usr/local/lib/vpn-stack/vpn-stack-agent.py", mocked.call_args.args[1])
         self.assertEqual(payload["node"], NODE_GATEWAY)
 
-    def test_compatible_snapshot_adapts_only_release_0200_schema_four(self) -> None:
-        snapshot = DiagnosticsSnapshot(
-            generated_at="2026-08-06T12:00:00+00:00",
-            deployment="demo",
-            topology="dual",
-            node_id=NODE_GATEWAY,
-            location="ru",
-            capabilities=("router",),
-            release={"version": "0.20.0", "release_id": "release-0200"},
-        ).to_dict()
-        snapshot.update({"schema_version": 4, "role": "ru-gateway"})
+    def test_snapshot_rejects_out_of_window_release_before_reading_old_schema(self) -> None:
+        snapshot = {"schema_version": 4, "release": {"version": "0.19.10"}}
         with patch("vpn_installer.remote.ssh_capture", return_value=json.dumps(snapshot)):
-            payload = remote_compatible_agent_snapshot(RemoteTarget(node_id=NODE_GATEWAY), compact=True)
-        self.assertEqual(payload["schema_version"], 5)
-        self.assertNotIn("role", payload)
+            with self.assertRaisesRegex(AppError, "cannot be updated by 0.20.2.*tag 0.19.10"):
+                remote_agent_snapshot(RemoteTarget(node_id=NODE_GATEWAY))
 
-    def test_compatible_snapshot_rejects_unknown_schema_or_release(self) -> None:
-        snapshot = {"schema_version": 4, "release": {"version": "0.19.9"}}
-        with patch("vpn_installer.remote.ssh_capture", return_value=json.dumps(snapshot)):
-            with self.assertRaisesRegex(AppError, "unsupported snapshot schema or release"):
-                remote_compatible_agent_snapshot(RemoteTarget(node_id=NODE_GATEWAY))
-
-    def test_strict_snapshot_does_not_adapt_release_0200(self) -> None:
-        snapshot = {"schema_version": 4, "release": {"version": "0.20.0"}}
+    def test_snapshot_rejects_wrong_schema_from_compatible_release(self) -> None:
+        snapshot = {"schema_version": 4, "release": {"version": "0.20.1"}}
         with patch("vpn_installer.remote.ssh_capture", return_value=json.dumps(snapshot)):
             with self.assertRaisesRegex(AppError, "unsupported snapshot schema"):
                 remote_agent_snapshot(RemoteTarget(node_id=NODE_GATEWAY))

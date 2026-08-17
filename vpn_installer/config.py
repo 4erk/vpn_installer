@@ -12,7 +12,6 @@ from pathlib import Path
 
 from .common import DEPLOYMENTS_DIR, env_line, fail, parse_env_value, read_text, sanitize_name, write_text
 from .interserver_transport import generate_transport_identity, generate_x25519_pair, validate_transport_identity
-from .upgrade_0200 import upgrade_env
 from .models import (
     ALLOW_EMPTY_OVERRIDE,
     DEFAULT_ASSET_TIMEOUT,
@@ -78,25 +77,6 @@ RU_DIRECT_OVERLAY_FILES = {
     "RU_FORCE_DIRECT_IP_CIDR": "ru-direct-cidrs.txt",
 }
 
-RETIRED_DIRECT_POLICY_VALUES = {
-    "RU_FORCE_DIRECT_DOMAIN": frozenset(
-        {
-            "mtalk.google.com",
-            "ifconfig.me",
-            "ifconfig.co",
-            "checkip.amazonaws.com",
-            "ipapi.co",
-            "ipinfo.io",
-            "ident.me",
-            "tnedi.me",
-            "icanhazip.com",
-        }
-    ),
-    "RU_FORCE_DIRECT_DOMAIN_SUFFIX": frozenset(
-        {".gstatic.com", ".ipify.org", ".ipinfo.io", ".ident.me", ".tnedi.me", ".icanhazip.com"}
-    ),
-}
-
 TRANSPORT_IDENTITY_KEYS = (
     "INTERSERVER_HY2_CERTIFICATE_B64",
     "INTERSERVER_HY2_PRIVATE_KEY_B64",
@@ -150,10 +130,8 @@ def normalize_deployment_env(source: dict[str, str]) -> dict[str, str]:
     schema = source.get("CONFIG_SCHEMA", "").strip()
     if schema == str(CONFIG_SCHEMA_VERSION):
         return source.copy()
-    if schema == "2":
-        return upgrade_env(source)
     raise ValueError(
-        f"unsupported CONFIG_SCHEMA={schema or '<empty>'}; release 0.20.1 accepts only schema 2 or 3"
+        f"unsupported CONFIG_SCHEMA={schema or '<empty>'}; current release accepts only schema {CONFIG_SCHEMA_VERSION}"
     )
 
 
@@ -323,11 +301,6 @@ def _merge_csv_defaults(existing_value: str, default_value: str) -> str:
     return ",".join(merged)
 
 
-def _normalize_policy_csv(key: str, value: str) -> str:
-    retired = RETIRED_DIRECT_POLICY_VALUES.get(key, frozenset())
-    return ",".join(item for item in _split_csv_values(value) if item.lower() not in retired)
-
-
 def _merge_source_defaults(existing_value: str, default_value: str) -> str:
     merged: list[str] = []
     seen: set[str] = set()
@@ -400,7 +373,6 @@ def merge_env_with_defaults(
             continue
         if existing.get(key):
             merged[key] = _merge_csv_defaults(existing[key], defaults[key])
-        merged[key] = _normalize_policy_csv(key, merged[key])
     for key in MERGED_SOURCE_DEFAULT_KEYS:
         if key not in defaults:
             continue
@@ -472,10 +444,7 @@ def apply_ru_direct_overlays(env: dict[str, str], env_path: Path | None) -> dict
         overlay_items = _split_overlay_values(read_text(path))
         if not overlay_items:
             continue
-        effective[env_key] = _normalize_policy_csv(
-            env_key,
-            _merge_csv_defaults(effective.get(env_key, ""), ",".join(overlay_items)),
-        )
+        effective[env_key] = _merge_csv_defaults(effective.get(env_key, ""), ",".join(overlay_items))
     return effective
 
 

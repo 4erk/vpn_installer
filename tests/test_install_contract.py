@@ -4,9 +4,10 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from vpn_installer.config import generate_default_env
-from vpn_installer.install_contract import InstallContractError, is_planned_install_maintenance, validate_bundle
+from vpn_installer.install_contract import InstallContractError, is_planned_install_maintenance, validate_bundle, validate_installed_bundle
 from vpn_installer.install_support import main as install_support_main
 from vpn_installer.render import copy_python_package, write_node_rendered_files
 
@@ -22,6 +23,30 @@ CONTRACT_FILES = (
 
 
 class InstallContractTests(unittest.TestCase):
+    def test_installed_bundle_uses_one_current_schema_validator_for_previous_release(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            bundle = root / "bundle"
+            bundle.mkdir()
+            (bundle / "render-manifest.json").write_text('{"version":"0.20.1"}', encoding="utf-8")
+            with patch("vpn_installer.install_contract._validate_bundle") as validator:
+                validate_installed_bundle(bundle, "gateway", root / "contract")
+
+        self.assertEqual(validator.call_args.kwargs["expected_version"], "0.20.1")
+        self.assertNotIn("require_current_compatibility", validator.call_args.kwargs)
+
+    def test_installed_bundle_rejects_out_of_window_version_before_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            bundle = root / "bundle"
+            bundle.mkdir()
+            (bundle / "render-manifest.json").write_text('{"version":"0.19.10"}', encoding="utf-8")
+            with patch("vpn_installer.install_contract._validate_bundle") as validator:
+                with self.assertRaisesRegex(InstallContractError, "tag 0.19.10"):
+                    validate_installed_bundle(bundle, "gateway", root / "contract")
+
+        validator.assert_not_called()
+
     def test_planned_install_maintenance_requires_exact_snapshot_evidence(self) -> None:
         snapshot = {
             "verdict": "degraded",

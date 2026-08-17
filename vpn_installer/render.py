@@ -74,7 +74,6 @@ SERVER_RENDER_MODULES = (
     "specs.py",
     "system_resolver.py",
     "topology.py",
-    "upgrade_0200.py",
 )
 
 SERVER_AGENT_BASE_MODULES = (
@@ -267,12 +266,6 @@ def render_gateway_singbox(env: dict[str, str]) -> str:
     if topology.is_dual:
         payload["experimental"]["clash_api"] = {"external_controller": HY2_CLASH_API_LISTEN}
     return render_json(payload)
-
-
-def render_ru_singbox(env: dict[str, str]) -> str:
-    """Compatibility wrapper; gateway location is defined by TopologySpec."""
-
-    return render_gateway_singbox(env)
 
 
 def render_gateway_xray(env: dict[str, str]) -> str:

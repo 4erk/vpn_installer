@@ -1246,18 +1246,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, sys.argv[3])
-from vpn_installer.compatibility import TRANSITION_SOURCE_VERSION
 from vpn_installer.diagnostics import SCHEMA_VERSION as DIAGNOSTICS_SCHEMA_VERSION
 from vpn_installer.install_contract import is_planned_install_maintenance
-from vpn_installer.upgrade_0200 import upgrade_diagnostics_snapshot
 
 payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 manifest = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
-if manifest.get("version") == TRANSITION_SOURCE_VERSION:
-    payload = upgrade_diagnostics_snapshot(
-        payload,
-        target_schema=DIAGNOSTICS_SCHEMA_VERSION,
-    )
 if payload.get("schema_version") != DIAGNOSTICS_SCHEMA_VERSION:
     raise SystemExit(
         f"post-activation agent did not return diagnostics schema {DIAGNOSTICS_SCHEMA_VERSION}"

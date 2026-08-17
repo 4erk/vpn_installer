@@ -13,6 +13,7 @@ from vpn_installer.audit import lab as audit_lab
 from vpn_installer.audit import quick as audit_quick
 from vpn_installer.audit.runner import AuditFailure
 from vpn_installer.client_artifacts import PUBLIC_VLESS_OUTBOUND_TAG
+from vpn_installer.compatibility import COMPATIBLE_INSTALLED_MIN
 from vpn_installer.config import generate_default_env
 from vpn_installer.diagnostics import SCHEMA_VERSION as DIAGNOSTICS_SCHEMA_VERSION
 from vpn_installer.manifest import INSTALL_PLAN_SCHEMA_VERSION, MANIFEST_SCHEMA_VERSION
@@ -24,13 +25,6 @@ from vpn_installer.topology import (
     NODE_GATEWAY,
     TOPOLOGY_DUAL,
     TOPOLOGY_SINGLE,
-)
-from vpn_installer.upgrade_0200 import (
-    SOURCE_CONFIG_SCHEMA,
-    SOURCE_DIAGNOSTICS_SCHEMA,
-    SOURCE_INSTALL_PLAN_SCHEMA,
-    SOURCE_MANIFEST_SCHEMA,
-    SOURCE_STATE_SCHEMA,
 )
 
 
@@ -264,22 +258,12 @@ class AuditModuleTests(unittest.TestCase):
         runner = FakeRunner()
         audit_docker.run(runner)  # type: ignore[arg-type]
         self.assertIn("docker-unmanaged-remove-purge-render-only", runner.records)
-        self.assertIn("docker-0200-to-0201-transition", runner.records)
+        self.assertIn("docker-compatible-update", runner.records)
         self.assertIn("docker-install-rollback-state", runner.records)
         self.assertIn("docker-node-scoped-workflows", runner.records)
 
-    def test_0200_transition_gate_is_exact_and_rejects_out_of_window_releases(self) -> None:
-        self.assertEqual(VERSION, "0.20.1")
-        self.assertEqual(
-            (
-                SOURCE_CONFIG_SCHEMA,
-                SOURCE_STATE_SCHEMA,
-                SOURCE_MANIFEST_SCHEMA,
-                SOURCE_INSTALL_PLAN_SCHEMA,
-                SOURCE_DIAGNOSTICS_SCHEMA,
-            ),
-            (2, 2, 3, 3, 4),
-        )
+    def test_compatible_update_gate_keeps_schemas_and_rejects_out_of_window_releases(self) -> None:
+        self.assertEqual(VERSION, "0.20.2")
         self.assertEqual(
             (
                 CONFIG_SCHEMA_VERSION,
@@ -290,29 +274,17 @@ class AuditModuleTests(unittest.TestCase):
             (3, 4, 4, 5),
         )
 
-        builder = audit_docker.release_0200_fixture_builder_text()
-        compile(builder, "<release-0200-fixture-builder>", "exec")
-        self.assertIn('"version": "0.20.0"', builder)
-        self.assertIn("SOURCE_MANIFEST_SCHEMA", builder)
-        self.assertNotIn("legacy_install_contract", builder)
-        self.assertNotIn("LEGACY_ROLE", builder)
+        builder = audit_docker.previous_release_fixture_builder_text()
+        compile(builder, "<previous-release-fixture-builder>", "exec")
+        self.assertIn("previous_version = COMPATIBLE_INSTALLED_MIN", builder)
 
-        script = audit_docker.upgrade_0200_acceptance_script()
+        script = audit_docker.compatible_update_acceptance_script()
         self.assertIn("support validate-installed", script)
-        self.assertIn("upgrade_env(source_env)", script)
-        self.assertIn("upgrade_state(source_state)", script)
-        self.assertIn("upgrade_diagnostics_snapshot", script)
-        self.assertIn('(2, 2, 3, 3, 4)', script)
         self.assertIn('(3, 4, 4, 5)', script)
-        self.assertIn('("0.19.10", "0.20.2")', script)
+        self.assertIn(f'= {COMPATIBLE_INSTALLED_MIN}', script)
+        self.assertIn("current.patch + 1", script)
         self.assertIn("cannot be updated", script)
-        self.assertNotIn("adapt-schema2", script)
-        self.assertLessEqual(audit_docker.UPGRADE_0200_TIMEOUT_SECONDS, 45)
-
-        module_source = Path(audit_docker.__file__).read_text(encoding="utf-8")
-        self.assertNotIn("legacy_install_contract", module_source)
-        self.assertNotIn("LEGACY_ROLE", module_source)
-        self.assertNotIn("docker-schema2-to-schema3-migration", module_source)
+        self.assertLessEqual(audit_docker.COMPATIBLE_UPDATE_TIMEOUT_SECONDS, 45)
 
     def test_transaction_rollback_linux_gate_uses_bounded_release_contracts(self) -> None:
         script = audit_docker.transaction_rollback_acceptance_script(repr("{}"), "audit-upgrade")
@@ -333,7 +305,7 @@ class AuditModuleTests(unittest.TestCase):
             "single-rollback-without-wireguard",
             "node-mismatch-rejection",
             "sigkill-production-cutover-reconciliation",
-            "release-0200-rollback-verification",
+            "previous-release-rollback-verification",
         ):
             self.assertIn(f"pass_gate {gate}", script)
         for stale in (
@@ -352,16 +324,15 @@ class AuditModuleTests(unittest.TestCase):
         self.assertIn('grep -Fxq "is-active $unit"', script)
         self.assertIn('test "$expected_enabled" = enabled', script)
         self.assertIn('test "$expected_active" = active', script)
-        crash_section = script.split("cp \"$PREVIOUS_CONTRACT/services.tsv\" /work/release-0200-services.tsv", 1)[1].split(
+        crash_section = script.split("cp \"$PREVIOUS_CONTRACT/services.tsv\" /work/previous-release-services.tsv", 1)[1].split(
             "pass_gate sigkill-production-cutover-reconciliation", 1
         )[0]
         self.assertIn("install_action", crash_section)
         self.assertNotIn("install_planned_links", crash_section)
         self.assertNotIn("switch_current_release", crash_section)
         self.assertNotIn("retire_previous_services", crash_section)
-        self.assertIn("release_0200", crash_section)
-        self.assertIn("build-release-0200.py", script)
-        self.assertNotIn("build-schema2.py", script)
+        self.assertIn("previous_release", crash_section)
+        self.assertIn("build-previous-release.py", script)
         self.assertNotIn("manifest_schema", script)
         self.assertEqual(script.count("pass_gate "), 6)
         self.assertLessEqual(audit_docker.TRANSACTION_ACCEPTANCE_TIMEOUT_SECONDS, 45)

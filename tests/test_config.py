@@ -278,35 +278,35 @@ class ConfigTests(unittest.TestCase):
         for key in config.DUAL_REQUIRED_ENV_VARS:
             self.assertTrue(dual[key], key)
 
-    def test_merge_env_with_defaults_appends_new_direct_domain_defaults(self) -> None:
+    def test_merge_env_with_defaults_preserves_operator_values_and_appends_defaults(self) -> None:
         merged = config.merge_env_with_defaults(
             {
-                "RU_FORCE_DIRECT_DOMAIN": "api.oneme.ru,legacy.example,mtalk.google.com,checkip.amazonaws.com",
-                "RU_FORCE_DIRECT_DOMAIN_SUFFIX": ".legacy.example,.ipify.org,.gstatic.com",
+                "RU_FORCE_DIRECT_DOMAIN": "api.oneme.ru,custom.example,mtalk.google.com,checkip.amazonaws.com",
+                "RU_FORCE_DIRECT_DOMAIN_SUFFIX": ".custom.example,.ipify.org,.gstatic.com",
             },
             "sample",
         )
         domains = merged["RU_FORCE_DIRECT_DOMAIN"].split(",")
         suffixes = merged["RU_FORCE_DIRECT_DOMAIN_SUFFIX"].split(",")
-        self.assertIn("legacy.example", domains)
+        self.assertIn("custom.example", domains)
         self.assertIn("api.oneme.ru", domains)
         self.assertIn("2ip.ru", domains)
         self.assertIn("ip.mail.ru", domains)
         self.assertEqual(domains.count("api.oneme.ru"), 1)
-        self.assertNotIn("mtalk.google.com", domains)
-        self.assertNotIn("checkip.amazonaws.com", domains)
-        self.assertIn(".legacy.example", suffixes)
-        self.assertNotIn(".ipify.org", suffixes)
-        self.assertNotIn(".gstatic.com", suffixes)
+        self.assertIn("mtalk.google.com", domains)
+        self.assertIn("checkip.amazonaws.com", domains)
+        self.assertIn(".custom.example", suffixes)
+        self.assertIn(".ipify.org", suffixes)
+        self.assertIn(".gstatic.com", suffixes)
 
     def test_current_schema_rejects_removed_network_policy(self) -> None:
         with self.assertRaisesRegex(ValueError, "RU_IPV6_POLICY"):
             config.merge_env_with_defaults({"RU_IPV6_POLICY": "block"}, "sample")
 
     def test_merge_env_with_defaults_appends_new_asset_sources(self) -> None:
-        merged = config.merge_env_with_defaults({"RU_GEOSITE_URL": "https://legacy.example/geosite.srs"}, "sample")
+        merged = config.merge_env_with_defaults({"RU_GEOSITE_URL": "https://custom.example/geosite.srs"}, "sample")
         geosite_sources = config.split_asset_sources(merged["RU_GEOSITE_URL"])
-        self.assertEqual(geosite_sources[0], "https://legacy.example/geosite.srs")
+        self.assertEqual(geosite_sources[0], "https://custom.example/geosite.srs")
         self.assertTrue(any("raw.githubusercontent.com/SagerNet/sing-geosite" in source for source in geosite_sources))
         self.assertTrue(any("cdn.jsdelivr.net/gh/SagerNet/sing-geosite" in source for source in geosite_sources))
 
@@ -317,17 +317,17 @@ class ConfigTests(unittest.TestCase):
     def test_apply_ru_direct_overlays_merges_files_with_comments_and_deduplicates(self) -> None:
         env = config.generate_default_env("demo")
         env["RU_FORCE_DIRECT_DOMAIN"] = "api.oneme.ru"
-        env["RU_FORCE_DIRECT_DOMAIN_SUFFIX"] = ".gstatic.com"
+        env["RU_FORCE_DIRECT_DOMAIN_SUFFIX"] = ".custom.example"
         env["RU_FORCE_DIRECT_IP_CIDR"] = "203.0.113.0/24"
         with tempfile.TemporaryDirectory() as tmp:
             env_path = Path(tmp) / "demo.env"
             env_path.write_text(config.render_env_text(env), encoding="utf-8")
             (Path(tmp) / "demo.ru-direct-domains.txt").write_text("# comment\napi.oneme.ru,example.com\nanother.example\n", encoding="utf-8")
-            (Path(tmp) / "demo.ru-direct-suffixes.txt").write_text(".gstatic.com\n# keep\n.example.com\n", encoding="utf-8")
+            (Path(tmp) / "demo.ru-direct-suffixes.txt").write_text(".custom.example\n# keep\n.example.com\n", encoding="utf-8")
             (Path(tmp) / "demo.ru-direct-cidrs.txt").write_text("203.0.113.0/24\n198.51.100.10/32\n", encoding="utf-8")
             merged = config.apply_ru_direct_overlays(env, env_path)
         self.assertEqual(merged["RU_FORCE_DIRECT_DOMAIN"], "api.oneme.ru,example.com,another.example")
-        self.assertEqual(merged["RU_FORCE_DIRECT_DOMAIN_SUFFIX"], ".example.com")
+        self.assertEqual(merged["RU_FORCE_DIRECT_DOMAIN_SUFFIX"], ".custom.example,.example.com")
         self.assertEqual(merged["RU_FORCE_DIRECT_IP_CIDR"], "203.0.113.0/24,198.51.100.10/32")
 
     def test_critical_env_view_includes_expected_keys(self) -> None:
@@ -432,7 +432,7 @@ class ConfigTests(unittest.TestCase):
             updated = config.ensure_deployment_env(env_path, "demo")
         self.assertEqual(updated["WAN_INTERFACE"], "eth9")
 
-    def test_failed_env_migration_does_not_rewrite_existing_file(self) -> None:
+    def test_retired_config_schema_is_rejected_without_rewriting(self) -> None:
         payload = (
             'CONFIG_SCHEMA="2"\nTOPOLOGY="single"\nGATEWAY_LOCATION="ru"\n'
             'GATEWAY_PUBLIC_IP="203.0.113.10"\nRU_PUBLIC_IP="198.51.100.20"\n'
@@ -440,7 +440,7 @@ class ConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             env_path = Path(tmp) / "demo.env"
             env_path.write_text(payload, encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "pre-0.20.0"):
+            with self.assertRaisesRegex(ValueError, "current release accepts only schema 3"):
                 config.ensure_deployment_env(env_path, "demo")
             observed = env_path.read_text(encoding="utf-8")
 

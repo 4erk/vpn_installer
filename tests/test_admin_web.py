@@ -14,7 +14,7 @@ from http.server import ThreadingHTTPServer
 
 from vpn_installer import admin_apply, admin_web
 from vpn_installer.config import generate_default_env
-from vpn_installer.render import render_gateway_singbox, render_ru_singbox
+from vpn_installer.render import render_gateway_singbox
 
 
 class AdminWebTests(unittest.TestCase):
@@ -109,8 +109,8 @@ class AdminWebTests(unittest.TestCase):
             lock_path = tmp_path / "rules.lock"
             sing_box_binary = tmp_path / "sing-box"
             sing_box_binary.write_bytes(b"pinned-test-binary")
-            base_path.write_text(render_ru_singbox(env), encoding="utf-8")
-            config_path.write_text(render_ru_singbox(env), encoding="utf-8")
+            base_path.write_text(render_gateway_singbox(env), encoding="utf-8")
+            config_path.write_text(render_gateway_singbox(env), encoding="utf-8")
             old_rules = [admin_apply.normalize_rule({"id": "1", "value": "old.example", "outbound": "direct-ru"})]
             new_rules = [admin_apply.normalize_rule({"id": "2", "value": "new.example", "outbound": "direct-ru"})]
             admin_apply.write_json_atomic(rules_path, {"schema_version": 1, "rules": old_rules})
@@ -448,7 +448,7 @@ class AdminWebTests(unittest.TestCase):
         env = generate_default_env("demo")
         env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
         env["EXIT_PUBLIC_IP"] = "198.51.100.20"
-        base = json.loads(render_ru_singbox(env))
+        base = json.loads(render_gateway_singbox(env))
         config = admin_apply.apply_admin_rules_to_config(
             base,
             [
@@ -523,7 +523,7 @@ class AdminWebTests(unittest.TestCase):
             rules = tmp_path / "rules.json"
             sing_box_binary = tmp_path / "sing-box"
             sing_box_binary.write_bytes(b"pinned-test-binary")
-            base.write_text(render_ru_singbox(env), encoding="utf-8")
+            base.write_text(render_gateway_singbox(env), encoding="utf-8")
             rules.write_text(
                 json.dumps({"rules": [{"id": "1", "value": "*.example.com", "outbound": "direct-ru"}]}),
                 encoding="utf-8",

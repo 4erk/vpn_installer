@@ -12,7 +12,7 @@ from .config import (
     normalize_deployment_env,
     render_example_env_text,
 )
-from .install_contract import InstallContractError, validate_bundle, validate_installed_bundle, validate_previous_0200_bundle
+from .install_contract import InstallContractError, validate_bundle, validate_installed_bundle
 from .render import write_node_rendered_files
 from .specs import DeploymentSpec
 from .topology import CONFIG_SCHEMA_VERSION, TopologySpec, normalize_node_id
@@ -70,15 +70,6 @@ def build_parser() -> argparse.ArgumentParser:
     validate.add_argument("--require-binaries", action="store_true")
     validate.set_defaults(func=cmd_validate_bundle)
 
-    previous = subparsers.add_parser(
-        "validate-previous-0200",
-        help="Validate the sole supported previous release and emit its TSV ownership contract.",
-    )
-    previous.add_argument("--current-release", type=Path, required=True)
-    previous.add_argument("--expected-node", required=True)
-    previous.add_argument("--contract-dir", type=Path, required=True)
-    previous.set_defaults(func=cmd_validate_previous_0200)
-
     installed = subparsers.add_parser(
         "validate-installed",
         help="Validate an installed release selected by the current compatibility window.",
@@ -128,18 +119,6 @@ def cmd_validate_bundle(args: argparse.Namespace) -> int:
             external_assets=args.external_assets,
             require_assets=args.require_assets,
             require_binaries=args.require_binaries,
-        )
-    except InstallContractError as exc:
-        raise SystemExit(str(exc)) from None
-    return 0
-
-
-def cmd_validate_previous_0200(args: argparse.Namespace) -> int:
-    try:
-        validate_previous_0200_bundle(
-            args.current_release,
-            normalize_node_id(args.expected_node),
-            args.contract_dir,
         )
     except InstallContractError as exc:
         raise SystemExit(str(exc)) from None

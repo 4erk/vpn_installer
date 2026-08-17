@@ -43,7 +43,7 @@ from .prompts import (
     select_node_for_menu,
     validate_target_settings,
 )
-from .remote import ensure_remote_privilege, ensure_target_host_key, fetch_remote_deployment_env, print_preflight, remote_agent_snapshot, remote_compatible_agent_snapshot, remote_preflight, scp_upload, ssh_capture, ssh_stream
+from .remote import ensure_remote_privilege, ensure_target_host_key, fetch_remote_deployment_env, print_preflight, remote_agent_snapshot, remote_preflight, scp_upload, ssh_capture, ssh_stream
 from .client_artifacts import client_artifact_paths
 from .render import deployment_out_dir, package_bundle, package_control_bundle, render_all_artifacts, render_config_artifacts
 from .state import load_state, state_json_path, write_state
@@ -1094,7 +1094,7 @@ def status_workflow(deployment: str | None, node: str, *, non_interactive: bool 
     exit_code = 0
     for target in targets:
         try:
-            snapshot = DiagnosticsSnapshot.from_agent(remote_compatible_agent_snapshot(target, compact=True))
+            snapshot = DiagnosticsSnapshot.from_agent(remote_agent_snapshot(target, compact=True))
         except Exception as exc:  # noqa: BLE001
             log_exception("status.snapshot", exc, extra={"node_id": target.node_id, "host": target.ssh_host})
             warn(f"{target.label}: structured snapshot unavailable: {error_summary(exc)}")

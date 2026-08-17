@@ -8,10 +8,8 @@ from typing import Mapping
 from . import VERSION
 
 
-COMPATIBLE_INSTALLED_MIN = "0.20.0"
+COMPATIBLE_INSTALLED_MIN = "0.20.1"
 COMPATIBLE_INSTALLED_MAX = VERSION
-TRANSITION_SOURCE_VERSION = "0.20.0"
-TRANSITION_REMOVE_IN = "0.20.2"
 
 _VERSION_PATTERN = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 
@@ -56,6 +54,18 @@ class CompatibilityWindow:
             maximum=Version.parse(COMPATIBLE_INSTALLED_MAX),
         )
 
+    @classmethod
+    def from_manifest(cls, payload: object) -> "CompatibilityWindow":
+        if not isinstance(payload, Mapping):
+            raise CompatibilityError("manifest update compatibility must be an object")
+        transitions = payload.get("transitions")
+        if not isinstance(transitions, list):
+            raise CompatibilityError("manifest update compatibility transitions must be an array")
+        return cls(
+            minimum=Version.parse(payload.get("installed_min", "")),
+            maximum=Version.parse(payload.get("installed_max", "")),
+        )
+
     def __post_init__(self) -> None:
         if self.minimum > self.maximum:
             raise CompatibilityError("compatible version range is inverted")
@@ -76,11 +86,10 @@ class CompatibilityWindow:
             "installed_max": str(self.maximum),
             "transitions": [
                 {
-                    "from": TRANSITION_SOURCE_VERSION,
-                    "to": VERSION,
-                    "remove_in": TRANSITION_REMOVE_IN,
+                    "from": str(self.minimum),
+                    "to": str(self.maximum),
                 }
-            ],
+            ] if self.minimum != self.maximum else [],
         }
 
 

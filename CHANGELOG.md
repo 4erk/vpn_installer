@@ -8,6 +8,25 @@
 
 Каждый раздел ниже описывает поведение именно указанной версии; действующий контракт задаёт верхний раздел релиза.
 
+## [0.20.2] - 2026-08-17
+
+### Changed
+
+- Минимальная совместимая установленная версия поднята до `0.20.1`, максимальная — `0.20.2`. Поддерживаются fresh install, `0.20.1 -> 0.20.2` и same-version reinstall.
+- Обновление и rollback используют один generic installed-bundle validator. Обе версии обязаны иметь config/state schema `3`, manifest/install-plan schema `4`, diagnostics schema `5` и canonical `gateway|exit` capability contract.
+- Read-only preflight/status теперь требуют native diagnostics schema `5`. Для неподдерживаемого релиза сначала проверяется только manifest release version и выводится команда удаления через установщик совпадающего Git-тега.
+- Config merge сохраняет operator-owned direct lists без скрытой очистки. Приоритет обязательных global-foreign доменов и suffixes теперь задаётся только routing policy compiler, поэтому configuration storage и route decisions больше не дублируют друг друга.
+
+### Removed
+
+- Полностью удалены `upgrade_0200.py`, config/state readers старых схем, diagnostics adapter, previous-version CLI command, специальный manifest/role validator и связанные unit/Docker fixtures.
+- Server support package, cloud-init и quick audit больше не включают transition module. Compatibility metadata не содержит срока жизни или runtime migration branch.
+- Удалены старый alias `render_ru_singbox`, его обходные тесты и deprecated sing-box runtime flag из Xray interop fixture; все вызовы используют canonical gateway renderer и явный resolver.
+
+### Verified
+
+- Схемы, topology, web-admin capability и основной `vless-uri.txt` не менялись. Docker acceptance проверяет same-schema update, interrupted cutover и rollback на предыдущий `0.20.1`.
+
 ## [0.20.1] - 2026-08-17
 
 ### Added

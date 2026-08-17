@@ -7,7 +7,6 @@ from typing import Any
 from .common import STATE_DIR, utc_now, write_private_json
 from .models import RemoteTarget
 from .topology import CONFIG_SCHEMA_VERSION, NODE_EXIT, NODE_GATEWAY, TOPOLOGY_DUAL, TOPOLOGY_SINGLE
-from .upgrade_0200 import SOURCE_STATE_SCHEMA, upgrade_state
 
 
 def _validate_native_state(payload: dict[str, Any]) -> dict[str, Any]:
@@ -36,8 +35,6 @@ def load_state(deployment_name: str) -> dict[str, Any]:
     if json_path.exists():
         payload = json.loads(json_path.read_text(encoding="utf-8"))
         schema = payload.get("schema_version")
-        if schema == SOURCE_STATE_SCHEMA:
-            payload = upgrade_state(payload)
         if payload.get("schema_version") != CONFIG_SCHEMA_VERSION:
             raise ValueError(f"unsupported state schema: {schema}")
         return _validate_native_state(payload)

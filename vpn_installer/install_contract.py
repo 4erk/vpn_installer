@@ -8,7 +8,7 @@ from typing import Any, Mapping
 
 from . import VERSION
 from .common import parse_env_value
-from .compatibility import CompatibilityWindow, TRANSITION_SOURCE_VERSION, require_compatible_installed
+from .compatibility import CompatibilityWindow, require_compatible_installed
 from .manifest import (
     INSTALL_PLAN_SCHEMA_VERSION,
     MANIFEST_SCHEMA_VERSION,
@@ -19,13 +19,6 @@ from .manifest import (
     required_asset_names,
 )
 from .topology import CONFIG_SCHEMA_VERSION, TopologySpec
-from .upgrade_0200 import (
-    SOURCE_CONFIG_SCHEMA,
-    SOURCE_INSTALL_PLAN_SCHEMA,
-    SOURCE_MANIFEST_SCHEMA,
-    previous_node_plan,
-    previous_role,
-)
 
 
 class InstallContractError(ValueError):
@@ -152,35 +145,7 @@ def validate_bundle(
         external_assets=external_assets,
         require_assets=require_assets,
         require_binaries=require_binaries,
-        manifest_schema=MANIFEST_SCHEMA_VERSION,
-        install_plan_schema=INSTALL_PLAN_SCHEMA_VERSION,
-        config_schema=CONFIG_SCHEMA_VERSION,
         expected_version=VERSION,
-        previous=False,
-    )
-
-
-def validate_previous_0200_bundle(
-    bundle: Path,
-    expected_node: str,
-    contract_dir: Path,
-    *,
-    require_assets: bool = True,
-    require_binaries: bool = True,
-) -> None:
-    """Validate the sole supported previous release without accepting older formats."""
-
-    _validate_bundle(
-        bundle,
-        expected_node,
-        contract_dir,
-        require_assets=require_assets,
-        require_binaries=require_binaries,
-        manifest_schema=SOURCE_MANIFEST_SCHEMA,
-        install_plan_schema=SOURCE_INSTALL_PLAN_SCHEMA,
-        config_schema=SOURCE_CONFIG_SCHEMA,
-        expected_version=TRANSITION_SOURCE_VERSION,
-        previous=True,
     )
 
 
@@ -199,19 +164,14 @@ def validate_installed_bundle(
         version = str(require_compatible_installed(manifest))
     except ValueError as exc:
         _fail(str(exc))
-    if version == VERSION:
-        validate_bundle(
-            bundle,
-            expected_node,
-            contract_dir,
-            require_assets=True,
-            require_binaries=True,
-        )
-        return
-    if version == TRANSITION_SOURCE_VERSION:
-        validate_previous_0200_bundle(bundle, expected_node, contract_dir)
-        return
-    _fail(f"compatible release {version} has no validator")
+    _validate_bundle(
+        bundle,
+        expected_node,
+        contract_dir,
+        require_assets=True,
+        require_binaries=True,
+        expected_version=version,
+    )
 
 
 def _validate_bundle(
@@ -222,11 +182,7 @@ def _validate_bundle(
     external_assets: Path | None = None,
     require_assets: bool,
     require_binaries: bool,
-    manifest_schema: int,
-    install_plan_schema: int,
-    config_schema: int,
     expected_version: str,
-    previous: bool,
 ) -> None:
 
     bundle = Path(bundle)
@@ -242,18 +198,20 @@ def _validate_bundle(
 
     manifest = _read_object(manifest_path, "render-manifest.json")
     standalone_plan = _read_object(plan_path, "install-plan.json")
-    if manifest.get("schema_version") != manifest_schema:
+    if manifest.get("schema_version") != MANIFEST_SCHEMA_VERSION:
         _fail(f"unsupported render manifest schema: {manifest.get('schema_version')!r}")
     if manifest.get("version") != expected_version:
         _fail(f"bundle version must be {expected_version}, got {manifest.get('version')!r}")
-    if previous:
+    if expected_version == VERSION:
+        if manifest.get("update_compatibility") != CompatibilityWindow.current().to_manifest():
+            _fail("current manifest update compatibility does not match the release contract")
+    else:
         try:
-            require_compatible_installed(manifest)
+            declared = CompatibilityWindow.from_manifest(manifest.get("update_compatibility"))
+            declared.require(expected_version)
         except ValueError as exc:
-            _fail(str(exc))
-    elif manifest.get("update_compatibility") != CompatibilityWindow.current().to_manifest():
-        _fail("current manifest update compatibility does not match the release contract")
-    if standalone_plan.get("schema_version") != install_plan_schema:
+            _fail(f"installed manifest has invalid update compatibility: {exc}")
+    if standalone_plan.get("schema_version") != INSTALL_PLAN_SCHEMA_VERSION:
         _fail(f"unsupported install plan schema: {standalone_plan.get('schema_version')!r}")
     embedded_plan = manifest.get("install_plan")
     if not isinstance(embedded_plan, dict) or embedded_plan != standalone_plan:
@@ -262,13 +220,13 @@ def _validate_bundle(
         _fail("install plan digest mismatch")
 
     env = _parse_env(env_path)
-    if env.get("CONFIG_SCHEMA") != str(config_schema):
-        _fail(f"node.env CONFIG_SCHEMA must be {config_schema}")
+    if env.get("CONFIG_SCHEMA") != str(CONFIG_SCHEMA_VERSION):
+        _fail(f"node.env CONFIG_SCHEMA must be {CONFIG_SCHEMA_VERSION}")
     if env.get("NODE_ID") != expected_node:
         _fail(f"node.env node mismatch: expected {expected_node}, got {env.get('NODE_ID')!r}")
     topology = TopologySpec.from_env(env, require_addresses=False)
     try:
-        node_plan = previous_node_plan(env, expected_node) if previous else topology.plan(expected_node)
+        node_plan = topology.plan(expected_node)
     except ValueError as exc:
         _fail(str(exc))
 
@@ -291,10 +249,7 @@ def _validate_bundle(
             _fail(f"canonical field mismatch: {field}")
     if manifest.get("node") != descriptor or standalone_plan.get("node") != descriptor:
         _fail("canonical node descriptor mismatch")
-    if previous:
-        if manifest.get("role") != previous_role(node_plan.node_id):
-            _fail("0.20.0 compatibility role does not match canonical node")
-    elif "role" in manifest or "compatibility" in manifest:
+    if "role" in manifest or "compatibility" in manifest:
         _fail("current manifest contains retired compatibility fields")
 
     env_sha = _digest(env_path)
@@ -430,9 +385,9 @@ def _validate_bundle(
         service_rows.append((name, unit, ownership))
 
     expected_plan = build_install_plan(node_plan, artifacts, assets, binaries, env=env)
-    expected_plan["schema_version"] = install_plan_schema
+    expected_plan["schema_version"] = INSTALL_PLAN_SCHEMA_VERSION
     if standalone_plan != expected_plan:
-        _fail(f"install plan differs from the canonical schema-{install_plan_schema} compiler output")
+        _fail(f"install plan differs from the canonical schema-{INSTALL_PLAN_SCHEMA_VERSION} compiler output")
 
     allowed_files = set(artifacts) | {"render-manifest.json", "install-plan.json"}
     unknown_files = sorted(path.name for path in bundle.iterdir() if path.is_file() and path.name not in allowed_files)
@@ -455,7 +410,7 @@ def _validate_bundle(
         contract_dir,
         "meta.tsv",
         [
-            ("schema_version", str(manifest_schema)),
+            ("schema_version", str(MANIFEST_SCHEMA_VERSION)),
             ("release_id", _safe_name(str(manifest.get("release_id", "")), "release id")),
             ("version", _safe_name(str(manifest.get("version", "")), "version")),
             ("deployment", _safe_name(env.get("DEPLOY_NAME", ""), "deployment name")),

@@ -153,7 +153,6 @@ def run(runner: AuditRunner) -> None:
                 str(ROOT_DIR / "vpn_installer" / "system_resolver.py"),
                 str(ROOT_DIR / "vpn_installer" / "routing_policy.py"),
                 str(ROOT_DIR / "vpn_installer" / "server_agent.py"),
-                str(ROOT_DIR / "vpn_installer" / "upgrade_0200.py"),
                 str(ROOT_DIR / "vpn_installer" / "vless_verify.py"),
                 str(ROOT_DIR / "vpn_installer" / "verify.py"),
                 str(ROOT_DIR / "vpn_installer" / "manifest.py"),
@@ -595,9 +594,9 @@ def test_validate_bundle(out_dir: Path, env: dict[str, str]) -> dict[str, str]:
         missing = sorted(expected[tarball.name.removesuffix(".tar.gz")] - names)
         if missing:
             raise AuditFailure(f"Bundle {tarball.name} не содержит: {', '.join(missing)}")
-        legacy = sorted(name for name in names if name == "rendered" or name.startswith("rendered/"))
-        if legacy:
-            raise AuditFailure(f"Bundle {tarball.name} содержит legacy rendered tree: {', '.join(legacy)}")
+        obsolete_tree = sorted(name for name in names if name == "rendered" or name.startswith("rendered/"))
+        if obsolete_tree:
+            raise AuditFailure(f"Bundle {tarball.name} содержит obsolete rendered tree: {', '.join(obsolete_tree)}")
         unrelated = sorted(
             name
             for name in names
@@ -844,8 +843,8 @@ def test_xray_reality_interop(runner: AuditRunner, out_dir: Path) -> dict[str, s
     router_config["route"]["default_domain_resolver"] = {"server": "interop-hosts"}
     router_config["route"]["rules"] = [rule for rule in router_config["route"]["rules"] if rule.get("action") != "resolve"]
     router_config["outbounds"] = [
-        {"type": "direct", "tag": "direct-ru"},
-        {"type": "direct", "tag": "to-foreign"},
+        {"type": "direct", "tag": "direct-ru", "domain_resolver": {"server": "interop-hosts"}},
+        {"type": "direct", "tag": "to-foreign", "domain_resolver": {"server": "interop-hosts"}},
     ]
     xray_server_config = json.loads((out_dir / "preview" / NODE_GATEWAY / "xray.json").read_text(encoding="utf-8"))
     xray_server_config["log"] = {"loglevel": "debug"}
@@ -895,10 +894,10 @@ def test_xray_reality_interop(runner: AuditRunner, out_dir: Path) -> dict[str, s
                 for asset in ("geosite-ru.srs", "geoip-ru.srs"):
                     runner.docker_copy(router, out_dir / "assets" / asset, f"/var/lib/vpn-stack/rules/{asset}")
                 runner.docker_copy(router, router_config_path, "/work/sing-box-router.json")
-                runner.docker_exec(router, "ENABLE_DEPRECATED_MISSING_DOMAIN_RESOLVER=true sing-box check -c /work/sing-box-router.json")
+                runner.docker_exec(router, "sing-box check -c /work/sing-box-router.json")
                 runner.docker_exec(router, "openssl req -x509 -newkey rsa:2048 -nodes -keyout /tmp/example.key -out /tmp/example.crt -subj /CN=www.bing.com -days 1 >/tmp/openssl-gen.log 2>&1")
                 runner.docker_exec(router, "openssl s_server -quiet -accept 443 -cert /tmp/example.crt -key /tmp/example.key -www >/tmp/example-tls.log 2>&1 & sleep 1")
-                runner.docker_exec(router, "ENABLE_DEPRECATED_MISSING_DOMAIN_RESOLVER=true sing-box run -c /work/sing-box-router.json >/tmp/sing-box-router.log 2>&1 & sleep 1")
+                runner.docker_exec(router, "sing-box run -c /work/sing-box-router.json >/tmp/sing-box-router.log 2>&1 & sleep 1")
                 runner.docker_exec(router, "for i in $(seq 1 40); do ss -ltn 2>/dev/null | grep -q ':2080 ' && exit 0; sleep 0.25; done; cat /tmp/sing-box-router.log; exit 1")
                 router_ip = runner.docker(
                     "inspect-singbox-router-interop",

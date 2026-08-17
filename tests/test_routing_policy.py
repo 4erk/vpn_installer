@@ -116,7 +116,7 @@ class RoutingPolicyTests(unittest.TestCase):
         self.assertTrue(any(rule.get("server") == "dns-global" and rule.get("action") == "resolve" for rule in route_rules))
         self.assertIn({"ip_is_private": True, "action": "reject", "method": "default", "no_drop": True}, route_rules)
 
-    def test_ipv6_probe_uses_global_route_even_when_legacy_direct_env_mentions_it(self) -> None:
+    def test_ipv6_probe_uses_global_route_when_direct_env_mentions_it(self) -> None:
         env = self.make_env()
         env["RU_FORCE_DIRECT_DOMAIN"] += ",ipv6-internet.yandex.net"
         policy = build_ru_routing_policy(env)
@@ -135,10 +135,10 @@ class RoutingPolicyTests(unittest.TestCase):
         self.assertEqual(global_dns["strategy"], "prefer_ipv4")
         self.assertNotIn("ipv6-internet.yandex.net", direct_domains)
 
-    def test_global_services_cannot_leak_from_legacy_direct_policy(self) -> None:
+    def test_global_services_cannot_leak_from_conflicting_direct_policy(self) -> None:
         env = self.make_env()
-        env["RU_FORCE_DIRECT_DOMAIN"] += ",mtalk.google.com,www.msftconnecttest.com"
-        env["RU_FORCE_DIRECT_DOMAIN_SUFFIX"] += ",.gstatic.com"
+        env["RU_FORCE_DIRECT_DOMAIN"] += ",mtalk.google.com,www.msftconnecttest.com,checkip.amazonaws.com"
+        env["RU_FORCE_DIRECT_DOMAIN_SUFFIX"] += ",.gstatic.com,.ipify.org"
         policy = build_ru_routing_policy(env)
         direct_domains = {
             domain.lower()
@@ -152,8 +152,9 @@ class RoutingPolicyTests(unittest.TestCase):
             if rule.get("outbound") == "direct-ru"
             for suffix in rule.get("domain_suffix", [])
         }
-        self.assertTrue({"mtalk.google.com", "www.msftconnecttest.com"}.isdisjoint(direct_domains))
+        self.assertTrue({"mtalk.google.com", "www.msftconnecttest.com", "checkip.amazonaws.com"}.isdisjoint(direct_domains))
         self.assertNotIn(".gstatic.com", direct_suffixes)
+        self.assertNotIn(".ipify.org", direct_suffixes)
         global_routes = [rule for rule in policy.route_rules if rule.get("outbound") == "to-foreign"]
         self.assertTrue(any("mtalk.google.com" in rule.get("domain", []) for rule in global_routes))
         self.assertTrue(any(".gstatic.com" in rule.get("domain_suffix", []) for rule in global_routes))
@@ -164,15 +165,6 @@ class RoutingPolicyTests(unittest.TestCase):
         self.assertEqual(rules[private_index], {"ip_is_private": True, "action": "reject", "method": "default", "no_drop": True})
         self.assertFalse(any(rule.get("port") == 853 for rule in rules))
         self.assertFalse(any("override_address" in rule for rule in rules))
-
-    def test_removed_knobs_cannot_change_routes(self) -> None:
-        env = self.make_env()
-        baseline = build_ru_routing_policy(env)
-        env.update({"RU_LITERAL_POLICY": "reject", "RU_IPV6_LITERAL_POLICY": "reject", "TO_FOREIGN_CONNECT_TIMEOUT": "5s", "RU_BLOCK_QUIC": "1"})
-        legacy = build_ru_routing_policy(env)
-        self.assertEqual(legacy.route_rules, baseline.route_rules)
-        self.assertEqual(legacy.outbounds, baseline.outbounds)
-        self.assertFalse(hasattr(legacy, "deprecated_overrides"))
 
     def test_single_gateway_has_only_local_egress(self) -> None:
         for location in ("ru", "foreign"):

@@ -203,7 +203,7 @@ class RenderTests(unittest.TestCase):
 
     def test_ru_server_config_sets_default_domain_resolver(self) -> None:
         env = self.make_env()
-        payload = json.loads(render.render_ru_singbox(env))
+        payload = json.loads(render.render_gateway_singbox(env))
         self.assertEqual(payload["route"]["default_domain_resolver"]["server"], "dns-global")
 
     def test_ru_server_config_accepts_single_primary_vless_user(self) -> None:
@@ -224,12 +224,12 @@ class RenderTests(unittest.TestCase):
     def test_ru_server_config_uses_configured_log_level(self) -> None:
         env = self.make_env()
         env["SING_BOX_LOG_LEVEL"] = "info"
-        payload = json.loads(render.render_ru_singbox(env))
+        payload = json.loads(render.render_gateway_singbox(env))
         self.assertEqual(payload["log"], {"level": "info", "timestamp": True})
 
     def test_ru_server_config_renders_xray_public_443_and_local_singbox_router(self) -> None:
         env = self.make_env()
-        router_payload = json.loads(render.render_ru_singbox(env))
+        router_payload = json.loads(render.render_gateway_singbox(env))
         xray_payload = json.loads(render.render_gateway_xray(env))
         self.assertEqual([inbound["listen_port"] for inbound in router_payload["inbounds"]], [2080, 443, 19091, 19093, 19094])
         self.assertEqual(
@@ -321,7 +321,7 @@ class RenderTests(unittest.TestCase):
 
     def test_ru_server_dns_servers_keep_global_detour_but_not_direct_detour(self) -> None:
         env = self.make_env()
-        payload = json.loads(render.render_ru_singbox(env))
+        payload = json.loads(render.render_gateway_singbox(env))
         servers = {server["tag"]: server for server in payload["dns"]["servers"]}
         self.assertIn("dns-ru-direct", servers)
         self.assertEqual(servers["dns-ru-direct"], {"type": "local", "tag": "dns-ru-direct"})
@@ -329,7 +329,7 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(servers["dns-global"]["detour"], "to-foreign")
 
     def test_ru_server_does_not_suppress_or_reject_aaaa(self) -> None:
-        payload = json.loads(render.render_ru_singbox(self.make_env()))
+        payload = json.loads(render.render_gateway_singbox(self.make_env()))
         self.assertFalse(
             any(
                 "AAAA" in rule.get("query_type", []) and rule.get("action") in {"reject", "predefined"}
@@ -352,7 +352,7 @@ class RenderTests(unittest.TestCase):
 
     def test_ru_server_uses_one_stable_overlay_for_domains_and_literals(self) -> None:
         env = self.make_env()
-        payload = json.loads(render.render_ru_singbox(env))
+        payload = json.loads(render.render_gateway_singbox(env))
         route_rules = payload["route"]["rules"]
         outbounds = {outbound["tag"]: outbound for outbound in payload["outbounds"]}
         domain_foreign_index = next(
@@ -412,19 +412,13 @@ class RenderTests(unittest.TestCase):
     def test_ru_server_allows_configurable_sniff_timeout(self) -> None:
         env = self.make_env()
         env["RU_SNIFF_TIMEOUT"] = "1500ms"
-        payload = json.loads(render.render_ru_singbox(env))
+        payload = json.loads(render.render_gateway_singbox(env))
         sniff = next(rule for rule in payload["route"]["rules"] if rule.get("action") == "sniff")
         self.assertEqual(sniff["timeout"], "1500ms")
 
-    def test_ru_server_never_globally_blocks_quic_from_legacy_env(self) -> None:
-        env = self.make_env()
-        env["RU_BLOCK_QUIC"] = "1"
-        payload = json.loads(render.render_ru_singbox(env))
-        self.assertFalse(any(rule.get("network") == "udp" and rule.get("port") == 443 for rule in payload["route"]["rules"]))
-
     def test_ru_server_rejects_client_tun_dot_without_dns_override(self) -> None:
         env = self.make_env()
-        payload = json.loads(render.render_ru_singbox(env))
+        payload = json.loads(render.render_gateway_singbox(env))
         route_rules = payload["route"]["rules"]
         self.assertIn({"ip_is_private": True, "action": "reject", "method": "default", "no_drop": True}, route_rules)
         self.assertFalse(any(rule.get("port") == 853 for rule in route_rules))
@@ -433,7 +427,7 @@ class RenderTests(unittest.TestCase):
 
     def test_ru_server_routes_own_public_ip_direct_before_foreign_catchall(self) -> None:
         env = self.make_env()
-        payload = json.loads(render.render_ru_singbox(env))
+        payload = json.loads(render.render_gateway_singbox(env))
         route_rules = payload["route"]["rules"]
         own_ip_index = next(index for index, rule in enumerate(route_rules) if rule.get("ip_cidr") == [f"{env['GATEWAY_PUBLIC_IP']}/32"])
         ipv4_literal_index = next(index for index, rule in enumerate(route_rules) if rule.get("ip_cidr") == ["0.0.0.0/0"])
@@ -442,7 +436,7 @@ class RenderTests(unittest.TestCase):
 
     def test_ru_server_resolves_direct_domains_at_the_selected_outbound(self) -> None:
         env = self.make_env()
-        payload = json.loads(render.render_ru_singbox(env))
+        payload = json.loads(render.render_gateway_singbox(env))
         route_rules = payload["route"]["rules"]
         direct_outbound = next(item for item in payload["outbounds"] if item["tag"] == "direct-ru")
         self.assertTrue(any(rule.get("outbound") == "direct-ru" and "domain" in rule for rule in route_rules))
@@ -452,7 +446,7 @@ class RenderTests(unittest.TestCase):
 
     def test_ru_server_config_forces_selected_domains_and_suffixes_direct(self) -> None:
         env = self.make_env()
-        payload = json.loads(render.render_ru_singbox(env))
+        payload = json.loads(render.render_gateway_singbox(env))
         dns_rules = payload["dns"]["rules"]
         route_rules = payload["route"]["rules"]
 
@@ -504,14 +498,14 @@ class RenderTests(unittest.TestCase):
     def test_ru_server_can_block_explicit_ip_cidr(self) -> None:
         env = self.make_env()
         env["RU_BLOCK_IP_CIDR"] = "203.0.113.0/24,198.51.100.4/32"
-        payload = json.loads(render.render_ru_singbox(env))
+        payload = json.loads(render.render_gateway_singbox(env))
         block_cidr_route_rule = next(rule for rule in payload["route"]["rules"] if rule.get("action") == "reject" and "ip_cidr" in rule)
         self.assertEqual(block_cidr_route_rule["ip_cidr"], ["203.0.113.0/24", "198.51.100.4/32"])
 
     def test_ru_server_config_supports_forced_direct_ip_cidr(self) -> None:
         env = self.make_env()
         env["RU_FORCE_DIRECT_IP_CIDR"] = "203.0.113.0/24,198.51.100.4/32"
-        payload = json.loads(render.render_ru_singbox(env))
+        payload = json.loads(render.render_gateway_singbox(env))
         cidr_rule = next(rule for rule in payload["route"]["rules"] if rule.get("outbound") == "direct-ru" and "ip_cidr" in rule)
         self.assertEqual(cidr_rule["ip_cidr"], ["203.0.113.0/24", "198.51.100.4/32", f"{env['GATEWAY_PUBLIC_IP']}/32"])
 
@@ -561,8 +555,6 @@ class RenderTests(unittest.TestCase):
                 gateway_yaml = (cloud_dir / "gateway.yaml").read_text(encoding="utf-8")
                 exit_yaml = (cloud_dir / "exit.yaml").read_text(encoding="utf-8")
                 self.assertIn("/root/vpn-stack/vpn_installer/install_support.py", gateway_yaml)
-                self.assertIn("/root/vpn-stack/vpn_installer/upgrade_0200.py", gateway_yaml)
-                self.assertNotIn("/root/vpn-stack/vpn_installer/legacy_install_contract.py", gateway_yaml)
                 self.assertIn("./install.sh --node gateway", gateway_yaml)
                 self.assertIn("--assets-dir /root/vpn-stack/assets", gateway_yaml)
                 self.assertNotIn("--assets-dir /root/vpn-stack/assets", exit_yaml)
@@ -915,7 +907,6 @@ class RenderTests(unittest.TestCase):
         self.assertIn("inet:vpnstack", script)
         self.assertIn("ip:vpnstack_nat4", script)
         self.assertIn("ip6:vpnstack_nat6", script)
-        self.assertNotIn("legacy_nat_marker", script)
         self.assertNotIn("ip:nat", script)
         self.assertNotIn("ip6:nat", script)
         self.assertIn("nft --check --file", script)

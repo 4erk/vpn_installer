@@ -17,7 +17,7 @@ from ..render import (
     render_foreign_singbox,
     render_foreign_wg,
     render_ru_firewall_nftables,
-    render_ru_singbox,
+    render_gateway_singbox,
     render_ru_wg,
 )
 from ..topology import NODE_GATEWAY
@@ -86,7 +86,7 @@ def build_lab_client_config(env: dict[str, str]) -> str:
 
 
 def build_lab_ru_config(env: dict[str, str]) -> str:
-    payload = json.loads(render_ru_singbox(env))
+    payload = json.loads(render_gateway_singbox(env))
     direct_dns = next(server for server in payload["dns"]["servers"] if server.get("tag") == "dns-ru-direct")
     direct_dns.clear()
     direct_dns.update({"type": "udp", "tag": "dns-ru-direct", "server": LAB_IPS["dns"], "server_port": 53})

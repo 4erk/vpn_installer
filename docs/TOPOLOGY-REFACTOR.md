@@ -1,6 +1,6 @@
-# Topology refactor 0.20.1
+# Topology refactor 0.20.2
 
-This file is the implementation ledger for the single/dual topology migration. A release is not complete while any required checkbox remains open.
+This file is the implementation ledger for the single/dual topology architecture. A release is not complete while any required checkbox remains open.
 
 ## Invariants
 
@@ -20,22 +20,22 @@ This file is the implementation ledger for the single/dual topology migration. A
 
 - [x] Characterization tests for the current dual URI, route order, bundles, manifests, and install order.
 - [x] Canonical `DeploymentSpec`, `TopologySpec`, `NodeSpec`, and `NodePlan`.
-- [x] One bounded transition from canonical `0.20.0` formats to `0.20.1`; pre-`0.20.0` inputs are rejected.
+- [x] Current-schema update window with no runtime migration adapters.
 - [x] Minimal per-node runtime configuration and secret projection.
 - [x] Capability-driven renderer, artifacts, package set, services, probes, and manifest.
 - [x] Single gateway routing and DNS without fake interserver state.
 - [x] Capability-aware server installer, rollback, removal, agent, health, and diagnostics.
 - [x] Topology-aware workflows, client artifacts, web-admin, status, diagnose, maintain, and live verify.
 - [x] Unit, Docker, lab, interrupted-install, and rollback matrix for `single-ru`, `single-foreign`, and `dual`.
-- [x] Documentation, changelog, migration evidence, release audit, and production acceptance.
+- [x] Documentation, changelog, compatibility evidence, release audit, and production acceptance.
 
-The `0.20.1` release gate requires config schema 3, manifest/install-plan schema 4 and diagnostics schema 5 on every installed node. Production acceptance is complete only after the unchanged primary VLESS URI passes the public gateway, Xray, router, optional interserver transport and selected egress.
+The `0.20.2` release gate requires config/state schema 3, manifest/install-plan schema 4 and diagnostics schema 5 on every installed node. Production acceptance is complete only after the unchanged primary VLESS URI passes the public gateway, Xray, router, optional interserver transport and selected egress.
 
 ## Compatibility boundary
 
-Release `0.20.1` supports fresh install, exact `0.20.0 -> 0.20.1`, and same-version reinstall only. Its compatible installed range is `0.20.0..0.20.1`; all CLI node selection uses only `--node gateway|exit|all`.
+Release `0.20.2` supports fresh install, `0.20.1 -> 0.20.2`, and same-version reinstall. Its compatible installed range is `0.20.1..0.20.2`; both versions use the same schemas and canonical node contract. All CLI node selection uses only `--node gateway|exit|all`.
 
-The complete `0.20.0` adapter is isolated in `vpn_installer/upgrade_0200.py` and is removed in `0.20.2`. That release raises its minimum installed version to `0.20.1` without a planned schema bump. See [DEPRECATIONS.md](./DEPRECATIONS.md) for the exact validators and removal list.
+No version-specific adapter is packaged. Unsupported versions fail on the manifest version before managed files change. See [DEPRECATIONS.md](./DEPRECATIONS.md) for the current policy.
 
 ## Acceptance matrix
 

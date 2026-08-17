@@ -7,7 +7,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from vpn_installer.client_artifacts import PUBLIC_VLESS_OUTBOUND_TAG, render_client_profile, render_hysteria2_uri, render_vless_uri
 from vpn_installer.config import generate_default_env
 from vpn_installer.public_transport import derive_public_hy2_password, render_public_hy2_outbound
-from vpn_installer.render import render_ru_firewall_nftables, render_ru_singbox
+from vpn_installer.render import render_gateway_singbox, render_ru_firewall_nftables
 
 
 class PublicTransportTests(unittest.TestCase):
@@ -50,7 +50,7 @@ class PublicTransportTests(unittest.TestCase):
 
     def test_ru_router_exposes_authenticated_hysteria_on_udp_public_port(self) -> None:
         env = self.make_env()
-        config = json.loads(render_ru_singbox(env))
+        config = json.loads(render_gateway_singbox(env))
         inbound = next(item for item in config["inbounds"] if item.get("tag") == "public-hy2-in")
         self.assertEqual(inbound["type"], "hysteria2")
         self.assertEqual(inbound["listen_port"], int(env["RU_LISTEN_PORT"]))

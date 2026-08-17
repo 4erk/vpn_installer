@@ -14,7 +14,7 @@ from vpn_installer import interserver_transport, server_agent
 from vpn_installer.config import generate_default_env
 from vpn_installer.diagnostics import DiagnosticsSnapshot
 from vpn_installer.log_classifier import classify_line
-from vpn_installer.render import render_ru_singbox
+from vpn_installer.render import render_gateway_singbox
 
 
 class ServerAgentTests(unittest.TestCase):
@@ -1160,9 +1160,9 @@ class ServerAgentTests(unittest.TestCase):
     def test_snapshot_includes_bootstrap_identity_for_lifecycle_preflight(self) -> None:
         manifest = {
             **self.single_manifest(),
-            "version": "0.20.1",
+            "version": "0.20.2",
             "release_id": "release-1",
-            "policy_version": "0.20.1",
+            "policy_version": "0.20.2",
         }
         with (
             patch.object(server_agent, "parse_env", return_value={"DEPLOY_NAME": "demo", "WAN_INTERFACE": "eth0", "WG_INTERFACE": "wg0", "RU_LISTEN_PORT": "443"}),
@@ -2205,7 +2205,7 @@ class ServerAgentTests(unittest.TestCase):
     def test_interserver_transport_snapshot_reports_stable_wireguard_overlay(self) -> None:
         env = generate_default_env("demo")
         env.update({"GATEWAY_PUBLIC_IP": "94.232.248.35", "EXIT_PUBLIC_IP": "132.243.21.108"})
-        config = json.loads(render_ru_singbox(env))
+        config = json.loads(render_gateway_singbox(env))
         sockets = subprocess.CompletedProcess(
             ["ss"],
             0,
@@ -2234,7 +2234,7 @@ class ServerAgentTests(unittest.TestCase):
     def test_transport_selection_snapshot_reports_configured_topology_without_urltest_history(self) -> None:
         env = generate_default_env("demo")
         env.update({"GATEWAY_PUBLIC_IP": "94.232.248.35", "EXIT_PUBLIC_IP": "132.243.21.108"})
-        config = json.loads(render_ru_singbox(env))
+        config = json.loads(render_gateway_singbox(env))
         relay = {"available": True, "endpoint": "127.0.0.1:19091", "reason": ""}
         selector = {"available": True, "selected": "interserver-underlay-hy2", "reason": ""}
         with (
@@ -2252,7 +2252,7 @@ class ServerAgentTests(unittest.TestCase):
     def test_transport_selection_rejects_an_incomplete_topology(self) -> None:
         env = generate_default_env("demo")
         env.update({"GATEWAY_PUBLIC_IP": "94.232.248.35", "EXIT_PUBLIC_IP": "132.243.21.108"})
-        config = json.loads(render_ru_singbox(env))
+        config = json.loads(render_gateway_singbox(env))
         config["outbounds"] = [
             outbound
             for outbound in config["outbounds"]

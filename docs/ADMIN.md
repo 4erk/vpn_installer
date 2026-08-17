@@ -81,4 +81,4 @@ CIDR используй только когда сервис публикует 
 
 На Linux замени `.\vpn.cmd` на `./vpn.sh`.
 
-В `0.20.1` web-admin определяется capability двойной topology, а не операторским переключателем. Команды `routes` и атомарный compiler правил остаются частью gateway router, поэтому в `single` управление из консоли работает без HTTP UI.
+Web-admin определяется capability двойной topology, а не операторским переключателем. Команды `routes` и атомарный compiler правил остаются частью gateway router, поэтому в `single` управление из консоли работает без HTTP UI.

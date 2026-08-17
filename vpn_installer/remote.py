@@ -15,8 +15,8 @@ from pathlib import Path
 from typing import Any
 
 from .common import STATE_DIR, command_exists, fail, print_header, run_command
+from .compatibility import require_compatible_installed
 from .diagnostics import SCHEMA_VERSION as DIAGNOSTICS_SCHEMA_VERSION, DiagnosticsSnapshot
-from .upgrade_0200 import Upgrade0200Error, upgrade_diagnostics_snapshot
 from .models import AppError, RemoteTarget
 from .runtime_deps import ensure_python_package
 
@@ -674,11 +674,7 @@ def remote_preflight(
 ) -> dict[str, str]:
     try:
         return bootstrap_from_snapshot(
-            remote_compatible_agent_snapshot(
-                target,
-                live_probes=run_live_probes,
-                compact=not run_live_probes,
-            )
+            remote_agent_snapshot(target, live_probes=run_live_probes, compact=not run_live_probes)
         )
     except (AppError, ValueError, json.JSONDecodeError):
         installed = ssh_capture(
@@ -706,31 +702,17 @@ def _remote_agent_payload(target: RemoteTarget, *, live_probes: bool = False, pr
     return json.loads(ssh_capture(target, command, command_timeout=180 if live_probes else 90))
 
 
-def remote_compatible_agent_snapshot(
-    target: RemoteTarget,
-    *,
-    live_probes: bool = False,
-    profile: str = "light",
-    compact: bool = False,
-) -> dict[str, Any]:
-    """Read a snapshot for non-mutating UI during the bounded 0.20.0 transition."""
-
-    payload = _remote_agent_payload(target, live_probes=live_probes, profile=profile, compact=compact)
-    if not isinstance(payload, dict):
-        raise AppError("vpn-stack-agent returned an invalid snapshot payload")
-    if payload.get("schema_version") == DIAGNOSTICS_SCHEMA_VERSION:
-        return payload
-    try:
-        return upgrade_diagnostics_snapshot(payload, target_schema=DIAGNOSTICS_SCHEMA_VERSION)
-    except Upgrade0200Error as exc:
-        raise AppError("vpn-stack-agent returned an unsupported snapshot schema or release") from exc
-
-
 def remote_agent_snapshot(target: RemoteTarget, *, live_probes: bool = False, profile: str = "light", compact: bool = False) -> dict[str, Any]:
     payload = _remote_agent_payload(target, live_probes=live_probes, profile=profile, compact=compact)
     if not isinstance(payload, dict):
         raise AppError("vpn-stack-agent returned an invalid snapshot payload")
     if int(payload.get("schema_version", 0)) != DIAGNOSTICS_SCHEMA_VERSION:
+        release = payload.get("release")
+        if isinstance(release, dict) and release.get("version"):
+            try:
+                require_compatible_installed(release)
+            except ValueError as exc:
+                raise AppError(str(exc)) from exc
         raise AppError("vpn-stack-agent returned an unsupported snapshot schema")
     return payload
 
