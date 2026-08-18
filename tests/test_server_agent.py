@@ -2327,13 +2327,13 @@ class ServerAgentTests(unittest.TestCase):
             patch.object(server_agent, "transport_candidate_probe", return_value=healthy) as probe,
         ):
             server_agent.collect_transport_probes(
-                "interserver-underlay-wg",
+                "interserver-underlay-hy2",
                 {"preferred_probe_at": "2026-08-07T11:59:49+00:00"},
                 env=env,
                 observed_at="2026-08-07T12:00:00+00:00",
             )
 
-        probe.assert_called_once_with("interserver-underlay-hy2")
+        probe.assert_called_once_with("interserver-underlay-wg")
 
     def test_transport_reconcile_does_not_switch_during_install_transaction(self) -> None:
         previous = {
@@ -2424,7 +2424,10 @@ class ServerAgentTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["scope"], "overlay-icmp")
         self.assertEqual(result["target"], "10.74.0.2")
-        self.assertEqual(command.call_args.args[0][0], "ping")
+        self.assertEqual(
+            command.call_args.args[0],
+            ["ping", "-n", "-I", "wg0", "-c", "1", "-W", "1", "-s", "32", "10.74.0.2"],
+        )
 
     def test_transport_overlay_path_probe_normalizes_packet_loss(self) -> None:
         completed = subprocess.CompletedProcess(
@@ -2439,6 +2442,70 @@ class ServerAgentTests(unittest.TestCase):
 
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"], "WireGuard overlay liveness probe timed out")
+
+    def test_transport_overlay_quality_probe_reports_partial_loss_and_rtt(self) -> None:
+        completed = subprocess.CompletedProcess(
+            ["ping"],
+            0,
+            (
+                "4 packets transmitted, 3 received, 25% packet loss, time 305ms\n"
+                "rtt min/avg/max/mdev = 24.100/31.250/48.500/8.200 ms\n"
+            ),
+            "",
+        )
+        env = {"WG_INTERFACE": "wg0", "WG_FOREIGN_ADDRESS": "10.74.0.2/24"}
+        with patch.object(server_agent, "run", return_value=completed) as command:
+            result = server_agent.transport_overlay_path_probe(env, quality=True)
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["quality_checked"])
+        self.assertEqual(result["packet_loss_pct"], 25.0)
+        self.assertEqual(result["rtt_avg_ms"], 31.25)
+        self.assertEqual(result["scope"], "overlay-quality")
+        self.assertIn("packet loss 25%", result["error"])
+        self.assertEqual(
+            command.call_args.args[0],
+            [
+                "ping",
+                "-n",
+                "-I",
+                "wg0",
+                "-c",
+                "4",
+                "-i",
+                "0.1",
+                "-w",
+                "2",
+                "-W",
+                "1",
+                "-s",
+                "1200",
+                "10.74.0.2",
+            ],
+        )
+
+    def test_transport_probe_schedules_quality_and_honors_preferred_retry(self) -> None:
+        self.assertTrue(server_agent.overlay_quality_probe_due({}, "2026-08-07T12:00:00+00:00"))
+        self.assertFalse(
+            server_agent.overlay_quality_probe_due(
+                {"quality_probe_at": "2026-08-07T11:59:55+00:00", "state": "healthy"},
+                "2026-08-07T12:00:00+00:00",
+            )
+        )
+        self.assertTrue(
+            server_agent.overlay_quality_probe_due(
+                {"quality_probe_at": "2026-08-07T11:59:59+00:00", "state": "suspect"},
+                "2026-08-07T12:00:00+00:00",
+            )
+        )
+        retry = {
+            "preferred_retry": {
+                "path": "interserver-underlay-wg",
+                "retry_at": "2026-08-07T12:01:00+00:00",
+            }
+        }
+        self.assertFalse(server_agent.preferred_transport_probe_due(retry, "2026-08-07T12:00:59+00:00"))
+        self.assertTrue(server_agent.preferred_transport_probe_due(retry, "2026-08-07T12:01:00+00:00"))
 
     def test_transport_relay_reset_does_not_touch_application_flows(self) -> None:
         payload = {

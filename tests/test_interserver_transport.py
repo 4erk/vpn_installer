@@ -165,7 +165,7 @@ class InterserverTransportIdentityTests(unittest.TestCase):
 
         self.assertEqual(
             hashlib.sha256(payload.encode("utf-8")).hexdigest(),
-            "25b3b25f46c98c59ca6425d474e92fef2862f316896bed29dfd890efaf8a37c5",
+            "1e94653d45e803d6b61ae43d057a3a63717ea122dc5e1e434a1442adbe288aa9",
         )
 
     def test_interserver_transport_rejects_single_topology(self) -> None:
@@ -215,24 +215,25 @@ class InterserverTransportIdentityTests(unittest.TestCase):
         state: dict[str, object] = {
             "schema_version": TRANSPORT_STATE_SCHEMA_VERSION,
             "updated_at": "2026-08-06T11:59:58+00:00",
-            "selected": TRANSPORT_HY2_TAG,
-            "latency_candidate": TRANSPORT_WG_TAG,
+            "selected": TRANSPORT_WG_TAG,
+            "latency_candidate": TRANSPORT_HY2_TAG,
             "latency_confirmations": 999,
         }
         probes = {
-            TRANSPORT_HY2_TAG: {"checked": True, "ok": True, "delay_ms": 800},
-            TRANSPORT_WG_TAG: {"checked": True, "ok": True, "delay_ms": 10},
+            TRANSPORT_WG_TAG: {"checked": True, "ok": True, "delay_ms": 800},
+            TRANSPORT_HY2_TAG: {"checked": True, "ok": True, "delay_ms": 10},
         }
         for second in range(0, 20, 2):
             state = evaluate_transport_policy(
-                selected=TRANSPORT_HY2_TAG,
+                selected=TRANSPORT_WG_TAG,
                 probes=probes,
                 previous=state,
                 observed_at=f"2026-08-06T12:00:{second:02d}+00:00",
             )
             self.assertFalse(state["would_switch"])
-            self.assertEqual(state["recommended"], TRANSPORT_HY2_TAG)
-            self.assertEqual(state["latency_confirmations"], 0)
+            self.assertEqual(state["recommended"], TRANSPORT_WG_TAG)
+            self.assertNotIn("latency_candidate", state)
+            self.assertNotIn("latency_confirmations", state)
 
     def test_unknown_state_schema_cannot_confirm_a_switch(self) -> None:
         stale = {
@@ -387,60 +388,71 @@ class InterserverTransportIdentityTests(unittest.TestCase):
 
     def test_healthy_fallback_returns_to_preferred_after_three_fresh_probes(self) -> None:
         failure = {
-            TRANSPORT_HY2_TAG: {"checked": True, "ok": False, "attempts": 2, "error": "timed out"},
-            TRANSPORT_WG_TAG: {"checked": True, "ok": True, "delay_ms": 70},
+            TRANSPORT_WG_TAG: {"checked": True, "ok": False, "attempts": 2, "error": "timed out"},
+            TRANSPORT_HY2_TAG: {"checked": True, "ok": True, "delay_ms": 70},
         }
         first = evaluate_transport_policy(
-            selected=TRANSPORT_HY2_TAG,
+            selected=TRANSPORT_WG_TAG,
             probes=failure,
             observed_at="2026-08-06T12:00:00+00:00",
         )
         switch = evaluate_transport_policy(
-            selected=TRANSPORT_HY2_TAG,
+            selected=TRANSPORT_WG_TAG,
             probes=failure,
             previous=first,
             observed_at="2026-08-06T12:00:02+00:00",
         )
         self.assertTrue(switch["would_switch"])
+        self.assertEqual(switch["preferred_retry"]["retry_at"], "2026-08-06T12:01:02+00:00")
 
         state: dict[str, object] = {
             **switch,
-            "selected": TRANSPORT_WG_TAG,
+            "selected": TRANSPORT_HY2_TAG,
             "would_switch": False,
             "changed": True,
         }
         healthy = {
-            TRANSPORT_WG_TAG: {"checked": True, "ok": True, "delay_ms": 40},
             TRANSPORT_HY2_TAG: {"checked": True, "ok": True, "delay_ms": 90},
+            TRANSPORT_WG_TAG: {"checked": True, "ok": True, "delay_ms": 40},
         }
-        for second in (4, 14, 24):
+        deferred = evaluate_transport_policy(
+            selected=TRANSPORT_HY2_TAG,
+            probes={**healthy, TRANSPORT_WG_TAG: {"checked": False, "ok": False}},
+            previous=state,
+            observed_at="2026-08-06T12:00:04+00:00",
+        )
+        self.assertFalse(deferred["would_switch"])
+        self.assertIn("deferred until", deferred["reason"])
+        state = deferred
+        for stamp in ("12:01:02", "12:01:12", "12:01:22"):
             state = evaluate_transport_policy(
-                selected=TRANSPORT_WG_TAG,
+                selected=TRANSPORT_HY2_TAG,
                 probes=healthy,
                 previous=state,
-                observed_at=f"2026-08-06T12:00:{second:02d}+00:00",
+                observed_at=f"2026-08-06T{stamp}+00:00",
             )
         self.assertEqual(state["state"], "recovering")
-        self.assertEqual(state["selected"], TRANSPORT_WG_TAG)
-        self.assertEqual(state["recommended"], TRANSPORT_HY2_TAG)
+        self.assertEqual(state["selected"], TRANSPORT_HY2_TAG)
+        self.assertEqual(state["recommended"], TRANSPORT_WG_TAG)
         self.assertTrue(state["would_switch"])
         self.assertEqual(state["preferred_recovery"]["confirmations"], 3)
+        self.assertEqual(state["preferred_retry"]["recovered_at"], "2026-08-06T12:01:22+00:00")
         json.dumps(state)
 
     def test_deferred_cycle_preserves_but_does_not_increment_recovery_evidence(self) -> None:
         first = evaluate_transport_policy(
-            selected=TRANSPORT_WG_TAG,
+            selected=TRANSPORT_HY2_TAG,
             probes={
-                TRANSPORT_WG_TAG: {"checked": True, "ok": True, "delay_ms": 20},
                 TRANSPORT_HY2_TAG: {"checked": True, "ok": True, "delay_ms": 50},
+                TRANSPORT_WG_TAG: {"checked": True, "ok": True, "delay_ms": 20},
             },
             observed_at="2026-08-06T12:00:00+00:00",
         )
         deferred = evaluate_transport_policy(
-            selected=TRANSPORT_WG_TAG,
+            selected=TRANSPORT_HY2_TAG,
             probes={
-                TRANSPORT_WG_TAG: {"checked": True, "ok": True, "delay_ms": 20},
-                TRANSPORT_HY2_TAG: {"checked": False, "ok": False},
+                TRANSPORT_HY2_TAG: {"checked": True, "ok": True, "delay_ms": 50},
+                TRANSPORT_WG_TAG: {"checked": False, "ok": False},
             },
             previous=first,
             observed_at="2026-08-06T12:00:02+00:00",
@@ -450,6 +462,47 @@ class InterserverTransportIdentityTests(unittest.TestCase):
         self.assertEqual(deferred["preferred_recovery"]["confirmations"], 1)
         self.assertEqual(deferred["preferred_probe_at"], first["preferred_probe_at"])
         self.assertFalse(deferred["would_switch"])
+
+    def test_recurrent_preferred_failure_increases_retry_without_permanent_lockout(self) -> None:
+        previous: dict[str, object] = {
+            "schema_version": TRANSPORT_STATE_SCHEMA_VERSION,
+            "updated_at": "2026-08-06T12:01:58+00:00",
+            "selected": TRANSPORT_WG_TAG,
+            "preferred_retry": {
+                "path": TRANSPORT_WG_TAG,
+                "attempts": 1,
+                "failed_at": "2026-08-06T12:00:00+00:00",
+                "retry_at": "2026-08-06T12:01:00+00:00",
+                "recovered_at": "2026-08-06T12:01:00+00:00",
+                "reason": "packet_loss",
+            },
+        }
+        probes = {
+            TRANSPORT_WG_TAG: {
+                "checked": True,
+                "ok": False,
+                "attempts": 5,
+                "error": "WireGuard overlay packet loss 20%",
+            },
+            TRANSPORT_HY2_TAG: {"checked": True, "ok": True, "delay_ms": 40},
+        }
+        first = evaluate_transport_policy(
+            selected=TRANSPORT_WG_TAG,
+            probes=probes,
+            previous=previous,
+            observed_at="2026-08-06T12:02:00+00:00",
+        )
+        second = evaluate_transport_policy(
+            selected=TRANSPORT_WG_TAG,
+            probes=probes,
+            previous=first,
+            observed_at="2026-08-06T12:02:02+00:00",
+        )
+
+        self.assertTrue(second["would_switch"])
+        self.assertEqual(second["failure"]["reason"], "packet_loss")
+        self.assertEqual(second["preferred_retry"]["attempts"], 2)
+        self.assertEqual(second["preferred_retry"]["retry_at"], "2026-08-06T12:04:02+00:00")
 
 if __name__ == "__main__":
     unittest.main()

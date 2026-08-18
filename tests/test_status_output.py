@@ -158,6 +158,13 @@ class StatusOutputTests(unittest.TestCase):
                                 "delay_ms": 18,
                                 "target": "10.74.0.2:1053",
                             },
+                            "last_quality_probe": {
+                                "checked": True,
+                                "ok": True,
+                                "quality_checked": True,
+                                "packet_loss_pct": 0.0,
+                                "rtt_avg_ms": 22.5,
+                            },
                             "probes": {
                                 "interserver-underlay-hy2": {
                                     "checked": True,
@@ -226,6 +233,7 @@ class StatusOutputTests(unittest.TestCase):
             "interserver transport: mode=stable-wireguard-overlay, selected=interserver-underlay-wg, "
             "configured_candidates=interserver-underlay-hy2,interserver-underlay-wg, "
             "overlay_probe=ok(18ms,target=10.74.0.2:1053), "
+            "quality_probe=ok(loss=0.0%,rtt=22.5ms), "
             "cold_probe=interserver-underlay-hy2:ok(23ms), adaptation=healthy, "
             "hy2_session=active, reason=selected underlay is healthy",
             rendered,

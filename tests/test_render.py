@@ -381,7 +381,7 @@ class RenderTests(unittest.TestCase):
                 "type": "selector",
                 "tag": "interserver-underlay-select",
                 "outbounds": ["interserver-underlay-wg", "interserver-underlay-hy2"],
-                "default": "interserver-underlay-hy2",
+                "default": "interserver-underlay-wg",
                 "interrupt_exist_connections": True,
             },
         )

@@ -199,6 +199,22 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
                     )
                 else:
                     details.append(f"overlay_probe=failed({overlay_probe.get('error') or 'unknown'})")
+            quality_probe = adaptive.get("last_quality_probe", {})
+            if isinstance(quality_probe, dict) and quality_probe.get("quality_checked") is True:
+                quality_outcome = (
+                    "ok"
+                    if quality_probe.get("ok") is True
+                    else f"failed({quality_probe.get('error') or 'unknown'})"
+                )
+                details.append(
+                    f"quality_probe={quality_outcome}(loss={quality_probe.get('packet_loss_pct', '-')}%,"
+                    f"rtt={quality_probe.get('rtt_avg_ms', '-')}ms)"
+                )
+            preferred_retry = adaptive.get("preferred_retry", {})
+            if isinstance(preferred_retry, dict) and preferred_retry.get("retry_at"):
+                details.append(
+                    f"preferred_retry={preferred_retry.get('attempts', '-')}@{preferred_retry['retry_at']}"
+                )
             probes = adaptive.get("probes", {})
             probes = probes if isinstance(probes, dict) else {}
             raw_probe = next(

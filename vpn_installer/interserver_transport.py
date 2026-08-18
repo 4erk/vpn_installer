@@ -8,7 +8,7 @@ import os
 import socket
 import struct
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 HY2_PORT = 18443
@@ -32,16 +32,22 @@ TRANSPORT_PROBE_PORTS = {
 FOREIGN_DNS_RELAY_PORT = 1053
 TRANSPORT_CANDIDATE_PROBE_TIMEOUT_MS = 1200
 TRANSPORT_PROBE_INTERVAL_SECONDS = 2
+TRANSPORT_QUALITY_PROBE_INTERVAL_SECONDS = 15
+TRANSPORT_QUALITY_PROBE_PACKETS = 4
+TRANSPORT_QUALITY_PROBE_PAYLOAD_BYTES = 1200
 TRANSPORT_FAILURE_CONFIRMATIONS = 2
 TRANSPORT_ALTERNATE_HEALTH_CONFIRMATIONS = 2
 TRANSPORT_EVIDENCE_MAX_GAP_SECONDS = TRANSPORT_PROBE_INTERVAL_SECONDS * 5
-TRANSPORT_PREFERRED_TAG = TRANSPORT_HY2_TAG
+TRANSPORT_PREFERRED_TAG = TRANSPORT_WG_TAG
 TRANSPORT_PREFERRED_RECOVERY_CONFIRMATIONS = 3
 TRANSPORT_PREFERRED_PROBE_INTERVAL_SECONDS = 10
 TRANSPORT_PREFERRED_EVIDENCE_MAX_GAP_SECONDS = TRANSPORT_PREFERRED_PROBE_INTERVAL_SECONDS * 3
+TRANSPORT_PREFERRED_RETRY_BASE_SECONDS = 60
+TRANSPORT_PREFERRED_RETRY_MAX_SECONDS = 900
+TRANSPORT_PREFERRED_STABLE_RESET_SECONDS = 600
 TRANSPORT_SWITCH_RETRY_BASE_SECONDS = 30
 TRANSPORT_SWITCH_RETRY_MAX_SECONDS = 300
-TRANSPORT_STATE_SCHEMA_VERSION = 11
+TRANSPORT_STATE_SCHEMA_VERSION = 12
 UNDERLAY_WG_RU_ADDRESS = "10.75.0.1/32"
 UNDERLAY_WG_FOREIGN_ADDRESS = "10.75.0.2/32"
 UNDERLAY_WG_MTU = 1420
@@ -587,7 +593,15 @@ def _normalize_probe(probe: dict[str, Any] | None) -> dict[str, Any]:
         "delay_ms": max(0, int(probe.get("delay_ms", 0) or 0)),
         "error": str(probe.get("error", ""))[:240],
     }
-    for key in ("scope", "target", "elapsed_ms"):
+    for key in (
+        "scope",
+        "target",
+        "elapsed_ms",
+        "quality_checked",
+        "packet_loss_pct",
+        "rtt_avg_ms",
+        "payload_bytes",
+    ):
         if key in probe:
             normalized[key] = probe[key]
     return normalized
@@ -596,6 +610,7 @@ def _normalize_probe(probe: dict[str, Any] | None) -> dict[str, Any]:
 def _probe_failure_reason(probe: dict[str, Any]) -> str:
     error = " ".join(str(probe.get("error", "")).lower().split())
     categories = (
+        ("packet_loss", ("packet loss",)),
         ("timeout", ("timed out", "timeout", "deadline")),
         ("connection_refused", ("connection refused",)),
         ("network_unreachable", ("network is unreachable", "no route to host")),
@@ -658,6 +673,51 @@ def _next_evidence(
     }
 
 
+def _preferred_retry_active(previous: dict[str, Any], observed_at: str) -> bool:
+    retry = previous.get("preferred_retry", {})
+    if not isinstance(retry, dict) or retry.get("path") != TRANSPORT_PREFERRED_TAG:
+        return False
+    retry_at = _parse_timestamp(retry.get("retry_at"))
+    observed = _parse_timestamp(observed_at)
+    return retry_at is not None and observed is not None and observed < retry_at
+
+
+def _next_preferred_retry(previous: dict[str, Any], reason: str, observed_at: str) -> dict[str, Any]:
+    prior = previous.get("preferred_retry", {})
+    observed = _parse_timestamp(observed_at) or datetime.now(timezone.utc)
+    attempts = 1
+    if isinstance(prior, dict) and prior.get("path") == TRANSPORT_PREFERRED_TAG:
+        recovered_at = _parse_timestamp(prior.get("recovered_at"))
+        if recovered_at is None or (observed - recovered_at).total_seconds() < TRANSPORT_PREFERRED_STABLE_RESET_SECONDS:
+            attempts = max(0, int(prior.get("attempts", 0) or 0)) + 1
+    delay = min(
+        TRANSPORT_PREFERRED_RETRY_MAX_SECONDS,
+        TRANSPORT_PREFERRED_RETRY_BASE_SECONDS * (2 ** min(attempts - 1, 8)),
+    )
+    return {
+        "path": TRANSPORT_PREFERRED_TAG,
+        "attempts": attempts,
+        "failed_at": observed_at,
+        "retry_at": (observed + timedelta(seconds=delay)).isoformat(),
+        "reason": reason,
+    }
+
+
+def _preferred_recovery_details(previous: dict[str, Any], observed_at: str) -> dict[str, Any]:
+    retry = previous.get("preferred_retry", {})
+    if not isinstance(retry, dict) or retry.get("path") != TRANSPORT_PREFERRED_TAG:
+        return {}
+    recovered_at = _parse_timestamp(retry.get("recovered_at"))
+    observed = _parse_timestamp(observed_at)
+    if (
+        recovered_at is not None
+        and observed is not None
+        and (observed - recovered_at).total_seconds() >= TRANSPORT_PREFERRED_STABLE_RESET_SECONDS
+    ):
+        return {}
+    return {"preferred_retry": retry}
+
+
 def _policy_state(
     selected: str,
     probes: dict[str, dict[str, Any]],
@@ -678,9 +738,6 @@ def _policy_state(
         "recommended": target,
         "would_switch": target != selected,
         "hard_failure_evidence": hard_failure,
-        # Retained as inert fields for readers of schema 6 state.
-        "latency_candidate": "",
-        "latency_confirmations": 0,
         "probes": probes,
         "reason": reason,
         **details,
@@ -727,6 +784,7 @@ def evaluate_transport_policy(
             f"{failure['confirmations']}/{TRANSPORT_FAILURE_CONFIRMATIONS}"
         )
         details: dict[str, Any] = {"failure": failure}
+        details.update(_preferred_recovery_details(prior, observed_at))
         recommended: str | None = None
         if alternate_probe["ok"]:
             alternate_health = _next_evidence(
@@ -743,6 +801,8 @@ def evaluate_transport_policy(
             ):
                 state = "recovering"
                 recommended = alternate
+                if selected == TRANSPORT_PREFERRED_TAG:
+                    details["preferred_retry"] = _next_preferred_retry(prior, failure_reason, observed_at)
                 reason = (
                     f"{selected} has confirmed {failure_reason}; "
                     f"{alternate} is confirmed healthy"
@@ -761,25 +821,39 @@ def evaluate_transport_policy(
         )
 
     if selected == TRANSPORT_PREFERRED_TAG:
-        return _policy_state(selected, normalized, observed_at, "healthy", "preferred overlay path is healthy")
+        return _policy_state(
+            selected,
+            normalized,
+            observed_at,
+            "healthy",
+            "preferred overlay path is healthy",
+            **_preferred_recovery_details(prior, observed_at),
+        )
 
     preferred_probe = normalized[TRANSPORT_PREFERRED_TAG]
-    recovery_details: dict[str, Any] = {}
+    recovery_details: dict[str, Any] = _preferred_recovery_details(prior, observed_at)
     prior_recovery = prior.get("preferred_recovery")
     if isinstance(prior_recovery, dict):
         recovery_details["preferred_recovery"] = prior_recovery
     if prior.get("preferred_probe_at"):
         recovery_details["preferred_probe_at"] = prior["preferred_probe_at"]
     if not preferred_probe["checked"]:
+        deferred_reason = (
+            f"fallback overlay path is healthy; preferred retry is deferred until "
+            f"{recovery_details['preferred_retry'].get('retry_at')}"
+            if _preferred_retry_active(prior, observed_at) and "preferred_retry" in recovery_details
+            else "fallback overlay path is healthy; preferred probe is deferred"
+        )
         return _policy_state(
             selected,
             normalized,
             observed_at,
             "healthy",
-            "fallback overlay path is healthy; preferred probe is deferred",
+            deferred_reason,
             **recovery_details,
         )
     if not preferred_probe["ok"]:
+        retry = _next_preferred_retry(prior, _probe_failure_reason(preferred_probe), observed_at)
         return _policy_state(
             selected,
             normalized,
@@ -787,6 +861,7 @@ def evaluate_transport_policy(
             "healthy",
             f"fallback overlay path is healthy; preferred underlay {_probe_failure_reason(preferred_probe)}",
             preferred_probe_at=observed_at,
+            preferred_retry=retry,
         )
 
     recovery_relation = _cycle_relation(
@@ -802,6 +877,13 @@ def evaluate_transport_policy(
         cycle_relation=recovery_relation,
     )
     confirmed = recovery["confirmations"] >= TRANSPORT_PREFERRED_RECOVERY_CONFIRMATIONS
+    if confirmed and "preferred_retry" in recovery_details:
+        recovery_details["preferred_retry"] = {
+            **recovery_details["preferred_retry"],
+            "recovered_at": observed_at,
+        }
+    recovery_details["preferred_recovery"] = recovery
+    recovery_details["preferred_probe_at"] = observed_at
     return _policy_state(
         selected,
         normalized,
@@ -816,6 +898,5 @@ def evaluate_transport_policy(
             )
         ),
         recommended=TRANSPORT_PREFERRED_TAG if confirmed else None,
-        preferred_recovery=recovery,
-        preferred_probe_at=observed_at,
+        **recovery_details,
     )

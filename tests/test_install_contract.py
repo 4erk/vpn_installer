@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from vpn_installer.compatibility import COMPATIBLE_INSTALLED_MIN
 from vpn_installer.config import generate_default_env
 from vpn_installer.install_contract import InstallContractError, is_planned_install_maintenance, validate_bundle, validate_installed_bundle
 from vpn_installer.install_support import main as install_support_main
@@ -28,11 +29,14 @@ class InstallContractTests(unittest.TestCase):
             root = Path(temp)
             bundle = root / "bundle"
             bundle.mkdir()
-            (bundle / "render-manifest.json").write_text('{"version":"0.20.2"}', encoding="utf-8")
+            (bundle / "render-manifest.json").write_text(
+                json.dumps({"version": COMPATIBLE_INSTALLED_MIN}),
+                encoding="utf-8",
+            )
             with patch("vpn_installer.install_contract._validate_bundle") as validator:
                 validate_installed_bundle(bundle, "gateway", root / "contract")
 
-        self.assertEqual(validator.call_args.kwargs["expected_version"], "0.20.2")
+        self.assertEqual(validator.call_args.kwargs["expected_version"], COMPATIBLE_INSTALLED_MIN)
         self.assertNotIn("require_current_compatibility", validator.call_args.kwargs)
 
     def test_installed_bundle_rejects_out_of_window_version_before_validation(self) -> None:

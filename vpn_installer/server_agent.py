@@ -59,6 +59,9 @@ try:
         TRANSPORT_PREFERRED_PROBE_INTERVAL_SECONDS,
         TRANSPORT_PREFERRED_TAG,
         TRANSPORT_PROBE_INTERVAL_SECONDS,
+        TRANSPORT_QUALITY_PROBE_INTERVAL_SECONDS,
+        TRANSPORT_QUALITY_PROBE_PACKETS,
+        TRANSPORT_QUALITY_PROBE_PAYLOAD_BYTES,
         TRANSPORT_RELAY_INBOUND_TAG,
         TRANSPORT_RELAY_PORT,
         TRANSPORT_SELECTOR_TAG,
@@ -82,6 +85,9 @@ except ImportError:  # Optional on nodes without an interserver capability.
             TRANSPORT_PREFERRED_PROBE_INTERVAL_SECONDS,
             TRANSPORT_PREFERRED_TAG,
             TRANSPORT_PROBE_INTERVAL_SECONDS,
+            TRANSPORT_QUALITY_PROBE_INTERVAL_SECONDS,
+            TRANSPORT_QUALITY_PROBE_PACKETS,
+            TRANSPORT_QUALITY_PROBE_PAYLOAD_BYTES,
             TRANSPORT_RELAY_INBOUND_TAG,
             TRANSPORT_RELAY_PORT,
             TRANSPORT_SELECTOR_TAG,
@@ -101,12 +107,15 @@ except ImportError:  # Optional on nodes without an interserver capability.
         TRANSPORT_CANDIDATE_TAGS = (TRANSPORT_WG_TAG, TRANSPORT_HY2_TAG)
         TRANSPORT_FAILURE_CONFIRMATIONS = 2
         TRANSPORT_PREFERRED_PROBE_INTERVAL_SECONDS = 10
-        TRANSPORT_PREFERRED_TAG = TRANSPORT_HY2_TAG
+        TRANSPORT_PREFERRED_TAG = TRANSPORT_WG_TAG
         TRANSPORT_PROBE_INTERVAL_SECONDS = 2
+        TRANSPORT_QUALITY_PROBE_INTERVAL_SECONDS = 15
+        TRANSPORT_QUALITY_PROBE_PACKETS = 4
+        TRANSPORT_QUALITY_PROBE_PAYLOAD_BYTES = 1200
         TRANSPORT_RELAY_INBOUND_TAG = "interserver-overlay-in"
         TRANSPORT_RELAY_PORT = 19091
         TRANSPORT_SELECTOR_TAG = "interserver-underlay-select"
-        TRANSPORT_STATE_SCHEMA_VERSION = 11
+        TRANSPORT_STATE_SCHEMA_VERSION = 12
         TRANSPORT_SWITCH_RETRY_BASE_SECONDS = 30
         TRANSPORT_SWITCH_RETRY_MAX_SECONDS = 300
         TRANSPORT_MODULE_AVAILABLE = False
@@ -2121,8 +2130,20 @@ def transport_selection_snapshot(config: dict[str, Any], env: dict[str, str], co
 
 def preferred_transport_probe_due(previous: dict[str, Any], observed_at: str) -> bool:
     now = parse_iso_datetime(observed_at)
+    retry = previous.get("preferred_retry", {})
+    retry_at = parse_iso_datetime(str(retry.get("retry_at", ""))) if isinstance(retry, dict) else None
+    if now is not None and retry_at is not None and now < retry_at:
+        return False
     age = iso_age_seconds(str(previous.get("preferred_probe_at", "")), now=now) if now else None
     return age is None or age >= TRANSPORT_PREFERRED_PROBE_INTERVAL_SECONDS
+
+
+def overlay_quality_probe_due(previous: dict[str, Any], observed_at: str) -> bool:
+    if previous.get("state") == "suspect":
+        return True
+    now = parse_iso_datetime(observed_at)
+    age = iso_age_seconds(str(previous.get("quality_probe_at", "")), now=now) if now else None
+    return age is None or age >= TRANSPORT_QUALITY_PROBE_INTERVAL_SECONDS
 
 
 def ping_failure_reason(result: subprocess.CompletedProcess[str], fallback: str) -> str:
@@ -2133,7 +2154,7 @@ def ping_failure_reason(result: subprocess.CompletedProcess[str], fallback: str)
     return detail[:240]
 
 
-def transport_overlay_path_probe(env: dict[str, str]) -> dict[str, Any]:
+def transport_overlay_path_probe(env: dict[str, str], *, quality: bool = False) -> dict[str, Any]:
     """Probe only the active interserver overlay, independent of DNS and Internet services."""
 
     started = time.monotonic()
@@ -2150,24 +2171,45 @@ def transport_overlay_path_probe(env: dict[str, str]) -> dict[str, Any]:
             "target": "",
             "error": "foreign WireGuard address is missing",
         }
-    result = run(
-        ["ping", "-n", "-I", interface, "-c", "1", "-W", "1", "-s", "32", target],
-        timeout=2,
-    )
+    packet_count = TRANSPORT_QUALITY_PROBE_PACKETS if quality else 1
+    payload_bytes = TRANSPORT_QUALITY_PROBE_PAYLOAD_BYTES if quality else 32
+    command = ["ping", "-n", "-I", interface, "-c", str(packet_count)]
+    if quality:
+        command.extend(["-i", "0.1", "-w", "2"])
+    command.extend(["-W", "1", "-s", str(payload_bytes), target])
+    result = run(command, timeout=3 if quality else 2)
     elapsed_ms = max(1, round((time.monotonic() - started) * 1000))
     error = ""
-    if result.returncode != 0:
+    packet_loss_pct: float | None = None
+    rtt_avg_ms: float | None = None
+    if quality:
+        loss_match = re.search(r"([0-9]+(?:[.,][0-9]+)?)%\s+packet loss", result.stdout)
+        if loss_match:
+            packet_loss_pct = float(loss_match.group(1).replace(",", "."))
+        rtt_match = re.search(r"=\s*[0-9.]+/([0-9.]+)/[0-9.]+/[0-9.]+\s+ms", result.stdout)
+        if rtt_match:
+            rtt_avg_ms = float(rtt_match.group(1))
+        if packet_loss_pct is not None and packet_loss_pct > 0:
+            error = f"WireGuard overlay packet loss {packet_loss_pct:g}%"
+    if not error and result.returncode != 0:
         error = ping_failure_reason(result, "WireGuard overlay liveness probe")
-    return {
+    payload: dict[str, Any] = {
         "checked": True,
         "ok": not error,
-        "attempts": 1,
-        "delay_ms": 0 if error else elapsed_ms,
+        "attempts": packet_count,
+        "delay_ms": 0 if error else round(rtt_avg_ms or elapsed_ms),
         "elapsed_ms": elapsed_ms,
-        "scope": "overlay-icmp",
+        "scope": "overlay-quality" if quality else "overlay-icmp",
         "target": target,
         "error": error,
+        "quality_checked": quality and packet_loss_pct is not None,
+        "payload_bytes": payload_bytes,
     }
+    if packet_loss_pct is not None:
+        payload["packet_loss_pct"] = packet_loss_pct
+    if rtt_avg_ms is not None:
+        payload["rtt_avg_ms"] = rtt_avg_ms
+    return payload
 
 
 def collect_transport_probes(
@@ -2180,7 +2222,10 @@ def collect_transport_probes(
     probes = {tag: {"checked": False, "ok": False, "attempts": 0} for tag in TRANSPORT_CANDIDATE_TAGS}
     if selected not in probes:
         return probes
-    probes[selected] = transport_overlay_path_probe(env)
+    probes[selected] = transport_overlay_path_probe(
+        env,
+        quality=overlay_quality_probe_due(previous, observed_at),
+    )
     if probes[selected].get("ok") is not True:
         alternate = next(tag for tag in TRANSPORT_CANDIDATE_TAGS if tag != selected)
         if transport_switch_backoff_active(previous, alternate, observed_at) is None:
@@ -2407,6 +2452,13 @@ def _reconcile_interserver_transport_unlocked() -> dict[str, Any]:
             observed_at=observed_at,
         )
         payload["overlay_probe"] = probes.get(selected, {})
+        if probes.get(selected, {}).get("quality_checked") is True:
+            payload["quality_probe_at"] = observed_at
+            payload["last_quality_probe"] = probes[selected]
+        elif previous_state.get("quality_probe_at"):
+            payload["quality_probe_at"] = previous_state["quality_probe_at"]
+            if isinstance(previous_state.get("last_quality_probe"), dict):
+                payload["last_quality_probe"] = previous_state["last_quality_probe"]
         last_switch_failure = previous_state.get("last_switch_failure")
         if isinstance(last_switch_failure, dict):
             payload["last_switch_failure"] = last_switch_failure
@@ -2461,6 +2513,8 @@ def _reconcile_interserver_transport_unlocked() -> dict[str, Any]:
                         "reason": f"{payload.get('reason', '')}; underlay selector updated",
                     }
                 )
+                payload.pop("quality_probe_at", None)
+                payload.pop("last_quality_probe", None)
         write_json_atomic(TRANSPORT_STATE_PATH, payload)
         return payload
 
