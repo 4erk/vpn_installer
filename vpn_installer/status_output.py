@@ -211,10 +211,13 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
                     f"rtt={quality_probe.get('rtt_avg_ms', '-')}ms)"
                 )
             preferred_retry = adaptive.get("preferred_retry", {})
-            if isinstance(preferred_retry, dict) and preferred_retry.get("retry_at"):
-                details.append(
-                    f"preferred_retry={preferred_retry.get('attempts', '-')}@{preferred_retry['retry_at']}"
-                )
+            if isinstance(preferred_retry, dict):
+                if preferred_retry.get("recovered_at"):
+                    details.append(f"preferred_recovered={preferred_retry['recovered_at']}")
+                elif preferred_retry.get("retry_at"):
+                    details.append(
+                        f"preferred_retry={preferred_retry.get('attempts', '-')}@{preferred_retry['retry_at']}"
+                    )
             probes = adaptive.get("probes", {})
             probes = probes if isinstance(probes, dict) else {}
             raw_probe = next(

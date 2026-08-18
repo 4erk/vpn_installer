@@ -504,5 +504,38 @@ class InterserverTransportIdentityTests(unittest.TestCase):
         self.assertEqual(second["preferred_retry"]["attempts"], 2)
         self.assertEqual(second["preferred_retry"]["retry_at"], "2026-08-06T12:04:02+00:00")
 
+    def test_healthy_preferred_path_closes_and_eventually_clears_retry_history(self) -> None:
+        previous = {
+            "schema_version": TRANSPORT_STATE_SCHEMA_VERSION,
+            "selected": TRANSPORT_WG_TAG,
+            "preferred_retry": {
+                "path": TRANSPORT_WG_TAG,
+                "attempts": 2,
+                "failed_at": "2026-08-06T11:59:00+00:00",
+                "retry_at": "2026-08-06T12:01:00+00:00",
+                "reason": "timeout",
+            },
+        }
+        probes = {
+            TRANSPORT_WG_TAG: {"checked": True, "ok": True, "delay_ms": 20},
+            TRANSPORT_HY2_TAG: {"checked": False, "ok": False},
+        }
+
+        recovered = evaluate_transport_policy(
+            selected=TRANSPORT_WG_TAG,
+            probes=probes,
+            previous=previous,
+            observed_at="2026-08-06T12:02:00+00:00",
+        )
+        stable = evaluate_transport_policy(
+            selected=TRANSPORT_WG_TAG,
+            probes=probes,
+            previous=recovered,
+            observed_at="2026-08-06T12:12:00+00:00",
+        )
+
+        self.assertEqual(recovered["preferred_retry"]["recovered_at"], "2026-08-06T12:02:00+00:00")
+        self.assertNotIn("preferred_retry", stable)
+
 if __name__ == "__main__":
     unittest.main()

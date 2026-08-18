@@ -165,6 +165,11 @@ class StatusOutputTests(unittest.TestCase):
                                 "packet_loss_pct": 0.0,
                                 "rtt_avg_ms": 22.5,
                             },
+                            "preferred_retry": {
+                                "path": "interserver-underlay-wg",
+                                "attempts": 1,
+                                "recovered_at": "2026-08-07T04:25:30+00:00",
+                            },
                             "probes": {
                                 "interserver-underlay-hy2": {
                                     "checked": True,
@@ -234,6 +239,7 @@ class StatusOutputTests(unittest.TestCase):
             "configured_candidates=interserver-underlay-hy2,interserver-underlay-wg, "
             "overlay_probe=ok(18ms,target=10.74.0.2:1053), "
             "quality_probe=ok(loss=0.0%,rtt=22.5ms), "
+            "preferred_recovered=2026-08-07T04:25:30+00:00, "
             "cold_probe=interserver-underlay-hy2:ok(23ms), adaptation=healthy, "
             "hy2_session=active, reason=selected underlay is healthy",
             rendered,

@@ -703,12 +703,20 @@ def _next_preferred_retry(previous: dict[str, Any], reason: str, observed_at: st
     }
 
 
-def _preferred_recovery_details(previous: dict[str, Any], observed_at: str) -> dict[str, Any]:
+def _preferred_recovery_details(
+    previous: dict[str, Any],
+    observed_at: str,
+    *,
+    mark_recovered: bool = False,
+) -> dict[str, Any]:
     retry = previous.get("preferred_retry", {})
     if not isinstance(retry, dict) or retry.get("path") != TRANSPORT_PREFERRED_TAG:
         return {}
     recovered_at = _parse_timestamp(retry.get("recovered_at"))
     observed = _parse_timestamp(observed_at)
+    if mark_recovered and recovered_at is None and observed is not None:
+        retry = {**retry, "recovered_at": observed_at}
+        recovered_at = observed
     if (
         recovered_at is not None
         and observed is not None
@@ -827,7 +835,7 @@ def evaluate_transport_policy(
             observed_at,
             "healthy",
             "preferred overlay path is healthy",
-            **_preferred_recovery_details(prior, observed_at),
+            **_preferred_recovery_details(prior, observed_at, mark_recovered=True),
         )
 
     preferred_probe = normalized[TRANSPORT_PREFERRED_TAG]
