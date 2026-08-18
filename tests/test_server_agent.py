@@ -2275,7 +2275,7 @@ class ServerAgentTests(unittest.TestCase):
         healthy = {"checked": True, "ok": True, "attempts": 1, "delay_ms": 50}
         env = {"WG_INTERFACE": "wg0", "WG_FOREIGN_ADDRESS": "10.74.0.2/24"}
         with (
-            patch.object(server_agent, "transport_overlay_path_probe", return_value=failed),
+            patch.object(server_agent, "transport_overlay_path_probe", return_value=failed) as overlay_probe,
             patch.object(server_agent, "transport_candidate_probe", return_value=healthy) as probe,
         ):
             result = server_agent.collect_transport_probes(
@@ -2286,6 +2286,7 @@ class ServerAgentTests(unittest.TestCase):
             )
 
         probe.assert_called_once_with("interserver-underlay-hy2")
+        overlay_probe.assert_called_once_with(env)
         self.assertEqual(result["interserver-underlay-wg"], failed)
         self.assertEqual(result["interserver-underlay-hy2"], healthy)
 
@@ -2492,7 +2493,7 @@ class ServerAgentTests(unittest.TestCase):
                 "2026-08-07T12:00:00+00:00",
             )
         )
-        self.assertTrue(
+        self.assertFalse(
             server_agent.overlay_quality_probe_due(
                 {"quality_probe_at": "2026-08-07T11:59:59+00:00", "state": "suspect"},
                 "2026-08-07T12:00:00+00:00",
@@ -2506,6 +2507,36 @@ class ServerAgentTests(unittest.TestCase):
         }
         self.assertFalse(server_agent.preferred_transport_probe_due(retry, "2026-08-07T12:00:59+00:00"))
         self.assertTrue(server_agent.preferred_transport_probe_due(retry, "2026-08-07T12:01:00+00:00"))
+
+    def test_transport_cycle_runs_quality_only_after_fast_liveness_succeeds(self) -> None:
+        liveness = {"checked": True, "ok": True, "attempts": 1, "scope": "overlay-icmp"}
+        quality = {
+            "checked": True,
+            "ok": True,
+            "attempts": 4,
+            "scope": "overlay-quality",
+            "quality_checked": True,
+            "packet_loss_pct": 0.0,
+        }
+        env = {"WG_INTERFACE": "wg0", "WG_FOREIGN_ADDRESS": "10.74.0.2/24"}
+        with patch.object(
+            server_agent,
+            "transport_overlay_path_probe",
+            side_effect=(liveness, quality),
+        ) as probe:
+            result = server_agent.collect_transport_probes(
+                "interserver-underlay-wg",
+                {},
+                env=env,
+                observed_at="2026-08-07T12:00:00+00:00",
+            )
+
+        self.assertEqual(result["interserver-underlay-wg"], quality)
+        self.assertEqual(probe.call_count, 2)
+        self.assertEqual(probe.call_args_list[0].args, (env,))
+        self.assertEqual(probe.call_args_list[0].kwargs, {})
+        self.assertEqual(probe.call_args_list[1].args, (env,))
+        self.assertEqual(probe.call_args_list[1].kwargs, {"quality": True})
 
     def test_transport_relay_reset_does_not_touch_application_flows(self) -> None:
         payload = {

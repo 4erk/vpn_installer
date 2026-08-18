@@ -2140,7 +2140,7 @@ def preferred_transport_probe_due(previous: dict[str, Any], observed_at: str) ->
 
 def overlay_quality_probe_due(previous: dict[str, Any], observed_at: str) -> bool:
     if previous.get("state") == "suspect":
-        return True
+        return False
     now = parse_iso_datetime(observed_at)
     age = iso_age_seconds(str(previous.get("quality_probe_at", "")), now=now) if now else None
     return age is None or age >= TRANSPORT_QUALITY_PROBE_INTERVAL_SECONDS
@@ -2222,10 +2222,9 @@ def collect_transport_probes(
     probes = {tag: {"checked": False, "ok": False, "attempts": 0} for tag in TRANSPORT_CANDIDATE_TAGS}
     if selected not in probes:
         return probes
-    probes[selected] = transport_overlay_path_probe(
-        env,
-        quality=overlay_quality_probe_due(previous, observed_at),
-    )
+    probes[selected] = transport_overlay_path_probe(env)
+    if probes[selected].get("ok") is True and overlay_quality_probe_due(previous, observed_at):
+        probes[selected] = transport_overlay_path_probe(env, quality=True)
     if probes[selected].get("ok") is not True:
         alternate = next(tag for tag in TRANSPORT_CANDIDATE_TAGS if tag != selected)
         if transport_switch_backoff_active(previous, alternate, observed_at) is None:

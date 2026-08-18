@@ -357,6 +357,12 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
             if request_count.stdout.strip() != "1":
                 raise AuditFailure("Continuity check retried HTTP instead of preserving one TCP stream")
             runner.docker_exec(ru_container, "nft delete table inet underlay_fault")
+            runner.docker_exec(
+                ru_container,
+                "python3 -c \"import json; p='/var/lib/vpn-stack/transport-state.json'; "
+                "s=json.load(open(p)); s['preferred_retry']['retry_at']='1970-01-01T00:00:00+00:00'; "
+                "open(p,'w').write(json.dumps(s))\"",
+            )
             time.sleep(0.5)
             recovery: list[dict[str, object]] = []
             for attempt in range(3):
