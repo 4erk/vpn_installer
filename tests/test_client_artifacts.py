@@ -94,13 +94,21 @@ class ClientArtifactTests(unittest.TestCase):
     def test_render_client_profiles_replaces_stale_generated_directory(self) -> None:
         env = self.make_env()
         with tempfile.TemporaryDirectory() as tmp:
-            stale_path = Path(tmp) / "demo" / "client" / "android-v2rayng-xray.json"
+            client_dir = Path(tmp) / "demo" / "client"
+            stale_path = client_dir / "android-v2rayng-xray.json"
             stale_path.mkdir(parents=True)
+            (client_dir / "sing-box-adaptive.json").write_text("stale", encoding="utf-8")
+            (client_dir / "live-xray-smoke.json").write_text("stale", encoding="utf-8")
+            operator_notes = client_dir / "operator-notes.txt"
+            operator_notes.write_text("keep", encoding="utf-8")
 
             client_artifacts.render_client_profiles(env, out_dir=Path(tmp))
 
             self.assertTrue(stale_path.is_file())
             self.assertIn('"protocol": "vless"', stale_path.read_text(encoding="utf-8"))
+            self.assertFalse((client_dir / "sing-box-adaptive.json").exists())
+            self.assertFalse((client_dir / "live-xray-smoke.json").exists())
+            self.assertEqual(operator_notes.read_text(encoding="utf-8"), "keep")
 
 
 if __name__ == "__main__":

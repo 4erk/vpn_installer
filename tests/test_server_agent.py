@@ -947,11 +947,18 @@ class ServerAgentTests(unittest.TestCase):
         current = {
             **self.gateway_contract(),
             "generated_at": "2026-07-20T08:00:00+00:00",
-            "verdicts": {"server_path": "verified", "client_observation": "client_specific"},
-            "services": {},
+            "verdicts": {
+                "server_path": "verified",
+                "public_front": "degraded",
+                "client_observation": "client_specific",
+                "overall": "degraded",
+                "reasons": ["public_front=client_specific"],
+            },
+            "services": {"xray": "active"},
             "probes": {"requirements": {"ru_direct": True, "via_wg": True, "router": True}},
             "network": {"interfaces": {}, "protocol_counters": {}, "softnet_counters": {}, "conntrack": {}},
             "front": {
+                "listening": True,
                 "connections": 1,
                 "bytes_sent": 12_251,
                 "bytes_retrans": 2_829,
@@ -1556,6 +1563,13 @@ class ServerAgentTests(unittest.TestCase):
                     "bytes_retrans": 81_000,
                     "retransmissions": 7,
                     "data_segs_out": 1_480,
+                    "pmtu": 1480,
+                    "mss": 1408,
+                    "rtt_ms": {"median": 28.0, "p95": 35.0},
+                    "rto_ms": {"p95": 210, "max": 220},
+                    "cwnd": {"median": 18, "max": 24},
+                    "delivery_rate_bps": {"median": 42_000_000, "max": 55_000_000},
+                    "reordering": 3,
                 }
             }
         }
@@ -1568,6 +1582,37 @@ class ServerAgentTests(unittest.TestCase):
         self.assertEqual(interval["degraded_sources"], ["203.0.113.20"])
         self.assertEqual(interval["flows"]["203.0.113.20:50123"]["bytes_retrans"], 80_000)
         self.assertEqual(interval["flows"]["203.0.113.20:50123"]["quality"], "degraded")
+        self.assertEqual(interval["flows"]["203.0.113.20:50123"]["pmtu"], 1480)
+        self.assertEqual(interval["flows"]["203.0.113.20:50123"]["mss"], 1408)
+        self.assertEqual(interval["flows"]["203.0.113.20:50123"]["rtt_ms"]["p95"], 35.0)
+        self.assertEqual(interval["flows"]["203.0.113.20:50123"]["rto_ms"]["max"], 220)
+
+    def test_front_interval_replaces_stale_client_specific_verdict(self) -> None:
+        current = {
+            "front": {"listening": True, "recent_degraded_sources": ["203.0.113.20"]},
+            "services": {"xray": "active"},
+            "verdicts": {
+                "server_path": "verified",
+                "public_front": "degraded",
+                "public_quic": "verified",
+                "client_observation": "client_specific",
+                "host_integrity": "verified",
+                "overall": "degraded",
+                "reasons": ["public_front=client_specific"],
+            },
+        }
+        interval = {
+            "baseline": False,
+            "observation": "observed",
+            "degraded_sources": [],
+        }
+
+        server_agent.apply_front_interval_verdict(current, interval)
+
+        self.assertEqual(current["verdicts"]["client_observation"], "observed")
+        self.assertEqual(current["verdicts"]["public_front"], "verified")
+        self.assertEqual(current["verdicts"]["overall"], "verified")
+        self.assertEqual(current["verdicts"]["reasons"], [])
 
     def test_front_interval_aggregates_loss_across_one_clients_flows(self) -> None:
         first = {

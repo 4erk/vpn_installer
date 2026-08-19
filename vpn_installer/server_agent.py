@@ -1675,6 +1675,15 @@ def client_front_quality(metrics: dict[str, Any]) -> str:
 
 
 FRONT_COUNTER_KEYS = ("bytes_sent", "bytes_retrans", "retransmissions", "data_segs_out")
+FRONT_PATH_KEYS = ("pmtu", "mss", "rtt_ms", "rto_ms", "cwnd", "delivery_rate_bps", "reordering")
+
+
+def front_path_snapshot(metrics: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        key: dict(value) if isinstance(value, Mapping) else value
+        for key in FRONT_PATH_KEYS
+        if (value := metrics.get(key)) is not None
+    }
 
 
 def front_counter_snapshot(front: dict[str, Any], observed_at: str) -> dict[str, Any]:
@@ -1690,6 +1699,7 @@ def front_counter_snapshot(front: dict[str, Any], observed_at: str) -> dict[str,
             "source": str(metrics.get("source", "")),
             "source_port": metrics.get("source_port"),
             **{key: int(metrics.get(key, 0) or 0) for key in FRONT_COUNTER_KEYS},
+            **front_path_snapshot(metrics),
         }
     return {"observed_at": observed_at, "flows": flows}
 
@@ -1773,6 +1783,7 @@ def front_interval_snapshot(
             "source_port": current.get("source_port"),
             **deltas,
             **metrics,
+            **front_path_snapshot(current),
         }
     interval_sources = {
         source: {**counters_by_source, **front_interval_metrics(counters_by_source)}
@@ -1934,6 +1945,43 @@ def public_front_verdict(
     if xray_state != "active" or not front.get("listening"):
         return "failed"
     return "degraded" if front_observation(front, interval) in {"client_specific", "degraded"} else "verified"
+
+
+def apply_front_interval_verdict(current: dict[str, Any], interval: dict[str, Any]) -> None:
+    front = current.get("front")
+    if not isinstance(front, dict) or not front:
+        return
+    verdicts = current.get("verdicts")
+    if not isinstance(verdicts, dict):
+        return
+    services = current.get("services", {})
+    xray_state = str(services.get("xray", "unknown")) if isinstance(services, Mapping) else "unknown"
+    observation = front_observation(front, interval)
+    public_front = public_front_verdict(xray_state, front, interval)
+    reasons = [
+        str(reason)
+        for reason in verdicts.get("reasons", [])
+        if not str(reason).startswith(("public_front=", "public_front_interval="))
+    ]
+    if public_front == "degraded":
+        reasons.append(f"public_front={observation}")
+    verdicts["client_observation"] = observation
+    verdicts["public_front"] = public_front
+    verdicts["reasons"] = reasons
+    components = {
+        verdicts.get("server_path"),
+        public_front,
+        verdicts.get("public_quic"),
+        verdicts.get("host_integrity"),
+    }
+    if "failed" in components:
+        verdicts["overall"] = "failed"
+    elif reasons or observation in {"client_specific", "degraded"}:
+        verdicts["overall"] = "degraded"
+    elif verdicts.get("server_path") == "verified":
+        verdicts["overall"] = "verified"
+    else:
+        verdicts["overall"] = "inconclusive"
 
 
 def front_degradation_evidence(
@@ -3699,16 +3747,7 @@ def _health_unlocked() -> dict[str, Any]:
             previous.get("front_counters", {}),
             observed_at,
         )
-        interval_observation = str(front_interval.get("observation", "observed"))
-        if interval_observation in {"client_specific", "degraded"}:
-            verdicts = current["verdicts"]
-            verdicts["client_observation"] = interval_observation
-            verdicts["public_front"] = "degraded"
-            if verdicts.get("overall") != "failed":
-                verdicts["overall"] = "degraded"
-            interval_reason = f"public_front_interval={interval_observation}"
-            if interval_reason not in verdicts["reasons"]:
-                verdicts["reasons"].append(interval_reason)
+        apply_front_interval_verdict(current, front_interval)
         now_epoch = int(time.time())
         server_path_failure = current["verdicts"]["server_path"] == "failed"
         host_integrity = current["verdicts"].get("host_integrity", "verified")

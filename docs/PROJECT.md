@@ -42,7 +42,7 @@ Topology и физическое расположение gateway неизмен
 
 ## Совместимость релиза
 
-`0.21.1` поддерживает fresh install, обновление с `0.21.0` и повторную установку `0.21.1`. Manifest объявляет `installed_min=0.21.0`, `installed_max=0.21.1`. Неподдерживаемый установленный релиз отклоняется до managed transaction; удалить его нужно `.\vpn.cmd` на Windows или `./vpn.sh` на Linux из совпадающего Git-тега, после чего выполняется fresh install.
+`0.21.2` поддерживает fresh install, обновление с `0.21.1` и повторную установку `0.21.2`. Manifest объявляет `installed_min=0.21.1`, `installed_max=0.21.2`. Неподдерживаемый установленный релиз отклоняется до managed transaction; удалить его нужно `.\vpn.cmd` на Windows или `./vpn.sh` на Linux из совпадающего Git-тега, после чего выполняется fresh install.
 
 Публичный CLI использует только `--node gateway|exit|all`. Role aliases, readers старых схем и migration chains отсутствуют. Совместимая предыдущая версия проверяется тем же config/state `3`, manifest/install-plan `4` и diagnostics `5` контрактом. Политика окна описана в [DEPRECATIONS.md](./DEPRECATIONS.md).
 

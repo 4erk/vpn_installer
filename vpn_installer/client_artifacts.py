@@ -313,6 +313,8 @@ STALE_CLIENT_ARTIFACT_NAMES = (
     "hiddify-subscription-url.txt",
     "hiddify-import-url.txt",
     "hiddify-android-subscription-url.txt",
+    "sing-box-adaptive.json",
+    "live-xray-smoke.json",
 )
 
 GENERATED_CLIENT_FILE_NAMES = (
@@ -335,7 +337,7 @@ def prepare_client_artifact_dir(client_dir: Path) -> None:
         path = client_dir / name
         if path.is_dir():
             shutil.rmtree(path)
-        elif path.exists():
+        elif path.exists() or path.is_symlink():
             path.unlink()
 
 
