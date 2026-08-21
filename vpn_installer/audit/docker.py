@@ -210,6 +210,13 @@ def previous_release_fixture_builder_text() -> str:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         plan = json.loads(plan_path.read_text(encoding="utf-8"))
         artifacts = manifest["artifacts"]
+        for name in ("btmp-vpn-stack.conf", "resource_control.py"):
+            artifacts.pop(name)
+            (release / name).unlink()
+        plan["packages"].remove("logrotate")
+        for packages in plan["package_sets"].values():
+            if "logrotate" in packages:
+                packages.remove("logrotate")
         for name, entry in artifacts.items():
             entry["sha256"] = digest((release / name).read_bytes())
 

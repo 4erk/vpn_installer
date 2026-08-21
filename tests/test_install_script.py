@@ -168,6 +168,84 @@ class InstallScriptContractTests(unittest.TestCase):
             text.index('start_planned_services "${staged_contract}"'),
             text.index('retire_previous_services "${PREVIOUS_CONTRACT}" "${staged_contract}"'),
         )
+        install_body = text.split("install_action() {", 1)[1].split("\n}\n\ncurrent_release_contract()", 1)[0]
+        self.assertLess(install_body.index('verify_active_release "${staged_contract}"'), install_body.index("prune_unreferenced_releases"))
+        self.assertIn('storage-maintain --deep', install_body)
+        self.assertLess(install_body.index('verify_active_release "${staged_contract}"'), install_body.index("retire_obsolete_snapshot_store"))
+        self.assertIn("VPNSTACK_REVISION_LIMIT=10", text)
+        snapshot_body = text.split("create_transaction_snapshots() {", 1)[1].split("\n}\n\nprune_revision_snapshots()", 1)[0]
+        self.assertLess(snapshot_body.index("prune_revision_snapshots"), snapshot_body.index("TRANSACTION_SNAPSHOT="))
+
+    @unittest.skipIf(os.name == "nt", "Windows Git Bash does not preserve POSIX symlink semantics")
+    def test_release_pruning_keeps_only_current_and_previous(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "vpn-stack"
+            shell_root = root.as_posix()
+            source = INSTALL_SCRIPT.as_posix()
+            command = "\n".join(
+                (
+                    "set -euo pipefail",
+                    f"export VPNSTACK_ROOT='{shell_root}'",
+                    "export VPNSTACK_INSTALL_LIBRARY_ONLY=1",
+                    f"source '{source}'",
+                    "mkdir -p \"$VPNSTACK_RELEASES_DIR/current\" \"$VPNSTACK_RELEASES_DIR/previous\" \"$VPNSTACK_RELEASES_DIR/stale\"",
+                    "touch \"$VPNSTACK_RELEASES_DIR/sentinel\"",
+                    "ln -s \"$VPNSTACK_RELEASES_DIR/current\" \"$VPNSTACK_CURRENT_RELEASE\"",
+                    "ln -s \"$VPNSTACK_RELEASES_DIR/previous\" \"$VPNSTACK_PREVIOUS_RELEASE\"",
+                    "prune_unreferenced_releases",
+                    "test -d \"$VPNSTACK_RELEASES_DIR/current\"",
+                    "test -d \"$VPNSTACK_RELEASES_DIR/previous\"",
+                    "test ! -e \"$VPNSTACK_RELEASES_DIR/stale\"",
+                    "test -f \"$VPNSTACK_RELEASES_DIR/sentinel\"",
+                )
+            )
+            result = self.run_bash(script=command)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_retired_snapshot_store_is_removed_without_touching_current_backups(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "vpn-stack"
+            source = INSTALL_SCRIPT.as_posix()
+            command = "\n".join(
+                (
+                    "set -euo pipefail",
+                    f"export VPNSTACK_ROOT='{root.as_posix()}'",
+                    "export VPNSTACK_INSTALL_LIBRARY_ONLY=1",
+                    f"source '{source}'",
+                    "mkdir -p \"$VPNSTACK_RETIRED_SNAPSHOT_DIR/old\" \"$VPNSTACK_REVISION_DIR/current\" \"$VPNSTACK_BASELINE_DIR\"",
+                    "retire_obsolete_snapshot_store",
+                    "test ! -e \"$VPNSTACK_RETIRED_SNAPSHOT_DIR\"",
+                    "test -d \"$VPNSTACK_REVISION_DIR/current\"",
+                    "test -d \"$VPNSTACK_BASELINE_DIR\"",
+                )
+            )
+            result = self.run_bash(script=command)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipIf(os.name == "nt", "Windows Git Bash does not preserve POSIX symlink semantics")
+    def test_revision_pruning_keeps_latest_and_bounded_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "vpn-stack"
+            source = INSTALL_SCRIPT.as_posix()
+            command = "\n".join(
+                (
+                    "set -euo pipefail",
+                    f"export VPNSTACK_ROOT='{root.as_posix()}'",
+                    "export VPNSTACK_INSTALL_LIBRARY_ONLY=1",
+                    f"source '{source}'",
+                    "mkdir -p \"$VPNSTACK_REVISION_DIR\"",
+                    "for n in $(seq -w 1 15); do mkdir \"$VPNSTACK_REVISION_DIR/revision-${n}\"; done",
+                    "ln -s \"$VPNSTACK_REVISION_DIR/revision-01\" \"$VPNSTACK_LATEST_SNAPSHOT\"",
+                    "prune_revision_snapshots",
+                    "test -d \"$(readlink -f \"$VPNSTACK_LATEST_SNAPSHOT\")\"",
+                    "test \"$(find \"$VPNSTACK_REVISION_DIR\" -mindepth 1 -maxdepth 1 -type d | wc -l)\" = 9",
+                )
+            )
+            result = self.run_bash(script=command)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_render_only_writes_current_single_gateway_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

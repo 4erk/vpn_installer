@@ -143,6 +143,11 @@ except ImportError:  # Installed agent runs as a standalone script.
     from release_integrity import release_tree_digest  # type: ignore[no-redef]
 
 try:
+    from .resource_control import exec_router, prepare_memory_reserve, storage_maintenance, storage_snapshot
+except ImportError:  # Installed agent runs as a standalone script.
+    from resource_control import exec_router, prepare_memory_reserve, storage_maintenance, storage_snapshot  # type: ignore[no-redef]
+
+try:
     import fcntl
 except ImportError:  # pragma: no cover - local Windows tests only
     class _NoopFcntl:
@@ -853,11 +858,19 @@ def installed_at_value() -> str:
 
 
 def service_exec_path(service: str) -> str:
-    result = run(["systemctl", "show", service, "--property=ExecStart", "--value"], timeout=5)
+    result = run(["systemctl", "show", service, "--property=MainPID", "--value"], timeout=5)
     if result.returncode != 0:
         return ""
-    match = re.search(r"(?:^|[ {;])path=([^ ;}]+)", result.stdout)
-    return match.group(1) if match else ""
+    try:
+        pid = int(result.stdout.strip())
+    except ValueError:
+        return ""
+    if pid <= 0:
+        return ""
+    try:
+        return os.readlink(f"/proc/{pid}/exe").removesuffix(" (deleted)")
+    except OSError:
+        return ""
 
 
 def manifest_snapshot() -> dict[str, Any]:
@@ -904,8 +917,13 @@ def manifest_snapshot() -> dict[str, Any]:
         state = "ok" if actual and actual == expected else "missing" if not actual else "mutated"
         service = str(raw_entry.get("service", ""))
         runtime_exec_path = service_exec_path(service) if service else ""
-        if state == "ok" and service and runtime_exec_path != str(actual_path):
-            state = "wrong-exec"
+        if state == "ok" and service:
+            try:
+                runtime_matches = bool(runtime_exec_path) and Path(runtime_exec_path).samefile(actual_path)
+            except OSError:
+                runtime_matches = runtime_exec_path == str(actual_path)
+            if not runtime_matches:
+                state = "wrong-exec"
         if state != "ok":
             mismatches.append(f"binary:{name}")
         checked_binaries[name] = {
@@ -3403,6 +3421,7 @@ def collect_runtime_facts(*, live_probes: bool = False, profile: str = "light", 
     if not full_logs and fresh_window_minutes > 5:
         fresh_since, fresh_window_minutes = "5 minutes ago", 5
     maintenance = maintenance_snapshot() if include_maintenance else {}
+    release_installed_at = installed_at_value()
     logs, fresh_logs, logs_collector_error = summarize_problem_windows(full_logs=full_logs, fresh_since=fresh_since)
     front = tcp_front_snapshot(port) if has_public_front else {}
     probes = run_confirmed_probes(env, contract, profile) if live_probes and not contract_error else {"profile": "none", "ok": None}
@@ -3415,6 +3434,7 @@ def collect_runtime_facts(*, live_probes: bool = False, profile: str = "light", 
     tcp_adaptation = tcp_adaptation_snapshot(public_iface, wg_interface if has_interserver else "")
     resolver = resolver_snapshot()
     root_filesystem = root_filesystem_snapshot()
+    storage = storage_snapshot(root_filesystem, release_installed_at, full_logs=full_logs)
     conntrack = conntrack_snapshot(full_logs=full_logs)
     if has_public_front:
         conntrack["front_bypass"] = xray_conntrack_bypass_snapshot(port)
@@ -3428,7 +3448,6 @@ def collect_runtime_facts(*, live_probes: bool = False, profile: str = "light", 
     )
     health_state = read_json(HEALTH_STATE_PATH, {})
     recent_front_interval = recent_observation(health_state.get("front_interval", {}), max_age_seconds=300)
-    release_installed_at = installed_at_value()
     recent_front_interval = release_scoped_observation(recent_front_interval, release_installed_at)
     if front and recent_front_interval:
         front["recent_interval"] = recent_front_interval
@@ -3447,6 +3466,15 @@ def collect_runtime_facts(*, live_probes: bool = False, profile: str = "light", 
         reasons.append(f"wireguard_policy={','.join(wireguard_policy.get('missing', [])) or 'invalid'}")
     if not resolver.get("managed_stub"):
         reasons.append(f"resolver_stub={resolver.get('resolv_conf_target') or 'missing'}")
+    capacity = storage.get("capacity", {})
+    memory = storage.get("memory", {})
+    if capacity.get("verdict") == "failed":
+        reasons.append(f"root_disk_full={capacity.get('used_percent', 'unknown')}%")
+    if memory.get("reserve_ready") is False:
+        reasons.append("low_memory_swap_reserve=missing")
+    router_memory = memory.get("router", {}) if isinstance(memory.get("router"), Mapping) else {}
+    if services.get("sing-box") == "active" and router_memory.get("go_memory_limit_active") is not True:
+        reasons.append("sing_box_memory_budget=missing")
     if live_probes and not contract_error and not release_gate_ok(probes):
         failed = ",".join(failed_requirements(probes))
         reasons.append(f"live_probes_failed:{failed}" if failed else "live_probes_failed")
@@ -3476,6 +3504,15 @@ def collect_runtime_facts(*, live_probes: bool = False, profile: str = "light", 
     transport_failures = [name for name in failed_requirements(probes) if name in OPTIONAL_TRANSPORT_REQUIREMENTS] if live_probes else []
     server_path = "failed" if reasons else "verified" if live_probes else "inconclusive"
     host_integrity = str(root_filesystem.get("verdict", "inconclusive"))
+    if capacity.get("verdict") == "failed" or memory.get("reserve_ready") is False or (
+        services.get("sing-box") == "active" and router_memory.get("go_memory_limit_active") is not True
+    ):
+        host_integrity = "failed"
+    elif capacity.get("verdict") == "degraded" and host_integrity == "verified":
+        host_integrity = "degraded"
+    oom_counts = storage.get("runtime_events", {}).get("oom_kills", {}).get("counts", {})
+    if int(oom_counts.get("30m", 0) or 0) > 0 and host_integrity == "verified":
+        host_integrity = "degraded"
     client_observation = front_observation(front, recent_front_interval) if front else "not-applicable"
     closing_churn = closing_churn_observation(front) if front else "not-applicable"
     public_front = public_front_verdict(services["xray"], front, recent_front_interval) if has_public_front else "not-applicable"
@@ -3519,7 +3556,7 @@ def collect_runtime_facts(*, live_probes: bool = False, profile: str = "light", 
             "installed_at": release_installed_at,
         },
         "host": host_snapshot(public_iface),
-        "storage": {"root_filesystem": root_filesystem},
+        "storage": storage,
         "services": services,
         "artifacts": manifest_data,
         "wireguard": wireguard_snapshot(wg_interface) if has_interserver else {},
@@ -3538,6 +3575,7 @@ def collect_runtime_facts(*, live_probes: bool = False, profile: str = "light", 
             "health_updated_at": health_state.get("updated_at", ""),
             "health_soft_reasons": health_state.get("soft_reasons", []),
             "last_front_degradation": health_state.get("last_front_degradation", {}),
+            "last_runtime_degradation": health_state.get("last_runtime_degradation", {}),
             "recent_front_interval": recent_front_interval,
         },
         "front": front,
@@ -3775,6 +3813,28 @@ def _health_unlocked() -> dict[str, Any]:
         }
         network_deltas = positive_counter_deltas(network_counters, previous.get("network_counters", {}))
         soft_reasons = network_soft_reasons(network_deltas)
+        router_resources = current.get("storage", {}).get("memory", {}).get("router", {})
+        resource_counters = {
+            "sing_box_automatic_restarts": int(router_resources.get("automatic_restarts", 0) or 0),
+        }
+        resource_deltas = positive_counter_deltas(resource_counters, previous.get("resource_counters", {}))
+        restart_delta = int(resource_deltas.get("sing_box_automatic_restarts", 0) or 0)
+        if restart_delta:
+            soft_reasons.append(f"sing_box_automatic_restarts={restart_delta}")
+        oom_latest = current.get("storage", {}).get("runtime_events", {}).get("oom_kills", {}).get("latest", {})
+        oom_timestamp = str(oom_latest.get("timestamp", "")) if isinstance(oom_latest, Mapping) else ""
+        previous_oom_timestamp = str(previous.get("last_seen_oom_timestamp", ""))
+        if oom_timestamp and oom_timestamp != previous_oom_timestamp:
+            soft_reasons.append("kernel_oom_kill=observed")
+        runtime_evidence = (
+            {
+                "observed_at": observed_at,
+                "automatic_restart_delta": restart_delta,
+                "oom": dict(oom_latest) if isinstance(oom_latest, Mapping) else {},
+            }
+            if restart_delta or (oom_timestamp and oom_timestamp != previous_oom_timestamp)
+            else previous.get("last_runtime_degradation", {})
+        )
         conntrack_full = int(current.get("network", {}).get("conntrack", {}).get("table_full_events", {}).get("5", 0))
         if conntrack_full:
             soft_reasons.append(f"conntrack_table_full_5m={conntrack_full}")
@@ -3836,6 +3896,10 @@ def _health_unlocked() -> dict[str, Any]:
             "probes": (postcheck or current).get("probes", {}),
             "network_counters": network_counters,
             "network_deltas": network_deltas,
+            "resource_counters": resource_counters,
+            "resource_deltas": resource_deltas,
+            "last_seen_oom_timestamp": oom_timestamp or previous_oom_timestamp,
+            "last_runtime_degradation": runtime_evidence,
             "front_counters": front_counters,
             "front_interval": front_interval,
             "soft_reasons": soft_reasons,
@@ -4052,6 +4116,11 @@ def build_parser() -> argparse.ArgumentParser:
     transport_select = sub.add_parser("transport-select")
     transport_select.add_argument("--tag", choices=TRANSPORT_CANDIDATE_TAGS, required=True)
     sub.add_parser("network-apply")
+    sub.add_parser("memory-prepare")
+    exec_router_parser = sub.add_parser("exec-router")
+    exec_router_parser.add_argument("router_command", nargs=argparse.REMAINDER)
+    storage = sub.add_parser("storage-maintain")
+    storage.add_argument("--deep", action="store_true")
     routes = sub.add_parser("routes")
     route_sub = routes.add_subparsers(dest="routes_action", required=True)
     route_sub.add_parser("list")
@@ -4108,6 +4177,13 @@ def main(argv: list[str] | None = None) -> int:
         payload = {"selected": args.tag, "changed": True}
     elif args.command == "network-apply":
         payload = apply_network_profile()
+    elif args.command == "memory-prepare":
+        payload = prepare_memory_reserve()
+    elif args.command == "exec-router":
+        exec_router(args.router_command)
+        return 0
+    elif args.command == "storage-maintain":
+        payload = storage_maintenance(parse_env(), deep=args.deep)
     elif args.command == "routes":
         payload = routes_command(args)
     else:

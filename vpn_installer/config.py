@@ -210,7 +210,7 @@ def generate_default_env(
         "RU_REALITY_ACCEPT_EMPTY_SHORT_ID": "1",
         "RU_REALITY_MAX_TIME_DIFFERENCE": "24h",
         "UTLS_FINGERPRINT": "chrome",
-        "SING_BOX_LOG_LEVEL": "info",
+        "SING_BOX_LOG_LEVEL": "warn",
         "RU_SNIFF_TIMEOUT": "250ms",
         "WG_INTERFACE": "wg0",
         "WG_PORT": "51820",

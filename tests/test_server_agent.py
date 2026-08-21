@@ -532,11 +532,14 @@ class ServerAgentTests(unittest.TestCase):
             root = Path(tmp)
             binary = root / "sing-box"
             binary.write_bytes(b"known-binary")
+            env = root / "env"
+            env.write_text("DEPLOY_NAME=test\n", encoding="utf-8")
             manifest = root / "manifest.json"
             manifest.write_text(
                 json.dumps(
                     {
                         **self.single_manifest(),
+                        "env_sha256": server_agent.sha256_file(env),
                         "binaries": {
                             "sing-box": {
                                 "path": str(binary),
@@ -548,20 +551,54 @@ class ServerAgentTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            service = subprocess.CompletedProcess(
-                ["systemctl"],
-                0,
-                "{ path=/usr/bin/sing-box ; argv[]=/usr/bin/sing-box run ; }\n",
-                "",
-            )
             with patch.object(server_agent, "MANIFEST_PATH", manifest), patch.object(
-                server_agent, "ENV_PATH", root / "env"
-            ), patch.object(server_agent, "run", return_value=service), patch.object(
+                server_agent, "ENV_PATH", env
+            ), patch.object(server_agent, "service_exec_path", return_value="/usr/bin/sing-box"), patch.object(
                 server_agent, "release_tree_snapshot", return_value={"state": "ok"}
             ):
                 snapshot = server_agent.manifest_snapshot()
         self.assertEqual(snapshot["drift"], "server-mutated")
         self.assertEqual(snapshot["binaries"]["sing-box"]["state"], "wrong-exec")
+
+    def test_manifest_snapshot_accepts_exec_launcher_actual_process(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            binary = root / "sing-box"
+            binary.write_bytes(b"known-binary")
+            env = root / "env"
+            env.write_text("DEPLOY_NAME=test\n", encoding="utf-8")
+            manifest = root / "manifest.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        **self.single_manifest(),
+                        "env_sha256": server_agent.sha256_file(env),
+                        "binaries": {
+                            "sing-box": {
+                                "path": str(binary),
+                                "sha256": server_agent.sha256_file(binary),
+                                "service": "sing-box.service",
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch.object(server_agent, "MANIFEST_PATH", manifest), patch.object(
+                server_agent, "ENV_PATH", env
+            ), patch.object(server_agent, "service_exec_path", return_value=str(binary)), patch.object(
+                server_agent, "release_tree_snapshot", return_value={"state": "ok"}
+            ):
+                snapshot = server_agent.manifest_snapshot()
+        self.assertEqual(snapshot["drift"], "none")
+        self.assertEqual(snapshot["binaries"]["sing-box"]["state"], "ok")
+
+    def test_service_exec_path_reads_the_actual_main_process(self) -> None:
+        service = subprocess.CompletedProcess(["systemctl"], 0, "42\n", "")
+        with patch.object(server_agent, "run", return_value=service), patch.object(
+            server_agent.os, "readlink", return_value="/opt/sing-box"
+        ):
+            self.assertEqual(server_agent.service_exec_path("sing-box.service"), "/opt/sing-box")
 
     def test_release_tree_snapshot_detects_content_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2841,6 +2878,7 @@ class ServerAgentTests(unittest.TestCase):
             shutil.copy2(source_root / "interserver_transport.py", target / "interserver_transport.py")
             shutil.copy2(source_root / "network_profile.py", target / "network_profile.py")
             shutil.copy2(source_root / "release_integrity.py", target / "release_integrity.py")
+            shutil.copy2(source_root / "resource_control.py", target / "resource_control.py")
             result = subprocess.run([sys.executable, str(agent), "--help"], text=True, capture_output=True, check=False, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("vpn-stack-agent", result.stdout)
@@ -2855,6 +2893,7 @@ class ServerAgentTests(unittest.TestCase):
             shutil.copy2(source_root / "log_classifier.py", target / "log_classifier.py")
             shutil.copy2(source_root / "network_profile.py", target / "network_profile.py")
             shutil.copy2(source_root / "release_integrity.py", target / "release_integrity.py")
+            shutil.copy2(source_root / "resource_control.py", target / "resource_control.py")
             result = subprocess.run([sys.executable, str(agent), "--help"], text=True, capture_output=True, check=False, timeout=10)
 
         self.assertEqual(result.returncode, 0, result.stderr)

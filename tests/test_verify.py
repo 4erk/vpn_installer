@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import tempfile
 import unittest
@@ -23,6 +24,8 @@ from vpn_installer.topology import (
 from vpn_installer.verify import (
     FALLBACK_CAPACITY_REFERENCE_BYTES_PER_SECOND,
     _apply_private_reject_correlation,
+    _install_release_gate,
+    _private_reject_component,
     _reconcile_public_capabilities,
     _validate_front_correlation,
     _validate_public_transport_result,
@@ -34,10 +37,22 @@ from vpn_installer.verify import (
     _wait_for_vless_runner,
     verify_live_workflow,
 )
-from vpn_installer.vless_verify import parse_vless_uri
+from vpn_installer.vless_verify import RELIABILITY_PROBE_URLS, parse_vless_uri
 
 
-FIRST_LOAD_OK = {"attempts": 9, "successes": 9, "failures": 0, "average_total_seconds": 0.2, "max_total_seconds": 0.4}
+FIRST_LOAD_OK = {
+    "attempts": 9,
+    "successes": 9,
+    "failures": 0,
+    "average_total_seconds": 0.2,
+    "max_total_seconds": 0.4,
+    "required_targets": list(RELIABILITY_PROBE_URLS),
+    "probes": [
+        {"url": url, "ok": True, "curl_status": 0, "http_status": "200", "total_seconds": 0.2}
+        for _cycle in range(3)
+        for url in RELIABILITY_PROBE_URLS
+    ],
+}
 UDP_DNS_OK = {
     "ok": True,
     "dns": {
@@ -549,6 +564,101 @@ class VerifyTests(unittest.TestCase):
         ):
             self.assertEqual(verify_live_workflow("demo", non_interactive=True), 1)
 
+    def test_install_gate_accepts_only_unrelated_client_specific_front_loss(self) -> None:
+        topology = TopologySpec.from_env(deployment_env())
+        public_vless = verified_public_vless_evidence(topology)
+        public_vless["paths"]["public_vless"] = {"checked": True}
+        degraded_gateway = _verify_snapshot(
+            acceptance_snapshot(
+                NODE_GATEWAY,
+                component_verdicts={
+                    "server_path": "verified",
+                    "public_front": "degraded",
+                    "public_quic": "verified",
+                    "client_observation": "client_specific",
+                    "host_integrity": "verified",
+                },
+            )
+        )
+        decision = _install_release_gate(
+            topology,
+            public_vless,
+            {"verdict": "verified"},
+            [degraded_gateway, _verify_snapshot(acceptance_snapshot(NODE_EXIT))],
+            same_node_functional_verified=False,
+        )
+
+        self.assertTrue(decision["eligible"])
+        self.assertEqual(decision["accepted_degradations"], [f"{NODE_GATEWAY}:client_specific_public_front"])
+
+        server_wide = copy.deepcopy(degraded_gateway)
+        server_wide.component_verdicts["client_observation"] = "degraded"
+        self.assertFalse(
+            _install_release_gate(
+                topology,
+                public_vless,
+                {"verdict": "verified"},
+                [server_wide, _verify_snapshot(acceptance_snapshot(NODE_EXIT))],
+                same_node_functional_verified=False,
+            )["eligible"]
+        )
+        self.assertFalse(
+            _install_release_gate(
+                topology,
+                {**public_vless, "verdict": "failed"},
+                {"verdict": "verified"},
+                [degraded_gateway, _verify_snapshot(acceptance_snapshot(NODE_EXIT))],
+                same_node_functional_verified=False,
+            )["eligible"]
+        )
+        self.assertFalse(
+            _install_release_gate(
+                topology,
+                public_vless,
+                {"verdict": "failed"},
+                [degraded_gateway, _verify_snapshot(acceptance_snapshot(NODE_EXIT))],
+                same_node_functional_verified=False,
+            )["eligible"]
+        )
+
+    def test_install_gate_does_not_make_operational_client_loss_green(self) -> None:
+        env = deployment_env()
+        topology = TopologySpec.from_env(env)
+        targets = [remote_target(topology, NODE_GATEWAY), remote_target(topology, NODE_EXIT)]
+
+        def snapshots() -> list[DiagnosticsSnapshot]:
+            return [
+                acceptance_snapshot(
+                    NODE_GATEWAY,
+                    component_verdicts={
+                        "server_path": "verified",
+                        "public_front": "degraded",
+                        "public_quic": "verified",
+                        "client_observation": "client_specific",
+                        "host_integrity": "verified",
+                    },
+                ),
+                acceptance_snapshot(NODE_EXIT),
+            ]
+
+        def run(*, install_gate: bool) -> int:
+            with (
+                patch("vpn_installer.verify.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), env, {}, targets, {})),
+                patch("vpn_installer.verify.workflows.print_summary"),
+                patch("vpn_installer.verify._capture_client_front", return_value={"events": {"accepted_tcp": 0}, "front": {"flows": {}}}),
+                patch("vpn_installer.verify._collect_agent_snapshot", side_effect=snapshots()),
+                patch("vpn_installer.verify._verify_public_vless_uri", return_value=verified_public_vless_evidence(topology)),
+                patch("vpn_installer.verify._verify_public_hysteria2", return_value={"verdict": "verified", "result": {}}),
+            ):
+                return verify_live_workflow("demo", non_interactive=True, accept_install_gate=install_gate)
+
+        self.assertEqual(run(install_gate=False), 1)
+        self.assertEqual(run(install_gate=True), 0)
+        reports = sorted((Path(self.temp_out.name) / "diagnostics").glob("*/live-verify.json"))
+        report = json.loads(reports[-1].read_text(encoding="utf-8"))
+        self.assertEqual(report["verdict"], "degraded")
+        self.assertTrue(report["install_release_gate"]["applied"])
+
     def test_verify_live_workflow_rollback_scope_checks_primary_vless_only(self) -> None:
         env = deployment_env()
         topology = TopologySpec.from_env(env)
@@ -678,7 +788,7 @@ class VerifyTests(unittest.TestCase):
                 verify_live_workflow(
                     "demo",
                     non_interactive=True,
-                    accept_same_node_for_install=True,
+                    accept_install_gate=True,
                 ),
                 0,
             )
@@ -782,6 +892,14 @@ class VerifyTests(unittest.TestCase):
         invalid_dns = {**UDP_DNS_OK, "dns": {**UDP_DNS_OK["dns"], "rcode": 2}}
         self.assertEqual(_validate_public_vless_result({**valid, "udp_dns": invalid_dns}, uri, topology)["functional"]["verdict"], "failed")
         self.assertEqual(_validate_public_vless_result({**valid, "first_load_reliability": {**FIRST_LOAD_OK, "failures": 1}}, uri, topology)["verdict"], "failed")
+        incomplete_targets = {
+            **FIRST_LOAD_OK,
+            "probes": [{**probe, "url": RELIABILITY_PROBE_URLS[0]} for probe in FIRST_LOAD_OK["probes"]],
+        }
+        self.assertEqual(
+            _validate_public_vless_result({**valid, "first_load_reliability": incomplete_targets}, uri, topology)["verdict"],
+            "failed",
+        )
 
     def test_public_vless_identity_paths_are_topology_aware(self) -> None:
         uri = parse_vless_uri("vless://00000000-0000-0000-0000-000000000000@203.0.113.10:443?security=reality&sni=www.bing.com&pbk=public-key&sid=0123456789abcdef&fp=chrome&type=tcp&flow=xtls-rprx-vision")
@@ -823,6 +941,7 @@ class VerifyTests(unittest.TestCase):
                             "ok": False,
                             "evidence": "socks-success-eof",
                             "correlation_required": True,
+                            "elapsed_seconds": 0.012,
                         },
                         {
                             "target": "172.19.0.2:853",
@@ -830,6 +949,7 @@ class VerifyTests(unittest.TestCase):
                             "ok": False,
                             "evidence": "socks-success-eof",
                             "correlation_required": True,
+                            "elapsed_seconds": 0.018,
                         },
                     ],
                 }
@@ -853,6 +973,25 @@ class VerifyTests(unittest.TestCase):
 
         partial = _apply_private_reject_correlation(raw, {**correlation, "verdict": "inconclusive", "targets": correlation["targets"][:1]})
         self.assertEqual(partial["udp_dns"]["private_reject"]["verdict"], "inconclusive")
+
+        policy_only = _apply_private_reject_correlation(
+            raw,
+            {**correlation, "verdict": "inconclusive", "targets": correlation["targets"]},
+        )
+        policy_targets = policy_only["udp_dns"]["private_reject"]["targets"]
+        self.assertEqual(policy_only["udp_dns"]["private_reject"]["verdict"], "verified")
+        self.assertTrue(all(target["verification_basis"] == "installed-policy-fast-eof" for target in policy_targets))
+        self.assertEqual(
+            _private_reject_component(policy_only["udp_dns"]["private_reject"], label="public VLESS")["verdict"],
+            "verified",
+        )
+
+        slow = copy.deepcopy(raw)
+        slow["udp_dns"]["private_reject"]["targets"][0]["elapsed_seconds"] = 2.0
+        self.assertEqual(
+            _apply_private_reject_correlation(slow, {**correlation, "verdict": "inconclusive"})["udp_dns"]["private_reject"]["verdict"],
+            "inconclusive",
+        )
 
     def test_public_vless_throughput_requires_rate_and_duration(self) -> None:
         uri = parse_vless_uri("vless://00000000-0000-0000-0000-000000000000@203.0.113.10:443?security=reality&sni=www.bing.com&pbk=public-key&sid=0123456789abcdef&fp=chrome&type=tcp&flow=xtls-rprx-vision")

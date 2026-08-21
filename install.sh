@@ -10,6 +10,7 @@ VPNSTACK_PREVIOUS_RELEASE="${VPNSTACK_ROOT}/previous"
 VPNSTACK_BACKUP_DIR="${VPNSTACK_ROOT}/backups"
 VPNSTACK_BASELINE_DIR="${VPNSTACK_BACKUP_DIR}/baseline"
 VPNSTACK_REVISION_DIR="${VPNSTACK_BACKUP_DIR}/revisions"
+VPNSTACK_RETIRED_SNAPSHOT_DIR="${VPNSTACK_BACKUP_DIR}/snapshots"
 VPNSTACK_LATEST_SNAPSHOT="${VPNSTACK_BACKUP_DIR}/latest"
 VPNSTACK_MANIFEST_PATH="${VPNSTACK_ROOT}/render-manifest.json"
 VPNSTACK_INSTALL_PLAN_PATH="${VPNSTACK_ROOT}/install-plan.json"
@@ -19,6 +20,7 @@ VPNSTACK_INSTALLED_AT_PATH="${VPNSTACK_ROOT}/installed-at"
 VPNSTACK_REMOVED_AT_PATH="${VPNSTACK_ROOT}/removed-at"
 VPNSTACK_ACCEPTANCE_PATH="${VPNSTACK_ROOT}/last-acceptance.json"
 VPNSTACK_FAILED_ACCEPTANCE_PATH="${VPNSTACK_ROOT}/last-failed-acceptance.json"
+VPNSTACK_REVISION_LIMIT=10
 INSTALL_LOCK_PATH="${VPNSTACK_INSTALL_LOCK_PATH:-/run/lock/vpn-stack-install.lock}"
 SYSTEMCTL_BIN="${SYSTEMCTL_BIN:-systemctl}"
 
@@ -577,6 +579,7 @@ create_transaction_snapshots() {
   local timestamp=""
   timestamp="$(date -u +'%Y%m%dT%H%M%SZ')-$$"
   mkdir -p "${VPNSTACK_BACKUP_DIR}" "${VPNSTACK_REVISION_DIR}"
+  prune_revision_snapshots
 
   capture_snapshot "${VPNSTACK_BASELINE_DIR}" "${scope_dir}" 1
   capture_sysctl_state "${VPNSTACK_BASELINE_DIR}" "${new_bundle}/sysctl-vpn-stack.conf" "/etc/sysctl.d/90-vpn-stack.conf"
@@ -589,6 +592,61 @@ create_transaction_snapshots() {
   ln -s "${TRANSACTION_SNAPSHOT}" "${latest_tmp}"
   mv -Tf "${latest_tmp}" "${VPNSTACK_LATEST_SNAPSHOT}"
   TRANSACTION_ACTIVE=1
+}
+
+prune_revision_snapshots() {
+  local revisions_root=""
+  revisions_root="$(readlink -f -- "${VPNSTACK_REVISION_DIR}")"
+  [[ -n "${revisions_root}" && "${revisions_root}" == "$(readlink -f -- "${VPNSTACK_ROOT}")/backups/revisions" ]] ||
+    die "refusing to prune an unexpected revision directory: ${revisions_root}"
+
+  local retain_before_new=$((VPNSTACK_REVISION_LIMIT - 1))
+  declare -A retained=()
+  local retained_count=0
+  local latest=""
+  if [[ -L "${VPNSTACK_LATEST_SNAPSHOT}" ]]; then
+    latest="$(readlink -f -- "${VPNSTACK_LATEST_SNAPSHOT}")"
+    [[ -d "${latest}" && "$(dirname -- "${latest}")" == "${revisions_root}" ]] ||
+      die "latest snapshot points outside the revision directory"
+    retained["${latest}"]=1
+    retained_count=1
+  fi
+
+  local snapshots=()
+  mapfile -d '' snapshots < <(find "${revisions_root}" -mindepth 1 -maxdepth 1 -type d -print0 | sort -zr)
+  local snapshot=""
+  local resolved=""
+  for snapshot in "${snapshots[@]}"; do
+    resolved="$(readlink -f -- "${snapshot}")"
+    [[ "$(dirname -- "${resolved}")" == "${revisions_root}" ]] ||
+      die "refusing to retain a snapshot outside the revision directory: ${snapshot}"
+    [[ -n "${retained["${resolved}"]+x}" ]] && continue
+    if ((retained_count < retain_before_new)); then
+      retained["${resolved}"]=1
+      retained_count=$((retained_count + 1))
+    fi
+  done
+  for snapshot in "${snapshots[@]}"; do
+    resolved="$(readlink -f -- "${snapshot}")"
+    [[ -n "${retained["${resolved}"]+x}" ]] && continue
+    [[ "$(dirname -- "${resolved}")" == "${revisions_root}" ]] ||
+      die "refusing to prune a snapshot outside the revision directory: ${snapshot}"
+    rm -rf --one-file-system -- "${resolved}"
+  done
+}
+
+retire_obsolete_snapshot_store() {
+  [[ -e "${VPNSTACK_RETIRED_SNAPSHOT_DIR}" || -L "${VPNSTACK_RETIRED_SNAPSHOT_DIR}" ]] || return 0
+  [[ -d "${VPNSTACK_RETIRED_SNAPSHOT_DIR}" && ! -L "${VPNSTACK_RETIRED_SNAPSHOT_DIR}" ]] ||
+    die "retired snapshot store has an unexpected type: ${VPNSTACK_RETIRED_SNAPSHOT_DIR}"
+
+  local backups_root=""
+  local resolved=""
+  backups_root="$(readlink -f -- "${VPNSTACK_BACKUP_DIR}")"
+  resolved="$(readlink -f -- "${VPNSTACK_RETIRED_SNAPSHOT_DIR}")"
+  [[ -n "${backups_root}" && "${resolved}" == "${backups_root}/snapshots" ]] ||
+    die "refusing to retire an unexpected snapshot directory: ${resolved}"
+  rm -rf --one-file-system -- "${resolved}"
 }
 
 cleanup_work() {
@@ -622,6 +680,7 @@ install_packages_from_plan() {
   (("${#packages[@]}" > 0)) || return 0
   apt-get update
   DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${packages[@]}"
+  apt-get clean
 }
 
 verify_sha256() {
@@ -1088,6 +1147,49 @@ switch_current_release() {
   mv -Tf "${current_tmp}" "${VPNSTACK_CURRENT_RELEASE}"
 }
 
+set_previous_release() {
+  local release_dir="$1"
+  local releases_root=""
+  local resolved=""
+  local previous_tmp="${VPNSTACK_ROOT}/.previous.$$.tmp"
+  releases_root="$(readlink -f -- "${VPNSTACK_RELEASES_DIR}")"
+  resolved="$(readlink -f -- "${release_dir}")"
+  [[ -d "${resolved}" && "$(dirname -- "${resolved}")" == "${releases_root}" ]] ||
+    die "refusing to set previous release outside the managed release directory: ${release_dir}"
+  ln -s "${resolved}" "${previous_tmp}"
+  mv -Tf "${previous_tmp}" "${VPNSTACK_PREVIOUS_RELEASE}"
+}
+
+prune_unreferenced_releases() {
+  [[ -d "${VPNSTACK_RELEASES_DIR}" ]] || return 0
+  local releases_root=""
+  releases_root="$(readlink -f -- "${VPNSTACK_RELEASES_DIR}")"
+  [[ -n "${releases_root}" && "${releases_root}" == "$(readlink -f -- "${VPNSTACK_ROOT}")/releases" ]] ||
+    die "refusing to prune an unexpected release directory: ${releases_root}"
+
+  declare -A retained=()
+  local link=""
+  local target=""
+  for link in "${VPNSTACK_CURRENT_RELEASE}" "${VPNSTACK_PREVIOUS_RELEASE}"; do
+    [[ -L "${link}" ]] || continue
+    target="$(readlink -f -- "${link}")"
+    [[ -d "${target}" && "$(dirname -- "${target}")" == "${releases_root}" ]] ||
+      die "managed release link points outside the release directory: ${link}"
+    retained["${target}"]=1
+  done
+  ((${#retained[@]} > 0)) || die "refusing to prune releases without a valid current link"
+
+  local candidate=""
+  local resolved=""
+  while IFS= read -r -d '' candidate; do
+    resolved="$(readlink -f -- "${candidate}")"
+    [[ "$(dirname -- "${resolved}")" == "${releases_root}" ]] ||
+      die "refusing to prune a release outside the managed directory: ${candidate}"
+    [[ -n "${retained["${resolved}"]+x}" ]] && continue
+    rm -rf --one-file-system -- "${resolved}"
+  done < <(find "${releases_root}" -mindepth 1 -maxdepth 1 -type d -print0)
+}
+
 new_contract_has_unit() {
   local contract_dir="$1"
   local unit="$2"
@@ -1378,6 +1480,9 @@ install_action() {
   retire_previous_payloads "${PREVIOUS_CONTRACT}" "${staged_contract}"
   record_install_metadata "${NODE}"
   verify_active_release "${staged_contract}"
+  "${PYTHON_BIN}" "$(contract_artifact_path "${staged_contract}" vpn-stack-agent.py)" storage-maintain --deep >/dev/null
+  prune_unreferenced_releases
+  retire_obsolete_snapshot_store
   TRANSACTION_ACTIVE=0
   echo "Installed node ${NODE} from current plan $(contract_value "${staged_contract}" release_id)."
 }
@@ -1399,6 +1504,10 @@ current_release_contract() {
 
 rollback_action() {
   [[ -L "${VPNSTACK_LATEST_SNAPSHOT}" ]] || die "no rollback snapshot is available"
+  local rolled_back_from=""
+  if [[ -L "${VPNSTACK_CURRENT_RELEASE}" ]]; then
+    rolled_back_from="$(readlink -f "${VPNSTACK_CURRENT_RELEASE}")"
+  fi
   local snapshot=""
   snapshot="$(readlink -f "${VPNSTACK_LATEST_SNAPSHOT}")"
   case "${snapshot}" in
@@ -1407,6 +1516,10 @@ rollback_action() {
   esac
   restore_snapshot "${snapshot}"
   verify_snapshot_service_states "${snapshot}"
+
+  if [[ -n "${rolled_back_from}" && -d "${rolled_back_from}" ]]; then
+    set_previous_release "${rolled_back_from}"
+  fi
 
   if [[ -L "${VPNSTACK_CURRENT_RELEASE}" ]]; then
     WORK_DIR="$(mktemp -d)"
@@ -1419,6 +1532,7 @@ rollback_action() {
     NODE="${current_node}"
     PUBLISHED_RELEASE_DIR="${current}"
     verify_active_release "${contract}"
+    prune_unreferenced_releases
   fi
   echo "Rollback snapshot restored: ${snapshot}"
 }

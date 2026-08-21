@@ -68,6 +68,7 @@ SERVER_RENDER_MODULES = (
     "network_profile.py",
     "public_transport.py",
     "release_integrity.py",
+    "resource_control.py",
     "render.py",
     "routing_policy.py",
     "server_agent.py",
@@ -81,6 +82,7 @@ SERVER_AGENT_BASE_MODULES = (
     "log_classifier.py",
     "network_profile.py",
     "release_integrity.py",
+    "resource_control.py",
 )
 SERVER_AGENT_INTERSERVER_MODULES = (
     "interserver_transport.py",
@@ -196,7 +198,7 @@ def wg_host_address(cidr: str) -> str:
 
 
 def render_gateway_singbox(env: dict[str, str]) -> str:
-    log_level = env.get("SING_BOX_LOG_LEVEL", "info").strip() or "info"
+    log_level = env.get("SING_BOX_LOG_LEVEL", "warn").strip() or "warn"
     topology = TopologySpec.from_env(env)
     policy = build_gateway_routing_policy(env)
     policy_parts = policy.singbox_parts()
@@ -741,7 +743,8 @@ def render_singbox_service(node_id: str, *, operator_routing: bool = True) -> st
         )
     service_lines.extend(
         [
-            "ExecStart=/etc/vpn-stack/current/bin/sing-box -D /var/lib/sing-box -C /etc/sing-box run",
+            "ExecStartPre=/usr/bin/python3 /usr/local/lib/vpn-stack/vpn-stack-agent.py memory-prepare",
+            "ExecStart=/usr/bin/python3 /usr/local/lib/vpn-stack/vpn-stack-agent.py exec-router /etc/vpn-stack/current/bin/sing-box -D /var/lib/sing-box -C /etc/sing-box run",
             "Restart=on-failure",
             "RestartSec=3s",
             "LimitNOFILE=1048576",
@@ -785,6 +788,7 @@ def render_sysctl(node_id: str) -> str:
         "net.ipv4.tcp_mtu_probing=1",
         f"net.ipv4.tcp_mtu_probe_floor={TCP_MTU_PROBE_FLOOR}",
         f"net.ipv4.tcp_no_metrics_save={TCP_NO_METRICS_SAVE}",
+        "vm.swappiness=10",
     ]
     if normalize_node_id(node_id) == NODE_GATEWAY:
         lines.append("net.ipv4.conf.all.src_valid_mark=1")
@@ -813,7 +817,27 @@ def render_journald_dropin(env: dict[str, str]) -> str:
 
 
 def render_apt_periodic_dropin() -> str:
-    return 'APT::Periodic::Update-Package-Lists "1";\nAPT::Periodic::Unattended-Upgrade "1";\n'
+    return (
+        'APT::Periodic::Update-Package-Lists "1";\n'
+        'APT::Periodic::Unattended-Upgrade "1";\n'
+        'APT::Periodic::AutocleanInterval "7";\n'
+    )
+
+
+def render_btmp_logrotate_config() -> str:
+    return "\n".join(
+        [
+            "/var/log/btmp {",
+            "    missingok",
+            "    rotate 2",
+            "    size 64M",
+            "    compress",
+            "    nodelaycompress",
+            "    create 0660 root utmp",
+            "}",
+            "",
+        ]
+    )
 
 
 def server_script_asset(name: str) -> str:
@@ -840,6 +864,7 @@ def render_health_service() -> str:
             "Type=oneshot",
             "ExecStartPre=/usr/bin/python3 /usr/local/lib/vpn-stack/vpn-stack-agent.py network-apply",
             "ExecStart=/usr/bin/python3 /usr/local/lib/vpn-stack/vpn-stack-agent.py health",
+            "ExecStartPost=-/usr/bin/python3 /usr/local/lib/vpn-stack/vpn-stack-agent.py storage-maintain",
             "",
             "[Install]",
             "WantedBy=multi-user.target",
@@ -988,6 +1013,7 @@ def rendered_files_for_node(env: dict[str, str], node_id: str, *, assets: dict[s
             "modules-vpn-stack.conf": render_modules_load(),
             "apt-vpn-stack-unattended.conf": render_apt_periodic_dropin(),
             "resolved-vpn-stack.conf": render_resolved_dropin(),
+            "btmp-vpn-stack.conf": render_btmp_logrotate_config(),
             **server_agent_artifacts(interserver=plan.requires_wireguard),
             "vpn-stack-health.service": render_health_service(),
             "vpn-stack-health.timer": render_health_timer(),
@@ -1021,6 +1047,7 @@ def rendered_files_for_node(env: dict[str, str], node_id: str, *, assets: dict[s
         "modules-vpn-stack.conf": render_modules_load(),
         "apt-vpn-stack-unattended.conf": render_apt_periodic_dropin(),
         "resolved-vpn-stack.conf": render_resolved_dropin(),
+        "btmp-vpn-stack.conf": render_btmp_logrotate_config(),
         **server_agent_artifacts(interserver=True),
         "vpn-stack-health.service": render_health_service(),
         "vpn-stack-health.timer": render_health_timer(),

@@ -42,7 +42,7 @@ Topology и физическое расположение gateway неизмен
 
 ## Совместимость релиза
 
-`0.21.2` поддерживает fresh install, обновление с `0.21.1` и повторную установку `0.21.2`. Manifest объявляет `installed_min=0.21.1`, `installed_max=0.21.2`. Неподдерживаемый установленный релиз отклоняется до managed transaction; удалить его нужно `.\vpn.cmd` на Windows или `./vpn.sh` на Linux из совпадающего Git-тега, после чего выполняется fresh install.
+`0.21.3` поддерживает fresh install, обновление с `0.21.2` и повторную установку `0.21.3`. Manifest объявляет `installed_min=0.21.2`, `installed_max=0.21.3`. Неподдерживаемый установленный релиз отклоняется до managed transaction; удалить его нужно `.\vpn.cmd` на Windows или `./vpn.sh` на Linux из совпадающего Git-тега, после чего выполняется fresh install.
 
 Публичный CLI использует только `--node gateway|exit|all`. Role aliases, readers старых схем и migration chains отсутствуют. Совместимая предыдущая версия проверяется тем же config/state `3`, manifest/install-plan `4` и diagnostics `5` контрактом. Политика окна описана в [DEPRECATIONS.md](./DEPRECATIONS.md).
 
@@ -88,6 +88,7 @@ Snapshot diagnostics schema 5 содержит:
 
 - service state, manifest drift и hashes всех managed artifacts, включая resolver drop-in и состояние `/etc/resolv.conf` stub;
 - root filesystem source/type, ext4 state и runtime error counters, время последней проверки и `fs_passno` загрузочного `fsck`;
+- ёмкость диска, фактически выделенные blocks current/previous/stale releases и journal/security logs, стабильный APT metadata/cache, RAM/swap, текущую и пиковую память router, активный `GOMEMLIMIT`, automatic restart и kernel OOM evidence;
 - WireGuard, выбранный межсерверный transport и delay кандидатов, interface/conntrack, protocol, softnet и structured qdisc counters; health хранит дельты UDP receive/send overflow, `fq`/per-flow drops, softnet drops и missed packets;
 - TCP front telemetry: active `ESTAB` и closing states разнесены до агрегации; RTT, retransmitted bytes/ratio, PMTU, MSS, cwnd, delivery rate, reordering и unacked считаются по каждому активному `source IP:port`, а `FIN-WAIT/LAST-ACK/CLOSING` формируют отдельный `closing_churn`; lifetime counters остаются исторической телеметрией, текущий verdict использует только flow с активностью не старше `30s` или монотонные counters того же socket ID в свежем интервале;
 - fresh, 30-minute и 24-hour log windows;
@@ -113,11 +114,11 @@ Install/reinstall собирает release во временном катало�
 
 APT-пакеты устанавливаются до managed snapshot и считаются монотонными prerequisites хоста: автоматический rollback не удаляет пакеты и не пытается откатывать версии через APT. Транзакционная гарантия начинается после успешной подготовки prerequisites и охватывает только явно принадлежащие проекту artifacts, links, services и runtime-state.
 
-Хранятся последние 10 revision snapshots плюс отдельный baseline. Snapshot текущей транзакции никогда не удаляется её собственным rollback; pruning выполняется до создания нового snapshot.
+Хранятся не более 10 revision snapshots плюс отдельный baseline. До создания нового snapshot installer сохраняет актуальную ссылку `latest` и самые свежие revisions, удаляя только прямые дочерние каталоги проверенного backup root. Snapshot текущей транзакции поэтому не может быть удалён собственным rollback. Retired-каталог `backups/snapshots` из поколений до `0.20.0` удаляется только после успешной acceptance и больше не создаётся.
 
 `.\vpn.cmd maintain` по умолчанию только показывает APT/security/reboot state. С `--apply --yes` узлы обновляются последовательно, после каждого выполняется fresh verification. `--refresh-assets` использует тот же транзакционный reinstall workflow; background asset mutation отсутствует.
 
-Journald ограничивается managed drop-in. APT periodic settings включают unattended security updates, но плановая установка пакетов остаётся явной командой `maintain`.
+Journald ограничивается managed drop-in 256 МБ/14 дней. После успешной acceptance release store сохраняет только атомарные `current` и `previous`, APT cache очищается, weekly autoclean удаляет устаревшие archives, а отдельная size-policy удерживает `btmp` в пределах двух сжатых ротаций по 64 МБ. На узлах с RAM менее 1 ГБ агент до запуска router обеспечивает 512 МБ emergency swap; `sing-box` получает вычисляемый `GOMEMLIMIT` с системным запасом памяти. Status раздельно показывает release trees, transaction backups, journald, security logs, APT metadata/cache и managed swap. APT periodic settings включают unattended security updates, но плановая установка пакетов остаётся явной командой `maintain`.
 
 ## Live verification
 
@@ -131,7 +132,7 @@ Server-side route acceptance использует HTTP `HEAD`: его задач
 
 Автоматическая post-cutover приёмка install/reinstall/maintenance вызывает `verify live` с `--throughput-seconds 0`: она доказывает полный публичный контракт, но не насыщает production-туннель собственным bulk download. Явный `verify live` по умолчанию выполняет `30s` throughput acceptance канонического VLESS/TCP; `--throughput-seconds 60` задаёт более длинное ручное окно, а `0` оставляет только функциональные probes. Runner циклически использует Hetzner FSN, Hetzner NBG и независимый Cloudflare payload. Hard gate требует sustained goodput не ниже `10 Mbit/s`, минимум два успешных источника, полный requested interval, отсутствие transfer failures и пауз прогресса длиннее budget. Peak сравнивается с reference `50 Mbit/s` и сохраняется как telemetry, но CDN-зависимый sample не вызывает rollback. Публичный Hysteria2 проходит отдельный функциональный контракт без автоматической throughput-нагрузки. Один global lock сериализует runner-профили; target-side deadline и SSH controller lease завершают process group при исчезновении локального процесса. Проверка не входит в health timer.
 
-В `dual` проверяющий runner запускается на независимом `exit`, а в `single` - на том же `gateway` со scope `same-node`. Он проверяет публичный VLESS path и server capacity, но не измеряет маршрут конкретного пользователя до gateway. Одновременный `client_specific/degraded` не маскируется успешным runner: это два разных component verdict.
+В `dual` проверяющий runner запускается на независимом `exit`, а в `single` - на том же `gateway` со scope `same-node`. Он проверяет публичный VLESS path и server capacity, но не измеряет маршрут конкретного пользователя до gateway. Одновременный `client_specific/degraded` не маскируется успешным runner: это два разных component verdict. При post-cutover install только эта строго изолированная деградация может не вызывать rollback, если независимые VLESS/HY2 paths и все server/host/drift gates доказаны; эксплуатационный отчёт при этом остаётся `degraded`. First-load probes не повторяют запрос после ошибки и сохраняют DNS/connect/TLS/TTFB timings, remote IP и `curl` error для точной фазы сбоя.
 
 ## CLI
 

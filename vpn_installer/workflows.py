@@ -13,6 +13,7 @@ from . import VERSION
 from .admin_access import admin_access_workflow, admin_url
 from .clipboard import copy_to_clipboard
 from .client_drift import find_client_drift
+from .compatibility import COMPATIBLE_INSTALLED_MIN
 from .common import DEPLOYMENTS_DIR, OUT_DIR, RUNTIME_DIR, INSTALL_SCRIPT_PATH, cli_command, ensure_directories, error_summary, fail, print_header, sanitize_name, warn, write_private_text
 from .config import (
     apply_ru_direct_overlays,
@@ -98,6 +99,13 @@ def load_remote_authoritative_env(
         remote_env = merge_node_env_with_defaults(parsed_remote_env, deployment_name)
         observed = project_node_env(remote_env, target.node_id)
         expected = project_node_env(env, target.node_id)
+        # 0.21.2 used verbose router logging by default; 0.21.3 intentionally migrates that exact default.
+        if (
+            preflight.get("release_version") == COMPATIBLE_INSTALLED_MIN
+            and observed.get("SING_BOX_LOG_LEVEL") == "info"
+            and expected.get("SING_BOX_LOG_LEVEL") == "warn"
+        ):
+            observed["SING_BOX_LOG_LEVEL"] = "warn"
         differences = [
             key
             for key in sorted(set(observed) | set(expected))
@@ -868,7 +876,7 @@ def verify_postcutover(
         non_interactive=True,
         throughput_seconds=throughput_seconds,
         require_native_agent=require_native_agent,
-        accept_same_node_for_install=True,
+        accept_install_gate=True,
     ) != 0:
         raise AppError("Свежая проверка полного VLESS-пути после установки не пройдена.")
 

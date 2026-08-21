@@ -22,6 +22,18 @@ def _collector_label(state: CollectorState) -> str:
     return state.status + (f" ({'; '.join(details)})" if details else "")
 
 
+def _format_size(value: object) -> str:
+    try:
+        size = int(value)
+    except (TypeError, ValueError):
+        return "unknown"
+    for suffix in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if size < 1024 or suffix == "TiB":
+            return f"{size:.0f}{suffix}" if suffix == "B" else f"{size:.1f}{suffix}"
+        size /= 1024
+    return "unknown"
+
+
 def _format_log_window(name: str, window: LogWindowSnapshot) -> list[str]:
     boundaries = []
     if window.since:
@@ -95,6 +107,61 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
             f"state={root_filesystem.get('state') or 'unknown'}, errors={root_filesystem.get('errors_count', '-')}, "
             f"boot_fsck={'enabled' if root_filesystem.get('boot_check_enabled') else 'disabled'}, "
             f"verdict={root_filesystem.get('verdict', 'inconclusive')}"
+        )
+    capacity = snapshot.storage.get("capacity", {})
+    if capacity:
+        lines.append(
+            "disk capacity: "
+            f"used={capacity.get('used_percent', 'unknown')}%, "
+            f"free={_format_size(capacity.get('free_bytes'))}, verdict={capacity.get('verdict', 'inconclusive')}"
+        )
+    releases = snapshot.storage.get("managed_releases", {})
+    if releases:
+        lines.append(
+            "release storage: "
+            f"count={releases.get('count', 'unknown')}, size={_format_size(releases.get('bytes'))}, "
+            f"stale={releases.get('stale_count', 'unknown')} ({_format_size(releases.get('stale_bytes'))})"
+        )
+    backups = snapshot.storage.get("transaction_backups", {})
+    if backups:
+        lines.append(
+            "transaction backups: "
+            f"revisions={backups.get('revision_count', 'unknown')} ({_format_size(backups.get('revision_bytes'))}), "
+            f"baseline={_format_size(backups.get('baseline_bytes'))}"
+        )
+    if "journal_bytes" in snapshot.storage or "security_log_bytes" in snapshot.storage:
+        lines.append(
+            "log storage: "
+            f"journal={_format_size(snapshot.storage.get('journal_bytes'))}, "
+            f"security={_format_size(snapshot.storage.get('security_log_bytes'))}"
+        )
+    package_cache = snapshot.storage.get("package_cache", {})
+    if package_cache:
+        lines.append(
+            "package metadata: "
+            f"lists={_format_size(package_cache.get('lists_bytes'))}, "
+            f"archives={_format_size(package_cache.get('archives_bytes'))}"
+        )
+    memory = snapshot.storage.get("memory", {})
+    if memory:
+        router = memory.get("router", {})
+        lines.append(
+            "memory: "
+            f"available={_format_size(memory.get('available_bytes'))}/{_format_size(memory.get('total_bytes'))}, "
+            f"swap_free={_format_size(memory.get('swap_free_bytes'))}/{_format_size(memory.get('swap_total_bytes'))}, "
+            f"reserve={'ready' if memory.get('reserve_ready') else 'missing'}, "
+            f"sing-box={_format_size(router.get('memory_current_bytes'))} peak={_format_size(router.get('memory_peak_bytes'))}, "
+            f"GOMEMLIMIT={router.get('go_memory_limit') or 'missing'}"
+        )
+        if snapshot.storage.get("managed_swap_file_bytes"):
+            lines.append(f"managed swap file: {_format_size(snapshot.storage.get('managed_swap_file_bytes'))}")
+    oom = snapshot.storage.get("runtime_events", {}).get("oom_kills", {})
+    if oom:
+        counts = oom.get("counts", {})
+        lines.append(
+            "OOM kills: "
+            f"5m={counts.get('5m', 'unknown')}, 30m={counts.get('30m', 'unknown')}, "
+            f"24h={counts.get('24h', 'unknown')}, since_release={counts.get('since_release', 'unknown')}"
         )
     if has_public_front and snapshot.front:
         lines.append(

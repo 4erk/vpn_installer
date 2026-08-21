@@ -23,7 +23,7 @@ RUNNER_REPORT_SECONDS = 1
 RUNNER_TRANSPORT_DRAIN_SECONDS = 10
 RELIABILITY_PROBE_URLS = (
     "https://www.gstatic.com/generate_204",
-    "https://www.cloudflare.com/cdn-cgi/trace",
+    "https://vk.ru/",
     "https://github.com/favicon.ico",
 )
 THROUGHPUT_SOURCE_URLS = (
@@ -300,11 +300,16 @@ def render_live_route_probe(*, listen_port: int, dns_listen_port: int, listen_ho
         dns_result = {{**dns_queries["A"], "queries": dns_queries}}
         private_targets = []
         for address, port in (("10.0.0.1", 80), ("172.19.0.2", 853)):
+            started = time.monotonic()
             try:
                 target_result = private_connect_result(address, port)
             except Exception as exc:
                 target_result = {{"verdict": "failed", "ok": False, "evidence": "probe-error", "error": str(exc)[:160]}}
-            private_targets.append({{"target": f"{{address}}:{{port}}", **target_result}})
+            private_targets.append({{
+                "target": f"{{address}}:{{port}}",
+                "elapsed_seconds": round(time.monotonic() - started, 3),
+                **target_result,
+            }})
         private_verdict = "verified"
         if any(item["verdict"] == "failed" for item in private_targets):
             private_verdict = "failed"
@@ -374,8 +379,10 @@ pid=""
 watchdog_pid=""
 curl_pid=""
 reliability_results_path="$work_dir/reliability-results.tsv"
+reliability_error_path="$work_dir/reliability-error.txt"
 throughput_payload_path="$work_dir/throughput-payload.bin"
 : >"$reliability_results_path"
+: >"$reliability_error_path"
 
 exec 9>"$lock_path"
 if ! flock -n 9; then
@@ -408,7 +415,7 @@ cleanup() {
         kill "$curl_pid" >/dev/null 2>&1 || true
         wait "$curl_pid" >/dev/null 2>&1 || true
     fi
-    rm -f -- "$reliability_results_path" "$throughput_payload_path"
+    rm -f -- "$reliability_results_path" "$reliability_error_path" "$throughput_payload_path"
     if [[ -z "${pid:-}" ]] || ! kill -0 "$pid" 2>/dev/null; then
         return
     fi
@@ -499,19 +506,21 @@ reliability_failures=0
 while (( reliability_attempts < __RELIABILITY_ATTEMPTS__ )); do
     reliability_url=${reliability_urls[$((reliability_attempts % ${#reliability_urls[@]}))]}
     reliability_attempts=$((reliability_attempts + 1))
-    probe_output=$(curl -LsS -o /dev/null -w '%{http_code}|%{time_total}' --proxy "$proxy" --connect-timeout 3 --max-time __RELIABILITY_TIMEOUT_SECONDS__ "$reliability_url" 2>>runner-curl.log)
+    : >"$reliability_error_path"
+    probe_output=$(curl -LsS -o /dev/null -w '%{http_code}|%{time_namelookup}|%{time_connect}|%{time_appconnect}|%{time_starttransfer}|%{time_total}|%{remote_ip}' --proxy "$proxy" --connect-timeout 3 --max-time __RELIABILITY_TIMEOUT_SECONDS__ "$reliability_url" 2>"$reliability_error_path")
     probe_status=$?
-    probe_code=${probe_output%%|*}
-    probe_seconds=${probe_output#*|}
+    IFS='|' read -r probe_code probe_namelookup probe_connect probe_appconnect probe_starttransfer probe_seconds probe_remote_ip <<<"$probe_output"
+    probe_error=$(tr '\t\r\n' '   ' <"$reliability_error_path" | tail -c 500)
+    cat "$reliability_error_path" >>runner-curl.log
     if (( probe_status != 0 )) || [[ ! "$probe_code" =~ ^(200|204|301|302|403)$ ]] || [[ ! "$probe_seconds" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
-        printf '%s\t0\t%s\t%s\t%s\n' "$reliability_url" "$probe_status" "$probe_code" "$probe_seconds" >>"$reliability_results_path"
+        printf '%s\t0\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$reliability_url" "$probe_status" "$probe_code" "$probe_namelookup" "$probe_connect" "$probe_appconnect" "$probe_starttransfer" "$probe_seconds" "$probe_remote_ip" "$probe_error" >>"$reliability_results_path"
         reliability_failures=$((reliability_failures + 1))
         if (( reliability_failures >= __RELIABILITY_FAILURE_LIMIT__ )); then
             break
         fi
         continue
     fi
-    printf '%s\t1\t%s\t%s\t%s\n' "$reliability_url" "$probe_status" "$probe_code" "$probe_seconds" >>"$reliability_results_path"
+    printf '%s\t1\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$reliability_url" "$probe_status" "$probe_code" "$probe_namelookup" "$probe_connect" "$probe_appconnect" "$probe_starttransfer" "$probe_seconds" "$probe_remote_ip" "$probe_error" >>"$reliability_results_path"
 done
 
 throughput_bytes=0
@@ -663,23 +672,57 @@ throughput = {
     "source_metrics": source_metrics,
 }
 reliability_probes = []
+
+
+def timing(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def incomplete_phase(probe):
+    if probe["ok"]:
+        return "completed"
+    if probe["connect_seconds"] <= 0:
+        return "proxy-connect-not-completed"
+    if probe["tls_seconds"] <= 0:
+        return "upstream-tls-not-completed"
+    if probe["starttransfer_seconds"] <= 0:
+        return "first-byte-not-received"
+    return "http-or-transfer-failed"
+
+
 for line in Path(sys.argv[18]).read_text(encoding="utf-8").splitlines():
-    url, ok, curl_status, http_status, total_seconds = line.split("\t", 4)
-    reliability_probes.append({
+    fields = line.split("\t", 10)
+    if len(fields) != 11:
+        continue
+    url, ok, curl_status, http_status, namelookup, connect, appconnect, starttransfer, total, remote_ip, error = fields
+    probe = {
         "url": url,
         "ok": ok == "1",
         "curl_status": int(curl_status),
         "http_status": http_status,
-        "total_seconds": float(total_seconds) if total_seconds else 0.0,
-    })
+        "namelookup_seconds": timing(namelookup),
+        "connect_seconds": timing(connect),
+        "tls_seconds": timing(appconnect),
+        "starttransfer_seconds": timing(starttransfer),
+        "total_seconds": timing(total),
+        "remote_ip": remote_ip,
+        "error": error,
+    }
+    probe["incomplete_phase"] = incomplete_phase(probe)
+    reliability_probes.append(probe)
 reliability_successes = sum(probe["ok"] for probe in reliability_probes)
 successful_times = [probe["total_seconds"] for probe in reliability_probes if probe["ok"]]
+required_targets = list(dict.fromkeys(probe["url"] for probe in reliability_probes))
 reliability = {
     "attempts": len(reliability_probes),
     "successes": reliability_successes,
     "failures": len(reliability_probes) - reliability_successes,
     "average_total_seconds": sum(successful_times) / len(successful_times) if successful_times else 0.0,
     "max_total_seconds": max(successful_times, default=0.0),
+    "required_targets": required_targets,
     "probes": reliability_probes,
 }
 print(json.dumps({

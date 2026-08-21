@@ -294,6 +294,41 @@ class StatusOutputTests(unittest.TestCase):
         self.assertNotIn("not-probed", rendered)
         self.assertNotIn("Nonems", rendered)
 
+    def test_formats_bounded_storage_and_memory_sources(self) -> None:
+        rendered = "\n".join(
+            format_snapshot_summary(
+                DiagnosticsSnapshot(
+                    storage={
+                        "capacity": {"used_percent": 42.0, "free_bytes": 4 * 1024**3, "verdict": "verified"},
+                        "managed_releases": {"count": 2, "bytes": 200 * 1024**2, "stale_count": 0, "stale_bytes": 0},
+                        "transaction_backups": {"revision_count": 10, "revision_bytes": 10 * 1024**2, "baseline_bytes": 1024**2},
+                        "managed_swap_file_bytes": 512 * 1024**2,
+                        "journal_bytes": 250 * 1024**2,
+                        "security_log_bytes": 8 * 1024**2,
+                        "package_cache": {"lists_bytes": 190 * 1024**2, "archives_bytes": 0},
+                        "memory": {
+                            "available_bytes": 350 * 1024**2,
+                            "total_bytes": 710 * 1024**2,
+                            "swap_free_bytes": 500 * 1024**2,
+                            "swap_total_bytes": 512 * 1024**2,
+                            "reserve_ready": True,
+                            "router": {
+                                "memory_current_bytes": 40 * 1024**2,
+                                "memory_peak_bytes": 50 * 1024**2,
+                                "go_memory_limit": "326MiB",
+                            },
+                        },
+                    }
+                )
+            )
+        )
+
+        self.assertIn("disk capacity: used=42.0%, free=4.0GiB, verdict=verified", rendered)
+        self.assertIn("release storage: count=2, size=200.0MiB, stale=0 (0B)", rendered)
+        self.assertIn("transaction backups: revisions=10 (10.0MiB), baseline=1.0MiB", rendered)
+        self.assertIn("package metadata: lists=190.0MiB, archives=0B", rendered)
+        self.assertIn("managed swap file: 512.0MiB", rendered)
+
     def test_formats_stale_adaptation_and_fresh_front_interval(self) -> None:
         rendered = "\n".join(
             format_snapshot_summary(

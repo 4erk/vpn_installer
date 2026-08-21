@@ -342,7 +342,18 @@ class RenderTests(unittest.TestCase):
         service = render.render_health_service()
         self.assertIn("ExecStartPre=/usr/bin/python3 /usr/local/lib/vpn-stack/vpn-stack-agent.py network-apply", service)
         self.assertIn("ExecStart=/usr/bin/python3 /usr/local/lib/vpn-stack/vpn-stack-agent.py health", service)
+        self.assertIn("ExecStartPost=-/usr/bin/python3 /usr/local/lib/vpn-stack/vpn-stack-agent.py storage-maintain", service)
         self.assertNotIn("sync-state.sh", service)
+
+    def test_sing_box_service_applies_memory_reserve_and_adaptive_go_budget(self) -> None:
+        service = render.render_singbox_service(render.NODE_GATEWAY)
+        self.assertIn("vpn-stack-agent.py memory-prepare", service)
+        self.assertIn("vpn-stack-agent.py exec-router /etc/vpn-stack/current/bin/sing-box", service)
+        self.assertNotIn("ExecStart=/etc/vpn-stack/current/bin/sing-box", service)
+
+    def test_host_profile_keeps_swap_as_an_emergency_reserve(self) -> None:
+        self.assertIn("vm.swappiness=10", render.render_sysctl(render.NODE_GATEWAY))
+        self.assertIn("size 64M", render.render_btmp_logrotate_config())
 
     def test_transport_service_reconciles_before_starting_the_watcher(self) -> None:
         service = render.render_transport_service(self.make_env())
@@ -759,6 +770,7 @@ class RenderTests(unittest.TestCase):
         self.assertIn("net.ipv4.conf.all.src_valid_mark=1", ru_files["sysctl-vpn-stack.conf"])
         self.assertIn("net.ipv4.ip_forward=1", foreign_files["sysctl-vpn-stack.conf"])
         self.assertIn('APT::Periodic::Unattended-Upgrade "1";', ru_files["apt-vpn-stack-unattended.conf"])
+        self.assertIn('APT::Periodic::AutocleanInterval "7";', ru_files["apt-vpn-stack-unattended.conf"])
         self.assertIn("DNS=1.1.1.1 9.9.9.9 8.8.8.8", ru_files["resolved-vpn-stack.conf"])
         self.assertIn("Cache=yes", foreign_files["resolved-vpn-stack.conf"])
         self.assertIn("StaleRetentionSec=1h", foreign_files["resolved-vpn-stack.conf"])

@@ -194,6 +194,7 @@ class VlessVerifyTests(unittest.TestCase):
         self.assertEqual(result["private_reject"]["verdict"], "inconclusive")
         self.assertFalse(result["private_reject"]["ok"])
         self.assertTrue(all(target["correlation_required"] for target in result["private_reject"]["targets"]))
+        self.assertTrue(all(0 <= target["elapsed_seconds"] < 2 for target in result["private_reject"]["targets"]))
 
     def test_route_probe_rejects_invalid_dns_semantics(self) -> None:
         cases = {
@@ -234,7 +235,12 @@ class VlessVerifyTests(unittest.TestCase):
         self.assertIn("controller-lease-expired", runner)
         self.assertIn("event first-load-reliability", runner)
         self.assertIn('reliability_attempts=0', runner)
+        self.assertIn("%{time_namelookup}|%{time_connect}|%{time_appconnect}|%{time_starttransfer}|%{time_total}|%{remote_ip}", runner)
+        self.assertIn('probe["incomplete_phase"] = incomplete_phase(probe)', runner)
+        self.assertIn('"error": error', runner)
         self.assertIn('"probes": reliability_probes', runner)
+        self.assertIn('"required_targets": required_targets', runner)
+        self.assertIn("https://vk.ru/", runner)
         self.assertIn('"first_load_reliability": reliability', runner)
         self.assertIn("kill -KILL", runner)
         self.assertNotIn("phase=capacity", runner)
@@ -251,7 +257,7 @@ class VlessVerifyTests(unittest.TestCase):
         self.assertIn("timeout --foreground --signal=TERM --kill-after=5s", runner)
         self.assertIn('stat -c %s -- "$throughput_payload_path"', runner)
         self.assertIn('kill "$curl_pid"', runner)
-        self.assertIn('rm -f -- "$reliability_results_path" "$throughput_payload_path"', runner)
+        self.assertIn('rm -f -- "$reliability_results_path" "$reliability_error_path" "$throughput_payload_path"', runner)
         self.assertNotIn("mktemp", runner)
         self.assertNotIn("--max-time \"$remaining_seconds\"", runner)
 

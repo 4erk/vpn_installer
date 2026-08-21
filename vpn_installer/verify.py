@@ -42,6 +42,7 @@ from .vless_verify import (
     RUNNER_RELIABILITY_ATTEMPTS,
     RUNNER_RELIABILITY_MAX_TOTAL_SECONDS,
     RUNNER_RELIABILITY_TIMEOUT_SECONDS,
+    RELIABILITY_PROBE_URLS,
     RUNNER_REPORT_SECONDS,
     RUNNER_SHUTDOWN_SECONDS,
     RUNNER_STARTUP_SECONDS,
@@ -300,6 +301,81 @@ def _reconcile_public_capabilities(snapshot: DiagnosticsSnapshot, public_vless: 
     return snapshot
 
 
+_INSTALL_GATE_CLIENT_DEGRADATIONS = frozenset(
+    {
+        "agent public_front=degraded",
+        "public TCP front shows active data-path degradation",
+    }
+)
+
+
+def _install_release_gate(
+    topology: TopologySpec,
+    public_vless: dict[str, object],
+    public_hysteria2: dict[str, object],
+    snapshots: list[DiagnosticsSnapshot],
+    *,
+    same_node_functional_verified: bool,
+) -> dict[str, object]:
+    """Decide install acceptance without hiding unrelated client-path loss."""
+
+    def rejected(reason: str) -> dict[str, object]:
+        return {"eligible": False, "reason": reason, "accepted_degradations": []}
+
+    functional = public_vless.get("functional")
+    correlation = public_vless.get("front_correlation")
+    public_path = public_vless.get("paths", {}).get("public_vless", {}) if isinstance(public_vless.get("paths"), dict) else {}
+    if not isinstance(functional, dict) or functional.get("verdict") != "verified":
+        return rejected("primary VLESS functional path is not verified")
+    if not isinstance(correlation, dict) or correlation.get("verdict") != "verified":
+        return rejected("independent Xray front correlation is not verified")
+    if not isinstance(public_path, dict) or public_path.get("checked") is not True:
+        return rejected("primary VLESS path evidence is incomplete")
+    if topology.is_dual:
+        if public_vless.get("verdict") != "verified":
+            return rejected("independent primary VLESS acceptance failed")
+        if public_hysteria2.get("verdict") != "verified":
+            return rejected("public Hysteria2 fallback acceptance failed")
+    elif not same_node_functional_verified:
+        return rejected("same-node primary VLESS functional acceptance failed")
+
+    snapshots_by_node = {snapshot.node_id: snapshot for snapshot in snapshots if snapshot.node_id}
+    expected_nodes = {node.node_id for node in topology.nodes}
+    if set(snapshots_by_node) != expected_nodes:
+        return rejected("native agent evidence is incomplete")
+
+    accepted_degradations: list[str] = []
+    for node_id in sorted(expected_nodes):
+        snapshot = snapshots_by_node[node_id]
+        if snapshot.verdict == "verified":
+            continue
+        verdicts = snapshot.component_verdicts
+        allowed_client_degradation = (
+            node_id == NODE_GATEWAY
+            and snapshot.verdict == "degraded"
+            and snapshot.drift == "none"
+            and verdicts.get("server_path") == "verified"
+            and verdicts.get("host_integrity") == "verified"
+            and verdicts.get("public_front") == "degraded"
+            and verdicts.get("client_observation") == "client_specific"
+            and (not topology.is_dual or verdicts.get("public_quic") == "verified")
+            and snapshot.route_probes.get("profile") == "acceptance"
+            and snapshot.route_probes.get("release_gate_ok", snapshot.route_probes.get("ok")) is True
+            and bool(snapshot.reasons)
+            and set(snapshot.reasons).issubset(_INSTALL_GATE_CLIENT_DEGRADATIONS)
+        )
+        if not allowed_client_degradation:
+            return rejected(f"{node_id} native acceptance is {snapshot.verdict}")
+        accepted_degradations.append(f"{node_id}:client_specific_public_front")
+    return {
+        "eligible": True,
+        "reason": "all release paths passed; only unrelated client-specific front loss remains"
+        if accepted_degradations
+        else "all release paths passed",
+        "accepted_degradations": accepted_degradations,
+    }
+
+
 def _probe_component(verdict: str, reason: str = "", *, measured: bool = True) -> dict[str, object]:
     component: dict[str, object] = {"verdict": verdict, "measured": measured}
     if reason:
@@ -323,7 +399,17 @@ def _private_reject_component(private_reject: object, *, label: str) -> dict[str
             and int(target["socks_reply_status"]) == 2
         )
         correlated_reject = target.get("correlated") is True and bool(str(target.get("correlation_id", "")).strip())
-        if target.get("verdict") == "verified" and (explicit_reject or correlated_reject):
+        elapsed = target.get("elapsed_seconds")
+        policy_reject = (
+            target.get("evidence") == "socks-success-eof"
+            and target.get("verification_basis") == "installed-policy-fast-eof"
+            and target.get("policy_verified") is True
+            and bool(str(target.get("policy_config_sha256", "")).strip())
+            and isinstance(elapsed, (int, float))
+            and not isinstance(elapsed, bool)
+            and 0 <= float(elapsed) < 2.0
+        )
+        if target.get("verdict") == "verified" and (explicit_reject or correlated_reject or policy_reject):
             target_verdicts.append("verified")
         elif target.get("verdict") == "failed":
             target_verdicts.append("failed")
@@ -445,6 +531,7 @@ def _validate_functional_transport_result(
             successes = int(reliability.get("successes", 0) or 0)
             failure_count = int(reliability.get("failures", 0) or 0)
             max_total = float(reliability.get("max_total_seconds", 0) or 0)
+            probes = reliability.get("probes")
         except (TypeError, ValueError):
             failures.append(f"{label} first-load reliability result is malformed")
         else:
@@ -452,6 +539,19 @@ def _validate_functional_transport_result(
                 failures.append(f"{label} first-load reliability failed")
             elif max_total <= 0 or max_total > RUNNER_RELIABILITY_MAX_TOTAL_SECONDS:
                 failures.append(f"{label} first-load latency exceeded {RUNNER_RELIABILITY_MAX_TOTAL_SECONDS:.1f}s")
+            elif not isinstance(probes, list):
+                failures.append(f"{label} first-load target evidence is missing")
+            else:
+                expected_per_target = RUNNER_RELIABILITY_ATTEMPTS // len(RELIABILITY_PROBE_URLS)
+                observed = {
+                    url: sum(
+                        isinstance(probe, dict) and probe.get("url") == url and probe.get("ok") is True
+                        for probe in probes
+                    )
+                    for url in RELIABILITY_PROBE_URLS
+                }
+                if any(count != expected_per_target for count in observed.values()):
+                    failures.append(f"{label} first-load target coverage is incomplete: {observed}")
     if failures:
         component = _probe_component("failed", "; ".join(failures))
     elif inconclusive:
@@ -924,13 +1024,18 @@ def _apply_private_reject_correlation(result: dict[str, object], correlation: di
     if not isinstance(udp_dns, dict) or not isinstance(private_reject, dict) or not isinstance(targets, list):
         return result
     policy = correlation.get("policy")
-    correlation_verified = (
-        correlation.get("verdict") == "verified"
-        and isinstance(policy, dict)
+    policy_verified = (
+        isinstance(policy, dict)
         and policy.get("verified") is True
         and policy.get("drift") == "none"
         and bool(str(policy.get("config_sha256", "")).strip())
     )
+    correlation_verified = correlation.get("verdict") == "verified" and policy_verified
+    policy_targets = {
+        str(item.get("target", ""))
+        for item in correlation_targets
+        if isinstance(item, dict) and str(item.get("target", "")).strip()
+    } if isinstance(correlation_targets, list) and policy_verified else set()
     correlated_by_target = {
         str(item.get("target", "")): item
         for item in correlation_targets
@@ -944,7 +1049,8 @@ def _apply_private_reject_correlation(result: dict[str, object], correlation: di
             merged_targets.append(raw_target)
             continue
         target = dict(raw_target)
-        evidence = correlated_by_target.get(str(target.get("target", "")))
+        target_name = str(target.get("target", ""))
+        evidence = correlated_by_target.get(target_name)
         if (
             evidence
             and target.get("verdict") == "inconclusive"
@@ -959,6 +1065,25 @@ def _apply_private_reject_correlation(result: dict[str, object], correlation: di
                     "correlation_required": False,
                     "correlation_id": evidence["correlation_id"],
                     "event_id": evidence.get("event_id", ""),
+                }
+            )
+        elif (
+            target_name in policy_targets
+            and target.get("verdict") == "inconclusive"
+            and target.get("evidence") == "socks-success-eof"
+            and target.get("correlation_required") is True
+            and isinstance(target.get("elapsed_seconds"), (int, float))
+            and not isinstance(target.get("elapsed_seconds"), bool)
+            and 0 <= float(target["elapsed_seconds"]) < 2.0
+        ):
+            target.update(
+                {
+                    "verdict": "verified",
+                    "ok": True,
+                    "correlation_required": False,
+                    "policy_verified": True,
+                    "verification_basis": "installed-policy-fast-eof",
+                    "policy_config_sha256": str(policy["config_sha256"]),
                 }
             )
         merged_targets.append(target)
@@ -1249,7 +1374,7 @@ def verify_live_workflow(
     non_interactive: bool = False,
     throughput_seconds: int = 30,
     require_native_agent: bool = True,
-    accept_same_node_for_install: bool = False,
+    accept_install_gate: bool = False,
 ) -> int:
     print_header("Live verification")
     deployment_name, env_path, env, _state, targets, _preflights_by_node = workflows.prepare_remote_session(
@@ -1358,13 +1483,6 @@ def verify_live_workflow(
             worst = "failed"
         elif rank[verdict] > rank[worst]:
             worst = verdict
-    same_node_install_accepted = bool(
-        accept_same_node_for_install
-        and same_node_functional_verified
-        and require_native_agent
-        and snapshots
-        and all(snapshot.verdict == "verified" for snapshot in snapshots)
-    )
     if (
         require_native_agent
         and topology.is_dual
@@ -1372,6 +1490,22 @@ def verify_live_workflow(
         and rank[worst] < rank["degraded"]
     ):
         worst = "degraded"
+    install_gate = _install_release_gate(
+        topology,
+        public_vless,
+        public_hysteria2,
+        snapshots,
+        same_node_functional_verified=same_node_functional_verified,
+    ) if require_native_agent else {
+        "eligible": False,
+        "reason": "native agent evidence was not requested",
+        "accepted_degradations": [],
+    }
+    install_gate_applied = bool(
+        accept_install_gate and worst != "verified" and install_gate["eligible"]
+    )
+    install_gate["applied"] = install_gate_applied
+    same_node_install_accepted = bool(install_gate_applied and not topology.is_dual)
     paths = _verification_path_evidence(
         topology,
         public_vless,
@@ -1399,6 +1533,7 @@ def verify_live_workflow(
                 "throughput_seconds": throughput_seconds,
                 "verification_scope": "release" if require_native_agent else "rollback-public-vless",
                 "runner_scope": "independent-node" if topology.is_dual else "same-node",
+                "install_release_gate": install_gate,
                 "same_node_install_accepted": same_node_install_accepted,
                 "public_vless": public_vless,
                 "public_hysteria2": public_hysteria2,
@@ -1415,6 +1550,9 @@ def verify_live_workflow(
     print(f"topology: {topology.mode}")
     print(f"verification scope: {'release' if require_native_agent else 'rollback-public-vless'}")
     print(f"verify verdict: {worst}")
+    if accept_install_gate:
+        gate_state = "applied" if install_gate_applied else "eligible" if install_gate["eligible"] else "rejected"
+        print(f"install release gate: {gate_state} - {install_gate['reason']}")
     for snapshot in snapshots:
         reason_text = "; ".join(snapshot.reasons) if snapshot.reasons else "fresh probes and installed manifest are consistent"
         print(f"{snapshot.node_id or 'unknown'}: {snapshot.verdict} - {reason_text}")
@@ -1432,4 +1570,4 @@ def verify_live_workflow(
                 print(f"{profile_name}-{component_name}: {component['verdict']} - {component.get('reason', 'passed')}")
     print(f"report: {report_path}")
     print(f"Deployment env: {Path(env_path)}")
-    return 0 if worst == "verified" or same_node_install_accepted else 1
+    return 0 if worst == "verified" or install_gate_applied else 1

@@ -743,6 +743,7 @@ def bootstrap_from_snapshot(snapshot: dict[str, Any]) -> dict[str, str]:
         "location": normalized.location,
         "capabilities": ",".join(normalized.capabilities),
         "installed": "1" if normalized.release.get("release_id") else "0",
+        "release_version": str(normalized.release.get("version", "")),
         "release_id": str(normalized.release.get("release_id", "")),
         "installed_at": str(normalized.release.get("installed_at", "")),
         "sing_box": str(services.get("sing-box", "")),

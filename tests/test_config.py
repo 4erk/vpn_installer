@@ -78,9 +78,9 @@ class ConfigTests(unittest.TestCase):
         env = config.generate_default_env("sample")
         self.assertEqual(env["UTLS_FINGERPRINT"], "chrome")
 
-    def test_default_sing_box_log_level_keeps_route_diagnostics_visible(self) -> None:
+    def test_default_sing_box_log_level_bounds_connection_log_volume(self) -> None:
         env = config.generate_default_env("sample")
-        self.assertEqual(env["SING_BOX_LOG_LEVEL"], "info")
+        self.assertEqual(env["SING_BOX_LOG_LEVEL"], "warn")
         self.assertEqual(env["RU_SNIFF_TIMEOUT"], "250ms")
         self.assertNotIn("RU_LITERAL_POLICY", env)
         self.assertNotIn("RU_IPV6_LITERAL_POLICY", env)
