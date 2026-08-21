@@ -8,7 +8,7 @@ from typing import Any, Mapping
 
 from . import VERSION
 from .common import parse_env_value
-from .compatibility import CompatibilityWindow, installed_contract_delta, require_compatible_installed
+from .compatibility import CompatibilityWindow, require_compatible_installed
 from .manifest import (
     INSTALL_PLAN_SCHEMA_VERSION,
     MANIFEST_SCHEMA_VERSION,
@@ -269,12 +269,6 @@ def _validate_bundle(
         _fail("install plan binaries do not match the manifest")
 
     expected_specs = artifact_specs(node_plan, env=env)
-    contract_delta = installed_contract_delta(expected_version)
-    unknown_delta_artifacts = contract_delta.added_artifacts - set(expected_specs)
-    if unknown_delta_artifacts:
-        _fail(f"installed contract delta has unknown artifacts: {sorted(unknown_delta_artifacts)}")
-    for name in contract_delta.added_artifacts:
-        expected_specs.pop(name)
     if set(artifacts) != set(expected_specs):
         unknown = sorted(set(artifacts) - set(expected_specs))
         missing = sorted(set(expected_specs) - set(artifacts))
@@ -391,17 +385,6 @@ def _validate_bundle(
         service_rows.append((name, unit, ownership))
 
     expected_plan = build_install_plan(node_plan, artifacts, assets, binaries, env=env)
-    unknown_delta_packages = contract_delta.added_packages - set(expected_plan["packages"])
-    if unknown_delta_packages:
-        _fail(f"installed contract delta has unknown packages: {sorted(unknown_delta_packages)}")
-    if contract_delta.added_packages:
-        expected_plan["packages"] = [
-            package for package in expected_plan["packages"] if package not in contract_delta.added_packages
-        ]
-        expected_plan["package_sets"] = {
-            capability: [package for package in packages if package not in contract_delta.added_packages]
-            for capability, packages in expected_plan["package_sets"].items()
-        }
     expected_plan["schema_version"] = INSTALL_PLAN_SCHEMA_VERSION
     if standalone_plan != expected_plan:
         _fail(f"install plan differs from the canonical schema-{INSTALL_PLAN_SCHEMA_VERSION} compiler output")

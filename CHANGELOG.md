@@ -8,6 +8,21 @@
 
 Каждый раздел ниже описывает поведение именно указанной версии; действующий контракт задаёт верхний раздел релиза.
 
+## [0.21.4] - 2026-08-21
+
+### Fixed
+
+- Историческое окно kernel OOM больше не обрезается временем последнего reinstall. Collector всегда запрашивает не менее 24 часов журнала и раздельно считает `5m`, `30m`, `24h` и события после текущего release; поэтому OOM до обновления остаётся виден в `24h`, но не запускает health-деградацию нового процесса.
+- Health реагирует только на новый `latest_since_release` OOM и сохраняет точную resource-причину `kernel_oom_kill_30m`, `root_disk_near_capacity`, отсутствующего swap reserve или `GOMEMLIMIT` вместо общего `host_integrity=...:unknown`.
+
+### Changed
+
+- Удалён одношаговый compatibility-код `0.21.2`: install-contract delta, миграция прежнего default log level и retired snapshot-store больше не входят в runtime. `0.21.4` обновляется только с полностью текущего `0.21.3`, где одноразовая очистка уже выполнена.
+
+### Compatibility
+
+- VLESS URI, routing policy, DNS, MTU, transport selector, web-admin и schema versions не изменены. Окно обновления ограничено `0.21.3..0.21.4`.
+
 ## [0.21.3] - 2026-08-21
 
 ### Fixed

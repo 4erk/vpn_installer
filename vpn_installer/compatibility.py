@@ -9,7 +9,7 @@ from . import VERSION
 from .common import cli_entrypoint
 
 
-COMPATIBLE_INSTALLED_MIN = "0.21.2"
+COMPATIBLE_INSTALLED_MIN = "0.21.3"
 COMPATIBLE_INSTALLED_MAX = VERSION
 
 _VERSION_PATTERN = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
@@ -17,26 +17,6 @@ _VERSION_PATTERN = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]
 
 class CompatibilityError(ValueError):
     pass
-
-
-@dataclass(frozen=True)
-class InstalledContractDelta:
-    """Current contract entries that did not exist in one compatible release."""
-
-    added_artifacts: frozenset[str] = frozenset()
-    added_packages: frozenset[str] = frozenset()
-
-
-INSTALLED_CONTRACT_DELTAS = {
-    "0.21.2": InstalledContractDelta(
-        added_artifacts=frozenset({"btmp-vpn-stack.conf", "resource_control.py"}),
-        added_packages=frozenset({"logrotate"}),
-    ),
-}
-
-
-def installed_contract_delta(version: str) -> InstalledContractDelta:
-    return INSTALLED_CONTRACT_DELTAS.get(version, InstalledContractDelta())
 
 
 @total_ordering

@@ -455,26 +455,6 @@ class WorkflowTests(unittest.TestCase):
                 )
         self.assertIn("installed node env drift", str(ctx.exception))
 
-    def test_previous_verbose_log_default_has_one_step_migration(self) -> None:
-        env = generate_default_env("demo")
-        env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
-        env["EXIT_PUBLIC_IP"] = "198.51.100.20"
-        previous = {**env, "SING_BOX_LOG_LEVEL": "info"}
-        target = RemoteTarget(node_id=NODE_GATEWAY, public_ip="203.0.113.10", ssh_host="203.0.113.10", ssh_user="root")
-        preflight = {
-            "installed": "1",
-            "deployment_name": "demo",
-            "node": NODE_GATEWAY,
-            "release_version": "0.21.2",
-        }
-        with patch("vpn_installer.workflows.fetch_remote_deployment_env", return_value=render_node_env_text(previous, "gateway")):
-            merged, synced = workflows.load_remote_authoritative_env(
-                "demo", Path("deployments/demo.env"), env, [target], {NODE_GATEWAY: preflight}
-            )
-
-        self.assertIs(merged, env)
-        self.assertFalse(synced)
-
     def test_cleanup_remote_workdir_warns_on_error(self) -> None:
         with patch("vpn_installer.workflows.ssh_stream", side_effect=AppError("fail")), patch("vpn_installer.workflows.warn") as warn_mock:
             workflows.cleanup_remote_workdir(RemoteTarget(node_id=NODE_GATEWAY), "vpn-installer/demo")

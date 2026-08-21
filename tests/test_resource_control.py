@@ -5,7 +5,7 @@ import os
 import subprocess
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -167,15 +167,36 @@ class ResourceControlTests(unittest.TestCase):
         }
         completed = subprocess.CompletedProcess(["journalctl"], 0, json.dumps(record) + "\n", "")
         with patch.object(resource_control, "_run", return_value=completed):
-            snapshot = resource_control._kernel_oom_snapshot(now.isoformat(), full_logs=True)
+            snapshot = resource_control._kernel_oom_snapshot((now - timedelta(seconds=1)).isoformat())
 
         self.assertEqual(snapshot["counts"]["5m"], 1)
+        self.assertEqual(snapshot["counts"]["since_release"], 1)
         self.assertIn("sing-box", snapshot["latest"]["message"])
+        self.assertEqual(snapshot["latest_since_release"], snapshot["latest"])
+
+    def test_oom_history_before_reinstall_stays_in_24h_but_not_since_release(self) -> None:
+        now = datetime.now(timezone.utc)
+        event_at = now - timedelta(hours=4)
+        record = {
+            "__REALTIME_TIMESTAMP": str(int(event_at.timestamp() * 1_000_000)),
+            "MESSAGE": "Out of memory: Killed process 42 (sing-box)",
+        }
+        completed = subprocess.CompletedProcess(["journalctl"], 0, json.dumps(record) + "\n", "")
+        with patch.object(resource_control, "_run", return_value=completed) as runner:
+            snapshot = resource_control._kernel_oom_snapshot(now.isoformat())
+
+        self.assertEqual(snapshot["counts"]["24h"], 1)
+        self.assertEqual(snapshot["counts"]["since_release"], 0)
+        self.assertEqual(snapshot["since_release_scope"], "complete")
+        self.assertEqual(snapshot["latest_since_release"], {})
+        query_since = datetime.fromisoformat(snapshot["query_since"])
+        self.assertLessEqual(query_since, now - timedelta(hours=23, minutes=59))
+        self.assertEqual(runner.call_args.args[0][0:3], ["journalctl", "-k", "--since"])
 
     def test_oom_snapshot_treats_no_journal_matches_as_an_empty_result(self) -> None:
         completed = subprocess.CompletedProcess(["journalctl"], 1, "", "")
         with patch.object(resource_control, "_run", return_value=completed):
-            snapshot = resource_control._kernel_oom_snapshot(datetime.now(timezone.utc).isoformat(), full_logs=False)
+            snapshot = resource_control._kernel_oom_snapshot(datetime.now(timezone.utc).isoformat())
 
         self.assertEqual(snapshot["counts"]["30m"], 0)
         self.assertEqual(snapshot["collector_error"], "")

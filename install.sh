@@ -10,7 +10,6 @@ VPNSTACK_PREVIOUS_RELEASE="${VPNSTACK_ROOT}/previous"
 VPNSTACK_BACKUP_DIR="${VPNSTACK_ROOT}/backups"
 VPNSTACK_BASELINE_DIR="${VPNSTACK_BACKUP_DIR}/baseline"
 VPNSTACK_REVISION_DIR="${VPNSTACK_BACKUP_DIR}/revisions"
-VPNSTACK_RETIRED_SNAPSHOT_DIR="${VPNSTACK_BACKUP_DIR}/snapshots"
 VPNSTACK_LATEST_SNAPSHOT="${VPNSTACK_BACKUP_DIR}/latest"
 VPNSTACK_MANIFEST_PATH="${VPNSTACK_ROOT}/render-manifest.json"
 VPNSTACK_INSTALL_PLAN_PATH="${VPNSTACK_ROOT}/install-plan.json"
@@ -633,20 +632,6 @@ prune_revision_snapshots() {
       die "refusing to prune a snapshot outside the revision directory: ${snapshot}"
     rm -rf --one-file-system -- "${resolved}"
   done
-}
-
-retire_obsolete_snapshot_store() {
-  [[ -e "${VPNSTACK_RETIRED_SNAPSHOT_DIR}" || -L "${VPNSTACK_RETIRED_SNAPSHOT_DIR}" ]] || return 0
-  [[ -d "${VPNSTACK_RETIRED_SNAPSHOT_DIR}" && ! -L "${VPNSTACK_RETIRED_SNAPSHOT_DIR}" ]] ||
-    die "retired snapshot store has an unexpected type: ${VPNSTACK_RETIRED_SNAPSHOT_DIR}"
-
-  local backups_root=""
-  local resolved=""
-  backups_root="$(readlink -f -- "${VPNSTACK_BACKUP_DIR}")"
-  resolved="$(readlink -f -- "${VPNSTACK_RETIRED_SNAPSHOT_DIR}")"
-  [[ -n "${backups_root}" && "${resolved}" == "${backups_root}/snapshots" ]] ||
-    die "refusing to retire an unexpected snapshot directory: ${resolved}"
-  rm -rf --one-file-system -- "${resolved}"
 }
 
 cleanup_work() {
@@ -1482,7 +1467,6 @@ install_action() {
   verify_active_release "${staged_contract}"
   "${PYTHON_BIN}" "$(contract_artifact_path "${staged_contract}" vpn-stack-agent.py)" storage-maintain --deep >/dev/null
   prune_unreferenced_releases
-  retire_obsolete_snapshot_store
   TRANSACTION_ACTIVE=0
   echo "Installed node ${NODE} from current plan $(contract_value "${staged_contract}" release_id)."
 }

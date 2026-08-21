@@ -42,7 +42,7 @@ Topology и физическое расположение gateway неизмен
 
 ## Совместимость релиза
 
-`0.21.3` поддерживает fresh install, обновление с `0.21.2` и повторную установку `0.21.3`. Manifest объявляет `installed_min=0.21.2`, `installed_max=0.21.3`. Неподдерживаемый установленный релиз отклоняется до managed transaction; удалить его нужно `.\vpn.cmd` на Windows или `./vpn.sh` на Linux из совпадающего Git-тега, после чего выполняется fresh install.
+`0.21.4` поддерживает fresh install, обновление с `0.21.3` и повторную установку `0.21.4`. Manifest объявляет `installed_min=0.21.3`, `installed_max=0.21.4`. Неподдерживаемый установленный релиз отклоняется до managed transaction; удалить его нужно `.\vpn.cmd` на Windows или `./vpn.sh` на Linux из совпадающего Git-тега, после чего выполняется fresh install.
 
 Публичный CLI использует только `--node gateway|exit|all`. Role aliases, readers старых схем и migration chains отсутствуют. Совместимая предыдущая версия проверяется тем же config/state `3`, manifest/install-plan `4` и diagnostics `5` контрактом. Политика окна описана в [DEPRECATIONS.md](./DEPRECATIONS.md).
 
@@ -88,7 +88,7 @@ Snapshot diagnostics schema 5 содержит:
 
 - service state, manifest drift и hashes всех managed artifacts, включая resolver drop-in и состояние `/etc/resolv.conf` stub;
 - root filesystem source/type, ext4 state и runtime error counters, время последней проверки и `fs_passno` загрузочного `fsck`;
-- ёмкость диска, фактически выделенные blocks current/previous/stale releases и journal/security logs, стабильный APT metadata/cache, RAM/swap, текущую и пиковую память router, активный `GOMEMLIMIT`, automatic restart и kernel OOM evidence;
+- ёмкость диска, фактически выделенные blocks current/previous/stale releases и journal/security logs, стабильный APT metadata/cache, RAM/swap, текущую и пиковую память router, активный `GOMEMLIMIT`, automatic restart и kernel OOM evidence; OOM считается независимо для `5m`, `30m`, `24h` и текущего release, а health использует только последнее событие после release;
 - WireGuard, выбранный межсерверный transport и delay кандидатов, interface/conntrack, protocol, softnet и structured qdisc counters; health хранит дельты UDP receive/send overflow, `fq`/per-flow drops, softnet drops и missed packets;
 - TCP front telemetry: active `ESTAB` и closing states разнесены до агрегации; RTT, retransmitted bytes/ratio, PMTU, MSS, cwnd, delivery rate, reordering и unacked считаются по каждому активному `source IP:port`, а `FIN-WAIT/LAST-ACK/CLOSING` формируют отдельный `closing_churn`; lifetime counters остаются исторической телеметрией, текущий verdict использует только flow с активностью не старше `30s` или монотонные counters того же socket ID в свежем интервале;
 - fresh, 30-minute и 24-hour log windows;
@@ -114,7 +114,7 @@ Install/reinstall собирает release во временном катало�
 
 APT-пакеты устанавливаются до managed snapshot и считаются монотонными prerequisites хоста: автоматический rollback не удаляет пакеты и не пытается откатывать версии через APT. Транзакционная гарантия начинается после успешной подготовки prerequisites и охватывает только явно принадлежащие проекту artifacts, links, services и runtime-state.
 
-Хранятся не более 10 revision snapshots плюс отдельный baseline. До создания нового snapshot installer сохраняет актуальную ссылку `latest` и самые свежие revisions, удаляя только прямые дочерние каталоги проверенного backup root. Snapshot текущей транзакции поэтому не может быть удалён собственным rollback. Retired-каталог `backups/snapshots` из поколений до `0.20.0` удаляется только после успешной acceptance и больше не создаётся.
+Хранятся не более 10 revision snapshots плюс отдельный baseline. До создания нового snapshot installer сохраняет актуальную ссылку `latest` и самые свежие revisions, удаляя только прямые дочерние каталоги проверенного backup root. Snapshot текущей транзакции поэтому не может быть удалён собственным rollback. Retired-каталог `backups/snapshots` из поколений до `0.20.0` не создаётся и отсутствует на совместимой базе `0.21.3`.
 
 `.\vpn.cmd maintain` по умолчанию только показывает APT/security/reboot state. С `--apply --yes` узлы обновляются последовательно, после каждого выполняется fresh verification. `--refresh-assets` использует тот же транзакционный reinstall workflow; background asset mutation отсутствует.
 

@@ -17,6 +17,7 @@ ROUTER_RESERVED_MEMORY_BYTES = 384 * MIB
 BTMP_ROTATE_BYTES = 64 * MIB
 DISK_DEGRADED_PERCENT = 85.0
 DISK_FAILED_PERCENT = 95.0
+OOM_HISTORY_RETENTION = timedelta(days=14)
 
 STATE_DIR = Path("/var/lib/vpn-stack")
 ROOT = Path("/etc/vpn-stack")
@@ -279,12 +280,14 @@ def _disk_capacity_snapshot() -> dict[str, Any]:
     }
 
 
-def _kernel_oom_snapshot(installed_at: str, *, full_logs: bool) -> dict[str, Any]:
+def _kernel_oom_snapshot(installed_at: str) -> dict[str, Any]:
     installed = _parse_timestamp(installed_at)
     now = datetime.now(timezone.utc)
-    since = installed.isoformat() if installed is not None and now - installed <= timedelta(days=14) else "24 hours ago" if full_logs else "30 minutes ago"
+    retention_start = now - OOM_HISTORY_RETENTION
+    history_start = now - timedelta(hours=24)
+    query_start = max(min(installed, history_start), retention_start) if installed is not None else history_start
     result = _run(
-        ["journalctl", "-k", "--since", since, "--no-pager", "-o", "json", "--grep=Out of memory: Killed process"],
+        ["journalctl", "-k", "--since", query_start.isoformat(), "--no-pager", "-o", "json", "--grep=Out of memory: Killed process"],
         timeout=20,
     )
     events: list[dict[str, Any]] = []
@@ -297,19 +300,38 @@ def _kernel_oom_snapshot(installed_at: str, *, full_logs: bool) -> dict[str, Any
                 continue
             events.append({"timestamp": datetime.fromtimestamp(epoch, timezone.utc).isoformat(), "message": str(record.get("MESSAGE", ""))[:500], "epoch": epoch})
     now_epoch = now.timestamp()
+    installed_epoch = installed.timestamp() if installed is not None else None
+    since_release_events = [event for event in events if installed_epoch is not None and event["epoch"] >= installed_epoch]
+    since_release_scope = (
+        "complete"
+        if installed is not None and installed >= retention_start
+        else "retention_limited"
+        if installed is not None
+        else "unknown"
+    )
     counts = {
         "5m": sum(now_epoch - event["epoch"] <= 300 for event in events),
         "30m": sum(now_epoch - event["epoch"] <= 1800 for event in events),
         "24h": sum(now_epoch - event["epoch"] <= 86400 for event in events),
-        "since_release": len(events),
+        "since_release": len(since_release_events) if since_release_scope == "complete" else None,
     }
-    latest = max(events, key=lambda event: event["epoch"], default={})
-    latest.pop("epoch", None)
+    def public_event(event: Mapping[str, Any]) -> dict[str, Any]:
+        return {key: value for key, value in event.items() if key != "epoch"}
+
+    latest = public_event(max(events, key=lambda event: event["epoch"], default={}))
+    latest_since_release = public_event(max(since_release_events, key=lambda event: event["epoch"], default={}))
     error = "" if result.returncode in {0, 1} else result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
-    return {"counts": counts, "latest": latest, "collector_error": error}
+    return {
+        "counts": counts,
+        "latest": latest,
+        "latest_since_release": latest_since_release,
+        "since_release_scope": since_release_scope,
+        "query_since": query_start.isoformat(),
+        "collector_error": error,
+    }
 
 
-def storage_snapshot(root_filesystem: Mapping[str, Any], installed_at: str, *, full_logs: bool) -> dict[str, Any]:
+def storage_snapshot(root_filesystem: Mapping[str, Any], installed_at: str) -> dict[str, Any]:
     security_paths = [BTMP_PATH, *Path("/var/log").glob("btmp.*"), *Path("/var/log").glob("auth.log*")]
     apt_archives_bytes = path_tree_disk_usage(APT_ARCHIVES_PATH)
     apt_lists_bytes = path_tree_disk_usage(APT_LISTS_PATH)
@@ -327,7 +349,7 @@ def storage_snapshot(root_filesystem: Mapping[str, Any], installed_at: str, *, f
             "total_bytes": apt_archives_bytes + apt_lists_bytes,
         },
         "memory": memory_runtime_snapshot(),
-        "runtime_events": {"oom_kills": _kernel_oom_snapshot(installed_at, full_logs=full_logs)},
+        "runtime_events": {"oom_kills": _kernel_oom_snapshot(installed_at)},
     }
 
 

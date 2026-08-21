@@ -3434,7 +3434,7 @@ def collect_runtime_facts(*, live_probes: bool = False, profile: str = "light", 
     tcp_adaptation = tcp_adaptation_snapshot(public_iface, wg_interface if has_interserver else "")
     resolver = resolver_snapshot()
     root_filesystem = root_filesystem_snapshot()
-    storage = storage_snapshot(root_filesystem, release_installed_at, full_logs=full_logs)
+    storage = storage_snapshot(root_filesystem, release_installed_at)
     conntrack = conntrack_snapshot(full_logs=full_logs)
     if has_public_front:
         conntrack["front_bypass"] = xray_conntrack_bypass_snapshot(port)
@@ -3504,14 +3504,22 @@ def collect_runtime_facts(*, live_probes: bool = False, profile: str = "light", 
     transport_failures = [name for name in failed_requirements(probes) if name in OPTIONAL_TRANSPORT_REQUIREMENTS] if live_probes else []
     server_path = "failed" if reasons else "verified" if live_probes else "inconclusive"
     host_integrity = str(root_filesystem.get("verdict", "inconclusive"))
-    if capacity.get("verdict") == "failed" or memory.get("reserve_ready") is False or (
-        services.get("sing-box") == "active" and router_memory.get("go_memory_limit_active") is not True
-    ):
+    host_integrity_detail = str(root_filesystem.get("reason", ""))
+    if capacity.get("verdict") == "failed":
+        host_integrity_detail = host_integrity_detail or "root_disk_full"
+        host_integrity = "failed"
+    elif memory.get("reserve_ready") is False:
+        host_integrity_detail = host_integrity_detail or "low_memory_swap_reserve_missing"
+        host_integrity = "failed"
+    elif services.get("sing-box") == "active" and router_memory.get("go_memory_limit_active") is not True:
+        host_integrity_detail = host_integrity_detail or "sing_box_memory_budget_missing"
         host_integrity = "failed"
     elif capacity.get("verdict") == "degraded" and host_integrity == "verified":
+        host_integrity_detail = "root_disk_near_capacity"
         host_integrity = "degraded"
     oom_counts = storage.get("runtime_events", {}).get("oom_kills", {}).get("counts", {})
     if int(oom_counts.get("30m", 0) or 0) > 0 and host_integrity == "verified":
+        host_integrity_detail = "kernel_oom_kill_30m"
         host_integrity = "degraded"
     client_observation = front_observation(front, recent_front_interval) if front else "not-applicable"
     closing_churn = closing_churn_observation(front) if front else "not-applicable"
@@ -3528,7 +3536,7 @@ def collect_runtime_facts(*, live_probes: bool = False, profile: str = "light", 
     if adaptation_degradation:
         degradations.append(adaptation_degradation)
     if host_integrity in {"degraded", "inconclusive"}:
-        degradations.append(f"host_integrity={host_integrity}:{root_filesystem.get('reason') or 'unknown'}")
+        degradations.append(f"host_integrity={host_integrity}:{host_integrity_detail or 'unknown'}")
     selected_transport = str(interserver.get("selection", {}).get("selected", ""))
     recent_conntrack_full = int(conntrack.get("table_full_events", {}).get("5", 0))
     if recent_conntrack_full:
@@ -3821,7 +3829,7 @@ def _health_unlocked() -> dict[str, Any]:
         restart_delta = int(resource_deltas.get("sing_box_automatic_restarts", 0) or 0)
         if restart_delta:
             soft_reasons.append(f"sing_box_automatic_restarts={restart_delta}")
-        oom_latest = current.get("storage", {}).get("runtime_events", {}).get("oom_kills", {}).get("latest", {})
+        oom_latest = current.get("storage", {}).get("runtime_events", {}).get("oom_kills", {}).get("latest_since_release", {})
         oom_timestamp = str(oom_latest.get("timestamp", "")) if isinstance(oom_latest, Mapping) else ""
         previous_oom_timestamp = str(previous.get("last_seen_oom_timestamp", ""))
         if oom_timestamp and oom_timestamp != previous_oom_timestamp:

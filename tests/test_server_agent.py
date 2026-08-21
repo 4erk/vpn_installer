@@ -891,6 +891,38 @@ class ServerAgentTests(unittest.TestCase):
         self.assertEqual(result["soft_reasons"], ["conntrack_table_full_5m=2"])
         recover.assert_not_called()
 
+    def test_health_does_not_replay_oom_from_before_current_release(self) -> None:
+        current = {
+            **self.gateway_contract(),
+            "generated_at": "2026-08-21T10:00:00+00:00",
+            "verdicts": {"server_path": "verified", "host_integrity": "verified"},
+            "services": {},
+            "probes": {"requirements": {"ru_direct": True, "via_wg": True, "router": True}},
+            "network": {"interfaces": {}, "protocol_counters": {}, "softnet_counters": {}, "conntrack": {}},
+            "storage": {
+                "memory": {"router": {"automatic_restarts": 0}},
+                "runtime_events": {
+                    "oom_kills": {
+                        "latest": {"timestamp": "2026-08-21T05:32:46+00:00", "message": "old OOM"},
+                        "latest_since_release": {},
+                    }
+                },
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch.object(server_agent, "HEALTH_STATE_PATH", Path(tmp) / "health.json"),
+                patch.object(server_agent, "LOCK_PATH", Path(tmp) / "lock"),
+                patch.object(server_agent, "collect_runtime_facts", return_value=current),
+                patch.object(server_agent, "recover") as recover,
+            ):
+                result = server_agent.health()
+
+        self.assertEqual(result["state"], "healthy")
+        self.assertEqual(result["soft_reasons"], [])
+        self.assertEqual(result["last_seen_oom_timestamp"], "")
+        recover.assert_not_called()
+
     def test_network_soft_reasons_do_not_promote_unscoped_host_tcp_or_generic_rx_drops(self) -> None:
         reasons = server_agent.network_soft_reasons(
             {

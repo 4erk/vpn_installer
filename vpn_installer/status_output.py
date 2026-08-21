@@ -158,10 +158,12 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
     oom = snapshot.storage.get("runtime_events", {}).get("oom_kills", {})
     if oom:
         counts = oom.get("counts", {})
+        since_release = counts.get("since_release")
+        since_release_label = str(since_release) if since_release is not None else str(oom.get("since_release_scope", "unknown"))
         lines.append(
             "OOM kills: "
             f"5m={counts.get('5m', 'unknown')}, 30m={counts.get('30m', 'unknown')}, "
-            f"24h={counts.get('24h', 'unknown')}, since_release={counts.get('since_release', 'unknown')}"
+            f"24h={counts.get('24h', 'unknown')}, since_release={since_release_label}"
         )
     if has_public_front and snapshot.front:
         lines.append(
