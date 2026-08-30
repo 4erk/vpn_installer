@@ -629,6 +629,7 @@ class WorkflowTests(unittest.TestCase):
         scp_mock.assert_called_once()
         self.assertEqual(ssh_mock.call_count, 3)
         self.assertIn("umask 077", ssh_mock.call_args_list[0].args[1])
+        self.assertIn("install -d -m 0700 /var/log/vpn-stack", ssh_mock.call_args_list[1].args[1])
         self.assertIn("/var/log/vpn-stack/install.log", ssh_mock.call_args_list[1].args[1])
         install_command = ssh_mock.call_args_list[2].args[1]
         self.assertIn("systemd-run --quiet --wait --collect", install_command)

@@ -555,7 +555,8 @@ def filter_targets_for_action(
     return actionable
 
 
-REMOTE_INSTALL_LOG = "/var/log/vpn-stack/install.log"
+REMOTE_INSTALL_LOG_DIR = "/var/log/vpn-stack"
+REMOTE_INSTALL_LOG = f"{REMOTE_INSTALL_LOG_DIR}/install.log"
 
 
 def remote_install_systemd_command(node_id: str, remote_root: str, command: str) -> str:
@@ -614,7 +615,7 @@ def install_remote_node(target: RemoteTarget, deployment_name: str, env: dict[st
         print_header(f"Действие {action} для {target.label}")
         ssh_stream(
             target,
-            f"install -d -m 0700 {shlex.quote(str(Path(REMOTE_INSTALL_LOG).parent))} && "
+            f"install -d -m 0700 {shlex.quote(REMOTE_INSTALL_LOG_DIR)} && "
             f": > {shlex.quote(REMOTE_INSTALL_LOG)} && chmod 0600 {shlex.quote(REMOTE_INSTALL_LOG)}",
             as_root=True,
         )
