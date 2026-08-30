@@ -9,7 +9,7 @@ from . import VERSION
 from .common import cli_entrypoint
 
 
-COMPATIBLE_INSTALLED_MIN = "0.21.4"
+COMPATIBLE_INSTALLED_MIN = "0.21.6"
 COMPATIBLE_INSTALLED_MAX = VERSION
 
 _VERSION_PATTERN = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")

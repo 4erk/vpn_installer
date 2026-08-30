@@ -320,23 +320,23 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
                 f"nft add table inet underlay_fault; nft 'add chain inet underlay_fault output {{ type filter hook output priority -10; policy accept; }}'; nft add rule inet underlay_fault output ip daddr {LAB_IPS['exit']} udp dport {fault_port} drop",
             )
             switch_started = time.monotonic()
-            suspicion = json.loads(
-                runner.docker_exec(ru_container, "python3 /opt/agent/vpn-stack-agent.py transport-reconcile").stdout
-            )
-            if not (
-                suspicion.get("changed") is not True
-                and suspicion.get("selected") == TRANSPORT_PREFERRED_TAG
-                and suspicion.get("state") == "suspect"
-            ):
-                raise AuditFailure(f"Transport agent did not retain the selected path for the first failure cycle: {suspicion}")
             transition = json.loads(
                 runner.docker_exec(ru_container, "python3 /opt/agent/vpn-stack-agent.py transport-reconcile").stdout
             )
             if not (
                 transition.get("changed") is True
                 and transition.get("selected") == fallback_tag
+                and transition.get("hard_failure_evidence") is True
             ):
-                raise AuditFailure(f"Transport agent did not perform the expected failover: {transition}")
+                raise AuditFailure(f"Transport agent did not perform confirmed failover in one cycle: {transition}")
+            fallback_stability = json.loads(
+                runner.docker_exec(ru_container, "python3 /opt/agent/vpn-stack-agent.py transport-reconcile").stdout
+            )
+            if not (
+                fallback_stability.get("changed") is not True
+                and fallback_stability.get("selected") == fallback_tag
+            ):
+                raise AuditFailure(f"Transport agent did not retain the healthy fallback: {fallback_stability}")
             switch_seconds = time.monotonic() - switch_started
             if switch_seconds > 4.0:
                 raise AuditFailure(f"Confirmed underlay failover exceeded 4 seconds: {switch_seconds:.3f}s")
@@ -384,8 +384,8 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
                 continuity_report,
                 json.dumps(
                     {
-                        "suspicion": suspicion,
                         "transition": transition,
+                        "fallback_stability": fallback_stability,
                         "switch_seconds": switch_seconds,
                         "stream_bytes": LAB_STREAM_BYTES,
                         "stream_seconds": stream_seconds,
