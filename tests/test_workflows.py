@@ -627,10 +627,14 @@ class WorkflowTests(unittest.TestCase):
             with patch("vpn_installer.workflows.deployment_out_dir", return_value=Path(tmp) / "out" / "demo"), patch("vpn_installer.workflows.ssh_stream") as ssh_mock, patch("vpn_installer.workflows.scp_upload") as scp_mock:
                 workflows.install_remote_node(target, "demo", env, "install")
         scp_mock.assert_called_once()
-        self.assertTrue(ssh_mock.call_count >= 2)
+        self.assertEqual(ssh_mock.call_count, 3)
         self.assertIn("umask 077", ssh_mock.call_args_list[0].args[1])
-        self.assertIn("chmod 0600 ./deployment.env", ssh_mock.call_args_list[1].args[1])
-        self.assertIn("--node gateway", ssh_mock.call_args_list[1].args[1])
+        self.assertIn("/var/log/vpn-stack/install.log", ssh_mock.call_args_list[1].args[1])
+        install_command = ssh_mock.call_args_list[2].args[1]
+        self.assertIn("systemd-run --quiet --wait --collect", install_command)
+        self.assertIn("StandardOutput=append:/var/log/vpn-stack/install.log", install_command)
+        self.assertIn("chmod 0600 ./deployment.env", install_command)
+        self.assertIn("--node gateway", install_command)
 
     def test_install_remote_node_defers_cleanup_after_any_install_error(self) -> None:
         env = generate_default_env("demo")
@@ -641,14 +645,18 @@ class WorkflowTests(unittest.TestCase):
             (bundle_dir / "gateway.tar.gz").write_bytes(b"bundle")
             with (
                 patch("vpn_installer.workflows.deployment_out_dir", return_value=Path(tmp)),
-                patch("vpn_installer.workflows.ssh_stream", side_effect=[None, AppError("remote installer exited with status 137")]),
+                patch(
+                    "vpn_installer.workflows.ssh_stream",
+                    side_effect=[None, None, AppError("remote installer exited with status 137")],
+                ),
                 patch("vpn_installer.workflows.scp_upload"),
                 patch("vpn_installer.workflows.cleanup_remote_workdir") as cleanup,
             ):
                 with self.assertRaises(AppError) as raised:
                     workflows.install_remote_node(target, "demo", env, "install")
         cleanup.assert_not_called()
-        self.assertIn("vpn-installer/demo/gateway/", getattr(raised.exception, "vpn_remote_root"))
+        self.assertIn("/tmp/vpn-stack-installer-demo-gateway-", getattr(raised.exception, "vpn_remote_root"))
+        self.assertEqual(getattr(raised.exception, "vpn_remote_log"), "/var/log/vpn-stack/install.log")
 
     def test_install_remote_node_uses_self_contained_support_bundle_for_remove(self) -> None:
         target = RemoteTarget(node_id=NODE_GATEWAY, ssh_host="ru.example", ssh_user="root")
@@ -662,11 +670,11 @@ class WorkflowTests(unittest.TestCase):
             ):
                 workflows.install_remote_node(target, "demo", {}, "remove")
         scp_mock.assert_called_once()
-        self.assertTrue(ssh_mock.call_count >= 2)
+        self.assertEqual(ssh_mock.call_count, 3)
         self.assertEqual(scp_mock.call_args.args[0], target)
         self.assertEqual(scp_mock.call_args.args[1], support)
-        self.assertIn("tar -xzf installer-support.tar.gz", ssh_mock.call_args_list[1].args[1])
-        self.assertIn("--node gateway --action remove", ssh_mock.call_args_list[1].args[1])
+        self.assertIn("tar -xzf installer-support.tar.gz", ssh_mock.call_args_list[2].args[1])
+        self.assertIn("--node gateway --action remove", ssh_mock.call_args_list[2].args[1])
 
     def test_verify_rollback_node_accepts_cross_version_service_evidence(self) -> None:
         observed = {

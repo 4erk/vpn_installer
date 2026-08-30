@@ -272,8 +272,8 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
             if isinstance(quality_probe, dict) and quality_probe.get("quality_checked") is True:
                 quality_outcome = (
                     "ok"
-                    if quality_probe.get("ok") is True
-                    else f"failed({quality_probe.get('error') or 'unknown'})"
+                    if quality_probe.get("quality_ok", quality_probe.get("ok")) is True
+                    else f"degraded({quality_probe.get('quality_error') or quality_probe.get('error') or 'unknown'})"
                 )
                 details.append(
                     f"quality_probe={quality_outcome}(loss={quality_probe.get('packet_loss_pct', '-')}%,"

@@ -555,10 +555,33 @@ def filter_targets_for_action(
     return actionable
 
 
+REMOTE_INSTALL_LOG = "/var/log/vpn-stack/install.log"
+
+
+def remote_install_systemd_command(node_id: str, remote_root: str, command: str) -> str:
+    unit = f"vpn-stack-install-{normalize_node_id(node_id)}"
+    cleanup = shlex.quote(f"rm -rf -- {shlex.quote(remote_root)}")
+    wrapped = f"set -Eeuo pipefail; trap {cleanup} EXIT; {command}"
+    return " ".join(
+        (
+            "systemd-run",
+            "--quiet",
+            "--wait",
+            "--collect",
+            "--service-type=exec",
+            f"--unit={shlex.quote(unit)}",
+            f"--property={shlex.quote(f'StandardOutput=append:{REMOTE_INSTALL_LOG}')}",
+            f"--property={shlex.quote(f'StandardError=append:{REMOTE_INSTALL_LOG}')}",
+            "/bin/bash",
+            "-lc",
+            shlex.quote(wrapped),
+        )
+    )
+
+
 def install_remote_node(target: RemoteTarget, deployment_name: str, env: dict[str, str], action: str) -> None:
     node_id = target.node_id
-    remote_parent = f"vpn-installer/{deployment_name}/{node_id}"
-    remote_root = f"{remote_parent}/{time.time_ns()}"
+    remote_root = f"/tmp/vpn-stack-installer-{sanitize_name(deployment_name)}-{node_id}-{time.time_ns()}"
     archive_name = f"{node_id}.tar.gz"
     print_header(f"Подготовка {target.label}")
     try:
@@ -589,14 +612,24 @@ def install_remote_node(target: RemoteTarget, deployment_name: str, env: dict[st
                 f"./install.sh --node {shlex.quote(node_id)} --action {shlex.quote(action)}"
             )
         print_header(f"Действие {action} для {target.label}")
-        ssh_stream(target, remote_command, as_root=True)
+        ssh_stream(
+            target,
+            f"install -d -m 0700 {shlex.quote(str(Path(REMOTE_INSTALL_LOG).parent))} && "
+            f": > {shlex.quote(REMOTE_INSTALL_LOG)} && chmod 0600 {shlex.quote(REMOTE_INSTALL_LOG)}",
+            as_root=True,
+        )
+        ssh_stream(
+            target,
+            remote_install_systemd_command(node_id, remote_root, remote_command),
+            as_root=True,
+        )
     except Exception as exc:  # noqa: BLE001
+        setattr(exc, "vpn_remote_log", REMOTE_INSTALL_LOG)
         if action in {"install", "reinstall"}:
             setattr(exc, "vpn_remote_root", remote_root)
             raise
         cleanup_remote_workdir(target, remote_root)
         raise
-    cleanup_remote_workdir(target, remote_root)
 
 
 def expected_release_id_for_node(env: dict[str, str], node_id: str) -> str:
@@ -630,7 +663,11 @@ def install_remote_node_with_recovery(
         install_remote_node(target, deployment_name, env, action)
     except Exception as exc:  # noqa: BLE001
         command_error = exc
-        warn(f"{target.label}: {action} завершился ошибкой. Сверяю transaction, current и acceptance на сервере.")
+        remote_log = str(getattr(exc, "vpn_remote_log", REMOTE_INSTALL_LOG))
+        warn(
+            f"{target.label}: управляющее соединение завершилось ошибкой. "
+            f"Сверяю серверную transaction; полный журнал: {remote_log}."
+        )
     try:
         observed = wait_for_remote_install_completion(target, wg_interface)
     except Exception as reconciliation_error:  # noqa: BLE001

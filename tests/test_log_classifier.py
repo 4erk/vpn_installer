@@ -159,6 +159,15 @@ class LogClassifierTests(unittest.TestCase):
         self.assertIsNotNone(classified)
         self.assertEqual(classified.bucket, "client_reset_eof")
 
+    def test_closed_network_dns_request_is_client_close_noise(self) -> None:
+        classified = classify_line(
+            "+0000 2026-08-29 10:01:02 ERROR [42 2.1s] dns: lookup failed for "
+            "sun9-1.userapi.com: use of closed network connection"
+        )
+        self.assertIsNotNone(classified)
+        self.assertEqual(classified.bucket, "client_reset_eof")
+        self.assertEqual(classified.destination, "sun9-1.userapi.com")
+
     def test_router_lookup_nxdomain_is_dns_and_deduplicated_by_request_id(self) -> None:
         lines = [
             "+0000 2026-07-15 01:53:31 ERROR [1400782119 31ms] dns: lookup failed for assets0.xboxlive.com: NXDOMAIN",

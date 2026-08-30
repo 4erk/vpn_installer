@@ -31,6 +31,7 @@ TRANSPORT_PROBE_PORTS = {
 }
 FOREIGN_DNS_RELAY_PORT = 1053
 TRANSPORT_CANDIDATE_PROBE_TIMEOUT_MS = 1200
+TRANSPORT_OVERLAY_PROBE_ATTEMPTS = 2
 TRANSPORT_PROBE_INTERVAL_SECONDS = 2
 TRANSPORT_QUALITY_PROBE_INTERVAL_SECONDS = 15
 TRANSPORT_QUALITY_PROBE_PACKETS = 4
@@ -47,7 +48,7 @@ TRANSPORT_PREFERRED_RETRY_MAX_SECONDS = 900
 TRANSPORT_PREFERRED_STABLE_RESET_SECONDS = 600
 TRANSPORT_SWITCH_RETRY_BASE_SECONDS = 30
 TRANSPORT_SWITCH_RETRY_MAX_SECONDS = 300
-TRANSPORT_STATE_SCHEMA_VERSION = 12
+TRANSPORT_STATE_SCHEMA_VERSION = 13
 UNDERLAY_WG_RU_ADDRESS = "10.75.0.1/32"
 UNDERLAY_WG_FOREIGN_ADDRESS = "10.75.0.2/32"
 UNDERLAY_WG_MTU = 1420
@@ -220,17 +221,28 @@ def _socks_udp_dns_probe(proxy_port: int, target_host: str, target_port: int, ti
             _dns_probe_response(response[offset:], query_id)
 
 
-def _probe_result(scope: str, target: str, started: float, error: str = "") -> dict[str, Any]:
+def _probe_result(
+    scope: str,
+    target: str,
+    started: float,
+    error: str = "",
+    *,
+    attempts: int = 1,
+    health_confirmed: bool = False,
+    failure_confirmed: bool = False,
+) -> dict[str, Any]:
     elapsed_ms = max(1, round((time.monotonic() - started) * 1000))
     return {
         "checked": True,
         "ok": not error,
-        "attempts": 1,
+        "attempts": attempts,
         "delay_ms": 0 if error else elapsed_ms,
         "elapsed_ms": elapsed_ms,
         "scope": scope,
         "target": target,
         "error": error[:240],
+        "health_confirmed": health_confirmed,
+        "failure_confirmed": failure_confirmed,
     }
 
 
@@ -252,7 +264,68 @@ def transport_candidate_probe(
         _socks_udp_dns_probe(proxy_port, target_host, FOREIGN_DNS_RELAY_PORT, timeout_seconds)
     except (OSError, ValueError) as exc:
         return _probe_result("raw-underlay-udp", target, started, str(exc))
-    return _probe_result("raw-underlay-udp", target, started)
+    return _probe_result("raw-underlay-udp", target, started, health_confirmed=True)
+
+
+def _bound_tcp_dns_probe(interface: str, target_host: str, target_port: int, timeout_seconds: float) -> None:
+    query_id, query = _dns_probe_query()
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as connection:
+        connection.setsockopt(
+            socket.SOL_SOCKET,
+            getattr(socket, "SO_BINDTODEVICE", 25),
+            interface.encode("utf-8") + b"\0",
+        )
+        connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        connection.settimeout(timeout_seconds)
+        connection.connect((target_host, target_port))
+        connection.sendall(len(query).to_bytes(2, "big") + query)
+        response_size = int.from_bytes(_receive_exact(connection, 2), "big")
+        _dns_probe_response(_receive_exact(connection, response_size), query_id)
+
+
+def transport_overlay_dns_probe(
+    interface: str,
+    target_host: str,
+    *,
+    timeout_ms: int = TRANSPORT_CANDIDATE_PROBE_TIMEOUT_MS,
+    attempts: int = TRANSPORT_OVERLAY_PROBE_ATTEMPTS,
+) -> dict[str, Any]:
+    """Prove the exact inner-WireGuard DNS dataplane without external dependencies."""
+
+    started = time.monotonic()
+    target = f"{target_host}:{FOREIGN_DNS_RELAY_PORT}"
+    if not interface or not target_host or attempts < 1:
+        return _probe_result("overlay-dns", target, started, "overlay probe identity is incomplete")
+    try:
+        address = ipaddress.ip_address(target_host)
+    except ValueError:
+        return _probe_result("overlay-dns", target, started, "overlay probe target is not an IP literal")
+    if address.version != 4:
+        return _probe_result("overlay-dns", target, started, "overlay probe target is not IPv4")
+
+    attempt_timeout = max(0.001, timeout_ms / 1000 / attempts)
+    last_error = "overlay DNS probe timed out"
+    for attempt in range(1, attempts + 1):
+        try:
+            _bound_tcp_dns_probe(interface, target_host, FOREIGN_DNS_RELAY_PORT, attempt_timeout)
+        except (OSError, ValueError) as exc:
+            last_error = str(exc) or last_error
+            continue
+        return _probe_result(
+            "overlay-dns",
+            target,
+            started,
+            attempts=attempt,
+            health_confirmed=True,
+        )
+    return _probe_result(
+        "overlay-dns",
+        target,
+        started,
+        last_error,
+        attempts=attempts,
+        failure_confirmed=True,
+    )
 
 
 def clamp_x25519_private(private_key: bytes) -> bytes:
@@ -597,7 +670,12 @@ def _normalize_probe(probe: dict[str, Any] | None) -> dict[str, Any]:
         "scope",
         "target",
         "elapsed_ms",
+        "health_confirmed",
+        "failure_confirmed",
         "quality_checked",
+        "quality_sampled",
+        "quality_ok",
+        "quality_error",
         "packet_loss_pct",
         "rtt_avg_ms",
         "payload_bytes",
@@ -619,6 +697,12 @@ def _probe_failure_reason(probe: dict[str, Any]) -> str:
         ("invalid_probe_response", ("dns probe returned", "socks5 proxy returned", "socks5 udp associate")),
     )
     return next((reason for reason, markers in categories if any(marker in error for marker in markers)), error[:120] or "probe_failed")
+
+
+def _selected_quality(probe: dict[str, Any]) -> tuple[str, str]:
+    if probe.get("quality_checked") is True and probe.get("quality_ok") is False:
+        return "degraded", str(probe.get("quality_error") or "overlay quality sample is degraded")
+    return "healthy", ""
 
 
 def _parse_timestamp(value: Any) -> datetime | None:
@@ -785,6 +869,8 @@ def evaluate_transport_policy(
             reason=failure_reason,
             cycle_relation=cycle_relation,
         )
+        if selected_probe.get("failure_confirmed") is True:
+            failure["confirmations"] = max(TRANSPORT_FAILURE_CONFIRMATIONS, failure["confirmations"])
         confirmed_failure = failure["confirmations"] >= TRANSPORT_FAILURE_CONFIRMATIONS
         state = "failed" if confirmed_failure and not alternate_probe["ok"] else "suspect"
         reason = (
@@ -802,6 +888,11 @@ def evaluate_transport_policy(
                 reason="healthy",
                 cycle_relation=cycle_relation,
             )
+            if alternate_probe.get("health_confirmed") is True:
+                alternate_health["confirmations"] = max(
+                    TRANSPORT_ALTERNATE_HEALTH_CONFIRMATIONS,
+                    alternate_health["confirmations"],
+                )
             details["alternate_health"] = alternate_health
             if (
                 confirmed_failure
@@ -829,12 +920,13 @@ def evaluate_transport_policy(
         )
 
     if selected == TRANSPORT_PREFERRED_TAG:
+        state, quality_reason = _selected_quality(selected_probe)
         return _policy_state(
             selected,
             normalized,
             observed_at,
-            "healthy",
-            "preferred overlay path is healthy",
+            state,
+            quality_reason or "preferred overlay path is healthy",
             **_preferred_recovery_details(prior, observed_at, mark_recovered=True),
         )
 
@@ -845,6 +937,7 @@ def evaluate_transport_policy(
         recovery_details["preferred_recovery"] = prior_recovery
     if prior.get("preferred_probe_at"):
         recovery_details["preferred_probe_at"] = prior["preferred_probe_at"]
+    selected_state, selected_quality_reason = _selected_quality(selected_probe)
     if not preferred_probe["checked"]:
         deferred_reason = (
             f"fallback overlay path is healthy; preferred retry is deferred until "
@@ -856,8 +949,8 @@ def evaluate_transport_policy(
             selected,
             normalized,
             observed_at,
-            "healthy",
-            deferred_reason,
+            selected_state,
+            selected_quality_reason or deferred_reason,
             **recovery_details,
         )
     if not preferred_probe["ok"]:
@@ -866,8 +959,9 @@ def evaluate_transport_policy(
             selected,
             normalized,
             observed_at,
-            "healthy",
-            f"fallback overlay path is healthy; preferred underlay {_probe_failure_reason(preferred_probe)}",
+            selected_state,
+            selected_quality_reason
+            or f"fallback overlay path is healthy; preferred underlay {_probe_failure_reason(preferred_probe)}",
             preferred_probe_at=observed_at,
             preferred_retry=retry,
         )

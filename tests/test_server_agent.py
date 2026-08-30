@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
@@ -18,6 +19,83 @@ from vpn_installer.render import render_gateway_singbox
 
 
 class ServerAgentTests(unittest.TestCase):
+    def test_agent_main_dispatches_every_managed_command(self) -> None:
+        payload = {"state": "healthy"}
+        targets = (
+            "diagnostics_snapshot",
+            "run_confirmed_probes",
+            "front_client_snapshot",
+            "public_front_snapshot",
+            "private_reject_correlations",
+            "health",
+            "health_log_summary",
+            "reconcile_interserver_transport",
+            "watch_interserver_transport",
+            "select_transport",
+            "apply_network_profile",
+            "prepare_memory_reserve",
+            "exec_router",
+            "storage_maintenance",
+            "routes_command",
+            "assets_snapshot",
+        )
+        commands = (
+            ["snapshot", "--compact"],
+            ["probe", "--profile", "acceptance"],
+            ["client", "--source", "203.0.113.5", "--since", "10"],
+            ["front", "--since", "10", "--live-probes"],
+            [
+                "private-reject-correlate",
+                "--since",
+                "2026-08-30T00:00:00Z",
+                "--inbound",
+                "router-in",
+                "--target",
+                "10.0.0.1:80",
+            ],
+            ["health"],
+            ["transport-reconcile"],
+            ["transport-watch"],
+            ["transport-select", "--tag", "interserver-underlay-hy2"],
+            ["network-apply"],
+            ["memory-prepare"],
+            ["exec-router", "/bin/true"],
+            ["storage-maintain", "--deep"],
+            ["routes", "list"],
+            ["assets"],
+        )
+        with ExitStack() as stack:
+            mocks = {
+                name: stack.enter_context(patch.object(server_agent, name, return_value=payload))
+                for name in targets
+            }
+            stack.enter_context(patch.object(server_agent, "parse_env", return_value={"WG_INTERFACE": "wg0"}))
+            stack.enter_context(
+                patch.object(
+                    server_agent,
+                    "read_json",
+                    return_value={"experimental": {"clash_api": {"external_controller": "127.0.0.1:19090"}}},
+                )
+            )
+            stack.enter_context(patch.object(server_agent, "runtime_contract", return_value={}))
+            stack.enter_context(patch.object(server_agent, "installed_runtime_contract", return_value={}))
+            stack.enter_context(patch.object(server_agent, "contract_has", return_value=True))
+            stack.enter_context(patch("builtins.print"))
+
+            for command in commands:
+                with self.subTest(command=command):
+                    self.assertEqual(server_agent.main(command), 0)
+
+        for name, mocked in mocks.items():
+            with self.subTest(dispatched=name):
+                mocked.assert_called()
+
+    def test_agent_main_health_returns_failure_status(self) -> None:
+        with patch.object(server_agent, "health", return_value={"state": "failed"}), patch.object(
+            server_agent, "health_log_summary", return_value={"state": "failed"}
+        ), patch("builtins.print"):
+            self.assertEqual(server_agent.main(["health"]), 1)
+
     def test_installed_at_uses_only_canonical_hyphenated_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2477,7 +2555,57 @@ class ServerAgentTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["scope"], "raw-underlay-udp")
         self.assertEqual(result["target"], "10.75.0.2:1053")
+        self.assertTrue(result["health_confirmed"])
         probe.assert_called_once_with(19094, "10.75.0.2", 1053, 1.2)
+
+    def test_overlay_dns_probe_retries_one_lost_exchange_without_failing_the_path(self) -> None:
+        with patch.object(
+            interserver_transport,
+            "_bound_tcp_dns_probe",
+            side_effect=[TimeoutError("timed out"), None],
+        ) as probe:
+            result = interserver_transport.transport_overlay_dns_probe("wg0", "10.74.0.2")
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["health_confirmed"])
+        self.assertFalse(result["failure_confirmed"])
+        self.assertEqual(result["attempts"], 2)
+        self.assertEqual(probe.call_count, 2)
+        self.assertEqual(probe.call_args.args, ("wg0", "10.74.0.2", 1053, 0.6))
+
+    def test_overlay_dns_probe_confirms_failure_only_after_two_exchanges(self) -> None:
+        with patch.object(
+            interserver_transport,
+            "_bound_tcp_dns_probe",
+            side_effect=TimeoutError("timed out"),
+        ) as probe:
+            result = interserver_transport.transport_overlay_dns_probe("wg0", "10.74.0.2")
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["failure_confirmed"])
+        self.assertEqual(result["attempts"], 2)
+        self.assertEqual(probe.call_count, 2)
+
+    def test_overlay_dns_probe_rejects_incomplete_and_non_ipv4_identity(self) -> None:
+        cases = (
+            (("", "10.74.0.2"), {}, "identity is incomplete"),
+            (("wg0", ""), {}, "identity is incomplete"),
+            (("wg0", "not-an-ip"), {}, "not an IP literal"),
+            (("wg0", "2001:db8::1"), {}, "not IPv4"),
+            (("wg0", "10.74.0.2"), {"attempts": 0}, "identity is incomplete"),
+        )
+        with patch.object(interserver_transport, "_bound_tcp_dns_probe") as probe:
+            for args, kwargs, expected in cases:
+                with self.subTest(args=args, kwargs=kwargs):
+                    result = interserver_transport.transport_overlay_dns_probe(*args, **kwargs)
+                    self.assertFalse(result["ok"])
+                    self.assertIn(expected, result["error"])
+        probe.assert_not_called()
+
+    def test_transport_candidate_probe_rejects_an_unknown_tag(self) -> None:
+        result = interserver_transport.transport_candidate_probe("unknown")
+        self.assertFalse(result["ok"])
+        self.assertIn("unknown transport candidate", result["error"])
 
     def test_transport_candidate_probe_rejects_a_local_accept_without_remote_dns(self) -> None:
         with patch.object(
@@ -2523,6 +2651,24 @@ class ServerAgentTests(unittest.TestCase):
         self.assertEqual(datagram.sendto.call_args.args[1], ("127.0.0.1", 9999))
         self.assertIn(b"\x09localhost\x00", datagram.sendto.call_args.args[0])
 
+    def test_bound_tcp_probe_validates_the_framed_dns_response(self) -> None:
+        connection = MagicMock()
+        connection.__enter__.return_value = connection
+        _query_id, dns_query = interserver_transport._dns_probe_query()
+        dns_response = (
+            bytes.fromhex("565081800001000100000000")
+            + dns_query[12:]
+            + bytes.fromhex("c00c000100010000003c00047f000001")
+        )
+        connection.recv.side_effect = [len(dns_response).to_bytes(2, "big"), dns_response]
+        with patch.object(interserver_transport.socket, "socket", return_value=connection):
+            interserver_transport._bound_tcp_dns_probe("wg0", "10.74.0.2", 1053, 0.6)
+
+        connection.connect.assert_called_once_with(("10.74.0.2", 1053))
+        framed_query = connection.sendall.call_args.args[0]
+        self.assertEqual(int.from_bytes(framed_query[:2], "big"), len(dns_query))
+        self.assertEqual(framed_query[2:], dns_query)
+
     def test_dns_probe_rejects_an_answer_count_without_record_data(self) -> None:
         _query_id, dns_query = interserver_transport._dns_probe_query()
         forged_response = bytes.fromhex("565081800001000100000000") + dns_query[12:]
@@ -2530,33 +2676,38 @@ class ServerAgentTests(unittest.TestCase):
         with self.assertRaisesRegex(OSError, "truncated name"):
             interserver_transport._dns_probe_response(forged_response, 0x5650)
 
-    def test_transport_overlay_path_probe_is_independent_of_dns(self) -> None:
-        completed = subprocess.CompletedProcess(["ping"], 0, "", "")
+    def test_transport_overlay_path_probe_uses_the_managed_dns_dataplane(self) -> None:
+        healthy = {
+            "checked": True,
+            "ok": True,
+            "attempts": 1,
+            "scope": "overlay-dns",
+            "target": "10.74.0.2:1053",
+        }
         env = {"WG_INTERFACE": "wg0", "WG_FOREIGN_ADDRESS": "10.74.0.2/24"}
-        with patch.object(server_agent, "run", return_value=completed) as command:
+        with patch.object(server_agent, "transport_overlay_dns_probe", return_value=healthy) as probe:
             result = server_agent.transport_overlay_path_probe(env)
 
         self.assertTrue(result["ok"])
-        self.assertEqual(result["scope"], "overlay-icmp")
-        self.assertEqual(result["target"], "10.74.0.2")
-        self.assertEqual(
-            command.call_args.args[0],
-            ["ping", "-n", "-I", "wg0", "-c", "1", "-W", "1", "-s", "32", "10.74.0.2"],
-        )
+        self.assertEqual(result["scope"], "overlay-dns")
+        probe.assert_called_once_with("wg0", "10.74.0.2")
 
-    def test_transport_overlay_path_probe_normalizes_packet_loss(self) -> None:
-        completed = subprocess.CompletedProcess(
-            ["ping"],
-            1,
-            "3 packets transmitted, 0 received, 100% packet loss",
-            "",
-        )
+    def test_transport_overlay_path_probe_preserves_confirmed_failure(self) -> None:
+        failed = {
+            "checked": True,
+            "ok": False,
+            "attempts": 2,
+            "scope": "overlay-dns",
+            "target": "10.74.0.2:1053",
+            "error": "timed out",
+            "failure_confirmed": True,
+        }
         env = {"WG_INTERFACE": "wg0", "WG_FOREIGN_ADDRESS": "10.74.0.2/24"}
-        with patch.object(server_agent, "run", return_value=completed):
+        with patch.object(server_agent, "transport_overlay_dns_probe", return_value=failed):
             result = server_agent.transport_overlay_path_probe(env)
 
         self.assertFalse(result["ok"])
-        self.assertEqual(result["error"], "WireGuard overlay liveness probe timed out")
+        self.assertTrue(result["failure_confirmed"])
 
     def test_transport_overlay_quality_probe_reports_partial_loss_and_rtt(self) -> None:
         completed = subprocess.CompletedProcess(
@@ -2623,7 +2774,7 @@ class ServerAgentTests(unittest.TestCase):
         self.assertTrue(server_agent.preferred_transport_probe_due(retry, "2026-08-07T12:01:00+00:00"))
 
     def test_transport_cycle_runs_quality_only_after_fast_liveness_succeeds(self) -> None:
-        liveness = {"checked": True, "ok": True, "attempts": 1, "scope": "overlay-icmp"}
+        liveness = {"checked": True, "ok": True, "attempts": 1, "scope": "overlay-dns", "health_confirmed": True}
         quality = {
             "checked": True,
             "ok": True,
@@ -2645,12 +2796,71 @@ class ServerAgentTests(unittest.TestCase):
                 observed_at="2026-08-07T12:00:00+00:00",
             )
 
-        self.assertEqual(result["interserver-underlay-wg"], quality)
+        selected = result["interserver-underlay-wg"]
+        self.assertTrue(selected["ok"])
+        self.assertEqual(selected["scope"], "overlay-dns")
+        self.assertTrue(selected["quality_sampled"])
+        self.assertTrue(selected["quality_ok"])
+        self.assertEqual(selected["packet_loss_pct"], 0.0)
         self.assertEqual(probe.call_count, 2)
         self.assertEqual(probe.call_args_list[0].args, (env,))
         self.assertEqual(probe.call_args_list[0].kwargs, {})
         self.assertEqual(probe.call_args_list[1].args, (env,))
         self.assertEqual(probe.call_args_list[1].kwargs, {"quality": True})
+
+    def test_transport_cycle_keeps_a_live_path_when_quality_sample_has_loss(self) -> None:
+        liveness = {"checked": True, "ok": True, "attempts": 1, "scope": "overlay-dns", "health_confirmed": True}
+        quality = {
+            "checked": True,
+            "ok": False,
+            "attempts": 4,
+            "scope": "overlay-quality",
+            "quality_checked": True,
+            "packet_loss_pct": 25.0,
+            "error": "WireGuard overlay packet loss 25%",
+        }
+        env = {"WG_INTERFACE": "wg0", "WG_FOREIGN_ADDRESS": "10.74.0.2/24"}
+        with patch.object(server_agent, "transport_overlay_path_probe", side_effect=(liveness, quality)), patch.object(
+            server_agent, "transport_candidate_probe"
+        ) as alternate:
+            result = server_agent.collect_transport_probes(
+                "interserver-underlay-wg",
+                {},
+                env=env,
+                observed_at="2026-08-07T12:00:00+00:00",
+            )
+
+        self.assertTrue(result["interserver-underlay-wg"]["ok"])
+        self.assertFalse(result["interserver-underlay-wg"]["quality_ok"])
+        self.assertTrue(result["interserver-underlay-wg"]["quality_sampled"])
+        self.assertEqual(result["interserver-underlay-wg"]["packet_loss_pct"], 25.0)
+        alternate.assert_not_called()
+
+    def test_transport_cycle_reuses_the_last_quality_sample_until_refresh(self) -> None:
+        liveness = {"checked": True, "ok": True, "attempts": 1, "scope": "overlay-dns"}
+        previous = {
+            "state": "degraded",
+            "quality_probe_at": "2026-08-07T11:59:59+00:00",
+            "last_quality_probe": {
+                "quality_checked": True,
+                "quality_ok": False,
+                "quality_error": "packet loss 25%",
+                "packet_loss_pct": 25.0,
+            },
+        }
+        env = {"WG_INTERFACE": "wg0", "WG_FOREIGN_ADDRESS": "10.74.0.2/24"}
+        with patch.object(server_agent, "transport_overlay_path_probe", return_value=liveness) as probe:
+            result = server_agent.collect_transport_probes(
+                "interserver-underlay-wg",
+                previous,
+                env=env,
+                observed_at="2026-08-07T12:00:00+00:00",
+            )
+
+        self.assertFalse(result["interserver-underlay-wg"]["quality_ok"])
+        self.assertFalse(result["interserver-underlay-wg"]["quality_sampled"])
+        self.assertEqual(result["interserver-underlay-wg"]["packet_loss_pct"], 25.0)
+        probe.assert_called_once_with(env)
 
     def test_transport_relay_reset_does_not_touch_application_flows(self) -> None:
         payload = {

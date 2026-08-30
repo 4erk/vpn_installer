@@ -50,6 +50,7 @@ _CANCELLATION_TOKENS = (
     "operation cancelled",
     "operation was canceled",
     "operation was cancelled",
+    "use of closed network connection",
     "write on closed stream",
 )
 _DNS_NODATA_TOKENS = (

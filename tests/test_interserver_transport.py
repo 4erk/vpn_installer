@@ -211,6 +211,52 @@ class InterserverTransportIdentityTests(unittest.TestCase):
         self.assertEqual(confirmed["failure"]["confirmations"], 2)
         self.assertEqual(confirmed["alternate_health"]["confirmations"], 2)
 
+    def test_policy_rejects_invalid_selection_and_missing_observation(self) -> None:
+        invalid = evaluate_transport_policy(selected="unknown", probes={}, observed_at="2026-08-06T12:00:00+00:00")
+        missing = evaluate_transport_policy(
+            selected=TRANSPORT_WG_TAG,
+            probes={
+                TRANSPORT_WG_TAG: {"checked": False, "ok": False},
+                TRANSPORT_HY2_TAG: {"checked": False, "ok": False},
+            },
+            observed_at="2026-08-06T12:00:00+00:00",
+        )
+
+        self.assertEqual(invalid["state"], "failed")
+        self.assertIn("invalid", invalid["reason"])
+        self.assertEqual(missing["state"], "inconclusive")
+        self.assertIn("not probed", missing["reason"])
+
+    def test_dataplane_confirmations_switch_in_one_cycle(self) -> None:
+        result = evaluate_transport_policy(
+            selected=TRANSPORT_WG_TAG,
+            probes={
+                TRANSPORT_WG_TAG: {
+                    "checked": True,
+                    "ok": False,
+                    "attempts": 2,
+                    "failure_confirmed": True,
+                    "scope": "overlay-dns",
+                    "error": "timed out",
+                },
+                TRANSPORT_HY2_TAG: {
+                    "checked": True,
+                    "ok": True,
+                    "attempts": 1,
+                    "health_confirmed": True,
+                    "scope": "raw-underlay-udp",
+                },
+            },
+            observed_at="2026-08-06T12:00:00+00:00",
+        )
+
+        self.assertEqual(result["state"], "recovering")
+        self.assertTrue(result["hard_failure_evidence"])
+        self.assertTrue(result["would_switch"])
+        self.assertEqual(result["recommended"], TRANSPORT_HY2_TAG)
+        self.assertEqual(result["failure"]["confirmations"], 2)
+        self.assertEqual(result["alternate_health"]["confirmations"], 2)
+
     def test_policy_never_switches_for_latency_advantage(self) -> None:
         state: dict[str, object] = {
             "schema_version": TRANSPORT_STATE_SCHEMA_VERSION,
@@ -234,6 +280,29 @@ class InterserverTransportIdentityTests(unittest.TestCase):
             self.assertEqual(state["recommended"], TRANSPORT_WG_TAG)
             self.assertNotIn("latency_candidate", state)
             self.assertNotIn("latency_confirmations", state)
+
+    def test_quality_loss_is_soft_degradation_without_a_switch(self) -> None:
+        result = evaluate_transport_policy(
+            selected=TRANSPORT_WG_TAG,
+            probes={
+                TRANSPORT_WG_TAG: {
+                    "checked": True,
+                    "ok": True,
+                    "scope": "overlay-dns",
+                    "quality_checked": True,
+                    "quality_ok": False,
+                    "quality_error": "WireGuard overlay packet loss 25%",
+                    "packet_loss_pct": 25.0,
+                },
+                TRANSPORT_HY2_TAG: {"checked": False, "ok": False},
+            },
+            observed_at="2026-08-06T12:00:00+00:00",
+        )
+
+        self.assertEqual(result["state"], "degraded")
+        self.assertFalse(result["hard_failure_evidence"])
+        self.assertFalse(result["would_switch"])
+        self.assertIn("packet loss 25%", result["reason"])
 
     def test_unknown_state_schema_cannot_confirm_a_switch(self) -> None:
         stale = {
@@ -438,6 +507,21 @@ class InterserverTransportIdentityTests(unittest.TestCase):
         self.assertEqual(state["preferred_recovery"]["confirmations"], 3)
         self.assertEqual(state["preferred_retry"]["recovered_at"], "2026-08-06T12:01:22+00:00")
         json.dumps(state)
+
+    def test_healthy_fallback_defers_after_a_failed_preferred_probe(self) -> None:
+        result = evaluate_transport_policy(
+            selected=TRANSPORT_HY2_TAG,
+            probes={
+                TRANSPORT_HY2_TAG: {"checked": True, "ok": True, "scope": "overlay-dns"},
+                TRANSPORT_WG_TAG: {"checked": True, "ok": False, "error": "timed out"},
+            },
+            observed_at="2026-08-06T12:00:00+00:00",
+        )
+
+        self.assertEqual(result["state"], "healthy")
+        self.assertFalse(result["would_switch"])
+        self.assertIn("preferred underlay timeout", result["reason"])
+        self.assertEqual(result["preferred_retry"]["attempts"], 1)
 
     def test_deferred_cycle_preserves_but_does_not_increment_recovery_evidence(self) -> None:
         first = evaluate_transport_policy(
