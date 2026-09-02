@@ -263,7 +263,7 @@ class AuditModuleTests(unittest.TestCase):
         self.assertIn("docker-node-scoped-workflows", runner.records)
 
     def test_compatible_update_gate_keeps_schemas_and_rejects_out_of_window_releases(self) -> None:
-        self.assertEqual(VERSION, "0.21.7")
+        self.assertEqual(VERSION, "0.21.8")
         self.assertEqual(
             (
                 CONFIG_SCHEMA_VERSION,

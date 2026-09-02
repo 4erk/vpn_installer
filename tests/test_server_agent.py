@@ -3071,22 +3071,85 @@ class ServerAgentTests(unittest.TestCase):
         self.assertEqual(payload["schema_version"], server_agent.TRANSPORT_STATE_SCHEMA_VERSION)
         self.assertNotIn("last_switch_failure", payload)
 
-    def test_overlay_proof_checks_liveness_mtu_and_bidirectional_transfer(self) -> None:
-        env = {"WG_INTERFACE": "wg0", "WG_FOREIGN_PUBLIC_KEY": "peer-key", "WG_FOREIGN_ADDRESS": "10.74.0.2/24", "RU_ROUTER_LISTEN_PORT": "2080"}
-        results = [
-            subprocess.CompletedProcess(["wg"], 0, "peer-key 10 20\n", ""),
-            subprocess.CompletedProcess(["ping"], 0, "", ""),
-            subprocess.CompletedProcess(["wg"], 0, "peer-key 30 40\n", ""),
-        ]
-        with (
-            patch.object(server_agent, "run", side_effect=results) as command,
-        ):
+    def test_transport_reconcile_drops_an_expired_switch_failure(self) -> None:
+        config = {"experimental": {"clash_api": {"external_controller": "127.0.0.1:19090"}}}
+        expired_failure = {
+            "target": "interserver-underlay-hy2",
+            "attempts": 1,
+            "failed_at": "2026-08-09T11:59:00+00:00",
+            "retry_at": "2026-08-09T11:59:30+00:00",
+            "reason": "transient activation failure",
+        }
+        previous = {
+            "schema_version": server_agent.TRANSPORT_STATE_SCHEMA_VERSION,
+            "state": "healthy",
+            "selected": "interserver-underlay-wg",
+            "switch_backoff": expired_failure,
+            "last_switch_failure": expired_failure,
+        }
+        selection = {"available": True, "selected": "interserver-underlay-wg"}
+        probes = {"interserver-underlay-wg": {"checked": True, "ok": True}}
+        evaluated = {
+            "schema_version": server_agent.TRANSPORT_STATE_SCHEMA_VERSION,
+            "updated_at": "2026-08-09T12:00:00+00:00",
+            "state": "healthy",
+            "selected": "interserver-underlay-wg",
+            "recommended": "interserver-underlay-wg",
+            "would_switch": False,
+            "changed": False,
+            "reason": "selected overlay is healthy",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch.object(server_agent, "TRANSPORT_LOCK_PATH", Path(tmp) / "transport.lock"),
+                patch.object(server_agent, "read_json", side_effect=[config, previous]),
+                patch.object(server_agent, "write_json_atomic") as write,
+                patch.object(server_agent, "parse_env", return_value={}),
+                patch.object(server_agent, "transport_topology_configured", return_value=True),
+                patch.object(server_agent, "transport_selection_snapshot", return_value=selection),
+                patch.object(server_agent, "collect_transport_probes", return_value=probes),
+                patch.object(server_agent, "evaluate_transport_policy", return_value=evaluated),
+                patch.object(server_agent, "utc_now", return_value="2026-08-09T12:00:00+00:00"),
+            ):
+                payload = server_agent._reconcile_interserver_transport_unlocked()
+
+        self.assertNotIn("switch_backoff", payload)
+        self.assertNotIn("last_switch_failure", payload)
+        write.assert_called_once_with(server_agent.TRANSPORT_STATE_PATH, payload)
+
+    def test_overlay_proof_waits_for_exact_dns_dataplane_convergence(self) -> None:
+        env = {"WG_INTERFACE": "wg0", "WG_FOREIGN_ADDRESS": "10.74.0.2/24"}
+        failed = {"ok": False, "health_confirmed": False, "error": "timed out"}
+        healthy = {"ok": True, "health_confirmed": True, "error": ""}
+        with patch.object(
+            server_agent,
+            "transport_overlay_dns_probe",
+            side_effect=[failed, failed, healthy],
+        ) as probe, patch.object(server_agent.time, "sleep") as sleep:
             server_agent.prove_wireguard_overlay(env)
 
-        self.assertEqual(command.call_count, 3)
-        self.assertEqual(command.call_args_list[1].args[0][0], "ping")
-        self.assertIn("-M", command.call_args_list[1].args[0])
-        self.assertEqual(command.call_args_list[1].args[0][command.call_args_list[1].args[0].index("-c") + 1], "3")
+        self.assertEqual(probe.call_count, 3)
+        probe.assert_called_with(
+            "wg0",
+            "10.74.0.2",
+            timeout_ms=server_agent.TRANSPORT_SWITCH_PROOF_TIMEOUT_MS,
+            attempts=1,
+        )
+        self.assertEqual(sleep.call_count, 2)
+        sleep.assert_called_with(server_agent.TRANSPORT_SWITCH_PROOF_RETRY_DELAY_SECONDS)
+
+    def test_overlay_proof_fails_after_bounded_dns_attempts(self) -> None:
+        env = {"WG_INTERFACE": "wg0", "WG_FOREIGN_ADDRESS": "10.74.0.2/24"}
+        failed = {"ok": False, "health_confirmed": False, "error": "timed out"}
+        with patch.object(
+            server_agent,
+            "transport_overlay_dns_probe",
+            return_value=failed,
+        ) as probe, patch.object(server_agent.time, "sleep"):
+            with self.assertRaisesRegex(RuntimeError, "DNS convergence proof failed after 5 attempts"):
+                server_agent.prove_wireguard_overlay(env)
+
+        self.assertEqual(probe.call_count, server_agent.TRANSPORT_SWITCH_PROOF_ATTEMPTS)
 
     def test_interserver_transport_snapshot_reports_foreign_listener(self) -> None:
         config = {

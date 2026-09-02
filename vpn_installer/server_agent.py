@@ -68,6 +68,9 @@ try:
         TRANSPORT_STATE_SCHEMA_VERSION,
         TRANSPORT_SWITCH_RETRY_BASE_SECONDS,
         TRANSPORT_SWITCH_RETRY_MAX_SECONDS,
+        TRANSPORT_SWITCH_PROOF_ATTEMPTS,
+        TRANSPORT_SWITCH_PROOF_RETRY_DELAY_SECONDS,
+        TRANSPORT_SWITCH_PROOF_TIMEOUT_MS,
         TRANSPORT_WG_TAG,
         evaluate_transport_policy,
         transport_candidate_probe,
@@ -95,6 +98,9 @@ except ImportError:  # Optional on nodes without an interserver capability.
             TRANSPORT_STATE_SCHEMA_VERSION,
             TRANSPORT_SWITCH_RETRY_BASE_SECONDS,
             TRANSPORT_SWITCH_RETRY_MAX_SECONDS,
+            TRANSPORT_SWITCH_PROOF_ATTEMPTS,
+            TRANSPORT_SWITCH_PROOF_RETRY_DELAY_SECONDS,
+            TRANSPORT_SWITCH_PROOF_TIMEOUT_MS,
             TRANSPORT_WG_TAG,
             evaluate_transport_policy,
             transport_candidate_probe,
@@ -120,6 +126,9 @@ except ImportError:  # Optional on nodes without an interserver capability.
         TRANSPORT_STATE_SCHEMA_VERSION = 13
         TRANSPORT_SWITCH_RETRY_BASE_SECONDS = 30
         TRANSPORT_SWITCH_RETRY_MAX_SECONDS = 300
+        TRANSPORT_SWITCH_PROOF_ATTEMPTS = 5
+        TRANSPORT_SWITCH_PROOF_RETRY_DELAY_SECONDS = 0.2
+        TRANSPORT_SWITCH_PROOF_TIMEOUT_MS = 1200
         TRANSPORT_MODULE_AVAILABLE = False
 
         def _missing_transport_module(*_args: Any, **_kwargs: Any) -> Any:
@@ -2335,31 +2344,27 @@ def collect_transport_probes(
 
 def prove_wireguard_overlay(env: dict[str, str]) -> None:
     interface = env.get("WG_INTERFACE", "wg0")
-    peer = env.get("WG_FOREIGN_PUBLIC_KEY", "")
     target = str(env.get("WG_FOREIGN_ADDRESS", "")).split("/", 1)[0]
-    if not target or not peer:
-        raise RuntimeError("foreign WireGuard proof identity is missing")
+    if not interface or not target:
+        raise RuntimeError("foreign WireGuard overlay proof identity is missing")
 
-    def transfer() -> tuple[int, int]:
-        result = run(["wg", "show", interface, "transfer"], timeout=3)
-        if result.returncode != 0:
-            raise RuntimeError((result.stderr.strip() or "WireGuard transfer counters are unavailable")[:240])
-        for line in result.stdout.splitlines():
-            fields = line.split()
-            if len(fields) >= 3 and fields[0] == peer:
-                return int(fields[1]), int(fields[2])
-        raise RuntimeError("WireGuard peer transfer counters are missing")
-
-    before_rx, before_tx = transfer()
-    path_result = run(
-        ["ping", "-n", "-M", "do", "-s", "1280", "-I", interface, "-c", "3", "-i", "0.2", "-W", "1", target],
-        timeout=3,
+    last_error = "overlay DNS exchange did not complete"
+    for attempt in range(1, TRANSPORT_SWITCH_PROOF_ATTEMPTS + 1):
+        proof = transport_overlay_dns_probe(
+            interface,
+            target,
+            timeout_ms=TRANSPORT_SWITCH_PROOF_TIMEOUT_MS,
+            attempts=1,
+        )
+        if proof.get("ok") is True and proof.get("health_confirmed") is True:
+            return
+        last_error = str(proof.get("error", "") or last_error)
+        if attempt < TRANSPORT_SWITCH_PROOF_ATTEMPTS:
+            time.sleep(TRANSPORT_SWITCH_PROOF_RETRY_DELAY_SECONDS)
+    raise RuntimeError(
+        f"WireGuard overlay DNS convergence proof failed after "
+        f"{TRANSPORT_SWITCH_PROOF_ATTEMPTS} attempts: {last_error[:160]}"
     )
-    if path_result.returncode != 0:
-        raise RuntimeError(ping_failure_reason(path_result, "WireGuard overlay liveness and MTU proof"))
-    after_rx, after_tx = transfer()
-    if after_rx <= before_rx or after_tx <= before_tx:
-        raise RuntimeError("new WireGuard overlay path produced no bidirectional transfer delta")
 
 
 def reset_transport_relay(controller: str) -> int:
@@ -2558,7 +2563,12 @@ def _reconcile_interserver_transport_unlocked() -> dict[str, Any]:
             if isinstance(previous_state.get("last_quality_probe"), dict):
                 payload["last_quality_probe"] = previous_state["last_quality_probe"]
         last_switch_failure = previous_state.get("last_switch_failure")
-        if isinstance(last_switch_failure, dict):
+        last_failure_target = str(last_switch_failure.get("target", "")) if isinstance(last_switch_failure, dict) else ""
+        if (
+            isinstance(last_switch_failure, dict)
+            and last_failure_target
+            and transport_switch_backoff_active(previous_state, last_failure_target, observed_at) is not None
+        ):
             payload["last_switch_failure"] = last_switch_failure
         alternate = next((tag for tag in TRANSPORT_CANDIDATE_TAGS if tag != selected), "")
         switch_backoff = transport_switch_backoff_active(previous_state, alternate, observed_at)
@@ -2611,6 +2621,8 @@ def _reconcile_interserver_transport_unlocked() -> dict[str, Any]:
                         "reason": f"{payload.get('reason', '')}; underlay selector updated",
                     }
                 )
+                payload.pop("switch_backoff", None)
+                payload.pop("last_switch_failure", None)
                 payload.pop("quality_probe_at", None)
                 payload.pop("last_quality_probe", None)
         write_json_atomic(TRANSPORT_STATE_PATH, payload)
