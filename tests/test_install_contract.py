@@ -18,6 +18,7 @@ from vpn_installer.install_contract import (
 )
 from vpn_installer.install_support import main as install_support_main
 from vpn_installer.render import copy_python_package, write_node_rendered_files
+from vpn_installer.transition_0218 import preflight_projection
 
 
 CONTRACT_FILES = (
@@ -32,6 +33,33 @@ CONTRACT_FILES = (
 
 
 class InstallContractTests(unittest.TestCase):
+    def test_previous_release_preflight_preserves_network_lifecycle_evidence(self) -> None:
+        projection = preflight_projection(
+            {
+                "schema_version": 5,
+                "release": {"version": "0.21.8", "release_id": "old-release"},
+                "network": {
+                    "tcp_adaptation": {
+                        "congestion_control": "bbr",
+                        "qdisc": "fq",
+                        "qdisc_limit": 10000,
+                        "qdisc_flow_limit": 512,
+                        "overlay_qdisc": "fq",
+                        "overlay_qdisc_limit": 10000,
+                        "overlay_qdisc_flow_limit": 512,
+                        "mtu_probing": 1,
+                        "mtu_probe_floor": 1024,
+                        "metrics_save_disabled": 0,
+                    }
+                },
+            }
+        )
+
+        self.assertEqual(projection["tcp_default_qdisc"], "fq")
+        self.assertEqual(projection["wg_qdisc"], "fq")
+        self.assertEqual(projection["wg_qdisc_limit"], "10000")
+        self.assertEqual(projection["wg_qdisc_flow_limit"], "512")
+
     def test_previous_release_acceptance_is_normalized_to_current_schema(self) -> None:
         payload = {"schema_version": 5}
         manifest = {"version": COMPATIBLE_INSTALLED_MIN}

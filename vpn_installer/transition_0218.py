@@ -386,6 +386,8 @@ def preflight_projection(payload: Mapping[str, object]) -> dict[str, str]:
     host = payload.get("host") if isinstance(payload.get("host"), Mapping) else {}
     services = payload.get("services") if isinstance(payload.get("services"), Mapping) else {}
     artifacts = payload.get("artifacts") if isinstance(payload.get("artifacts"), Mapping) else {}
+    network = payload.get("network") if isinstance(payload.get("network"), Mapping) else {}
+    tcp_adaptation = network.get("tcp_adaptation") if isinstance(network.get("tcp_adaptation"), Mapping) else {}
     return {
         "schema_version": str(SOURCE_DIAGNOSTICS_SCHEMA), "login_user": str(host.get("login_user", "")),
         "is_root": "1" if host.get("is_root") is True else "0", "has_sudo": "1" if host.get("has_sudo") is True else "0",
@@ -401,4 +403,14 @@ def preflight_projection(payload: Mapping[str, object]) -> dict[str, str]:
         "wireguard": str(services.get("wireguard", "")), "admin": str(services.get("admin", "")),
         "resolver": str(services.get("resolver", "")), "health_timer": str(services.get("health_timer", "unknown")),
         "drift": str(artifacts.get("drift", "unknown")),
+        "tcp_congestion_control": str(tcp_adaptation.get("congestion_control", "")),
+        "tcp_default_qdisc": str(tcp_adaptation.get("qdisc", "")),
+        "tcp_qdisc_limit": str(tcp_adaptation.get("qdisc_limit", "")),
+        "tcp_qdisc_flow_limit": str(tcp_adaptation.get("qdisc_flow_limit", "")),
+        "wg_qdisc": str(tcp_adaptation.get("overlay_qdisc", "")),
+        "wg_qdisc_limit": str(tcp_adaptation.get("overlay_qdisc_limit", "")),
+        "wg_qdisc_flow_limit": str(tcp_adaptation.get("overlay_qdisc_flow_limit", "")),
+        "tcp_mtu_probing": str(tcp_adaptation.get("mtu_probing", "")),
+        "tcp_mtu_probe_floor": str(tcp_adaptation.get("mtu_probe_floor", "")),
+        "tcp_metrics_save_disabled": str(tcp_adaptation.get("metrics_save_disabled", "")),
     }

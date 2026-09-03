@@ -863,6 +863,28 @@ class WorkflowTests(unittest.TestCase):
             accept_install_gate=True,
         )
 
+    def test_postcutover_verification_confirms_transient_failure(self) -> None:
+        with (
+            patch("vpn_installer.verify.verify_live_workflow", side_effect=[1, 0]) as verify,
+            patch("vpn_installer.workflows.time.sleep") as sleep,
+            patch("vpn_installer.workflows.warn") as warning,
+        ):
+            workflows.verify_postcutover("demo")
+
+        self.assertEqual(verify.call_count, 2)
+        sleep.assert_called_once_with(workflows.POSTCUTOVER_VERIFY_RETRY_DELAY_SECONDS)
+        warning.assert_called_once()
+
+    def test_postcutover_verification_rejects_confirmed_failure(self) -> None:
+        with (
+            patch("vpn_installer.verify.verify_live_workflow", return_value=1) as verify,
+            patch("vpn_installer.workflows.time.sleep"),
+        ):
+            with self.assertRaisesRegex(AppError, "двух последовательных циклах"):
+                workflows.verify_postcutover("demo")
+
+        self.assertEqual(verify.call_count, 2)
+
     def test_run_selected_remote_action_install_orders_nodes(self) -> None:
         env = generate_default_env("demo")
         env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"

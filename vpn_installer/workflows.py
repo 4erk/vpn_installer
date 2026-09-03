@@ -73,6 +73,10 @@ from .topology import (
 )
 
 
+POSTCUTOVER_VERIFY_ATTEMPTS = 2
+POSTCUTOVER_VERIFY_RETRY_DELAY_SECONDS = 2
+
+
 def is_audit_failure(exc: BaseException) -> bool:
     return exc.__class__.__name__ == "AuditFailure" and exc.__class__.__module__.startswith("vpn_installer.audit")
 
@@ -907,18 +911,24 @@ def verify_postcutover(
     throughput_seconds: int = 0,
     require_native_agent: bool = True,
 ) -> None:
-    """Prove the public client contract after every mutating install workflow."""
+    """Prove the public client contract and confirm a failure before rollback."""
 
     from .verify import verify_live_workflow
 
-    if verify_live_workflow(
-        deployment_name,
-        non_interactive=True,
-        throughput_seconds=throughput_seconds,
-        require_native_agent=require_native_agent,
-        accept_install_gate=True,
-    ) != 0:
-        raise AppError("Свежая проверка полного VLESS-пути после установки не пройдена.")
+    for attempt in range(POSTCUTOVER_VERIFY_ATTEMPTS):
+        result = verify_live_workflow(
+            deployment_name,
+            non_interactive=True,
+            throughput_seconds=throughput_seconds,
+            require_native_agent=require_native_agent,
+            accept_install_gate=True,
+        )
+        if result == 0:
+            return
+        if attempt + 1 < POSTCUTOVER_VERIFY_ATTEMPTS:
+            warn("Первый post-cutover VLESS-цикл не пройден; подтверждаю состояние повторной свежей проверкой.")
+            time.sleep(POSTCUTOVER_VERIFY_RETRY_DELAY_SECONDS)
+    raise AppError("Свежая проверка полного VLESS-пути после установки не пройдена в двух последовательных циклах.")
 
 
 def rollback_changed_nodes(
