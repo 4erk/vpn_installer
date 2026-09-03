@@ -27,6 +27,7 @@ class DnsCacheTests(unittest.TestCase):
                     "bind-interfaces",
                     "no-resolv",
                     "no-hosts",
+                    "address=/localhost/127.0.0.1",
                     "all-servers",
                     "cache-size=4096",
                     "neg-ttl=60",

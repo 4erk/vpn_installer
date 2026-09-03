@@ -26,6 +26,7 @@
 - Rollback на совместимый `0.21.8` проверяет snapshot старым контрактом, но атомарно сохраняет acceptance уже в текущей diagnostics schema `6`. Любой реальный HTTP status при VLESS probe считается доказательством транспорта; application-level `4xx/5xx` остаётся в отчёте и не выдаётся за сетевой timeout.
 - App-owned DNS unit запускает `dnsmasq` через `DynamicUser` и разрешает требуемый `AF_NETLINK` внутри systemd sandbox; отсутствие этого address family было поймано production acceptance до переключения релиза и приводило к безопасному rollback.
 - Переходный adapter переносит network/qdisc evidence из diagnostics `0.21.8`, поэтому rollback проверяет фактический восстановленный `wg0`, а не принимает отсутствие поля adapter-а за runtime drift. Первый неуспешный post-cutover VLESS gate подтверждается вторым полным свежим циклом через один интервал transport watcher; rollback запускается только при двух последовательных отказах.
+- App-owned DNS cache детерминированно отвечает `127.0.0.1` на стандартный `localhost A`. Это сохраняет служебный DNS-over-TCP liveness contract во время rolling update со старым gateway; раньше `no-hosts` возвращал `NXDOMAIN`, хотя оба underlay и пользовательский VLESS-путь были исправны. Docker runtime smoke теперь проверяет именно этот production record без command-line подмены.
 
 ### Compatibility
 

@@ -14,6 +14,7 @@ def render_dnsmasq_config() -> str:
         "bind-interfaces",
         "no-resolv",
         "no-hosts",
+        "address=/localhost/127.0.0.1",
         "all-servers",
         f"cache-size={DNS_CACHE_CAPACITY}",
         "neg-ttl=60",

@@ -194,7 +194,7 @@ def platform_contract_driver_text() -> str:
 
         def dns_query() -> None:
             transaction_id = 0x5650
-            question = b"".join(bytes((len(part),)) + part for part in b"matrix.invalid".split(b"."))
+            question = b"".join(bytes((len(part),)) + part for part in b"localhost".split(b"."))
             payload = struct.pack("!HHHHHH", transaction_id, 0x0100, 1, 0, 0, 0) + question + b"\\x00\\x00\\x01\\x00\\x01"
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
                 client.settimeout(0.25)
@@ -205,7 +205,7 @@ def platform_contract_driver_text() -> str:
             response_id, flags, _questions, answers, _authority, _additional = struct.unpack("!HHHHHH", response[:12])
             if response_id != transaction_id or not flags & 0x8000 or flags & 0x000F or answers < 1:
                 fail("dnsmasq returned an invalid DNS response")
-            if socket.inet_aton("192.0.2.123") not in response:
+            if socket.inet_aton("127.0.0.1") not in response:
                 fail("dnsmasq response does not contain the expected A record")
 
 
@@ -226,7 +226,6 @@ def platform_contract_driver_text() -> str:
                     "/usr/sbin/dnsmasq",
                     "--keep-in-foreground",
                     "--conf-file=/etc/vpn-stack/dnsmasq.conf",
-                    "--address=/matrix.invalid/192.0.2.123",
                 ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -321,7 +320,7 @@ def platform_contract_driver_text() -> str:
         dnsmasq_path = Path("/usr/sbin/dnsmasq")
         if not dnsmasq_path.is_file():
             fail("managed DNS service binary is not installed at /usr/sbin/dnsmasq")
-        progress("dnsmasq-nobody-smoke")
+        progress("dnsmasq-dynamic-user-smoke")
         dnsmasq_smoke(bundle / "dnsmasq-vpn-stack.conf")
 
         validate_bundle(bundle, NODE_GATEWAY, post_install_contract, expected_platform=spec)
