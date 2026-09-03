@@ -28,12 +28,13 @@ show_vpn_help() {
 
 Что нужно заранее:
   - один сервер для одиночной схемы или два для двойной
-  - Ubuntu 24.04 и публичный IPv4 у каждого используемого сервера
+  - поддерживаемый Linux из docs/PLATFORMS.md и публичный IPv4 у каждого сервера
   - SSH-доступ по ключу или паролю
   - VPN-клиент с поддержкой VLESS/Reality
   - Список команд: docs/COMMANDS.md
   - Как выбрать серверы: docs/PROVIDERS.md
   - Что внутри проекта: docs/PROJECT.md
+  - Поддерживаемые Linux: docs/PLATFORMS.md
   - При ошибке подробный лог: out/logs/runtime/latest-error.log
 EOF
 }

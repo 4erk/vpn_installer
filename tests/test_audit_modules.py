@@ -257,13 +257,14 @@ class AuditModuleTests(unittest.TestCase):
     def test_docker_run_registers_checks(self) -> None:
         runner = FakeRunner()
         audit_docker.run(runner)  # type: ignore[arg-type]
+        self.assertIn("docker-platform-contract-matrix", runner.records)
         self.assertIn("docker-unmanaged-remove-purge-render-only", runner.records)
         self.assertIn("docker-compatible-update", runner.records)
         self.assertIn("docker-install-rollback-state", runner.records)
         self.assertIn("docker-node-scoped-workflows", runner.records)
 
-    def test_compatible_update_gate_keeps_schemas_and_rejects_out_of_window_releases(self) -> None:
-        self.assertEqual(VERSION, "0.21.8")
+    def test_compatible_update_gate_migrates_exact_predecessor_and_rejects_out_of_window_releases(self) -> None:
+        self.assertEqual(VERSION, "0.22.0")
         self.assertEqual(
             (
                 CONFIG_SCHEMA_VERSION,
@@ -271,16 +272,14 @@ class AuditModuleTests(unittest.TestCase):
                 INSTALL_PLAN_SCHEMA_VERSION,
                 DIAGNOSTICS_SCHEMA_VERSION,
             ),
-            (3, 4, 4, 5),
+            (3, 5, 5, 6),
         )
-
-        builder = audit_docker.previous_release_fixture_builder_text()
-        compile(builder, "<previous-release-fixture-builder>", "exec")
-        self.assertIn("previous_version = COMPATIBLE_INSTALLED_MIN", builder)
 
         script = audit_docker.compatible_update_acceptance_script()
         self.assertIn("support validate-installed", script)
-        self.assertIn('(3, 4, 4, 5)', script)
+        self.assertIn("PYTHONPATH=/work/previous", script)
+        self.assertIn('(3, 5, 5, 6)', script)
+        self.assertIn("SOURCE_MANIFEST_SCHEMA", script)
         self.assertIn(f'= {COMPATIBLE_INSTALLED_MIN}', script)
         self.assertIn("current.patch + 1", script)
         self.assertIn("cannot be updated", script)

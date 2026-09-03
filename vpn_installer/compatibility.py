@@ -9,8 +9,33 @@ from . import VERSION
 from .common import cli_entrypoint
 
 
-COMPATIBLE_INSTALLED_MIN = "0.21.7"
+COMPATIBLE_INSTALLED_MIN = "0.21.8"
 COMPATIBLE_INSTALLED_MAX = VERSION
+
+SOURCE_SCHEMA_0218 = {
+    "config": 3,
+    "state": 3,
+    "manifest": 4,
+    "install_plan": 4,
+    "diagnostics": 5,
+}
+CURRENT_SCHEMA = {
+    "config": 3,
+    "state": 3,
+    "manifest": 5,
+    "install_plan": 5,
+    "diagnostics": 6,
+}
+CURRENT_TRANSITIONS = (
+    {
+        "from": "0.21.8",
+        "to": "0.22.0",
+        "source": SOURCE_SCHEMA_0218,
+        "target": CURRENT_SCHEMA,
+        "adapter": "transition_0218",
+        "remove_in": "0.22.1",
+    },
+)
 
 _VERSION_PATTERN = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 
@@ -47,29 +72,37 @@ class Version:
 class CompatibilityWindow:
     minimum: Version
     maximum: Version
+    transitions: tuple[Mapping[str, object], ...] = ()
 
     @classmethod
     def current(cls) -> "CompatibilityWindow":
         return cls(
             minimum=Version.parse(COMPATIBLE_INSTALLED_MIN),
             maximum=Version.parse(COMPATIBLE_INSTALLED_MAX),
+            transitions=tuple(dict(item) for item in CURRENT_TRANSITIONS),
         )
 
     @classmethod
     def from_manifest(cls, payload: object) -> "CompatibilityWindow":
         if not isinstance(payload, Mapping):
             raise CompatibilityError("manifest update compatibility must be an object")
+        if set(payload) != {"installed_min", "installed_max", "transitions"}:
+            raise CompatibilityError("manifest update compatibility fields must be exact")
         transitions = payload.get("transitions")
         if not isinstance(transitions, list):
             raise CompatibilityError("manifest update compatibility transitions must be an array")
-        return cls(
+        window = cls(
             minimum=Version.parse(payload.get("installed_min", "")),
             maximum=Version.parse(payload.get("installed_max", "")),
+            transitions=tuple(dict(item) for item in transitions if isinstance(item, Mapping)),
         )
+        _validate_transitions(transitions, window)
+        return window
 
     def __post_init__(self) -> None:
         if self.minimum > self.maximum:
             raise CompatibilityError("compatible version range is inverted")
+        _validate_transitions(list(self.transitions), self)
 
     def accepts(self, version: Version | str) -> bool:
         candidate = version if isinstance(version, Version) else Version.parse(version)
@@ -85,13 +118,40 @@ class CompatibilityWindow:
         return {
             "installed_min": str(self.minimum),
             "installed_max": str(self.maximum),
-            "transitions": [
-                {
-                    "from": str(self.minimum),
-                    "to": str(self.maximum),
-                }
-            ] if self.minimum != self.maximum else [],
+            "transitions": [dict(item) for item in self.transitions],
         }
+
+
+def _validate_schema_tuple(value: object, label: str) -> None:
+    keys = {"config", "state", "manifest", "install_plan", "diagnostics"}
+    if not isinstance(value, Mapping) or set(value) != keys:
+        raise CompatibilityError(f"{label} schema tuple fields must be exact")
+    if not all(isinstance(item, int) and not isinstance(item, bool) and item > 0 for item in value.values()):
+        raise CompatibilityError(f"{label} schema tuple values must be positive integers")
+
+
+def _validate_transitions(transitions: list[object], window: CompatibilityWindow) -> None:
+    if window.minimum == window.maximum:
+        if transitions:
+            raise CompatibilityError("same-version compatibility window cannot declare transitions")
+        return
+    if len(transitions) != 1 or not isinstance(transitions[0], Mapping):
+        raise CompatibilityError("compatibility window requires one explicit transition")
+    transition = transitions[0]
+    allowed = {"from", "to", "source", "target", "adapter", "remove_in"}
+    if not {"from", "to"}.issubset(transition) or set(transition) - allowed:
+        raise CompatibilityError("transition fields are invalid")
+    if str(transition.get("from")) != str(window.minimum) or str(transition.get("to")) != str(window.maximum):
+        raise CompatibilityError("transition endpoints do not match the compatibility window")
+    extended = {"source", "target", "adapter", "remove_in"} & set(transition)
+    if extended:
+        if extended != {"source", "target", "adapter", "remove_in"}:
+            raise CompatibilityError("transition adapter metadata must be complete")
+        _validate_schema_tuple(transition.get("source"), "source")
+        _validate_schema_tuple(transition.get("target"), "target")
+        if not re.fullmatch(r"[a-z][a-z0-9_]*", str(transition.get("adapter", ""))):
+            raise CompatibilityError("transition adapter name is invalid")
+        Version.parse(transition.get("remove_in", ""))
 
 
 def installed_version(manifest: Mapping[str, object]) -> Version:

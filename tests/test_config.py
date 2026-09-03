@@ -91,8 +91,25 @@ class ConfigTests(unittest.TestCase):
         self.assertNotIn("RU_DIRECT_DNS_PORT", env)
         self.assertEqual(env["GLOBAL_DOH_SERVER"], "8.8.8.8")
         self.assertEqual(env["GLOBAL_DOH_SERVER_NAME"], "dns.google")
-        self.assertEqual(env["SSH_MAX_STARTUPS"], "10:30:60")
-        self.assertEqual(env["SSH_PER_SOURCE_MAX_STARTUPS"], "6")
+        self.assertTrue(config.DEPRECATED_SSH_ENV_KEYS.isdisjoint(env))
+
+    def test_normalize_deployment_env_removes_all_deprecated_ssh_settings(self) -> None:
+        source = config.generate_default_env("sample")
+        source.update(
+            {
+                "SSH_LOGIN_GRACE_TIME": "45",
+                "SSH_MAX_AUTH_TRIES": "4",
+                "SSH_MAX_STARTUPS": "5:30:20",
+                "SSH_PER_SOURCE_MAX_STARTUPS": "2",
+                "SSH_PER_SOURCE_NETBLOCK_SIZE": "24:64",
+            }
+        )
+
+        normalized = config.normalize_deployment_env(source)
+
+        self.assertTrue(config.DEPRECATED_SSH_ENV_KEYS.isdisjoint(normalized))
+        self.assertEqual(normalized["SSH_PORT"], "22")
+        self.assertEqual(normalized["DEPLOY_NAME"], "sample")
 
     def test_current_schema_rejects_removed_routing_knobs(self) -> None:
         with self.assertRaisesRegex(ValueError, "unsupported deployment env keys"):
@@ -107,8 +124,6 @@ class ConfigTests(unittest.TestCase):
                 "GLOBAL_DOH_SERVER_NAME": "cloudflare-dns.com",
                 "UTLS_FINGERPRINT": "randomized",
                 "RU_REALITY_SERVER_NAME": "www.cloudflare.com",
-                "SSH_MAX_STARTUPS": "5:30:20",
-                "SSH_PER_SOURCE_MAX_STARTUPS": "2",
                 "WG_MTU": "1380",
                 "RU_LISTEN_PORT": "8443",
                 "RU_BLOCK_IP_CIDR": "91.108.56.0/22",
@@ -122,8 +137,6 @@ class ConfigTests(unittest.TestCase):
             "GLOBAL_DOH_SERVER_NAME": "cloudflare-dns.com",
             "UTLS_FINGERPRINT": "randomized",
             "RU_REALITY_SERVER_NAME": "www.cloudflare.com",
-            "SSH_MAX_STARTUPS": "5:30:20",
-            "SSH_PER_SOURCE_MAX_STARTUPS": "2",
             "WG_MTU": "1380",
             "RU_LISTEN_PORT": "8443",
             "RU_BLOCK_IP_CIDR": "91.108.56.0/22",

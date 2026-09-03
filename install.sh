@@ -62,16 +62,39 @@ require_value() {
   [[ -n "${value}" ]] || die "${option} requires a value"
 }
 
-find_python() {
+select_python() {
   local candidate=""
-  for candidate in "${PYTHON_BIN:-}" python3 python "${SCRIPT_DIR}/.runtime/python/windows/python.exe"; do
+  for candidate in "${PYTHON_BIN:-}" python3 /usr/libexec/platform-python python "${SCRIPT_DIR}/.runtime/python/windows/python.exe"; do
     [[ -n "${candidate}" ]] || continue
     if "${candidate}" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' >/dev/null 2>&1; then
       PYTHON_BIN="${candidate}"
       return 0
     fi
   done
+  return 1
+}
+
+find_python() {
+  select_python && return 0
   die "Python 3.9+ is required"
+}
+
+bootstrap_python() {
+  select_python && return 0
+
+  if command -v apt-get >/dev/null 2>&1; then
+    DEBIAN_FRONTEND=noninteractive apt-get update || die "failed to update apt metadata for Python bootstrap"
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3 ||
+      die "failed to install Python with apt-get"
+  elif command -v dnf5 >/dev/null 2>&1; then
+    dnf5 -y --setopt=install_weak_deps=False install python3 || die "failed to install Python with dnf5"
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf -y --setopt=install_weak_deps=False install python3 || die "failed to install Python with dnf"
+  else
+    die "Python 3.9+ is unavailable and no supported package manager (apt-get, dnf5, dnf) was found"
+  fi
+
+  select_python || die "Python bootstrap completed, but Python 3.9+ is unavailable"
 }
 
 parse_cli() {
@@ -158,6 +181,9 @@ render_node_bundle() {
     --env-file "${ENV_FILE}"
     --output-dir "${destination}"
   )
+  if [[ "${RENDER_ONLY}" != "1" ]]; then
+    args+=(--current-platform)
+  fi
   if [[ -n "${ASSETS_DIR}" ]]; then
     args+=(--assets-dir "${ASSETS_DIR}")
   fi
@@ -171,6 +197,7 @@ validate_bundle() {
   local external_assets="${4:-}"
   local require_assets="${5:-0}"
   local require_binaries="${6:-0}"
+  local require_current_platform="${7:-1}"
   rm -rf -- "${contract_dir}"
   mkdir -p "${contract_dir}"
 
@@ -183,6 +210,9 @@ validate_bundle() {
     --expected-node "${expected_node}"
     --contract-dir "${contract_dir}"
   )
+  if [[ "${require_current_platform}" == "1" ]]; then
+    args+=(--require-current-platform)
+  fi
   if [[ -n "${external_assets}" ]]; then
     args+=(--external-assets "${external_assets}")
   fi
@@ -251,7 +281,7 @@ render_only_action() {
   trap 'rm -rf -- "${temporary:-}" "${contract:-}"' RETURN
 
   render_node_bundle "${temporary}"
-  validate_bundle "${temporary}" "${NODE}" "${contract}" "${ASSETS_DIR}" 0 0
+  validate_bundle "${temporary}" "${NODE}" "${contract}" "${ASSETS_DIR}" 0 0 0
 
   local old_output=""
   if [[ -e "${OUTPUT_DIR}" || -L "${OUTPUT_DIR}" ]]; then
@@ -442,6 +472,7 @@ stop_services_from_file() {
   local ownership=""
   while IFS=$'\t' read -r name unit ownership _rest; do
     [[ -n "${unit}" ]] || continue
+    [[ "${ownership}" == "managed" ]] || continue
     "${SYSTEMCTL_BIN}" stop "${unit}" >/dev/null 2>&1 || true
   done <"${services_file}"
 }
@@ -463,6 +494,7 @@ restore_service_state() {
   local active=""
   while IFS=$'\t' read -r name unit ownership enabled active; do
     [[ -n "${unit}" ]] || continue
+    [[ "${ownership}" == "managed" ]] || continue
     case "${enabled}" in
       masked|masked-runtime)
         "${SYSTEMCTL_BIN}" mask "${unit}" >/dev/null
@@ -660,12 +692,17 @@ on_exit() {
 
 install_packages_from_plan() {
   local contract_dir="$1"
-  local packages=()
-  mapfile -t packages <"${contract_dir}/packages.tsv"
-  (("${#packages[@]}" > 0)) || return 0
-  apt-get update
-  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${packages[@]}"
-  apt-get clean
+  "${PYTHON_BIN}" -c \
+    'import sys; sys.path.insert(0, sys.argv[1]); from vpn_installer.install_support import main; raise SystemExit(main(sys.argv[2:]))' \
+    "${SCRIPT_DIR}" install-packages --contract-dir "${contract_dir}"
+}
+
+prepare_host_platform() {
+  local contract_dir="$1"
+  local release_dir="$2"
+  "${PYTHON_BIN}" -c \
+    'import sys; sys.path.insert(0, sys.argv[1]); from vpn_installer.install_support import main; raise SystemExit(main(sys.argv[2:]))' \
+    "${SCRIPT_DIR}" prepare-host --contract-dir "${contract_dir}" --release-dir "${release_dir}"
 }
 
 verify_sha256() {
@@ -1190,8 +1227,7 @@ retire_previous_services() {
   local ownership=""
   while IFS=$'\t' read -r name unit ownership; do
     new_contract_has_unit "${new_contract}" "${unit}" && continue
-    [[ "${ownership}" == "managed" ]] ||
-      die "refusing to retire borrowed service: ${unit}"
+    [[ "${ownership}" == "managed" ]] || continue
     "${SYSTEMCTL_BIN}" disable --now "${unit}" >/dev/null
   done <"${previous_contract}/services.tsv"
 }
@@ -1333,18 +1369,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, sys.argv[3])
-from vpn_installer.diagnostics import SCHEMA_VERSION as DIAGNOSTICS_SCHEMA_VERSION
-from vpn_installer.install_contract import is_planned_install_maintenance
+from vpn_installer.install_contract import is_planned_install_maintenance, normalize_acceptance_snapshot
 
 payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 manifest = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
-if payload.get("schema_version") != DIAGNOSTICS_SCHEMA_VERSION:
-    raise SystemExit(
-        f"post-activation agent did not return diagnostics schema {DIAGNOSTICS_SCHEMA_VERSION}"
-    )
-for field in ("topology", "node_id", "location", "capabilities"):
-    if payload.get(field) != manifest.get(field):
-        raise SystemExit(f"post-activation canonical field mismatch: {field}")
+payload = normalize_acceptance_snapshot(payload, manifest)
 try:
     generated = datetime.fromisoformat(str(payload["generated_at"]).replace("Z", "+00:00"))
 except (KeyError, TypeError, ValueError) as exc:
@@ -1384,6 +1413,10 @@ if payload.get("network", {}).get("profile_mismatches"):
     raise SystemExit("post-activation network profile drift detected")
 if payload.get("verdict") != "verified" and not is_planned_install_maintenance(payload):
     raise SystemExit(f"post-activation verdict is {payload.get('verdict')}: {payload.get('reasons', [])}")
+Path(sys.argv[1]).write_text(
+    json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+    encoding="utf-8",
+)
 PY
   then
     FAILED_ACCEPTANCE_STASH="${WORK_DIR}/failed-acceptance.json"
@@ -1409,7 +1442,7 @@ verify_target_units() {
   done <"${contract_dir}/services.tsv"
 }
 
-install_action() {
+validate_install_request() {
   [[ -n "${NODE}" ]] || die "--node is required for ${ACTION}"
   [[ -n "${ENV_FILE}" ]] || die "--env-file is required for ${ACTION}"
   [[ -f "${ENV_FILE}" ]] || die "env file not found: ${ENV_FILE}"
@@ -1419,6 +1452,9 @@ install_action() {
   if [[ "${ACTION}" == "reinstall" && ! -L "${VPNSTACK_CURRENT_RELEASE}" ]]; then
     die "reinstall requires an installed current release"
   fi
+}
+
+install_action() {
 
   WORK_DIR="$(mktemp -d)"
   local source_bundle="${WORK_DIR}/rendered"
@@ -1444,7 +1480,7 @@ install_action() {
       die "installed node ${previous_node} does not match requested node ${requested_node}"
   fi
 
-  # APT packages are monotonic host prerequisites, outside managed release rollback.
+  # Platform packages are monotonic host prerequisites, outside managed release rollback.
   install_packages_from_plan "${source_contract}"
   build_operation_scope "${source_contract}" "${PREVIOUS_CONTRACT}" "${scope_dir}"
   create_transaction_snapshots "${scope_dir}" "${source_bundle}"
@@ -1453,6 +1489,7 @@ install_action() {
   validate_bundle "${STAGED_RELEASE_DIR}" "${NODE}" "${staged_contract}" "" 1 1
   validate_staged_payloads "${STAGED_RELEASE_DIR}" "${staged_contract}"
   publish_staged_release "${STAGED_RELEASE_DIR}" "${staged_contract}"
+  prepare_host_platform "${staged_contract}" "${PUBLISHED_RELEASE_DIR}"
 
   install_planned_links "${staged_contract}" "${PREVIOUS_CONTRACT}"
   switch_current_release "${PUBLISHED_RELEASE_DIR}"
@@ -1586,12 +1623,25 @@ acquire_install_lock() {
 
 main() {
   parse_cli "$@"
-  find_python
 
   if [[ "${RENDER_ONLY}" == "1" ]]; then
+    find_python
     render_only_action
     return 0
   fi
+
+  if [[ "${ACTION}" == "install" || "${ACTION}" == "reinstall" ]]; then
+    require_root
+    acquire_install_lock
+    validate_install_request
+    bootstrap_python
+    find_python
+    trap on_exit EXIT
+    install_action
+    return 0
+  fi
+
+  find_python
 
   if [[ -z "${NODE}" && "${ACTION}" != "install" && "${ACTION}" != "reinstall" ]]; then
     NODE="$(infer_installed_node || true)"
@@ -1600,12 +1650,6 @@ main() {
   case "${ACTION}" in
     status)
       status_action
-      ;;
-    install|reinstall)
-      require_root
-      acquire_install_lock
-      trap on_exit EXIT
-      install_action
       ;;
     rollback)
       require_root

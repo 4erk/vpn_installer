@@ -14,6 +14,7 @@ from typing import Any, Iterable
 
 from .common import INSTALL_SCRIPT_PATH, OUT_DIR, ROOT_DIR, ensure_file_parent, print_header, warn, write_private_text, write_text
 from .config import apply_ru_direct_overlays, download_asset, parse_env_text, render_env_text, require_env, split_asset_sources
+from .dns_cache import DNS_CACHE_ADDRESS, DNS_CACHE_PORT, render_dnsmasq_config, render_dnsmasq_service
 from .interserver_transport import (
     FOREIGN_DNS_RELAY_PORT,
     HY2_CLASH_API_LISTEN,
@@ -43,10 +44,10 @@ from .network_profile import (
     UDP_WMEM_MAX,
     wireguard_policy_spec,
 )
+from .platforms import PlatformSpec, default_build_platform
 from .public_transport import render_public_hy2_inbound
 from .routing_policy import PRIVATE_OR_FAKE_DESTINATION_CIDRS, build_gateway_routing_policy
 from .specs import DeploymentSpec, reality_handshake_target
-from .system_resolver import render_resolved_dropin
 from .topology import CAP_WEB_ADMIN, NODE_EXIT, NODE_GATEWAY, TopologySpec, normalize_node_id
 
 
@@ -58,6 +59,7 @@ SERVER_RENDER_MODULES = (
     "compatibility.py",
     "config.py",
     "diagnostics.py",
+    "dns_cache.py",
     "dns_policy.py",
     "install_contract.py",
     "install_support.py",
@@ -66,6 +68,7 @@ SERVER_RENDER_MODULES = (
     "manifest.py",
     "models.py",
     "network_profile.py",
+    "platforms.py",
     "public_transport.py",
     "release_integrity.py",
     "resource_control.py",
@@ -73,14 +76,15 @@ SERVER_RENDER_MODULES = (
     "routing_policy.py",
     "server_agent.py",
     "specs.py",
-    "system_resolver.py",
     "topology.py",
+    "transition_0218.py",
 )
 
 SERVER_AGENT_BASE_MODULES = (
     "diagnostics.py",
     "log_classifier.py",
     "network_profile.py",
+    "platforms.py",
     "release_integrity.py",
     "resource_control.py",
 )
@@ -210,7 +214,12 @@ def render_gateway_singbox(env: dict[str, str]) -> str:
     }
     if topology.is_dual:
         dns_servers = [
-            {"type": "local", "tag": "dns-ru-direct"},
+            {
+                "type": "tcp",
+                "tag": "dns-ru-direct",
+                "server": DNS_CACHE_ADDRESS,
+                "server_port": DNS_CACHE_PORT,
+            },
             {
                 "type": "tcp",
                 "tag": "dns-global",
@@ -225,7 +234,14 @@ def render_gateway_singbox(env: dict[str, str]) -> str:
             {"tag": "ru-geoip", "type": "local", "format": "binary", "path": f"{env['RULESET_DIR']}/geoip-ru.srs"},
         ]
     else:
-        dns_servers = [{"type": "local", "tag": "dns-local"}]
+        dns_servers = [
+            {
+                "type": "tcp",
+                "tag": "dns-local",
+                "server": DNS_CACHE_ADDRESS,
+                "server_port": DNS_CACHE_PORT,
+            }
+        ]
         dns_final = "dns-local"
         rule_set = []
     outbounds = [*policy_parts["outbounds"], *transport["outbounds"]]
@@ -375,8 +391,8 @@ def render_foreign_singbox(env: dict[str, str]) -> str:
                     "tag": "dns-relay-in",
                     "listen": "0.0.0.0",
                     "listen_port": FOREIGN_DNS_RELAY_PORT,
-                    "override_address": "127.0.0.53",
-                    "override_port": 53,
+                    "override_address": DNS_CACHE_ADDRESS,
+                    "override_port": DNS_CACHE_PORT,
                 },
                 {
                     "type": "hysteria2",
@@ -685,6 +701,10 @@ def render_nftables_service() -> str:
     )
 
 
+def render_dns_service() -> str:
+    return render_dnsmasq_service()
+
+
 def render_admin_web_service() -> str:
     return textwrap.dedent(
         """
@@ -731,8 +751,9 @@ def render_singbox_service(node_id: str, *, operator_routing: bool = True) -> st
     service_lines = [
             "[Unit]",
             "Description=vpn-stack sing-box router",
-            "After=network-online.target",
+            "After=network-online.target vpn-stack-dns.service",
             "Wants=network-online.target",
+            "Requires=vpn-stack-dns.service",
             "",
             "[Service]",
             "Type=simple",
@@ -755,24 +776,6 @@ def render_singbox_service(node_id: str, *, operator_routing: bool = True) -> st
         ]
     )
     return "\n".join(service_lines)
-
-
-def render_sshd_hardening(env: dict[str, str]) -> str:
-    return "\n".join(
-        [
-            "# Managed by vpn-stack",
-            f"LoginGraceTime {env['SSH_LOGIN_GRACE_TIME']}",
-            f"MaxAuthTries {env['SSH_MAX_AUTH_TRIES']}",
-            f"MaxStartups {env['SSH_MAX_STARTUPS']}",
-            f"PerSourceMaxStartups {env['SSH_PER_SOURCE_MAX_STARTUPS']}",
-            f"PerSourceNetBlockSize {env['SSH_PER_SOURCE_NETBLOCK_SIZE']}",
-            "UseDNS no",
-            "KbdInteractiveAuthentication no",
-            "PasswordAuthentication yes",
-            "AllowTcpForwarding yes",
-            "",
-        ]
-    )
 
 
 def render_sysctl(node_id: str) -> str:
@@ -816,14 +819,6 @@ def render_journald_dropin(env: dict[str, str]) -> str:
     )
 
 
-def render_apt_periodic_dropin() -> str:
-    return (
-        'APT::Periodic::Update-Package-Lists "1";\n'
-        'APT::Periodic::Unattended-Upgrade "1";\n'
-        'APT::Periodic::AutocleanInterval "7";\n'
-    )
-
-
 def render_btmp_logrotate_config() -> str:
     return "\n".join(
         [
@@ -857,7 +852,7 @@ def render_health_service() -> str:
         [
             "[Unit]",
             "Description=Check vpn-stack runtime health",
-            "After=network-online.target ssh.service",
+            "After=network-online.target",
             "Wants=network-online.target",
             "",
             "[Service]",
@@ -983,7 +978,14 @@ def reset_generated_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
-def rendered_files_for_node(env: dict[str, str], node_id: str, *, assets: dict[str, Path] | None = None) -> dict[str, str]:
+def rendered_files_for_node(
+    env: dict[str, str],
+    node_id: str,
+    *,
+    assets: dict[str, Path] | None = None,
+    platform: PlatformSpec | None = None,
+) -> dict[str, str]:
+    platform = platform or default_build_platform()
     normalized_node_id = normalize_node_id(node_id)
     if env.get("NODE_ID", "").strip():
         configured_node_id = normalize_node_id(env["NODE_ID"])
@@ -1008,11 +1010,10 @@ def rendered_files_for_node(env: dict[str, str], node_id: str, *, assets: dict[s
             "nftables.conf": render_ru_firewall_nftables(env, web_admin=CAP_WEB_ADMIN in plan.capabilities),
             "vpn-stack-nft-apply.sh": render_nft_apply_script(),
             "vpn-stack-nftables.service": render_nftables_service(),
-            "sshd-vpn-stack.conf": render_sshd_hardening(env),
             "sysctl-vpn-stack.conf": render_sysctl(NODE_GATEWAY),
             "modules-vpn-stack.conf": render_modules_load(),
-            "apt-vpn-stack-unattended.conf": render_apt_periodic_dropin(),
-            "resolved-vpn-stack.conf": render_resolved_dropin(),
+            "dnsmasq-vpn-stack.conf": render_dnsmasq_config(),
+            "vpn-stack-dns.service": render_dns_service(),
             "btmp-vpn-stack.conf": render_btmp_logrotate_config(),
             **server_agent_artifacts(interserver=plan.requires_wireguard),
             "vpn-stack-health.service": render_health_service(),
@@ -1031,7 +1032,7 @@ def rendered_files_for_node(env: dict[str, str], node_id: str, *, assets: dict[s
             files["vpn-stack-transport.service"] = render_transport_service(env)
         if journal_limits_enabled(env):
             files["journald-vpn-stack.conf"] = render_journald_dropin(env)
-        return finalize_node_files(env, plan, files, assets=assets)
+        return finalize_node_files(env, plan, files, assets=assets, platform=platform)
     if plan.node_id != NODE_EXIT:
         raise ValueError(f"unsupported node: {plan.node_id}")
     wan_iface = env.get("WAN_INTERFACE", "").strip() or "eth0"
@@ -1042,11 +1043,10 @@ def rendered_files_for_node(env: dict[str, str], node_id: str, *, assets: dict[s
         "nftables.conf": render_foreign_nftables(env, wan_iface),
         "vpn-stack-nft-apply.sh": render_nft_apply_script(),
         "vpn-stack-nftables.service": render_nftables_service(),
-        "sshd-vpn-stack.conf": render_sshd_hardening(env),
         "sysctl-vpn-stack.conf": render_sysctl(NODE_EXIT),
         "modules-vpn-stack.conf": render_modules_load(),
-        "apt-vpn-stack-unattended.conf": render_apt_periodic_dropin(),
-        "resolved-vpn-stack.conf": render_resolved_dropin(),
+        "dnsmasq-vpn-stack.conf": render_dnsmasq_config(),
+        "vpn-stack-dns.service": render_dns_service(),
         "btmp-vpn-stack.conf": render_btmp_logrotate_config(),
         **server_agent_artifacts(interserver=True),
         "vpn-stack-health.service": render_health_service(),
@@ -1060,11 +1060,19 @@ def rendered_files_for_node(env: dict[str, str], node_id: str, *, assets: dict[s
         files,
         assets=assets,
         foreign_block_ru=env.get("FOREIGN_BLOCK_RU", "0").strip() == "1",
+        platform=platform,
     )
 
 
-def write_node_rendered_files(env: dict[str, str], node_id: str, output_dir: Path, *, assets: dict[str, Path] | None = None) -> Path:
-    for name, content in rendered_files_for_node(env, node_id, assets=assets).items():
+def write_node_rendered_files(
+    env: dict[str, str],
+    node_id: str,
+    output_dir: Path,
+    *,
+    assets: dict[str, Path] | None = None,
+    platform: PlatformSpec | None = None,
+) -> Path:
+    for name, content in rendered_files_for_node(env, node_id, assets=assets, platform=platform).items():
         write_private_text(output_dir / name, content)
     return output_dir
 

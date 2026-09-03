@@ -32,6 +32,7 @@ from .localnet import assert_server_route_not_self_tunneled, local_route_to_serv
 from .models import AppError, NODE_META, RemoteTarget, UserCancelled
 from .manifest import project_node_env
 from .network_profile import FQ_KIND
+from .platforms import HostFacts, PlatformError, resolve_platform
 from .prompts import (
     ask_install_action,
     auth_mode_label,
@@ -139,6 +140,21 @@ def print_step(step: int, total: int, message: str) -> None:
     print(f"[{step}/{total}] {message}")
 
 
+def validate_server_platform(target: RemoteTarget, preflight: dict[str, str]) -> None:
+    try:
+        platform = resolve_platform(HostFacts.from_mapping(preflight))
+    except PlatformError as exc:
+        raise AppError(f"{target.label}: {exc}") from exc
+    preflight["platform_family"] = platform.family
+    preflight["package_provider"] = platform.package_provider
+    if preflight.get("host_firewall") not in {"", "none"}:
+        raise AppError(
+            f"{target.label}: активен {preflight['host_firewall']}. "
+            "vpn-stack должен быть единственным владельцем ingress/forward nftables policy; "
+            "отключи сторонний firewall до установки."
+        )
+
+
 def verify_target_interactively(
     target: RemoteTarget,
     *,
@@ -172,10 +188,7 @@ def verify_target_interactively(
             print_preflight(target, preflight)
             persist_runtime_auth(target)
             if validate_os:
-                if preflight.get("os_id") != "ubuntu":
-                    fail(f"{target.label} должен быть Ubuntu.")
-                if preflight.get("os_version") and preflight["os_version"] != "24.04":
-                    warn(f"{target.label} не на Ubuntu 24.04: {preflight['os_version']}")
+                validate_server_platform(target, preflight)
             if require_privilege:
                 ensure_remote_privilege(target, preflight, prompt_yes_no=prompt_yes_no, prompt_secret=prompt_secret)
             return target, preflight
@@ -240,10 +253,7 @@ def verify_target_non_interactively(
         )
     print_preflight(target, preflight)
     if validate_os:
-        if preflight.get("os_id") != "ubuntu":
-            fail(f"{target.label} должен быть Ubuntu.")
-        if preflight.get("os_version") and preflight["os_version"] != "24.04":
-            warn(f"{target.label} не на Ubuntu 24.04: {preflight['os_version']}")
+        validate_server_platform(target, preflight)
     if require_privilege:
         if preflight.get("is_root") == "1":
             target.sudo_mode = "root"
@@ -1228,8 +1238,7 @@ def maintain_workflow(
         print_header(f"Обслуживание {target.label}")
         ssh_stream(
             target,
-            "DEBIAN_FRONTEND=noninteractive apt-get update && "
-            "DEBIAN_FRONTEND=noninteractive apt-get -y --with-new-pkgs upgrade",
+            "/usr/bin/python3 /usr/local/lib/vpn-stack/vpn-stack-agent.py maintain --apply",
             as_root=True,
         )
         snapshot = DiagnosticsSnapshot.from_agent(remote_agent_snapshot(target, live_probes=True, profile="acceptance"))

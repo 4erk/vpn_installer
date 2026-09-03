@@ -15,6 +15,7 @@ from vpn_installer import interserver_transport, server_agent
 from vpn_installer.config import generate_default_env
 from vpn_installer.diagnostics import DiagnosticsSnapshot
 from vpn_installer.log_classifier import classify_line
+from vpn_installer.platforms import default_build_platform
 from vpn_installer.render import render_gateway_singbox
 
 
@@ -154,22 +155,25 @@ class ServerAgentTests(unittest.TestCase):
             "capabilities": capabilities,
             "required_services": required,
         }
+        platform = default_build_platform().to_dict()
         return {
-            "schema_version": 4,
+            "schema_version": 5,
             "topology": "single",
             "node_id": "gateway",
             "location": "foreign",
             "capabilities": capabilities,
             "required_services": required,
             "node": node,
+            "platform": platform,
             "install_plan": {
-                "schema_version": 4,
+                "schema_version": 5,
                 "topology": "single",
                 "node_id": "gateway",
                 "location": "foreign",
                 "capabilities": capabilities,
                 "required_services": required,
                 "services": services,
+                "platform": platform,
             },
         }
 
@@ -216,7 +220,7 @@ class ServerAgentTests(unittest.TestCase):
         self.assertEqual(action, "none")
         run_mock.assert_not_called()
 
-    def test_agent_emits_native_diagnostics_v5_end_to_end(self) -> None:
+    def test_agent_emits_native_diagnostics_v6_end_to_end(self) -> None:
         generated_at = "2026-08-06T18:00:00+00:00"
         installed_at = "2026-08-06T17:59:00+00:00"
         empty_logs = server_agent.summarize_lines([])
@@ -227,11 +231,11 @@ class ServerAgentTests(unittest.TestCase):
             "host": {"hostname": "ru", "login_user": "root", "is_root": True},
             "release": {"release_id": "release-1", "installed_at": installed_at},
             "services": {name: "active" for name in ("wireguard", "nftables", "sing-box", "resolver", "xray", "admin", "health_timer", "transport")},
-            "artifacts": {"manifest": {"schema_version": 4, "release_id": "release-1"}, "drift": "none", "files": {"sing-box.json": {"actual_sha256": "a", "expected_sha256": "a"}}},
+            "artifacts": {"manifest": {"schema_version": 5, "release_id": "release-1"}, "drift": "none", "files": {"sing-box.json": {"actual_sha256": "a", "expected_sha256": "a"}}},
             "wireguard": {"interface": "wg0", "state": "up", "peers": []},
             "probes": {"profile": "acceptance", "ok": True},
             "storage": {"root_filesystem": {"source": "/dev/vda1", "verdict": "verified"}},
-            "network": {"tcp_adaptation": {"qdisc": "fq"}, "resolver": {"managed_stub": True}, "conntrack": {"count": 1}},
+            "network": {"tcp_adaptation": {"qdisc": "fq"}, "resolver": {"managed_config": True}, "conntrack": {"count": 1}},
             "front": {"listening": True},
             "transport": {"interserver": {"configured": True}},
             "maintenance": {"upgradable": 0, "security_upgradable": 0, "reboot_required": False},
@@ -247,7 +251,7 @@ class ServerAgentTests(unittest.TestCase):
             payload = server_agent.diagnostics_snapshot(live_probes=True, full_logs=True, include_maintenance=True)
 
         snapshot = DiagnosticsSnapshot.from_agent(payload)
-        self.assertEqual(snapshot.schema_version, 5)
+        self.assertEqual(snapshot.schema_version, 6)
         self.assertEqual(snapshot.collector_status, "ok")
         self.assertEqual(snapshot.host["login_user"], "root")
         self.assertEqual(snapshot.log_windows["since_release"].counts["dns_timeout"], 0)
@@ -262,11 +266,11 @@ class ServerAgentTests(unittest.TestCase):
             "host": {},
             "release": {"installed_at": generated_at},
             "services": {name: "active" for name in ("wireguard", "nftables", "sing-box", "resolver", "xray")},
-            "artifacts": {"manifest": {"schema_version": 4}, "drift": "none", "files": {}},
+            "artifacts": {"manifest": {"schema_version": 5}, "drift": "none", "files": {}},
             "wireguard": {"interface": "wg0", "state": "up"},
             "probes": {"profile": "none", "ok": None},
             "storage": {"root_filesystem": {"verdict": "verified"}},
-            "network": {"tcp_adaptation": {"qdisc": "fq"}, "resolver": {"managed_stub": True}, "conntrack": {"count": 1}},
+            "network": {"tcp_adaptation": {"qdisc": "fq"}, "resolver": {"managed_config": True}, "conntrack": {"count": 1}},
             "front": {"listening": True},
             "transport": {"interserver": {"configured": True}},
             "maintenance": {},
@@ -3184,6 +3188,7 @@ class ServerAgentTests(unittest.TestCase):
             shutil.copy2(source_root / "network_profile.py", target / "network_profile.py")
             shutil.copy2(source_root / "release_integrity.py", target / "release_integrity.py")
             shutil.copy2(source_root / "resource_control.py", target / "resource_control.py")
+            shutil.copy2(source_root / "platforms.py", target / "platforms.py")
             result = subprocess.run([sys.executable, str(agent), "--help"], text=True, capture_output=True, check=False, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("vpn-stack-agent", result.stdout)
@@ -3199,6 +3204,7 @@ class ServerAgentTests(unittest.TestCase):
             shutil.copy2(source_root / "network_profile.py", target / "network_profile.py")
             shutil.copy2(source_root / "release_integrity.py", target / "release_integrity.py")
             shutil.copy2(source_root / "resource_control.py", target / "resource_control.py")
+            shutil.copy2(source_root / "platforms.py", target / "platforms.py")
             result = subprocess.run([sys.executable, str(agent), "--help"], text=True, capture_output=True, check=False, timeout=10)
 
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -3381,20 +3387,19 @@ class ServerAgentTests(unittest.TestCase):
 
     def test_resolver_snapshot_reports_managed_cache_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            dropin = Path(tmp) / "resolved.conf"
-            dropin.write_text(
-                "[Resolve]\nDNS=1.1.1.1 9.9.9.9 8.8.8.8\nCache=yes\nStaleRetentionSec=1h\n",
+            config = Path(tmp) / "dnsmasq.conf"
+            config.write_text(
+                "listen-address=127.0.0.1\nport=1054\nno-resolv\nall-servers\n"
+                "cache-size=4096\nserver=1.1.1.1\nserver=9.9.9.9\nserver=8.8.8.8\n",
                 encoding="utf-8",
             )
-            with (
-                patch.object(server_agent, "RESOLVED_DROPIN_PATH", dropin),
-                patch.object(server_agent.os.path, "realpath", return_value=server_agent.RESOLVED_STUB_PATH),
-            ):
+            with patch.object(server_agent, "DNS_CACHE_CONFIG_PATH", config):
                 resolver = server_agent.resolver_snapshot()
 
-        self.assertTrue(resolver["managed_stub"])
-        self.assertTrue(resolver["cache_enabled"])
-        self.assertEqual(resolver["stale_retention"], "1h")
+        self.assertTrue(resolver["managed_config"])
+        self.assertTrue(resolver["concurrent_upstreams"])
+        self.assertEqual(resolver["listen_port"], 1054)
+        self.assertEqual(resolver["cache_capacity"], 4096)
         self.assertEqual(resolver["upstreams"], ["1.1.1.1", "9.9.9.9", "8.8.8.8"])
 
     def test_proxy_probe_does_not_force_ip_family_on_ipv4_loopback_proxy(self) -> None:

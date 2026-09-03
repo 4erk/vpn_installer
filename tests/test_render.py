@@ -47,7 +47,17 @@ class RenderTests(unittest.TestCase):
         for location in ("ru", "foreign"):
             with self.subTest(location=location):
                 payload = json.loads(render.render_gateway_singbox(self.make_single_env(location)))
-                self.assertEqual(payload["dns"]["servers"], [{"type": "local", "tag": "dns-local"}])
+                self.assertEqual(
+                    payload["dns"]["servers"],
+                    [
+                        {
+                            "type": "tcp",
+                            "tag": "dns-local",
+                            "server": "127.0.0.1",
+                            "server_port": 1054,
+                        }
+                    ],
+                )
                 self.assertEqual(payload["dns"]["final"], "dns-local")
                 self.assertEqual([item["tag"] for item in payload["inbounds"]], ["router-in", "public-hy2-in"])
                 self.assertEqual(payload["endpoints"], [])
@@ -324,7 +334,15 @@ class RenderTests(unittest.TestCase):
         payload = json.loads(render.render_gateway_singbox(env))
         servers = {server["tag"]: server for server in payload["dns"]["servers"]}
         self.assertIn("dns-ru-direct", servers)
-        self.assertEqual(servers["dns-ru-direct"], {"type": "local", "tag": "dns-ru-direct"})
+        self.assertEqual(
+            servers["dns-ru-direct"],
+            {
+                "type": "tcp",
+                "tag": "dns-ru-direct",
+                "server": "127.0.0.1",
+                "server_port": 1054,
+            },
+        )
         self.assertNotIn("detour", servers["dns-ru-direct"])
         self.assertEqual(servers["dns-global"]["detour"], "to-foreign")
 
@@ -725,11 +743,13 @@ class RenderTests(unittest.TestCase):
         self.assertIn("sing-box.json", files)
         self.assertIn("xray.json", files)
         self.assertIn(f"{env['WG_INTERFACE']}.conf", files)
-        self.assertIn("sshd-vpn-stack.conf", files)
+        self.assertNotIn("sshd-vpn-stack.conf", files)
         self.assertIn("sysctl-vpn-stack.conf", files)
         self.assertIn("journald-vpn-stack.conf", files)
-        self.assertIn("apt-vpn-stack-unattended.conf", files)
-        self.assertIn("resolved-vpn-stack.conf", files)
+        self.assertNotIn("apt-vpn-stack-unattended.conf", files)
+        self.assertNotIn("resolved-vpn-stack.conf", files)
+        self.assertIn("dnsmasq-vpn-stack.conf", files)
+        self.assertIn("vpn-stack-dns.service", files)
         self.assertIn("vpn-stack-agent.py", files)
         self.assertIn("log_classifier.py", files)
         self.assertIn("release_integrity.py", files)
@@ -748,6 +768,11 @@ class RenderTests(unittest.TestCase):
         self.assertIn("vpn-stack-admin.service", files)
         self.assertIn("vpn-stack-xray.service", files)
         foreign_files = render.rendered_files_for_node(env, render.NODE_EXIT)
+        self.assertNotIn("sshd-vpn-stack.conf", foreign_files)
+        self.assertNotIn("apt-vpn-stack-unattended.conf", foreign_files)
+        self.assertNotIn("resolved-vpn-stack.conf", foreign_files)
+        self.assertIn("dnsmasq-vpn-stack.conf", foreign_files)
+        self.assertIn("vpn-stack-dns.service", foreign_files)
         self.assertIn("interserver_transport.py", foreign_files)
         self.assertIn("network_profile.py", foreign_files)
         self.assertNotIn("vpn-stack-transport.service", foreign_files)
@@ -755,7 +780,7 @@ class RenderTests(unittest.TestCase):
         self.assertNotIn("admin_web.py", foreign_files)
         self.assertNotIn("vpn-stack-admin.service", foreign_files)
 
-    def test_runtime_dropins_are_renderer_owned_and_role_specific(self) -> None:
+    def test_runtime_artifacts_are_renderer_owned_and_role_specific(self) -> None:
         env = self.make_env()
         ru_files = render.rendered_files_for_node(env, render.NODE_GATEWAY)
         foreign_files = render.rendered_files_for_node(env, render.NODE_EXIT)
@@ -769,14 +794,23 @@ class RenderTests(unittest.TestCase):
         self.assertIn("net.core.wmem_max=16777216", foreign_files["sysctl-vpn-stack.conf"])
         self.assertIn("net.ipv4.conf.all.src_valid_mark=1", ru_files["sysctl-vpn-stack.conf"])
         self.assertIn("net.ipv4.ip_forward=1", foreign_files["sysctl-vpn-stack.conf"])
-        self.assertIn('APT::Periodic::Unattended-Upgrade "1";', ru_files["apt-vpn-stack-unattended.conf"])
-        self.assertIn('APT::Periodic::AutocleanInterval "7";', ru_files["apt-vpn-stack-unattended.conf"])
-        self.assertIn("DNS=1.1.1.1 9.9.9.9 8.8.8.8", ru_files["resolved-vpn-stack.conf"])
-        self.assertIn("Cache=yes", foreign_files["resolved-vpn-stack.conf"])
-        self.assertIn("StaleRetentionSec=1h", foreign_files["resolved-vpn-stack.conf"])
+        self.assertEqual(ru_files["dnsmasq-vpn-stack.conf"], foreign_files["dnsmasq-vpn-stack.conf"])
+        self.assertIn("listen-address=127.0.0.1\nport=1054\n", ru_files["dnsmasq-vpn-stack.conf"])
+        self.assertIn("ExecStart=/usr/sbin/dnsmasq --keep-in-foreground", ru_files["vpn-stack-dns.service"])
+        self.assertIn("Requires=vpn-stack-dns.service", ru_files["sing-box.service"])
+        self.assertIn("Requires=vpn-stack-dns.service", foreign_files["sing-box.service"])
         self.assertIn(f"SystemMaxUse={env['JOURNAL_SYSTEM_MAX_USE']}", ru_files["journald-vpn-stack.conf"])
         env["JOURNAL_LIMIT_ENABLED"] = "0"
         self.assertNotIn("journald-vpn-stack.conf", render.rendered_files_for_node(env, render.NODE_GATEWAY))
+
+    def test_rendered_manifest_and_install_plan_use_schema_5(self) -> None:
+        files = render.rendered_files_for_node(self.make_env(), render.NODE_GATEWAY)
+        manifest = json.loads(files["render-manifest.json"])
+        install_plan = json.loads(files["install-plan.json"])
+
+        self.assertEqual(manifest["schema_version"], 5)
+        self.assertEqual(install_plan["schema_version"], 5)
+        self.assertEqual(manifest["install_plan"], install_plan)
 
     def test_ru_wireguard_hooks_are_restart_safe(self) -> None:
         env = self.make_env()
@@ -840,20 +874,15 @@ class RenderTests(unittest.TestCase):
         inbound = next(item for item in payload["inbounds"] if item["tag"] == "dns-relay-in")
         self.assertEqual(inbound["listen"], "0.0.0.0")
         self.assertNotIn("network", inbound)
-        self.assertEqual((inbound["override_address"], inbound["override_port"]), ("127.0.0.53", 53))
+        self.assertEqual((inbound["override_address"], inbound["override_port"]), ("127.0.0.1", 1054))
         nftables = render.render_foreign_nftables(env, "eth0")
         self.assertIn(
             f'iifname "{env["WG_INTERFACE"]}" ip saddr 10.75.0.1 udp dport 1053 counter accept',
             nftables,
         )
 
-    def test_render_sshd_hardening_uses_expected_limits(self) -> None:
-        env = self.make_env()
-        config = render.render_sshd_hardening(env)
-        self.assertIn("LoginGraceTime 20", config)
-        self.assertIn("MaxAuthTries 3", config)
-        self.assertIn("MaxStartups 10:30:60", config)
-        self.assertIn("PerSourceMaxStartups 6", config)
+    def test_renderer_does_not_expose_removed_sshd_hardening(self) -> None:
+        self.assertFalse(hasattr(render, "render_sshd_hardening"))
 
     def test_render_ru_nftables_admits_ssh_and_vless_without_log_driven_blocks(self) -> None:
         env = self.make_env()
@@ -1127,6 +1156,19 @@ class RenderTests(unittest.TestCase):
             tmp_path = Path(tmp)
             env_file = tmp_path / "demo.env"
             output_dir = tmp_path / "preview"
+            python_wrapper = tmp_path / "python-wrapper.sh"
+            embedded_python = (repo_root / ".runtime" / "python" / "windows" / "python.exe").as_posix()
+            python_wrapper.write_text(
+                "#!/usr/bin/env bash\n"
+                "code=\"$2\"\n"
+                "shift 2\n"
+                f'exec "{embedded_python}" -c \'import sys; code = sys.argv.pop(1); root = sys.argv.pop(1); '
+                "sys.path.insert(0, root); from vpn_installer import platforms; "
+                "platforms.current_platform = platforms.default_build_platform; "
+                "exec(compile(code, \"<vpn-test>\", \"exec\"))' "
+                f'"$code" "{repo_root.as_posix()}" "$@"\n',
+                encoding="utf-8",
+            )
             env_file.write_text(render.render_env_text(env), encoding="utf-8")
             command = [
                 preferred_bash() or "bash",
@@ -1144,7 +1186,11 @@ class RenderTests(unittest.TestCase):
                 cwd=repo_root,
                 capture_output=True,
                 text=True,
-                env={**os.environ, "LC_ALL": "C.UTF-8"},
+                env={
+                    **os.environ,
+                    "LC_ALL": "C.UTF-8",
+                    "PYTHON_BIN": python_wrapper.as_posix(),
+                },
                 check=False,
             )
             self.assertEqual(completed.returncode, 0, msg=f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}")

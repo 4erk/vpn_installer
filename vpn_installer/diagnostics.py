@@ -12,7 +12,7 @@ except ImportError:  # Installed beside vpn-stack-agent.py as a standalone modul
     from log_classifier import BUCKETS  # type: ignore[no-redef]
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 COLLECTOR_STATUSES = frozenset({"ok", "error", "stale", "skipped", "not_applicable"})
 TOPOLOGIES = frozenset({"single", "dual"})
 NODE_IDS = frozenset({"gateway", "exit"})
@@ -305,7 +305,7 @@ class DiagnosticsSnapshot:
         if self.topology == "single" and self.node_id == "exit":
             raise ValueError("single topology cannot contain an exit node")
         if set(self.collectors) != set(COLLECTOR_NAMES):
-            raise ValueError("collector names must match the V5 contract")
+            raise ValueError("collector names must match the V6 contract")
         if not all(isinstance(value, CollectorState) for value in self.collectors.values()):
             raise TypeError("collectors must contain CollectorState values")
         self.collectors = {name: self.collectors[name] for name in COLLECTOR_NAMES}

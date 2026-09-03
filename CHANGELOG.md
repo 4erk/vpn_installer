@@ -8,6 +8,28 @@
 
 Каждый раздел ниже описывает поведение именно указанной версии; действующий контракт задаёт верхний раздел релиза.
 
+## [0.22.0] - 2026-09-03
+
+### Added
+
+- Серверная матрица расширена до Ubuntu 22.04/24.04/26.04, Debian 12/13, AlmaLinux/Rocky Linux 9/10 и Fedora 43/44 на `x86_64` с `systemd`. `HostFacts` и `PlatformSpec` фиксируют точную ОС, архитектуру, init, security module, firewall owner и package provider в manifest schema `5`.
+- Роли теперь задают логические зависимости, которые один provider преобразует в APT, DNF4 или DNF5 packages. Для EL9 используется совместимый `curl-minimal`; transient repository failures повторяются один раз, package conflicts не маскируются.
+- Добавлен app-owned DNS cache `vpn-stack-dns.service` на `127.0.0.1:1054`. Он входит в manifest, drift, health, acceptance и rollback, не меняя host resolver или `/etc/resolv.conf`.
+- Docker contract matrix рендерит install plan, устанавливает его allowlisted packages, запускает `dnsmasq` от непривилегированного пользователя и выполняет реальный DNS-запрос на каждом поддерживаемом релизе.
+
+### Changed
+
+- `install.sh` на минимальном образе сначала устанавливает только Python 3.9+, затем передаёт package plan Python provider. DNF устанавливает пакеты одним idempotent вызовом без повторного `makecache`; transient repository failures повторяются один раз.
+- Package install, update inventory, apply и cache cleanup принадлежат platform provider. SELinux hosts получают постоянные контексты для pinned binaries и app-owned dnsmasq config, а TCP/UDP `1054` назначается `dns_port_t` только если порт свободен или уже принадлежит этому типу. Root filesystem допускает поддерживаемые writable ext4, XFS и Btrfs.
+- Install/reinstall отклоняет неизвестный init, активные `ufw`/`firewalld` и недоказанный firewall state до managed cutover. Локальный `render-only` остаётся кроссплатформенным и не пытается определить Linux по Windows `/etc/os-release`.
+- Diagnostics schema `6` и manifest/install-plan schema `5` включают platform contract. Пользовательский вывод остаётся кратким; полный trace сохраняется в runtime logs.
+- Rollback на совместимый `0.21.8` проверяет snapshot старым контрактом, но атомарно сохраняет acceptance уже в текущей diagnostics schema `6`. Любой реальный HTTP status при VLESS probe считается доказательством транспорта; application-level `4xx/5xx` остаётся в отчёте и не выдаётся за сетевой timeout.
+
+### Compatibility
+
+- Единственный переход `0.21.8 -> 0.22.0` проверяется точным adapter старых schemas `3/4/5`. Он удаляет retired SSH/APT/resolved artifacts и не переносит их в новый runtime; adapter помечен к удалению в `0.22.1`.
+- Основной `vless-uri.txt`, Xray/Reality front, routing policy, WireGuard MTU, web-admin и клиентские профили не меняются.
+
 ## [0.21.8] - 2026-09-02
 
 ### Fixed

@@ -65,7 +65,7 @@ class DiagnosticsTests(unittest.TestCase):
 
         restored = DiagnosticsSnapshot.from_json(snapshot.to_json())
 
-        self.assertEqual(restored.schema_version, 5)
+        self.assertEqual(restored.schema_version, 6)
         self.assertEqual(restored.deployment, "demo")
         self.assertEqual(restored.topology, "dual")
         self.assertEqual(restored.node_id, "gateway")

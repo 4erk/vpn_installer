@@ -116,8 +116,8 @@ class InstallSupportTests(unittest.TestCase):
                     manifest = json.loads((output_dir / "render-manifest.json").read_text(encoding="utf-8"))
                     output_names = {path.name for path in output_dir.iterdir()}
 
-                self.assertEqual(manifest["schema_version"], 4)
-                self.assertEqual(manifest["install_plan"]["schema_version"], 4)
+                self.assertEqual(manifest["schema_version"], 5)
+                self.assertEqual(manifest["install_plan"]["schema_version"], 5)
                 self.assertEqual(manifest["node"]["id"], node_id)
                 self.assertEqual(manifest["node"]["location"], plan.location)
                 self.assertEqual(manifest["node"]["capabilities"], sorted(plan.capabilities))
@@ -228,8 +228,8 @@ class InstallSupportTests(unittest.TestCase):
             )
             self.assertEqual(rc, 0)
             manifest = json.loads((output_dir / "render-manifest.json").read_text(encoding="utf-8"))
-            self.assertEqual(manifest["schema_version"], 4)
-            self.assertEqual(manifest["install_plan"]["schema_version"], 4)
+            self.assertEqual(manifest["schema_version"], 5)
+            self.assertEqual(manifest["install_plan"]["schema_version"], 5)
             self.assertEqual(manifest["node"]["location"], "foreign")
             self.assertFalse((output_dir / "wg0.conf").exists())
             self.assertFalse((output_dir / "vpn-stack-transport.service").exists())

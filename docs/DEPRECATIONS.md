@@ -1,35 +1,33 @@
 # Совместимость версий
 
-## Текущее окно
+## Переходный релиз 0.22.0
 
-Релиз `0.21.8` записывает только текущие форматы:
+`0.22.0` поддерживает fresh install, повторную установку той же версии и один последовательный переход с точного `0.21.8`.
 
-- config/state schema `3`;
-- manifest/install-plan schema `4`;
-- diagnostics schema `5`;
-- topology `single|dual` и узлы `gateway|exit`.
+| Формат | `0.21.8` | `0.22.0` |
+| --- | --- | --- |
+| config/state | `3` | `3` |
+| manifest/install-plan | `4` | `5` |
+| diagnostics | `5` | `6` |
 
-Manifest каждого узла объявляет `installed_min=0.21.7` и `installed_max=0.21.8`.
+Manifest `0.22.0` объявляет `installed_min=0.21.8`, `installed_max=0.22.0`. Старый bundle проверяет отдельный fail-closed adapter `transition_0218`: точную версию, schemas, topology/capabilities, package/service/artifact ownership, hashes, binaries и acceptance snapshot. Неизвестные версии и приблизительно похожие manifests отклоняются до изменения managed runtime.
 
-| Состояние сервера | Допустимое действие |
-| --- | --- |
-| Управляемой установки нет | Fresh install |
-| Установлен точный `0.21.7` | Обновление на `0.21.8` тем же current-schema validator |
-| Установлен точный `0.21.8` | Same-version reinstall |
-| Любая другая или нераспознаваемая версия | Отказ до изменения managed runtime |
+Переход удаляет из установленного состояния прежние SSH, APT и `systemd-resolved` drop-ins. Старые SSH env-поля принимаются только как одноразовый input `0.21.8` и не попадают в новый `node.env`. Adapter и этот input cleanup имеют `remove_in=0.22.1`.
 
-Для неподдерживаемого релиза используй `.\vpn.cmd` на Windows или `./vpn.sh` на Linux из совпадающего Git-тега. Выполни доступную в той версии команду `remove`/`purge`, затем установи текущий релиз с нуля. Новый установщик не угадывает ownership или формат чужого поколения.
+## Следующий релиз 0.22.1
 
-## Инварианты
+`0.22.1` должен обновляться только с `0.22.0` и записывать те же текущие schemas `3/5/6`. В нём удаляются:
 
-- Проверка установленной версии выполняется до package install, upload, transaction snapshot и переключения `current`.
-- `0.21.7` и `0.21.8` проходят один validator config/state `3`, manifest/install-plan `4` и diagnostics `5`; version-specific schema adapters отсутствуют.
-- Current bundle обязан публиковать точное текущее окно. Предыдущий совместимый bundle обязан иметь корректное собственное окно, включающее его версию.
-- Любой неизвестный schema, retired `role` field, неканонический node env, изменённый artifact или несовпадающий hash завершает проверку ошибкой.
-- Rollback проверяет восстановленный релиз тем же installed-bundle validator и повторяет native acceptance; отдельного compatibility runtime нет.
+- `transition_0218` и чтение diagnostics schema `5`;
+- retired renderer `system_resolver`;
+- обработка deprecated SSH env-полей;
+- разрешения installer на старые `/etc/ssh`, `/etc/apt` и `/etc/systemd/resolved` artifacts;
+- Docker fixtures и тесты перехода `0.21.8`.
 
-## Следующие релизы
+После этого runtime не содержит цепочки миграций. Каждый следующий несовместимый шаг снова обязан иметь ровно один явно ограниченный переход с непосредственно предыдущего релиза.
 
-Каждый релиз явно задаёт минимальную и максимальную обновляемую версию. Если следующий релиз сохраняет схемы, достаточно передвинуть окно и проверить previous/current одним validator. Если схема действительно меняется, переход должен быть отдельным ограниченным модулем с указанной версией удаления; цепочки миграций и permissive fallback запрещены.
+## Неподдерживаемая версия
 
-Активных deprecated env-ключей, contract deltas, role aliases, readers старых схем и migration chains в `0.21.8` нет. Поддержка обновления с `0.21.6` завершена: новый релиз принимает только текущий `0.21.7` и не содержит version-specific adapters.
+Для любой версии вне текущего окна используй `.\vpn.cmd` на Windows или `./vpn.sh` на Linux из совпадающего Git-тега, выполни доступную там команду `remove`/`purge`, затем сделай fresh install текущей версии. Новый установщик не угадывает ownership неизвестного поколения.
+
+Основной `out/<deployment>/client/vless-uri.txt` этим переходом не меняется.

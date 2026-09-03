@@ -37,6 +37,7 @@ BTMP_LOGROTATE_STATE_PATH = STATE_DIR / "btmp-logrotate.status"
 JOURNAL_PATH = Path("/var/log/journal")
 APT_ARCHIVES_PATH = Path("/var/cache/apt/archives")
 APT_LISTS_PATH = Path("/var/lib/apt/lists")
+DNF_CACHE_PATH = Path("/var/cache/dnf")
 
 
 def _run(args: list[str], *, timeout: int = 30) -> subprocess.CompletedProcess[str]:
@@ -332,9 +333,15 @@ def _kernel_oom_snapshot(installed_at: str) -> dict[str, Any]:
 
 
 def storage_snapshot(root_filesystem: Mapping[str, Any], installed_at: str) -> dict[str, Any]:
-    security_paths = [BTMP_PATH, *Path("/var/log").glob("btmp.*"), *Path("/var/log").glob("auth.log*")]
+    security_paths = [
+        BTMP_PATH,
+        *Path("/var/log").glob("btmp.*"),
+        *Path("/var/log").glob("auth.log*"),
+        *Path("/var/log").glob("secure*"),
+    ]
     apt_archives_bytes = path_tree_disk_usage(APT_ARCHIVES_PATH)
     apt_lists_bytes = path_tree_disk_usage(APT_LISTS_PATH)
+    dnf_cache_bytes = path_tree_disk_usage(DNF_CACHE_PATH)
     return {
         "root_filesystem": dict(root_filesystem),
         "capacity": _disk_capacity_snapshot(),
@@ -346,7 +353,8 @@ def storage_snapshot(root_filesystem: Mapping[str, Any], installed_at: str) -> d
         "package_cache": {
             "archives_bytes": apt_archives_bytes,
             "lists_bytes": apt_lists_bytes,
-            "total_bytes": apt_archives_bytes + apt_lists_bytes,
+            "dnf_bytes": dnf_cache_bytes,
+            "total_bytes": apt_archives_bytes + apt_lists_bytes + dnf_cache_bytes,
         },
         "memory": memory_runtime_snapshot(),
         "runtime_events": {"oom_kills": _kernel_oom_snapshot(installed_at)},
@@ -376,4 +384,10 @@ def storage_maintenance(env: Mapping[str, str], *, deep: bool = False) -> dict[s
         )
         if rotate.returncode == 0 and vacuum.returncode == 0:
             actions.append("journal-vacuumed")
+    if deep:
+        if shutil.which("apt-get") and _run(["apt-get", "clean"], timeout=120).returncode == 0:
+            actions.append("apt-cache-cleaned")
+        dnf = "dnf5" if shutil.which("dnf5") else "dnf" if shutil.which("dnf") else ""
+        if dnf and _run([dnf, "clean", "all"], timeout=120).returncode == 0:
+            actions.append("dnf-cache-cleaned")
     return {"changed": bool(actions), "actions": actions}

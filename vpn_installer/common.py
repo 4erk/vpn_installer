@@ -71,7 +71,8 @@ def read_text(path: Path) -> str:
 
 def write_text(path: Path, content: str) -> None:
     ensure_file_parent(path)
-    path.write_text(content, encoding="utf-8", newline="\n")
+    with path.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(content)
 
 
 def write_private_text(path: Path, content: str) -> None:

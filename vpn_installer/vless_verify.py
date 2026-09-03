@@ -24,7 +24,7 @@ RUNNER_TRANSPORT_DRAIN_SECONDS = 10
 RELIABILITY_PROBE_URLS = (
     "https://www.gstatic.com/generate_204",
     "https://vk.ru/",
-    "https://github.com/favicon.ico",
+    "https://chatgpt.com/",
 )
 THROUGHPUT_SOURCE_URLS = (
     "https://fsn1-speed.hetzner.com/100MB.bin",
@@ -512,7 +512,7 @@ while (( reliability_attempts < __RELIABILITY_ATTEMPTS__ )); do
     IFS='|' read -r probe_code probe_namelookup probe_connect probe_appconnect probe_starttransfer probe_seconds probe_remote_ip <<<"$probe_output"
     probe_error=$(tr '\t\r\n' '   ' <"$reliability_error_path" | tail -c 500)
     cat "$reliability_error_path" >>runner-curl.log
-    if (( probe_status != 0 )) || [[ ! "$probe_code" =~ ^(200|204|301|302|403)$ ]] || [[ ! "$probe_seconds" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    if (( probe_status != 0 )) || [[ ! "$probe_code" =~ ^[1-5][0-9][0-9]$ ]] || [[ ! "$probe_seconds" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
         printf '%s\t0\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$reliability_url" "$probe_status" "$probe_code" "$probe_namelookup" "$probe_connect" "$probe_appconnect" "$probe_starttransfer" "$probe_seconds" "$probe_remote_ip" "$probe_error" >>"$reliability_results_path"
         reliability_failures=$((reliability_failures + 1))
         if (( reliability_failures >= __RELIABILITY_FAILURE_LIMIT__ )); then

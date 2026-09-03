@@ -18,6 +18,7 @@ from .manifest import (
     build_install_plan,
     required_asset_names,
 )
+from .platforms import PlatformSpec
 from .topology import CONFIG_SCHEMA_VERSION, TopologySpec
 
 
@@ -124,7 +125,8 @@ def _write_lines(contract_dir: Path, name: str, rows: list[tuple[str, ...]]) -> 
         if any("\t" in value or "\n" in value for value in row):
             _fail(f"unsafe tabular value in {name}")
     text = "".join("\t".join(row) + "\n" for row in rows)
-    (contract_dir / name).write_text(text, encoding="utf-8", newline="\n")
+    with (contract_dir / name).open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(text)
 
 
 def validate_bundle(
@@ -135,6 +137,7 @@ def validate_bundle(
     external_assets: Path | None = None,
     require_assets: bool = False,
     require_binaries: bool = False,
+    expected_platform: PlatformSpec | None = None,
 ) -> None:
     """Validate a current rendered node bundle and emit its fail-closed TSV contract."""
 
@@ -146,6 +149,7 @@ def validate_bundle(
         require_assets=require_assets,
         require_binaries=require_binaries,
         expected_version=VERSION,
+        expected_platform=expected_platform,
     )
 
 
@@ -164,6 +168,14 @@ def validate_installed_bundle(
         version = str(require_compatible_installed(manifest))
     except ValueError as exc:
         _fail(str(exc))
+    if version == "0.21.8":
+        from .transition_0218 import validate_installed_bundle as validate_legacy
+
+        try:
+            validate_legacy(bundle, expected_node, contract_dir)
+        except ValueError as exc:
+            _fail(str(exc))
+        return
     _validate_bundle(
         bundle,
         expected_node,
@@ -172,6 +184,37 @@ def validate_installed_bundle(
         require_binaries=True,
         expected_version=version,
     )
+
+
+def normalize_acceptance_snapshot(
+    payload: Mapping[str, Any],
+    manifest: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate an installed release snapshot and return the current diagnostics schema."""
+
+    from .diagnostics import SCHEMA_VERSION as diagnostics_schema
+
+    version = str(manifest.get("version", ""))
+    if version == "0.21.8":
+        from .transition_0218 import normalize_snapshot
+
+        try:
+            return normalize_snapshot(payload, manifest, target_schema=diagnostics_schema)
+        except ValueError as exc:
+            _fail(str(exc))
+
+    if version != VERSION or manifest.get("schema_version") != MANIFEST_SCHEMA_VERSION:
+        _fail("acceptance manifest does not belong to a supported release")
+    if payload.get("schema_version") != diagnostics_schema:
+        _fail(f"post-activation agent did not return diagnostics schema {diagnostics_schema}")
+    for field in ("topology", "node_id", "location", "capabilities"):
+        if payload.get(field) != manifest.get(field):
+            _fail(f"post-activation canonical field mismatch: {field}")
+    return dict(payload)
+
+
+def validate_acceptance_snapshot(payload: Mapping[str, Any], manifest: Mapping[str, Any]) -> None:
+    normalize_acceptance_snapshot(payload, manifest)
 
 
 def _validate_bundle(
@@ -183,6 +226,7 @@ def _validate_bundle(
     require_assets: bool,
     require_binaries: bool,
     expected_version: str,
+    expected_platform: PlatformSpec | None = None,
 ) -> None:
 
     bundle = Path(bundle)
@@ -218,6 +262,18 @@ def _validate_bundle(
         _fail("standalone install plan does not match the manifest")
     if manifest.get("install_plan_sha256") != _canonical_digest(standalone_plan):
         _fail("install plan digest mismatch")
+    try:
+        platform = PlatformSpec.from_dict(manifest.get("platform"))
+    except ValueError as exc:
+        _fail(f"invalid platform descriptor: {exc}")
+    if standalone_plan.get("platform") != platform.to_dict():
+        _fail("install plan platform does not match the manifest")
+    if expected_platform is not None and platform != expected_platform:
+        _fail(
+            "bundle platform does not match the target host: "
+            f"bundle={platform.os_id} {platform.os_version} {platform.architecture}, "
+            f"host={expected_platform.os_id} {expected_platform.os_version} {expected_platform.architecture}"
+        )
 
     env = _parse_env(env_path)
     if env.get("CONFIG_SCHEMA") != str(CONFIG_SCHEMA_VERSION):
@@ -384,7 +440,7 @@ def _validate_bundle(
             _fail(f"unknown service ownership: {ownership}")
         service_rows.append((name, unit, ownership))
 
-    expected_plan = build_install_plan(node_plan, artifacts, assets, binaries, env=env)
+    expected_plan = build_install_plan(node_plan, artifacts, assets, binaries, env=env, platform=platform)
     expected_plan["schema_version"] = INSTALL_PLAN_SCHEMA_VERSION
     if standalone_plan != expected_plan:
         _fail(f"install plan differs from the canonical schema-{INSTALL_PLAN_SCHEMA_VERSION} compiler output")
@@ -406,6 +462,8 @@ def _validate_bundle(
     _write_lines(contract_dir, "binaries.tsv", binary_rows)
     _write_lines(contract_dir, "services.tsv", service_rows)
     _write_lines(contract_dir, "packages.tsv", package_rows)
+    with (contract_dir / "platform.json").open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(json.dumps(platform.to_dict(), sort_keys=True, separators=(",", ":")) + "\n")
     _write_lines(
         contract_dir,
         "meta.tsv",
@@ -418,5 +476,7 @@ def _validate_bundle(
             ("node_id", node_plan.node_id),
             ("location", node_plan.location),
             ("capabilities", ",".join(sorted(node_plan.capabilities))),
+            ("platform", f"{platform.os_id}:{platform.os_version}:{platform.architecture}"),
+            ("package_provider", platform.package_provider),
         ],
     )

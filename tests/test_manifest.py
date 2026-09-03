@@ -49,8 +49,10 @@ class ManifestTopologyTests(unittest.TestCase):
                 manifest = json.loads(files["render-manifest.json"])
                 install_plan = json.loads(files["install-plan.json"])
 
-                self.assertEqual(manifest["schema_version"], 4)
-                self.assertEqual(manifest["install_plan"]["schema_version"], 4)
+                self.assertEqual(manifest["schema_version"], 5)
+                self.assertEqual(manifest["install_plan"]["schema_version"], 5)
+                self.assertEqual(manifest["platform"], manifest["install_plan"]["platform"])
+                self.assertEqual(manifest["platform"]["os_id"], "ubuntu")
                 self.assertEqual(manifest["topology"], topology)
                 self.assertEqual(manifest["node_id"], node_id)
                 self.assertEqual(manifest["location"], plan.location)
@@ -77,7 +79,7 @@ class ManifestTopologyTests(unittest.TestCase):
                 packages = set(manifest["install_plan"]["packages"])
                 self.assertIn("iproute2", packages)
                 self.assertEqual("unzip" in packages, plan.requires_xray)
-                self.assertEqual("wireguard" in packages, plan.has_interserver)
+                self.assertEqual("wireguard-tools" in packages, plan.has_interserver)
                 self.assertEqual("iperf3" in packages, plan.has_interserver)
 
     def test_disabled_journal_limit_is_absent_from_artifact_contract(self) -> None:

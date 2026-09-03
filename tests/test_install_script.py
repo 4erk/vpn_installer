@@ -127,7 +127,33 @@ class InstallScriptContractTests(unittest.TestCase):
                 "set -euo pipefail",
                 "export VPNSTACK_INSTALL_LIBRARY_ONLY=1",
                 f"source '{source}'",
-                f"validate_bundle '{bundle.as_posix()}' gateway '{contract.as_posix()}' '' 0 0",
+                f"validate_bundle '{bundle.as_posix()}' gateway '{contract.as_posix()}' '' 0 0 0",
+            )
+        )
+        return self.run_bash(script=command)
+
+    def run_python_bootstrap(self, provider: str) -> subprocess.CompletedProcess[str]:
+        source = INSTALL_SCRIPT.as_posix()
+        command = "\n".join(
+            (
+                "set -euo pipefail",
+                "export VPNSTACK_INSTALL_LIBRARY_ONLY=1",
+                f"source '{source}'",
+                f"PROVIDER='{provider}'",
+                "PY_READY=0",
+                "select_python() {",
+                "  if [[ \"$PY_READY\" == 1 ]]; then PYTHON_BIN=python3; return 0; fi",
+                "  return 1",
+                "}",
+                "command() {",
+                "  if [[ \"${1:-}\" == -v ]]; then [[ \"${2:-}\" == \"$PROVIDER\" ]]; return; fi",
+                "  builtin command \"$@\"",
+                "}",
+                "apt-get() { printf 'apt-get:%s:%s\\n' \"${DEBIAN_FRONTEND:-}\" \"$*\"; [[ \"$1\" != install ]] || PY_READY=1; }",
+                "dnf5() { printf 'dnf5:%s\\n' \"$*\"; PY_READY=1; }",
+                "dnf() { printf 'dnf:%s\\n' \"$*\"; PY_READY=1; }",
+                "bootstrap_python",
+                "printf 'python=%s\\n' \"$PYTHON_BIN\"",
             )
         )
         return self.run_bash(script=command)
@@ -157,7 +183,8 @@ class InstallScriptContractTests(unittest.TestCase):
         self.assertIn('VPNSTACK_ACCEPTANCE_PATH="${VPNSTACK_ROOT}/last-acceptance.json"', text)
         self.assertIn("installed node ${previous_node} does not match requested node ${requested_node}", text)
         self.assertIn('verify_previous_owned_path "${previous_contract}" "${path}"', text)
-        self.assertIn("DIAGNOSTICS_SCHEMA_VERSION", text)
+        self.assertIn("normalize_acceptance_snapshot", text)
+        self.assertIn('local require_current_platform="${7:-1}"', text)
         self.assertIn('verify_snapshot_service_states "${snapshot}"', text)
         self.assertNotIn("restored schema-2 service is not active", text)
         self.assertLess(
@@ -174,6 +201,36 @@ class InstallScriptContractTests(unittest.TestCase):
         self.assertIn("VPNSTACK_REVISION_LIMIT=10", text)
         snapshot_body = text.split("create_transaction_snapshots() {", 1)[1].split("\n}\n\nprune_revision_snapshots()", 1)[0]
         self.assertLess(snapshot_body.index("prune_revision_snapshots"), snapshot_body.index("TRANSACTION_SNAPSHOT="))
+        bootstrap_body = text.split("bootstrap_python() {", 1)[1].split("\n}\n\nparse_cli()", 1)[0]
+        self.assertIn("apt-get install -y --no-install-recommends python3", bootstrap_body)
+        self.assertIn("dnf5 -y --setopt=install_weak_deps=False install python3", bootstrap_body)
+        self.assertIn("dnf -y --setopt=install_weak_deps=False install python3", bootstrap_body)
+        self.assertNotIn("route", bootstrap_body)
+        self.assertNotIn("sysctl", bootstrap_body)
+        main_body = text.split("main() {", 1)[1].split("\n}\n\nif [[", 1)[0]
+        self.assertLess(main_body.index("validate_install_request"), main_body.index("bootstrap_python"))
+        bootstrap_index = main_body.index("bootstrap_python")
+        self.assertLess(bootstrap_index, main_body.index("find_python", bootstrap_index))
+
+    def test_python_bootstrap_uses_exact_supported_provider_commands(self) -> None:
+        expected = {
+            "apt-get": (
+                "apt-get:noninteractive:update",
+                "apt-get:noninteractive:install -y --no-install-recommends python3",
+            ),
+            "dnf5": ("dnf5:-y --setopt=install_weak_deps=False install python3",),
+            "dnf": ("dnf:-y --setopt=install_weak_deps=False install python3",),
+        }
+        for provider, commands in expected.items():
+            with self.subTest(provider=provider):
+                result = self.run_python_bootstrap(provider)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.splitlines(), [*commands, "python=python3"])
+
+    def test_python_bootstrap_fails_closed_without_supported_provider(self) -> None:
+        result = self.run_python_bootstrap("none")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no supported package manager (apt-get, dnf5, dnf) was found", result.stderr)
 
     @unittest.skipIf(os.name == "nt", "Windows Git Bash does not preserve POSIX symlink semantics")
     def test_release_pruning_keeps_only_current_and_previous(self) -> None:
@@ -233,8 +290,8 @@ class InstallScriptContractTests(unittest.TestCase):
             plan = json.loads((output / "install-plan.json").read_text(encoding="utf-8"))
             node_env = (output / "node.env").read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["schema_version"], 4)
-        self.assertEqual(plan["schema_version"], 4)
+        self.assertEqual(manifest["schema_version"], 5)
+        self.assertEqual(plan["schema_version"], 5)
         self.assertEqual(manifest["install_plan"], plan)
         self.assertEqual(plan["node_id"], "gateway")
         self.assertEqual(plan["topology"], "single")

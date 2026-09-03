@@ -10,6 +10,7 @@ from . import VERSION
 from .common import env_line, parse_env_value
 from .compatibility import CompatibilityWindow
 from .diagnostics import sha256_text
+from .platforms import PlatformSpec, default_build_platform, requirements_for
 from .routing_policy import POLICY_VERSION
 from .topology import (
     CAP_INTERSERVER_CLIENT,
@@ -30,8 +31,8 @@ from .topology import (
     normalize_node_id,
 )
 
-MANIFEST_SCHEMA_VERSION = 4
-INSTALL_PLAN_SCHEMA_VERSION = 4
+MANIFEST_SCHEMA_VERSION = 5
+INSTALL_PLAN_SCHEMA_VERSION = 5
 
 SING_BOX_VERSION = "1.13.12"
 SING_BOX_LINUX_AMD64_ARCHIVE_SHA256 = "1540533adb3df24f5ad5f14b5c7ca3dbc2401b10a1c1eb278fcadcada47ec6c4"
@@ -40,30 +41,8 @@ XRAY_VERSION = "26.3.27"
 XRAY_LINUX_AMD64_SHA256 = "23cd9af937744d97776ee35ecad4972cf4b2109d1e0fe6be9930467608f7c8ae"
 XRAY_LINUX_AMD64_BINARY_SHA256 = "8255dd939c34cf966cc91517b6324dd3c8d0bcf49ffac8beca049a38c46845ed"
 
-BASE_PACKAGES = (
-    "ca-certificates",
-    "curl",
-    "e2fsprogs",
-    "iproute2",
-    "kmod",
-    "logrotate",
-    "nftables",
-    "python3",
-    "systemd-resolved",
-    "tar",
-    "unattended-upgrades",
-    "util-linux",
-)
-PUBLIC_FRONT_PACKAGES = ("unzip",)
-INTERSERVER_PACKAGES = ("iperf3", "iputils-ping", "wireguard", "wireguard-tools")
-
 COMMON_NODE_ENV_KEYS = (
     "SSH_PORT",
-    "SSH_LOGIN_GRACE_TIME",
-    "SSH_MAX_AUTH_TRIES",
-    "SSH_MAX_STARTUPS",
-    "SSH_PER_SOURCE_MAX_STARTUPS",
-    "SSH_PER_SOURCE_NETBLOCK_SIZE",
     "SING_BOX_LOG_LEVEL",
     "JOURNAL_LIMIT_ENABLED",
     "JOURNAL_SYSTEM_MAX_USE",
@@ -136,17 +115,17 @@ BASE_ARTIFACTS = {
     "nftables.conf": ArtifactSpec("/etc/vpn-stack/nftables.conf", "base"),
     "vpn-stack-nft-apply.sh": ArtifactSpec("/usr/local/lib/vpn-stack/nft-apply.sh", "base"),
     "vpn-stack-nftables.service": ArtifactSpec("/etc/systemd/system/vpn-stack-nftables.service", "base"),
-    "sshd-vpn-stack.conf": ArtifactSpec("/etc/ssh/sshd_config.d/90-vpn-stack.conf", "base"),
     "sysctl-vpn-stack.conf": ArtifactSpec("/etc/sysctl.d/90-vpn-stack.conf", "base"),
     "modules-vpn-stack.conf": ArtifactSpec("/etc/modules-load.d/90-vpn-stack.conf", "base"),
     "journald-vpn-stack.conf": ArtifactSpec("/etc/systemd/journald.conf.d/90-vpn-stack.conf", "base"),
-    "apt-vpn-stack-unattended.conf": ArtifactSpec("/etc/apt/apt.conf.d/90-vpn-stack-unattended", "base"),
-    "resolved-vpn-stack.conf": ArtifactSpec("/etc/systemd/resolved.conf.d/90-vpn-stack.conf", "base"),
+    "dnsmasq-vpn-stack.conf": ArtifactSpec("/etc/vpn-stack/dnsmasq.conf", "base"),
+    "vpn-stack-dns.service": ArtifactSpec("/etc/systemd/system/vpn-stack-dns.service", "base"),
     "btmp-vpn-stack.conf": ArtifactSpec("/usr/local/lib/vpn-stack/btmp-logrotate.conf", "base"),
     "vpn-stack-agent.py": ArtifactSpec("/usr/local/lib/vpn-stack/vpn-stack-agent.py", "base"),
     "diagnostics.py": ArtifactSpec("/usr/local/lib/vpn-stack/diagnostics.py", "base"),
     "log_classifier.py": ArtifactSpec("/usr/local/lib/vpn-stack/log_classifier.py", "base"),
     "network_profile.py": ArtifactSpec("/usr/local/lib/vpn-stack/network_profile.py", "base"),
+    "platforms.py": ArtifactSpec("/usr/local/lib/vpn-stack/platforms.py", "base"),
     "release_integrity.py": ArtifactSpec("/usr/local/lib/vpn-stack/release_integrity.py", "base"),
     "resource_control.py": ArtifactSpec("/usr/local/lib/vpn-stack/resource_control.py", "base"),
     "vpn-stack-health.service": ArtifactSpec("/etc/systemd/system/vpn-stack-health.service", "base"),
@@ -182,7 +161,7 @@ INTERSERVER_CLIENT_ARTIFACTS = {
 SERVICE_UNITS = {
     "sing-box": ("sing-box.service", "managed"),
     "nftables": ("vpn-stack-nftables.service", "managed"),
-    "resolver": ("systemd-resolved.service", "borrowed"),
+    "resolver": ("vpn-stack-dns.service", "managed"),
     "health_timer": ("vpn-stack-health.timer", "managed"),
     "xray": ("vpn-stack-xray.service", "managed"),
     "admin": ("vpn-stack-admin.service", "managed"),
@@ -381,15 +360,26 @@ def build_install_plan(
     binaries: Mapping[str, Mapping[str, str]],
     *,
     env: Mapping[str, str],
+    platform: PlatformSpec | None = None,
 ) -> dict[str, object]:
-    packages = set(BASE_PACKAGES)
-    package_sets: dict[str, list[str]] = {"base": list(BASE_PACKAGES)}
+    platform = platform or default_build_platform()
+    logical_requirements = requirements_for(
+        public_front=plan.requires_xray,
+        interserver=plan.has_interserver,
+        platform=platform,
+    )
+    packages = platform.resolve_packages(logical_requirements)
+    package_sets: dict[str, list[str]] = {
+        "base": platform.resolve_packages(
+            requirements_for(public_front=False, interserver=False, platform=platform)
+        ),
+    }
     if plan.requires_xray:
-        packages.update(PUBLIC_FRONT_PACKAGES)
-        package_sets[CAP_PUBLIC_FRONT] = list(PUBLIC_FRONT_PACKAGES)
+        package_sets[CAP_PUBLIC_FRONT] = platform.resolve_packages(("zip-extractor",))
     if plan.has_interserver:
-        packages.update(INTERSERVER_PACKAGES)
-        package_sets["interserver"] = list(INTERSERVER_PACKAGES)
+        package_sets["interserver"] = platform.resolve_packages(
+            ("icmp-tools", "throughput-tools", "wireguard-tools")
+        )
 
     wg_interface = str(env.get("WG_INTERFACE", "")).strip() or "wg0"
     services = []
@@ -406,8 +396,10 @@ def build_install_plan(
         "schema_version": INSTALL_PLAN_SCHEMA_VERSION,
         **_canonical_plan_fields(plan),
         "node": _node_descriptor(plan),
+        "platform": platform.to_dict(),
+        "logical_requirements": list(logical_requirements),
         "services": services,
-        "packages": sorted(packages),
+        "packages": packages,
         "package_sets": package_sets,
         "artifacts": {name: dict(entry) for name, entry in sorted(artifacts.items())},
         "assets": {name: dict(entry) for name, entry in sorted(assets.items())},
@@ -422,6 +414,7 @@ def render_manifest(
     *,
     assets: dict[str, Path] | None = None,
     foreign_block_ru: bool = True,
+    platform: PlatformSpec | None = None,
 ) -> str:
     env = _parse_env_text(env_text)
     plan = resolve_node_plan(node, env)
@@ -458,13 +451,15 @@ def render_manifest(
     binaries = _binary_entries(plan)
     node_env_text = render_node_env_text(env, plan)
     node_env_sha256 = sha256_text(node_env_text)
-    install_plan = build_install_plan(plan, artifacts, asset_entries, binaries, env=env)
+    platform = platform or default_build_platform()
+    install_plan = build_install_plan(plan, artifacts, asset_entries, binaries, env=env, platform=platform)
     install_plan_text = json.dumps(install_plan, sort_keys=True, separators=(",", ":"))
     release_material = json.dumps(
         {
             "version": VERSION,
             "topology": plan.topology,
             "node": _node_descriptor(plan),
+            "platform": platform.to_dict(),
             "node_env": node_env_sha256,
             "artifacts": artifacts,
             "assets": asset_entries,
@@ -482,6 +477,7 @@ def render_manifest(
         "release_id": release_id,
         **_canonical_plan_fields(plan),
         "node": _node_descriptor(plan),
+        "platform": platform.to_dict(),
         "update_compatibility": CompatibilityWindow.current().to_manifest(),
         "env_sha256": sha256_text(env_text),
         "node_env_sha256": node_env_sha256,
@@ -504,6 +500,7 @@ def finalize_node_files(
     *,
     assets: Mapping[str, Path] | None = None,
     foreign_block_ru: bool | None = None,
+    platform: PlatformSpec | None = None,
 ) -> dict[str, str]:
     """Attach canonical node control files after the renderer composes artifacts."""
 
@@ -530,6 +527,7 @@ def finalize_node_files(
             if foreign_block_ru is None
             else foreign_block_ru
         ),
+        platform=platform,
     )
     manifest = json.loads(manifest_text)
     files["render-manifest.json"] = manifest_text

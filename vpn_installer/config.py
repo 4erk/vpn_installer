@@ -89,6 +89,18 @@ PUBLIC_TRANSPORT_IDENTITY_KEYS = (
     "PUBLIC_HY2_PUBLIC_KEY_SHA256",
 )
 
+# Transitional 0.22.0 input cleanup. These settings modified the host SSH daemon,
+# were never required by the VPN dataplane, and are removed from rendered state.
+DEPRECATED_SSH_ENV_KEYS = frozenset(
+    {
+        "SSH_LOGIN_GRACE_TIME",
+        "SSH_MAX_AUTH_TRIES",
+        "SSH_MAX_STARTUPS",
+        "SSH_PER_SOURCE_MAX_STARTUPS",
+        "SSH_PER_SOURCE_NETBLOCK_SIZE",
+    }
+)
+
 DUAL_REQUIRED_ENV_VARS = (
     "EXIT_PUBLIC_IP",
     "WG_RU_ADDRESS",
@@ -129,7 +141,7 @@ def load_env_file(path: Path) -> dict[str, str]:
 def normalize_deployment_env(source: dict[str, str]) -> dict[str, str]:
     schema = source.get("CONFIG_SCHEMA", "").strip()
     if schema == str(CONFIG_SCHEMA_VERSION):
-        return source.copy()
+        return {key: value for key, value in source.items() if key not in DEPRECATED_SSH_ENV_KEYS}
     raise ValueError(
         f"unsupported CONFIG_SCHEMA={schema or '<empty>'}; current release accepts only schema {CONFIG_SCHEMA_VERSION}"
     )
@@ -193,11 +205,6 @@ def generate_default_env(
         "GATEWAY_PUBLIC_IP": "",
         "EXIT_PUBLIC_IP": "",
         "SSH_PORT": "22",
-        "SSH_LOGIN_GRACE_TIME": "20",
-        "SSH_MAX_AUTH_TRIES": "3",
-        "SSH_MAX_STARTUPS": "10:30:60",
-        "SSH_PER_SOURCE_MAX_STARTUPS": "6",
-        "SSH_PER_SOURCE_NETBLOCK_SIZE": "24:64",
         "WAN_INTERFACE": "",
         "CLIENT_UUID": str(uuid.uuid4()),
         "CLIENT_FLOW": "xtls-rprx-vision",

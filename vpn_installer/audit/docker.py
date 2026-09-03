@@ -4,9 +4,14 @@ import contextlib
 import io
 import json
 import shutil
+import subprocess
+import tarfile
 import textwrap
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import BoundedSemaphore
 
 from .. import VERSION
 from ..common import INSTALL_SCRIPT_PATH, ROOT_DIR
@@ -51,6 +56,9 @@ from .runner import (
 
 COMPATIBLE_UPDATE_TIMEOUT_SECONDS = 45
 TRANSACTION_ACCEPTANCE_TIMEOUT_SECONDS = 45
+PLATFORM_CONTRACT_TIMEOUT_SECONDS = 480
+PLATFORM_PACKAGE_COMMAND_TIMEOUT_SECONDS = 300
+PLATFORM_CONTRACT_MAX_WORKERS = 3
 TRANSACTION_ACCEPTANCE_GATES = (
     "acceptance-marker-path",
     "failed-acceptance-evidence",
@@ -59,6 +67,435 @@ TRANSACTION_ACCEPTANCE_GATES = (
     "sigkill-production-cutover-reconciliation",
     "previous-release-rollback-verification",
 )
+
+
+def export_release_source(ref: str, destination: Path) -> Path:
+    """Export an immutable tagged source tree without reading the working tree."""
+
+    if destination.exists():
+        shutil.rmtree(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    archive_path = destination.parent / f"{destination.name}.tar"
+    try:
+        completed = subprocess.run(
+            ["git", "archive", "--format=tar", f"--output={archive_path}", ref, "vpn_installer"],
+            cwd=ROOT_DIR,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout).strip()
+            raise AuditFailure(f"cannot export compatibility source {ref}: {detail}")
+        destination.mkdir(parents=True)
+        with tarfile.open(archive_path, "r") as archive:
+            for member in archive.getmembers():
+                path = Path(member.name)
+                if path.is_absolute() or ".." in path.parts:
+                    raise AuditFailure(f"unsafe path in compatibility source archive: {member.name}")
+            archive.extractall(destination)
+    finally:
+        archive_path.unlink(missing_ok=True)
+    return destination
+
+
+@dataclass(frozen=True)
+class PlatformDockerCase:
+    name: str
+    image: str
+    os_id: str
+    version: str
+    version_match: str
+    package_provider: str
+
+
+PLATFORM_DOCKER_CASES = (
+    PlatformDockerCase("ubuntu-22-04", "ubuntu:22.04", "ubuntu", "22.04", "exact", "apt"),
+    PlatformDockerCase("ubuntu-24-04", "ubuntu:24.04", "ubuntu", "24.04", "exact", "apt"),
+    PlatformDockerCase("ubuntu-26-04", "ubuntu:26.04", "ubuntu", "26.04", "exact", "apt"),
+    PlatformDockerCase("debian-12", "debian:12-slim", "debian", "12", "exact", "apt"),
+    PlatformDockerCase("debian-13", "debian:13-slim", "debian", "13", "exact", "apt"),
+    PlatformDockerCase("almalinux-9", "almalinux:9", "almalinux", "9", "major", "dnf4"),
+    PlatformDockerCase("almalinux-10", "almalinux:10", "almalinux", "10", "major", "dnf4"),
+    PlatformDockerCase("rocky-9", "rockylinux/rockylinux:9", "rocky", "9", "major", "dnf4"),
+    PlatformDockerCase("rocky-10", "rockylinux/rockylinux:10", "rocky", "10", "major", "dnf4"),
+    PlatformDockerCase("fedora-43", "fedora:43", "fedora", "43", "exact", "dnf5"),
+    PlatformDockerCase("fedora-44", "fedora:44", "fedora", "44", "exact", "dnf5"),
+)
+
+
+def platform_contract_driver_text() -> str:
+    return textwrap.dedent(
+        """\
+        from __future__ import annotations
+
+        import json
+        import os
+        import pwd
+        import shutil
+        import socket
+        import struct
+        import subprocess
+        import sys
+        import time
+        from dataclasses import replace
+        from pathlib import Path
+
+        from vpn_installer.config import load_env_file
+        from vpn_installer.install_contract import validate_bundle
+        from vpn_installer.platforms import (
+            PlatformSpec,
+            detect_host_facts,
+            install_packages,
+            resolve_platform,
+        )
+        from vpn_installer.render import write_node_rendered_files
+        from vpn_installer.topology import NODE_GATEWAY
+
+
+        def fail(message: str) -> None:
+            raise SystemExit(message)
+
+
+        def progress(phase: str) -> None:
+            print(json.dumps({"phase": phase}, sort_keys=True), flush=True)
+
+
+        def run_package_command(command, **kwargs):
+            action = next(
+                (part for part in command if part in {"update", "install", "makecache", "clean"}),
+                command[0],
+            )
+            progress(f"package-command:{command[0]}:{action}")
+            kwargs["timeout"] = min(
+                int(kwargs.get("timeout", __PACKAGE_COMMAND_TIMEOUT__)),
+                __PACKAGE_COMMAND_TIMEOUT__,
+            )
+            return subprocess.run(command, **kwargs)
+
+
+        def package_is_installed(family: str, package: str) -> bool:
+            command = (
+                ["dpkg-query", "-W", "-f=${Status}", package]
+                if family == "deb"
+                else ["rpm", "-q", package]
+            )
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=20,
+            )
+            if completed.returncode != 0:
+                return False
+            return family != "deb" or completed.stdout.strip() == "install ok installed"
+
+
+        def dns_query() -> None:
+            transaction_id = 0x5650
+            question = b"".join(bytes((len(part),)) + part for part in b"matrix.invalid".split(b"."))
+            payload = struct.pack("!HHHHHH", transaction_id, 0x0100, 1, 0, 0, 0) + question + b"\\x00\\x00\\x01\\x00\\x01"
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
+                client.settimeout(0.25)
+                client.sendto(payload, ("127.0.0.1", 1054))
+                response, _address = client.recvfrom(4096)
+            if len(response) < 12:
+                fail("dnsmasq returned a truncated DNS response")
+            response_id, flags, _questions, answers, _authority, _additional = struct.unpack("!HHHHHH", response[:12])
+            if response_id != transaction_id or not flags & 0x8000 or flags & 0x000F or answers < 1:
+                fail("dnsmasq returned an invalid DNS response")
+            if socket.inet_aton("192.0.2.123") not in response:
+                fail("dnsmasq response does not contain the expected A record")
+
+
+        def dnsmasq_smoke(config_source: Path) -> None:
+            runtime_config = Path("/etc/vpn-stack/dnsmasq.conf")
+            runtime_config.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(config_source, runtime_config)
+            runtime_config.chmod(0o644)
+            account = pwd.getpwnam("nobody")
+
+            def drop_privileges() -> None:
+                os.setgroups([])
+                os.setgid(account.pw_gid)
+                os.setuid(account.pw_uid)
+
+            process = subprocess.Popen(
+                [
+                    "/usr/sbin/dnsmasq",
+                    "--keep-in-foreground",
+                    "--conf-file=/etc/vpn-stack/dnsmasq.conf",
+                    "--address=/matrix.invalid/192.0.2.123",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                preexec_fn=drop_privileges,
+            )
+            error = ""
+            try:
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline:
+                    if process.poll() is not None:
+                        error = "dnsmasq exited before accepting DNS queries"
+                        break
+                    try:
+                        dns_query()
+                    except (OSError, socket.timeout):
+                        time.sleep(0.1)
+                        continue
+                    status = Path(f"/proc/{process.pid}/status").read_text(encoding="utf-8")
+                    uid_line = next(line for line in status.splitlines() if line.startswith("Uid:"))
+                    effective_uid = int(uid_line.split()[2])
+                    if effective_uid != account.pw_uid:
+                        error = f"dnsmasq effective uid is {effective_uid}, expected {account.pw_uid}"
+                    break
+                else:
+                    error = "dnsmasq did not answer a DNS query within 3 seconds"
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                try:
+                    output, _unused = process.communicate(timeout=3)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    output, _unused = process.communicate(timeout=3)
+            if error:
+                fail(f"{error}: {output.strip()[:500]}")
+
+
+        case_path = Path(sys.argv[1])
+        env_path = Path(sys.argv[2])
+        case = json.loads(case_path.read_text(encoding="utf-8"))
+        progress("detect")
+        facts = detect_host_facts()
+
+        if facts.os_id != case["os_id"]:
+            fail(f"OS detection mismatch: {facts.os_id!r} != {case['os_id']!r}")
+        detected_version = facts.os_version.split(".", 1)[0] if case["version_match"] == "major" else facts.os_version
+        if detected_version != case["version"]:
+            fail(f"version detection mismatch: {facts.os_version!r} does not match {case['version']!r}")
+        if facts.architecture != "x86_64":
+            fail(f"architecture detection mismatch: {facts.architecture!r}")
+        pid1 = Path("/proc/1/comm").read_text(encoding="utf-8").strip()
+        if pid1 == "systemd" or facts.init_system == "systemd":
+            fail("platform matrix must not use systemd as container PID 1")
+
+        spec = resolve_platform(replace(facts, init_system="systemd"))
+        if spec.package_provider != case["package_provider"]:
+            fail(f"package provider mismatch: {spec.package_provider!r}")
+        if PlatformSpec.from_dict(spec.to_dict()) != spec:
+            fail("platform descriptor does not round-trip through the catalog")
+
+        root = Path("/work/platform-contract")
+        if root.exists():
+            shutil.rmtree(root)
+        bundle = root / "bundle"
+        contract = root / "contract"
+        post_install_contract = root / "post-install-contract"
+        env = load_env_file(env_path)
+        progress("render-and-validate-plan")
+        write_node_rendered_files(env, NODE_GATEWAY, bundle, platform=spec)
+        validate_bundle(bundle, NODE_GATEWAY, contract, expected_platform=spec)
+
+        plan = json.loads((bundle / "install-plan.json").read_text(encoding="utf-8"))
+        packages = [line for line in (contract / "packages.tsv").read_text(encoding="utf-8").splitlines() if line]
+        if packages != plan.get("packages"):
+            fail("validated packages.tsv differs from the install plan")
+        logical_requirements = plan.get("logical_requirements")
+        if not isinstance(logical_requirements, list):
+            fail("install plan has no logical package requirements")
+        if packages != spec.resolve_packages(logical_requirements):
+            fail("install plan packages differ from the platform package map")
+        unexpected = sorted(set(packages) - set(spec.package_map.values()))
+        if unexpected:
+            fail(f"install plan contains packages outside the allowlist: {unexpected}")
+
+        progress("install-packages")
+        install_packages(spec, packages, runner=run_package_command)
+        progress("verify-package-database")
+        missing = [package for package in packages if not package_is_installed(spec.family, package)]
+        if missing:
+            fail(f"package database does not report installed packages: {missing}")
+        dnsmasq_path = Path("/usr/sbin/dnsmasq")
+        if not dnsmasq_path.is_file():
+            fail("managed DNS service binary is not installed at /usr/sbin/dnsmasq")
+        progress("dnsmasq-nobody-smoke")
+        dnsmasq_smoke(bundle / "dnsmasq-vpn-stack.conf")
+
+        validate_bundle(bundle, NODE_GATEWAY, post_install_contract, expected_platform=spec)
+        print(
+            json.dumps(
+                {
+                    "name": case["name"],
+                    "image": case["image"],
+                    "os_id": facts.os_id,
+                    "os_version": facts.os_version,
+                    "architecture": facts.architecture,
+                    "detected_init": facts.init_system,
+                    "dns_smoke": "nobody-udp-ok",
+                    "pid1": pid1,
+                    "package_provider": spec.package_provider,
+                    "package_count": len(packages),
+                    "packages": packages,
+                    "plan_schema": plan["schema_version"],
+                    "python_version": ".".join(str(part) for part in sys.version_info[:3]),
+                },
+                sort_keys=True,
+            )
+        )
+        """
+    ).replace("__PACKAGE_COMMAND_TIMEOUT__", str(PLATFORM_PACKAGE_COMMAND_TIMEOUT_SECONDS))
+
+
+def platform_contract_shell() -> str:
+    return textwrap.dedent(
+        """\
+        set -euo pipefail
+        export LC_ALL=C
+        export VPNSTACK_INSTALL_LIBRARY_ONLY=1
+        source /work/install.sh
+        bootstrap_python
+        PYTHONPATH=/work "$PYTHON_BIN" /work/platform-contract.py /work/platform-case.json /work/deployment.env
+        """
+    )
+
+
+def _ensure_platform_image(runner: AuditRunner, case: PlatformDockerCase) -> None:
+    inspected = runner.docker(
+        f"platform-image-inspect-{case.name}",
+        ["image", "inspect", case.image],
+        expected_codes={0, 1},
+        timeout_seconds=15,
+    )
+    if inspected.returncode != 0:
+        runner.docker(
+            f"platform-image-pull-{case.name}",
+            ["pull", case.image],
+            timeout_seconds=PLATFORM_CONTRACT_TIMEOUT_SECONDS,
+        )
+
+
+def _run_platform_contract_case(
+    runner: AuditRunner,
+    case: PlatformDockerCase,
+    *,
+    driver_path: Path,
+    env_path: Path,
+    package_path: Path,
+) -> dict[str, object]:
+    _ensure_platform_image(runner, case)
+    case_dir = runner.work_dir / "platform-contract-matrix" / case.name
+    case_path = case_dir / "case.json"
+    write_text(case_path, json.dumps(asdict(case), sort_keys=True) + "\n")
+    container = f"audit-platform-{case.name}-{runner.run_id}"
+    with runner.docker_container(container, case.image):
+        runner.docker(
+            f"platform-mkdir-{case.name}",
+            ["exec", container, "mkdir", "-p", "/work"],
+        )
+        for source, destination, label in (
+            (package_path, "/work", "package"),
+            (INSTALL_SCRIPT_PATH, "/work/install.sh", "installer"),
+            (driver_path, "/work/platform-contract.py", "driver"),
+            (case_path, "/work/platform-case.json", "case"),
+            (env_path, "/work/deployment.env", "env"),
+        ):
+            runner.docker(
+                f"platform-copy-{case.name}-{label}",
+                ["cp", str(source), f"{container}:{destination}"],
+            )
+        completed = runner.docker_exec(
+            container,
+            platform_contract_shell(),
+            timeout_seconds=PLATFORM_CONTRACT_TIMEOUT_SECONDS,
+        )
+    output = next((line for line in reversed(completed.stdout.splitlines()) if line.strip()), "")
+    try:
+        result = json.loads(output)
+    except json.JSONDecodeError as exc:
+        raise AuditFailure(f"{case.name}: platform contract did not return JSON") from exc
+    if not isinstance(result, dict) or result.get("name") != case.name:
+        raise AuditFailure(f"{case.name}: platform contract returned the wrong case identity")
+    if result.get("os_id") != case.os_id or result.get("package_provider") != case.package_provider:
+        raise AuditFailure(f"{case.name}: platform contract returned the wrong platform identity")
+    result_version = str(result.get("os_version", ""))
+    matched_version = result_version.split(".", 1)[0] if case.version_match == "major" else result_version
+    if matched_version != case.version:
+        raise AuditFailure(f"{case.name}: platform contract returned the wrong OS version")
+    packages = result.get("packages")
+    if (
+        not isinstance(packages, list)
+        or not packages
+        or result.get("package_count") != len(packages)
+    ):
+        raise AuditFailure(f"{case.name}: platform contract did not verify any packages")
+    if result.get("pid1") == "systemd" or result.get("dns_smoke") != "nobody-udp-ok":
+        raise AuditFailure(f"{case.name}: platform runtime smoke is incomplete")
+    python_version = str(result.get("python_version", ""))
+    if case.os_id in {"almalinux", "rocky"} and case.version == "9" and not python_version.startswith("3.9."):
+        raise AuditFailure(f"{case.name}: Python 3.9 compatibility was not exercised")
+    return result
+
+
+def test_platform_contract_matrix(runner: AuditRunner) -> dict[str, str]:
+    matrix_dir = runner.work_dir / "platform-contract-matrix"
+    matrix_dir.mkdir(parents=True, exist_ok=True)
+    source_dir = matrix_dir / "source"
+    if source_dir.exists():
+        shutil.rmtree(source_dir)
+    package_path = source_dir / "vpn_installer"
+    shutil.copytree(
+        ROOT_DIR / "vpn_installer",
+        package_path,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+    driver_path = matrix_dir / "platform-contract.py"
+    write_text(driver_path, platform_contract_driver_text())
+    env_path, _env = runner.create_env("platform-contract-matrix")
+
+    results: dict[str, dict[str, object]] = {}
+    failures: list[str] = []
+    rpm_slots = BoundedSemaphore(2)
+
+    def run_case(case: PlatformDockerCase) -> dict[str, object]:
+        scope = contextlib.nullcontext() if case.package_provider == "apt" else rpm_slots
+        with scope:
+            return _run_platform_contract_case(
+                runner,
+                case,
+                driver_path=driver_path,
+                env_path=env_path,
+                package_path=package_path,
+            )
+
+    with ThreadPoolExecutor(max_workers=PLATFORM_CONTRACT_MAX_WORKERS) as executor:
+        futures = {executor.submit(run_case, case): case for case in PLATFORM_DOCKER_CASES}
+        for future in as_completed(futures):
+            case = futures[future]
+            try:
+                results[case.name] = future.result()
+            except Exception as exc:  # noqa: BLE001
+                failures.append(f"{case.name}: {exc}")
+    ordered = [results[case.name] for case in PLATFORM_DOCKER_CASES if case.name in results]
+    result_path = matrix_dir / "results.json"
+    write_text(
+        result_path,
+        json.dumps({"failures": sorted(failures), "results": ordered}, indent=2, sort_keys=True) + "\n",
+    )
+    if failures:
+        raise AuditFailure(
+            f"platform contract matrix failed; partial results: {result_path}\n"
+            + "\n".join(sorted(failures))
+        )
+
+    return {
+        "platforms": ",".join(case.name for case in PLATFORM_DOCKER_CASES),
+        "verified_packages": str(sum(int(result["package_count"]) for result in ordered)),
+        "results": str(result_path),
+    }
 
 
 def acceptance_snapshot_fixture(
@@ -129,6 +566,7 @@ def acceptance_snapshot_fixture(
 
 
 def run(runner: AuditRunner) -> None:
+    runner.record("docker-platform-contract-matrix", lambda: test_platform_contract_matrix(runner))
     runner.ensure_audit_image()
     runner.record("docker-unmanaged-remove-purge-render-only", lambda: test_unmanaged_remove_purge_render_only(runner))
     runner.record("docker-asset-fail-fast", lambda: test_asset_fail_fast(runner))
@@ -176,6 +614,7 @@ def previous_release_fixture_builder_text() -> str:
         source_snapshot = acceptance_snapshot_fixture("verified", node_id=node_id)
         source_snapshot.update(
             {
+                "schema_version": 5,
                 "release": {
                     "version": previous_version,
                     "release_id": f"{previous_version}-audit-{node_id}",
@@ -226,11 +665,6 @@ def previous_release_fixture_builder_text() -> str:
                 "install_plan_sha256": canonical_digest(plan),
             }
         )
-        manifest["update_compatibility"] = {
-            "installed_min": previous_version,
-            "installed_max": previous_version,
-            "transitions": [],
-        }
         plan_path.write_text(json.dumps(plan, indent=2, sort_keys=True) + "\\n", encoding="utf-8")
         manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\\n", encoding="utf-8")
 
@@ -282,15 +716,19 @@ def compatible_update_acceptance_script() -> str:
           --expected-node exit \
           --external-assets /work/assets \
           --contract-dir "$current_contract"
-        PYTHONPATH=/work python3 /work/build-previous-release.py \
-          exit "$current_bundle" "$source_release" /usr/local/bin/sing-box
+        PYTHONPATH=/work/previous python3 -m vpn_installer.install_support render-node \
+          --node exit \
+          --env-file /work/dual.env \
+          --assets-dir /work/assets \
+          --output-dir "$source_release"
+        install -D -m 0755 /usr/local/bin/sing-box "$source_release/bin/sing-box"
         support validate-installed \
           --current-release "$source_release" \
           --expected-node exit \
           --contract-dir "$source_contract"
 
         test "$(meta_value "$source_contract" version)" = __PREVIOUS_VERSION__
-        test "$(meta_value "$source_contract" schema_version)" = __CURRENT_MANIFEST_SCHEMA__
+        test "$(meta_value "$source_contract" schema_version)" = __SOURCE_MANIFEST_SCHEMA__
         test "$(meta_value "$current_contract" version)" = __CURRENT_VERSION__
         test "$(meta_value "$current_contract" schema_version)" = __CURRENT_MANIFEST_SCHEMA__
 
@@ -307,6 +745,11 @@ def compatible_update_acceptance_script() -> str:
         from vpn_installer.install_contract import InstallContractError, validate_installed_bundle
         from vpn_installer.manifest import INSTALL_PLAN_SCHEMA_VERSION, MANIFEST_SCHEMA_VERSION
         from vpn_installer.topology import CONFIG_SCHEMA_VERSION
+        from vpn_installer.transition_0218 import (
+            SOURCE_DIAGNOSTICS_SCHEMA,
+            SOURCE_INSTALL_PLAN_SCHEMA,
+            SOURCE_MANIFEST_SCHEMA,
+        )
 
         source_release = Path(sys.argv[1])
         result_dir = Path(sys.argv[2])
@@ -318,15 +761,15 @@ def compatible_update_acceptance_script() -> str:
             MANIFEST_SCHEMA_VERSION,
             INSTALL_PLAN_SCHEMA_VERSION,
             DIAGNOSTICS_SCHEMA_VERSION,
-        ) == (3, 4, 4, 5)
+        ) == (3, 5, 5, 6)
 
         source_env = load_env_file(source_release / "node.env")
         source_manifest = json.loads((source_release / "render-manifest.json").read_text(encoding="utf-8"))
         source_plan = json.loads((source_release / "install-plan.json").read_text(encoding="utf-8"))
         assert source_env["CONFIG_SCHEMA"] == str(CONFIG_SCHEMA_VERSION)
         assert source_manifest["version"] == COMPATIBLE_INSTALLED_MIN
-        assert source_manifest["schema_version"] == MANIFEST_SCHEMA_VERSION
-        assert source_plan["schema_version"] == INSTALL_PLAN_SCHEMA_VERSION
+        assert source_manifest["schema_version"] == SOURCE_MANIFEST_SCHEMA
+        assert source_plan["schema_version"] == SOURCE_INSTALL_PLAN_SCHEMA
 
         current = Version.parse(VERSION)
         future = str(Version(current.major, current.minor, current.patch + 1))
@@ -350,9 +793,9 @@ def compatible_update_acceptance_script() -> str:
                 "version": COMPATIBLE_INSTALLED_MIN,
                 "config": CONFIG_SCHEMA_VERSION,
                 "state": CONFIG_SCHEMA_VERSION,
-                "manifest": MANIFEST_SCHEMA_VERSION,
-                "install_plan": INSTALL_PLAN_SCHEMA_VERSION,
-                "diagnostics": DIAGNOSTICS_SCHEMA_VERSION,
+                "manifest": SOURCE_MANIFEST_SCHEMA,
+                "install_plan": SOURCE_INSTALL_PLAN_SCHEMA,
+                "diagnostics": SOURCE_DIAGNOSTICS_SCHEMA,
             },
             "to": {
                 "version": VERSION,
@@ -372,6 +815,8 @@ def compatible_update_acceptance_script() -> str:
     ).replace(
         "__PREVIOUS_VERSION__", COMPATIBLE_INSTALLED_MIN
     ).replace(
+        "__SOURCE_MANIFEST_SCHEMA__", "4"
+    ).replace(
         "__CURRENT_MANIFEST_SCHEMA__", str(MANIFEST_SCHEMA_VERSION)
     ).replace(
         "__CURRENT_VERSION__", VERSION
@@ -385,15 +830,14 @@ def test_compatible_update(runner: AuditRunner) -> dict[str, str]:
         topology=TOPOLOGY_DUAL,
         gateway_location=LOCATION_RU,
     )
-    fixture_builder = runner.work_dir / "compatible-update" / "build-previous-release.py"
-    write_text(fixture_builder, previous_release_fixture_builder_text())
+    previous_source = export_release_source(COMPATIBLE_INSTALLED_MIN, runner.work_dir / "compatible-update" / "previous")
     result_dir = runner.work_dir / "compatible-update-result"
     container = f"audit-compatible-update-{runner.run_id}"
     with runner.docker_container(container, AUDIT_IMAGE):
         runner.docker_exec(container, "mkdir -p /work")
         runner.docker_copy(container, ROOT_DIR / "vpn_installer", "/work")
+        runner.docker_copy(container, previous_source, "/work/previous")
         runner.docker_copy(container, env_path, "/work/dual.env")
-        runner.docker_copy(container, fixture_builder, "/work/build-previous-release.py")
         runner.docker_exec(
             container,
             compatible_update_acceptance_script(),
@@ -403,7 +847,7 @@ def test_compatible_update(runner: AuditRunner) -> dict[str, str]:
     return {
         "container": container,
         "deployment": env["DEPLOY_NAME"],
-        "transition": f"{COMPATIBLE_INSTALLED_MIN}->{VERSION} (schemas 3/3/4/4/5 unchanged)",
+        "transition": f"{COMPATIBLE_INSTALLED_MIN}->{VERSION} (manifest 4->5, diagnostics 5->6)",
         "artifacts": str(result_dir),
     }
 
@@ -647,9 +1091,15 @@ def transaction_rollback_acceptance_script(verified_snapshot: str, deployment_na
             pass_gate node-mismatch-rejection
 
             rm -rf -- "$VPNSTACK_ROOT"
+            previous_bundle=/work/previous-dual-exit
+            PYTHONPATH=/work/previous python3 -m vpn_installer.install_support render-node \
+              --node exit \
+              --env-file /work/dual.env \
+              --assets-dir /work/assets \
+              --output-dir "$previous_bundle"
             previous_release="$VPNSTACK_RELEASES_DIR/previous-release"
             PYTHONPATH=/work python3 /work/build-previous-release.py \
-              exit "$exit_bundle" "$previous_release" /usr/local/bin/sing-box
+              exit "$previous_bundle" "$previous_release" /usr/local/bin/sing-box
             ln -s "$previous_release" "$VPNSTACK_CURRENT_RELEASE"
             previous_release_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release_id"])' "$previous_release/render-manifest.json")"
             python3 - "$VPNSTACK_ACCEPTANCE_PATH" "$previous_release_id" <<'PY'
@@ -676,7 +1126,7 @@ def transaction_rollback_acceptance_script(verified_snapshot: str, deployment_na
             PREVIOUS_CONTRACT=""
             prepare_previous_contract
             test "$(contract_value "$PREVIOUS_CONTRACT" version)" = __PREVIOUS_VERSION__
-            test "$(contract_value "$PREVIOUS_CONTRACT" schema_version)" = __CURRENT_MANIFEST_SCHEMA__
+            test "$(contract_value "$PREVIOUS_CONTRACT" schema_version)" = __SOURCE_MANIFEST_SCHEMA__
             cp "$PREVIOUS_CONTRACT/services.tsv" /work/previous-release-services.tsv
             grep -Fqx $'wireguard\twg-quick@wg0.service\tmanaged' /work/previous-release-services.tsv
             ! grep -Fq $'transport\t' /work/previous-release-services.tsv
@@ -686,6 +1136,15 @@ def transaction_rollback_acceptance_script(verified_snapshot: str, deployment_na
               set -euo pipefail
               trap on_exit EXIT
               install_packages_from_plan() { :; }
+              prepare_host_platform() { :; }
+              render_node_bundle() {
+                local destination="$1"
+                support render-node \
+                  --node "$NODE" \
+                  --env-file "$ENV_FILE" \
+                  --assets-dir "$ASSETS_DIR" \
+                  --output-dir "$destination"
+              }
               stage_binaries() {
                 mkdir -p "$1/bin"
                 cp /usr/local/bin/sing-box "$1/bin/sing-box"
@@ -746,7 +1205,7 @@ def transaction_rollback_acceptance_script(verified_snapshot: str, deployment_na
             rollback_action >/work/previous-release-rollback.out
             grep -Fq 'Rollback snapshot restored:' /work/previous-release-rollback.out
             test "$(readlink -f "$VPNSTACK_CURRENT_RELEASE")" = "$previous_release"
-            test "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["schema_version"])' "$VPNSTACK_CURRENT_RELEASE/render-manifest.json")" = __CURRENT_MANIFEST_SCHEMA__
+            test "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["schema_version"])' "$VPNSTACK_CURRENT_RELEASE/render-manifest.json")" = __SOURCE_MANIFEST_SCHEMA__
             python3 - "$VPNSTACK_ACCEPTANCE_PATH" __PREVIOUS_VERSION__ <<'PY'
             import json
             import sys
@@ -790,6 +1249,7 @@ def transaction_rollback_acceptance_script(verified_snapshot: str, deployment_na
         .replace("__PREVIOUS_VERSION__", COMPATIBLE_INSTALLED_MIN)
         .replace("__CURRENT_DIAGNOSTICS_SCHEMA__", str(DIAGNOSTICS_SCHEMA_VERSION))
         .replace("__CURRENT_MANIFEST_SCHEMA__", str(MANIFEST_SCHEMA_VERSION))
+        .replace("__SOURCE_MANIFEST_SCHEMA__", "4")
     )
 
 
@@ -818,6 +1278,10 @@ def test_install_rollback_state(runner: AuditRunner) -> dict[str, str]:
     )
     fixture_builder = runner.work_dir / "install-rollback" / "build-previous-release.py"
     write_text(fixture_builder, previous_release_fixture_builder_text())
+    previous_source = export_release_source(
+        COMPATIBLE_INSTALLED_MIN,
+        runner.work_dir / "install-rollback" / "previous",
+    )
     result_dir = runner.work_dir / "install-rollback-result"
     container = f"audit-install-rollback-{runner.run_id}"
     with runner.docker_container(container, AUDIT_IMAGE):
@@ -826,6 +1290,7 @@ def test_install_rollback_state(runner: AuditRunner) -> dict[str, str]:
         runner.docker_copy(container, env_path, "/work/deployment.env")
         runner.docker_copy(container, dual_env_path, "/work/dual.env")
         runner.docker_copy(container, ROOT_DIR / "vpn_installer", "/work")
+        runner.docker_copy(container, previous_source, "/work/previous")
         runner.docker_copy(container, fixture_builder, "/work/build-previous-release.py")
         runner.docker_exec(
             container,
@@ -911,7 +1376,20 @@ def write_mock_ssh_scripts(base_dir: Path, *, allow_exit: bool = False) -> tuple
         {
             "deployment": "mock",
             "release": {"release_id": "mock-release", "policy_version": "0.11.0", "installed_at": datetime.now(timezone.utc).isoformat()},
-            "host": {"hostname": "ru-host", "login_user": "root", "is_root": True, "has_sudo": True, "os_id": "ubuntu", "os_version": "24.04", "default_interface": "eth0"},
+            "host": {
+                "hostname": "ru-host",
+                "login_user": "root",
+                "is_root": True,
+                "has_sudo": True,
+                "os_id": "ubuntu",
+                "os_version": "24.04",
+                "os_id_like": ["debian"],
+                "architecture": "x86_64",
+                "init_system": "systemd",
+                "security_mode": "apparmor",
+                "host_firewall": "none",
+                "default_interface": "eth0",
+            },
             "wg_state": {"interface": "wg0", "state": "up", "peers": []},
             "network": {"interfaces": {"eth0": {}}, "tcp_adaptation": {}},
             "front": {"listening": True, "state_counts": {}, "socket_retransmissions": 0, "rtt_ms": {}},
@@ -951,6 +1429,11 @@ def write_mock_ssh_scripts(base_dir: Path, *, allow_exit: bool = False) -> tuple
         has_sudo=1
         os_id=ubuntu
         os_version=24.04
+        os_id_like=debian
+        architecture=x86_64
+        init_system=systemd
+        security_mode=apparmor
+        host_firewall=none
         hostname=ru-host
         default_iface=eth0
         installed=1
@@ -978,6 +1461,11 @@ def write_mock_ssh_scripts(base_dir: Path, *, allow_exit: bool = False) -> tuple
             has_sudo=1
             os_id=ubuntu
             os_version=24.04
+            os_id_like=debian
+            architecture=x86_64
+            init_system=systemd
+            security_mode=apparmor
+            host_firewall=none
             hostname=foreign-host
             default_iface=eth0
             installed=1

@@ -625,8 +625,16 @@ def preflight_script(
             "set -euo pipefail",
             f"WG_INTERFACE={quoted_interface}",
             "service_state() { systemctl is-active \"$1\" 2>/dev/null || true; }",
-            "os_id=''; os_version=''",
-            "if [[ -r /etc/os-release ]]; then . /etc/os-release; os_id=\"${ID:-}\"; os_version=\"${VERSION_ID:-}\"; fi",
+            "os_id=''; os_version=''; os_id_like=''",
+            "if [[ -r /etc/os-release ]]; then . /etc/os-release; os_id=\"${ID:-}\"; os_version=\"${VERSION_ID:-}\"; os_id_like=\"${ID_LIKE:-}\"; fi",
+            "architecture=\"$(uname -m)\"",
+            "init_system=\"$(cat /proc/1/comm 2>/dev/null || true)\"",
+            "[[ -d /run/systemd/system ]] && init_system=systemd",
+            "security_mode=none",
+            "if [[ -r /sys/fs/selinux/enforce ]]; then [[ \"$(cat /sys/fs/selinux/enforce)\" == 1 ]] && security_mode=selinux-enforcing || security_mode=selinux-permissive; elif [[ -e /sys/module/apparmor/parameters/enabled ]]; then security_mode=apparmor; fi",
+            "host_firewall=none",
+            "[[ \"$(service_state firewalld.service)\" == active ]] && host_firewall=firewalld",
+            "if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi '^Status: active'; then host_firewall=ufw; fi",
             "installed=0; node_id=''; deployment_name=''; installed_at=''",
             "[[ -r /etc/vpn-stack/node-id ]] && node_id=\"$(tr -d '\\r\\n' </etc/vpn-stack/node-id)\"",
             "[[ -r /etc/vpn-stack/installed-at ]] && installed_at=\"$(tr -d '\\r\\n' </etc/vpn-stack/installed-at)\"",
@@ -645,6 +653,11 @@ def preflight_script(
             "printf 'has_sudo=%s\\n' \"$(command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1 && echo 1 || echo 0)\"",
             "printf 'os_id=%s\\n' \"$os_id\"",
             "printf 'os_version=%s\\n' \"$os_version\"",
+            "printf 'os_id_like=%s\\n' \"$os_id_like\"",
+            "printf 'architecture=%s\\n' \"$architecture\"",
+            "printf 'init_system=%s\\n' \"$init_system\"",
+            "printf 'security_mode=%s\\n' \"$security_mode\"",
+            "printf 'host_firewall=%s\\n' \"$host_firewall\"",
             "printf 'hostname=%s\\n' \"$(hostname -f 2>/dev/null || hostname)\"",
             "printf 'default_iface=%s\\n' \"$default_iface\"",
             "printf 'installed=%s\\n' \"$installed\"",
@@ -656,7 +669,6 @@ def preflight_script(
             "printf 'nftables=%s\\n' \"$(service_state vpn-stack-nftables.service)\"",
             "printf 'wireguard=%s\\n' \"$(service_state wg-quick@${WG_INTERFACE}.service)\"",
             "printf 'health_timer=%s\\n' \"$(service_state vpn-stack-health.timer)\"",
-            "printf 'ssh_service=%s\\n' \"$(service_state ssh.service)\"",
             "printf 'ssh_socket=%s\\n' \"$(service_state ssh.socket)\"",
             "printf 'wg_latest_handshake=%s\\n' \"$wg_latest_handshake\"",
             "printf 'wg_latest_handshake_age_s=%s\\n' \"$wg_latest_handshake_age_s\"",
@@ -673,9 +685,31 @@ def remote_preflight(
     run_live_probes: bool = False,
 ) -> dict[str, str]:
     try:
-        return bootstrap_from_snapshot(
-            remote_agent_snapshot(target, live_probes=run_live_probes, compact=not run_live_probes)
-        )
+        payload = _remote_agent_payload(target, live_probes=run_live_probes, compact=not run_live_probes)
+        if int(payload.get("schema_version", 0)) == DIAGNOSTICS_SCHEMA_VERSION:
+            return bootstrap_from_snapshot(payload)
+        from .transition_0218 import SOURCE_DIAGNOSTICS_SCHEMA, preflight_projection
+
+        if int(payload.get("schema_version", 0)) == SOURCE_DIAGNOSTICS_SCHEMA:
+            legacy = preflight_projection(payload)
+            host = parse_kv_output(
+                ssh_capture(
+                    target,
+                    preflight_script(
+                        wg_interface,
+                        fresh_since_epoch=fresh_since_epoch,
+                        run_live_probes=False,
+                    ),
+                )
+            )
+            for name in (
+                "login_user", "is_root", "has_sudo", "hostname", "os_id", "os_version",
+                "os_id_like", "architecture", "init_system", "security_mode", "host_firewall", "default_iface",
+            ):
+                if host.get(name):
+                    legacy[name] = host[name]
+            return legacy
+        raise AppError("vpn-stack-agent returned an unsupported snapshot schema")
     except (AppError, ValueError, json.JSONDecodeError):
         installed = ssh_capture(
             target,
@@ -710,9 +744,27 @@ def remote_agent_snapshot(target: RemoteTarget, *, live_probes: bool = False, pr
         release = payload.get("release")
         if isinstance(release, dict) and release.get("version"):
             try:
-                require_compatible_installed(release)
+                version = require_compatible_installed(release)
             except ValueError as exc:
                 raise AppError(str(exc)) from exc
+            if str(version) == "0.21.8":
+                from .transition_0218 import SOURCE_DIAGNOSTICS_SCHEMA, normalize_snapshot
+
+                if int(payload.get("schema_version", 0)) != SOURCE_DIAGNOSTICS_SCHEMA:
+                    raise AppError("vpn-stack-agent returned an unsupported snapshot schema")
+
+                try:
+                    manifest = json.loads(
+                        ssh_capture(target, "cat /etc/vpn-stack/render-manifest.json", command_timeout=30)
+                    )
+                    payload = normalize_snapshot(
+                        payload,
+                        manifest,
+                        target_schema=DIAGNOSTICS_SCHEMA_VERSION,
+                    )
+                except (ValueError, json.JSONDecodeError) as exc:
+                    raise AppError(str(exc)) from exc
+                return payload
         raise AppError("vpn-stack-agent returned an unsupported snapshot schema")
     return payload
 
@@ -737,6 +789,11 @@ def bootstrap_from_snapshot(snapshot: dict[str, Any]) -> dict[str, str]:
         "hostname": str(host.get("hostname", "")),
         "os_id": str(host.get("os_id", "")),
         "os_version": str(host.get("os_version", "")),
+        "os_id_like": " ".join(str(value) for value in host.get("os_id_like", ()) if value),
+        "architecture": str(host.get("architecture", "")),
+        "init_system": str(host.get("init_system", "")),
+        "security_mode": str(host.get("security_mode", "unknown")),
+        "host_firewall": str(host.get("host_firewall", "none")),
         "deployment_name": normalized.deployment,
         "topology": normalized.topology,
         "node": normalized.node_id,
@@ -796,7 +853,11 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
     print_header(f"Проверка {target.label}")
     print(f"host: {preflight.get('hostname', '-')}")
     print(f"login user: {preflight.get('login_user', '-')}")
-    print(f"os: {preflight.get('os_id', '-')} {preflight.get('os_version', '-')}")
+    print(
+        f"os: {preflight.get('os_id', '-')} {preflight.get('os_version', '-')} "
+        f"{preflight.get('architecture', '-')}; init={preflight.get('init_system', '-')}; "
+        f"security={preflight.get('security_mode', '-')}; host-firewall={preflight.get('host_firewall', '-')}"
+    )
     print(f"default iface: {preflight.get('default_iface', '-')}")
     print(
         f"installed: {preflight.get('installed', '0')}; deployment: {preflight.get('deployment_name', '-')}; "

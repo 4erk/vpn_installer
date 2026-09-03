@@ -73,7 +73,8 @@ def ensure_dir(path: Path) -> Path:
 
 def write_text(path: Path, content: str) -> None:
     ensure_file_parent(path)
-    path.write_text(content, encoding="utf-8", newline="\n")
+    with path.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(content)
 
 
 def write_bytes(path: Path, content: bytes) -> None:

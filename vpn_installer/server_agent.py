@@ -160,6 +160,11 @@ except ImportError:  # Installed agent runs as a standalone script.
     from resource_control import exec_router, prepare_memory_reserve, storage_maintenance, storage_snapshot  # type: ignore[no-redef]
 
 try:
+    from .platforms import PlatformSpec, apply_updates, current_platform, detect_host_facts, maintenance_snapshot as platform_maintenance_snapshot, resolve_platform
+except ImportError:  # Installed agent runs as a standalone script.
+    from platforms import PlatformSpec, apply_updates, current_platform, detect_host_facts, maintenance_snapshot as platform_maintenance_snapshot, resolve_platform  # type: ignore[no-redef]
+
+try:
     import fcntl
 except ImportError:  # pragma: no cover - local Windows tests only
     class _NoopFcntl:
@@ -231,15 +236,13 @@ XRAY_CONFIG_PATH = Path("/etc/xray/config.json")
 NFTABLES_CONFIG_PATH = ROOT / "nftables.conf"
 NFTABLES_SERVICE = "vpn-stack-nftables.service"
 SYSCTL_PATH = Path("/etc/sysctl.d/90-vpn-stack.conf")
-RESOLV_CONF_PATH = Path("/etc/resolv.conf")
-RESOLVED_DROPIN_PATH = Path("/etc/systemd/resolved.conf.d/90-vpn-stack.conf")
-RESOLVED_STUB_PATH = "/run/systemd/resolve/stub-resolv.conf"
+DNS_CACHE_CONFIG_PATH = ROOT / "dnsmasq.conf"
 FSTAB_PATH = Path("/etc/fstab")
 PROC_MOUNTS_PATH = Path("/proc/self/mounts")
 EXT4_SYSFS_ROOT = Path("/sys/fs/ext4")
 SYS_DEV_BLOCK_ROOT = Path("/sys/dev/block")
 
-MANIFEST_CAPABILITY_SCHEMA_VERSION = 4
+MANIFEST_CAPABILITY_SCHEMA_VERSION = 5
 TOPOLOGY_SINGLE = "single"
 TOPOLOGY_DUAL = "dual"
 NODE_GATEWAY = "gateway"
@@ -259,7 +262,7 @@ SERVICE_UNIT_DEFAULTS = {
     "wireguard": "wg-quick@{wg_interface}.service",
     "nftables": NFTABLES_SERVICE,
     "sing-box": "sing-box.service",
-    "resolver": "systemd-resolved.service",
+    "resolver": "vpn-stack-dns.service",
     "xray": "vpn-stack-xray.service",
     "admin": "vpn-stack-admin.service",
     "health_timer": "vpn-stack-health.timer",
@@ -371,6 +374,12 @@ def runtime_contract(manifest: Mapping[str, Any]) -> dict[str, Any]:
         raise RuntimeError("install plan service entries conflict with required services")
     if capabilities & INTERSERVER_CAPABILITIES and not TRANSPORT_MODULE_AVAILABLE:
         raise RuntimeError("interserver transport module is missing for an interserver-capable node")
+    try:
+        platform = PlatformSpec.from_dict(manifest.get("platform"))
+    except ValueError as exc:
+        raise RuntimeError(f"manifest platform is invalid: {exc}") from exc
+    if install_plan.get("platform") != platform.to_dict():
+        raise RuntimeError("install plan platform conflicts with the manifest")
 
     return {
         "topology": topology,
@@ -379,6 +388,7 @@ def runtime_contract(manifest: Mapping[str, Any]) -> dict[str, Any]:
         "capabilities": capabilities,
         "required_services": required_services,
         "service_units": service_units,
+        "platform": platform.to_dict(),
     }
 
 
@@ -3236,20 +3246,13 @@ def run_confirmed_probes(env: dict[str, str], contract: Mapping[str, Any], profi
     return retry
 
 
-def maintenance_snapshot() -> dict[str, Any]:
-    result = run(["apt", "list", "--upgradable"], timeout=20)
-    if result.returncode != 0:
-        return {"collector_error": (result.stderr.strip() or "apt list failed")[:240]}
-    lines = [line for line in result.stdout.splitlines() if "/" in line and not line.startswith("Listing")]
-    security = [line for line in lines if "security" in line.lower()]
-    os_release = os_release_fields()
-    return {
-        "upgradable": len(lines),
-        "security_upgradable": len(security),
-        "reboot_required": Path("/var/run/reboot-required").exists(),
-        "kernel": os.uname().release,
-        "os": os_release.get("PRETTY_NAME", ""),
-    }
+def maintenance_snapshot(platform: PlatformSpec | None = None) -> dict[str, Any]:
+    try:
+        result = platform_maintenance_snapshot(platform or current_platform())
+    except (OSError, RuntimeError, ValueError) as exc:
+        return {"collector_error": str(exc)[:240]}
+    result.update(kernel=os.uname().release, os=os_release_fields().get("PRETTY_NAME", ""))
+    return result
 
 
 def decode_mount_field(value: str) -> str:
@@ -3334,7 +3337,21 @@ def root_filesystem_snapshot(
         "verdict": "inconclusive",
         "reason": "root filesystem state is unavailable",
     }
-    if filesystem != "ext4" or not source:
+    if not source:
+        return result
+    mount_options = {item for item in mount.get("options", "").split(",") if item}
+    if "ro" in mount_options:
+        result.update(state="read-only", verdict="failed", reason="root filesystem is mounted read-only")
+        return result
+    if filesystem in {"xfs", "btrfs"}:
+        result.update(
+            state="mounted",
+            boot_check_enabled=None,
+            verdict="verified",
+            reason="",
+        )
+        return result
+    if filesystem != "ext4":
         result["reason"] = f"unsupported root filesystem: {filesystem or 'unknown'}"
         return result
     device = os.path.realpath(source)
@@ -3385,21 +3402,39 @@ def os_release_fields() -> dict[str, str]:
 
 def resolver_snapshot() -> dict[str, Any]:
     try:
-        target = os.path.realpath(RESOLV_CONF_PATH)
-    except OSError:
-        target = ""
-    try:
-        lines = RESOLVED_DROPIN_PATH.read_text(encoding="utf-8").splitlines()
+        lines = DNS_CACHE_CONFIG_PATH.read_text(encoding="utf-8").splitlines()
     except OSError:
         lines = []
-    dns_line = next((line.partition("=")[2].strip() for line in lines if line.startswith("DNS=")), "")
-    stale_retention = next((line.partition("=")[2].strip() for line in lines if line.startswith("StaleRetentionSec=")), "")
+    settings: dict[str, list[str]] = {}
+    flags: set[str] = set()
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, separator, value = line.partition("=")
+        if separator:
+            settings.setdefault(key, []).append(value)
+        else:
+            flags.add(key)
+    address = settings.get("listen-address", [""])[-1]
+    port = settings.get("port", [""])[-1]
+    cache_capacity = settings.get("cache-size", [""])[-1]
+    upstreams = settings.get("server", [])
+    managed = (
+        address == "127.0.0.1"
+        and port == "1054"
+        and bool(upstreams)
+        and "no-resolv" in flags
+        and "all-servers" in flags
+    )
     return {
-        "resolv_conf_target": target,
-        "managed_stub": target == RESOLVED_STUB_PATH,
-        "upstreams": dns_line.split(),
-        "cache_enabled": any(line.strip() == "Cache=yes" for line in lines),
-        "stale_retention": stale_retention,
+        "provider": "dnsmasq",
+        "listen_address": address,
+        "listen_port": int(port) if port.isdigit() else 0,
+        "upstreams": upstreams,
+        "cache_capacity": int(cache_capacity) if cache_capacity.isdigit() else 0,
+        "concurrent_upstreams": "all-servers" in flags,
+        "managed_config": managed,
     }
 
 
@@ -3407,6 +3442,11 @@ def host_snapshot(default_iface: str) -> dict[str, Any]:
     is_root = bool(getattr(os, "geteuid", lambda: 1)() == 0)
     has_sudo = is_root or run(["sudo", "-n", "true"], timeout=2).returncode == 0
     os_release = os_release_fields()
+    facts = detect_host_facts()
+    try:
+        platform = resolve_platform(facts).to_dict()
+    except ValueError:
+        platform = {}
     return {
         "hostname": socket.getfqdn() or socket.gethostname(),
         "login_user": os.environ.get("USER") or os.environ.get("LOGNAME") or "unknown",
@@ -3414,6 +3454,12 @@ def host_snapshot(default_iface: str) -> dict[str, Any]:
         "has_sudo": has_sudo,
         "os_id": os_release.get("ID", ""),
         "os_version": os_release.get("VERSION_ID", ""),
+        "os_id_like": list(facts.id_like),
+        "architecture": facts.architecture,
+        "init_system": facts.init_system,
+        "security_mode": facts.security_mode,
+        "host_firewall": facts.host_firewall,
+        "platform": platform,
         "default_interface": default_iface,
     }
 
@@ -3509,8 +3555,8 @@ def collect_runtime_facts(*, live_probes: bool = False, profile: str = "light", 
         reasons.append(f"network_profile={','.join(profile_mismatches)}")
     if wireguard_policy.get("managed") and not wireguard_policy.get("ok"):
         reasons.append(f"wireguard_policy={','.join(wireguard_policy.get('missing', [])) or 'invalid'}")
-    if not resolver.get("managed_stub"):
-        reasons.append(f"resolver_stub={resolver.get('resolv_conf_target') or 'missing'}")
+    if not resolver.get("managed_config"):
+        reasons.append("resolver_config=missing")
     capacity = storage.get("capacity", {})
     memory = storage.get("memory", {})
     if capacity.get("verdict") == "failed":
@@ -4174,6 +4220,8 @@ def build_parser() -> argparse.ArgumentParser:
     exec_router_parser.add_argument("router_command", nargs=argparse.REMAINDER)
     storage = sub.add_parser("storage-maintain")
     storage.add_argument("--deep", action="store_true")
+    maintain = sub.add_parser("maintain")
+    maintain.add_argument("--apply", action="store_true")
     routes = sub.add_parser("routes")
     route_sub = routes.add_subparsers(dest="routes_action", required=True)
     route_sub.add_parser("list")
@@ -4237,6 +4285,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     elif args.command == "storage-maintain":
         payload = storage_maintenance(parse_env(), deep=args.deep)
+    elif args.command == "maintain":
+        platform = current_platform()
+        if args.apply:
+            apply_updates(platform)
+        payload = maintenance_snapshot(platform)
     elif args.command == "routes":
         payload = routes_command(args)
     else:

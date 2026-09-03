@@ -8,7 +8,14 @@ from unittest.mock import patch
 
 from vpn_installer.compatibility import COMPATIBLE_INSTALLED_MIN
 from vpn_installer.config import generate_default_env
-from vpn_installer.install_contract import InstallContractError, is_planned_install_maintenance, validate_bundle, validate_installed_bundle
+from vpn_installer.diagnostics import SCHEMA_VERSION as DIAGNOSTICS_SCHEMA_VERSION
+from vpn_installer.install_contract import (
+    InstallContractError,
+    is_planned_install_maintenance,
+    normalize_acceptance_snapshot,
+    validate_bundle,
+    validate_installed_bundle,
+)
 from vpn_installer.install_support import main as install_support_main
 from vpn_installer.render import copy_python_package, write_node_rendered_files
 
@@ -19,12 +26,24 @@ CONTRACT_FILES = (
     "binaries.tsv",
     "services.tsv",
     "packages.tsv",
+    "platform.json",
     "meta.tsv",
 )
 
 
 class InstallContractTests(unittest.TestCase):
-    def test_installed_bundle_uses_one_current_schema_validator_for_previous_release(self) -> None:
+    def test_previous_release_acceptance_is_normalized_to_current_schema(self) -> None:
+        payload = {"schema_version": 5}
+        manifest = {"version": COMPATIBLE_INSTALLED_MIN}
+        normalized = {"schema_version": DIAGNOSTICS_SCHEMA_VERSION}
+
+        with patch("vpn_installer.transition_0218.normalize_snapshot", return_value=normalized) as adapter:
+            result = normalize_acceptance_snapshot(payload, manifest)
+
+        self.assertEqual(result, normalized)
+        adapter.assert_called_once_with(payload, manifest, target_schema=DIAGNOSTICS_SCHEMA_VERSION)
+
+    def test_installed_bundle_dispatches_exact_previous_release_adapter(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             bundle = root / "bundle"
@@ -33,11 +52,10 @@ class InstallContractTests(unittest.TestCase):
                 json.dumps({"version": COMPATIBLE_INSTALLED_MIN}),
                 encoding="utf-8",
             )
-            with patch("vpn_installer.install_contract._validate_bundle") as validator:
+            with patch("vpn_installer.transition_0218.validate_installed_bundle") as validator:
                 validate_installed_bundle(bundle, "gateway", root / "contract")
 
-        self.assertEqual(validator.call_args.kwargs["expected_version"], COMPATIBLE_INSTALLED_MIN)
-        self.assertNotIn("require_current_compatibility", validator.call_args.kwargs)
+        validator.assert_called_once_with(bundle, "gateway", root / "contract")
 
     def test_installed_bundle_rejects_out_of_window_version_before_validation(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -105,7 +123,7 @@ class InstallContractTests(unittest.TestCase):
     def contract_payload(contract_dir: Path) -> dict[str, bytes]:
         return {name: (contract_dir / name).read_bytes() for name in CONTRACT_FILES}
 
-    def test_function_and_cli_emit_identical_schema_four_tsv_contract(self) -> None:
+    def test_function_and_cli_emit_identical_schema_five_contract(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             bundle = self.render_single_gateway(root)
@@ -128,10 +146,12 @@ class InstallContractTests(unittest.TestCase):
             self.assertEqual(result, 0)
             self.assertEqual(self.contract_payload(cli_contract), self.contract_payload(direct_contract))
             meta = (direct_contract / "meta.tsv").read_text(encoding="utf-8").splitlines()
-            self.assertEqual(meta[0], "schema_version\t4")
+            self.assertEqual(meta[0], "schema_version\t5")
             self.assertIn("topology\tsingle", meta)
             self.assertIn("node_id\tgateway", meta)
             self.assertIn("location\tforeign", meta)
+            platform = json.loads((direct_contract / "platform.json").read_text(encoding="utf-8"))
+            self.assertEqual(platform["package_provider"], "apt")
 
     def test_invalid_bundle_fails_before_any_tsv_is_written(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
