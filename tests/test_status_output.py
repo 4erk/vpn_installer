@@ -29,6 +29,47 @@ def collected_windows() -> dict[str, LogWindowSnapshot]:
 
 
 class StatusOutputTests(unittest.TestCase):
+    def test_formats_app_owned_resolver_without_host_resolver_fields(self) -> None:
+        lines = format_snapshot_summary(
+            DiagnosticsSnapshot(
+                network={
+                    "resolver": {
+                        "provider": "dnsmasq",
+                        "listen_address": "127.0.0.1",
+                        "listen_port": 1054,
+                        "cache_capacity": 4096,
+                        "concurrent_upstreams": True,
+                        "managed_config": True,
+                        "upstreams": ["1.1.1.1", "9.9.9.9", "8.8.8.8"],
+                    }
+                }
+            )
+        )
+
+        rendered = "\n".join(lines)
+        self.assertIn(
+            "app resolver: provider=dnsmasq, listen=127.0.0.1:1054, cache_entries=4096, "
+            "concurrent_upstreams=yes, managed=yes, upstreams=1.1.1.1,9.9.9.9,8.8.8.8",
+            rendered,
+        )
+        self.assertNotIn("host resolver:", rendered)
+
+    def test_labels_transition_snapshot_resolver_as_host_owned(self) -> None:
+        lines = format_snapshot_summary(
+            DiagnosticsSnapshot(
+                network={
+                    "resolver": {
+                        "managed_stub": True,
+                        "cache_enabled": True,
+                        "stale_retention": "1h",
+                        "upstreams": ["1.1.1.1"],
+                    }
+                }
+            )
+        )
+
+        self.assertIn("host resolver: stub=active, cache=on, stale=1h, upstreams=1.1.1.1", lines)
+
     def test_explains_when_read_only_status_skips_live_probes(self) -> None:
         lines = format_snapshot_summary(
             DiagnosticsSnapshot(

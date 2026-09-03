@@ -29,6 +29,7 @@
 - App-owned DNS cache детерминированно отвечает `127.0.0.1` на стандартный `localhost A`. Это сохраняет служебный DNS-over-TCP liveness contract во время rolling update со старым gateway; раньше `no-hosts` возвращал `NXDOMAIN`, хотя оба underlay и пользовательский VLESS-путь были исправны. Docker runtime smoke теперь проверяет именно этот production record без command-line подмены.
 - Transport watcher использует loss как route evidence только в свежей 20-пакетной выборке preferred WireGuard и только когда alternate одновременно доказал доступ к управляемому foreign DNS relay. Возврат с Hysteria2 требует восьми успешных probe без потерь и прежних трёх recovery confirmations; RTT сам по себе маршрут не меняет. Это закрывает длительные зависания живого, но теряющего пакеты underlay без flapping и без перезапуска Xray, router или клиентских TCP-соединений.
 - Full-path verifier коррелирует VLESS-run с явными source-filtered Xray flow events, даже если rolling accept counter пересёк границу окна. Пауза throughput теперь считается только между порциями данных внутри активной загрузки, а не во время запуска curl или смены источника.
+- `status` явно называет app-owned `dnsmasq` и показывает его listen address, cache capacity, concurrent upstreams и managed state. Переходный host resolver `0.21.8` имеет отдельную подпись и больше не создаёт ложный вывод `cache=off` для работающего кеша проекта.
 
 ### Diagnosed
 
