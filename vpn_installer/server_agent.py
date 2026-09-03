@@ -57,6 +57,8 @@ try:
         TRANSPORT_FAILURE_CONFIRMATIONS,
         TRANSPORT_HY2_TAG,
         TRANSPORT_PREFERRED_PROBE_INTERVAL_SECONDS,
+        TRANSPORT_CANDIDATE_QUALITY_PROBE_ATTEMPTS,
+        TRANSPORT_CANDIDATE_QUALITY_PROBE_TIMEOUT_MS,
         TRANSPORT_PREFERRED_TAG,
         TRANSPORT_PROBE_INTERVAL_SECONDS,
         TRANSPORT_QUALITY_PROBE_INTERVAL_SECONDS,
@@ -87,6 +89,8 @@ except ImportError:  # Optional on nodes without an interserver capability.
             TRANSPORT_FAILURE_CONFIRMATIONS,
             TRANSPORT_HY2_TAG,
             TRANSPORT_PREFERRED_PROBE_INTERVAL_SECONDS,
+            TRANSPORT_CANDIDATE_QUALITY_PROBE_ATTEMPTS,
+            TRANSPORT_CANDIDATE_QUALITY_PROBE_TIMEOUT_MS,
             TRANSPORT_PREFERRED_TAG,
             TRANSPORT_PROBE_INTERVAL_SECONDS,
             TRANSPORT_QUALITY_PROBE_INTERVAL_SECONDS,
@@ -115,15 +119,17 @@ except ImportError:  # Optional on nodes without an interserver capability.
         TRANSPORT_CANDIDATE_TAGS = (TRANSPORT_WG_TAG, TRANSPORT_HY2_TAG)
         TRANSPORT_FAILURE_CONFIRMATIONS = 2
         TRANSPORT_PREFERRED_PROBE_INTERVAL_SECONDS = 10
+        TRANSPORT_CANDIDATE_QUALITY_PROBE_ATTEMPTS = 8
+        TRANSPORT_CANDIDATE_QUALITY_PROBE_TIMEOUT_MS = 2400
         TRANSPORT_PREFERRED_TAG = TRANSPORT_WG_TAG
         TRANSPORT_PROBE_INTERVAL_SECONDS = 2
         TRANSPORT_QUALITY_PROBE_INTERVAL_SECONDS = 15
-        TRANSPORT_QUALITY_PROBE_PACKETS = 4
+        TRANSPORT_QUALITY_PROBE_PACKETS = 20
         TRANSPORT_QUALITY_PROBE_PAYLOAD_BYTES = 1200
         TRANSPORT_RELAY_INBOUND_TAG = "interserver-overlay-in"
         TRANSPORT_RELAY_PORT = 19091
         TRANSPORT_SELECTOR_TAG = "interserver-underlay-select"
-        TRANSPORT_STATE_SCHEMA_VERSION = 13
+        TRANSPORT_STATE_SCHEMA_VERSION = 14
         TRANSPORT_SWITCH_RETRY_BASE_SECONDS = 30
         TRANSPORT_SWITCH_RETRY_MAX_SECONDS = 300
         TRANSPORT_SWITCH_PROOF_ATTEMPTS = 5
@@ -2265,7 +2271,7 @@ def transport_overlay_path_probe(env: dict[str, str], *, quality: bool = False) 
     packet_count = TRANSPORT_QUALITY_PROBE_PACKETS
     payload_bytes = TRANSPORT_QUALITY_PROBE_PAYLOAD_BYTES
     command = ["ping", "-n", "-I", interface, "-c", str(packet_count)]
-    command.extend(["-i", "0.1", "-w", "2"])
+    command.extend(["-i", "0.05", "-w", "2"])
     command.extend(["-W", "1", "-s", str(payload_bytes), target])
     result = run(command, timeout=3)
     elapsed_ms = max(1, round((time.monotonic() - started) * 1000))
@@ -2343,12 +2349,29 @@ def collect_transport_probes(
             }
         )
         probes[selected]["quality_sampled"] = False
-    if probes[selected].get("ok") is not True:
+    fresh_preferred_quality_failure = (
+        selected == TRANSPORT_PREFERRED_TAG
+        and probes[selected].get("quality_sampled") is True
+        and probes[selected].get("quality_checked") is True
+        and probes[selected].get("quality_ok") is False
+    )
+    if probes[selected].get("ok") is not True or fresh_preferred_quality_failure:
         alternate = next(tag for tag in TRANSPORT_CANDIDATE_TAGS if tag != selected)
         if transport_switch_backoff_active(previous, alternate, observed_at) is None:
-            probes[alternate] = transport_candidate_probe(alternate)
+            if fresh_preferred_quality_failure:
+                probes[alternate] = transport_candidate_probe(
+                    alternate,
+                    timeout_ms=TRANSPORT_CANDIDATE_QUALITY_PROBE_TIMEOUT_MS,
+                    attempts=TRANSPORT_CANDIDATE_QUALITY_PROBE_ATTEMPTS,
+                )
+            else:
+                probes[alternate] = transport_candidate_probe(alternate)
     elif selected != TRANSPORT_PREFERRED_TAG and preferred_transport_probe_due(previous, observed_at):
-        probes[TRANSPORT_PREFERRED_TAG] = transport_candidate_probe(TRANSPORT_PREFERRED_TAG)
+        probes[TRANSPORT_PREFERRED_TAG] = transport_candidate_probe(
+            TRANSPORT_PREFERRED_TAG,
+            timeout_ms=TRANSPORT_CANDIDATE_QUALITY_PROBE_TIMEOUT_MS,
+            attempts=TRANSPORT_CANDIDATE_QUALITY_PROBE_ATTEMPTS,
+        )
     return probes
 
 

@@ -304,6 +304,70 @@ class InterserverTransportIdentityTests(unittest.TestCase):
         self.assertFalse(result["would_switch"])
         self.assertIn("packet loss 25%", result["reason"])
 
+    def test_fresh_preferred_quality_loss_switches_to_a_healthy_fallback(self) -> None:
+        result = evaluate_transport_policy(
+            selected=TRANSPORT_WG_TAG,
+            probes={
+                TRANSPORT_WG_TAG: {
+                    "checked": True,
+                    "ok": True,
+                    "scope": "overlay-dns",
+                    "quality_checked": True,
+                    "quality_sampled": True,
+                    "quality_ok": False,
+                    "quality_error": "WireGuard overlay packet loss 10%",
+                    "packet_loss_pct": 10.0,
+                },
+                TRANSPORT_HY2_TAG: {
+                    "checked": True,
+                    "ok": True,
+                    "health_confirmed": True,
+                    "scope": "raw-underlay-udp",
+                    "quality_checked": True,
+                    "quality_ok": True,
+                    "packet_loss_pct": 0.0,
+                },
+            },
+            observed_at="2026-08-06T12:00:00+00:00",
+        )
+
+        self.assertEqual(result["state"], "recovering")
+        self.assertFalse(result["hard_failure_evidence"])
+        self.assertTrue(result["would_switch"])
+        self.assertEqual(result["recommended"], TRANSPORT_HY2_TAG)
+        self.assertEqual(result["quality_failure"]["reason"], "packet_loss")
+        self.assertEqual(result["preferred_retry"]["retry_at"], "2026-08-06T12:01:00+00:00")
+
+    def test_preferred_quality_loss_does_not_switch_to_a_lossy_fallback(self) -> None:
+        result = evaluate_transport_policy(
+            selected=TRANSPORT_WG_TAG,
+            probes={
+                TRANSPORT_WG_TAG: {
+                    "checked": True,
+                    "ok": True,
+                    "quality_checked": True,
+                    "quality_sampled": True,
+                    "quality_ok": False,
+                    "quality_error": "WireGuard overlay packet loss 10%",
+                    "packet_loss_pct": 10.0,
+                },
+                TRANSPORT_HY2_TAG: {
+                    "checked": True,
+                    "ok": True,
+                    "health_confirmed": True,
+                    "quality_checked": True,
+                    "quality_ok": False,
+                    "quality_error": "underlay probe packet loss 12.5%",
+                    "packet_loss_pct": 12.5,
+                },
+            },
+            observed_at="2026-08-06T12:00:00+00:00",
+        )
+
+        self.assertEqual(result["state"], "degraded")
+        self.assertFalse(result["would_switch"])
+        self.assertEqual(result["recommended"], TRANSPORT_WG_TAG)
+
     def test_unknown_state_schema_cannot_confirm_a_switch(self) -> None:
         stale = {
             "schema_version": 999,
@@ -522,6 +586,28 @@ class InterserverTransportIdentityTests(unittest.TestCase):
         self.assertFalse(result["would_switch"])
         self.assertIn("preferred underlay timeout", result["reason"])
         self.assertEqual(result["preferred_retry"]["attempts"], 1)
+
+    def test_fallback_does_not_recover_to_a_lossy_preferred_path(self) -> None:
+        result = evaluate_transport_policy(
+            selected=TRANSPORT_HY2_TAG,
+            probes={
+                TRANSPORT_HY2_TAG: {"checked": True, "ok": True, "scope": "overlay-dns"},
+                TRANSPORT_WG_TAG: {
+                    "checked": True,
+                    "ok": True,
+                    "quality_checked": True,
+                    "quality_ok": False,
+                    "quality_error": "underlay probe packet loss 12.5%",
+                    "packet_loss_pct": 12.5,
+                },
+            },
+            observed_at="2026-08-06T12:00:00+00:00",
+        )
+
+        self.assertEqual(result["state"], "healthy")
+        self.assertFalse(result["would_switch"])
+        self.assertIn("packet loss 12.5%", result["reason"])
+        self.assertEqual(result["preferred_retry"]["reason"], "packet_loss")
 
     def test_deferred_cycle_preserves_but_does_not_increment_recovery_evidence(self) -> None:
         first = evaluate_transport_policy(

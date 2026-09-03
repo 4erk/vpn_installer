@@ -1240,7 +1240,7 @@ def _validate_front_correlation(observation: object) -> dict[str, object]:
         observations = observation
     else:
         return _probe_component("inconclusive", "public VLESS front was not observed while the runner was active")
-    best: tuple[int, dict[str, object]] | None = None
+    best: tuple[int, int, dict[str, object]] | None = None
     errors: list[str] = []
     for item in observations:
         if not isinstance(item, dict):
@@ -1261,19 +1261,42 @@ def _validate_front_correlation(observation: object) -> dict[str, object]:
         flows = during.get("front", {}).get("flows", {}) if isinstance(during.get("front"), dict) else {}
         if not isinstance(flows, dict):
             flows = {}
-        candidate = (accepted_delta, flows)
-        if best is None or (accepted_delta, len(flows)) > (best[0], len(best[1])):
+        flow_events = during.get("flow_events", {})
+        if not isinstance(flow_events, dict):
+            flow_events = {}
+        correlated_events = 0
+        for destinations in flow_events.values():
+            if not isinstance(destinations, dict):
+                continue
+            for count in destinations.values():
+                try:
+                    correlated_events += max(0, int(count))
+                except (TypeError, ValueError):
+                    return _probe_component("failed", "public VLESS flow correlation counters are malformed")
+        candidate = (correlated_events, accepted_delta, flows)
+        if best is None or (correlated_events > 0, accepted_delta, len(flows)) > (
+            best[0] > 0,
+            best[1],
+            len(best[2]),
+        ):
             best = candidate
     if best is None:
         detail = f": {errors[-1]}" if errors else ""
         return _probe_component("inconclusive", f"public VLESS front correlation snapshots are incomplete{detail}")
-    accepted_delta, flows = best
-    if accepted_delta < 1:
+    correlated_events, accepted_delta, flows = best
+    if accepted_delta < 1 and correlated_events < 1:
         return _probe_component("inconclusive", "public VLESS runner produced no correlated Xray TCP accept event")
     qualities = {str(metrics.get("quality", "")) for metrics in flows.values() if isinstance(metrics, dict)}
     verdict = "degraded" if "degraded" in qualities else "verified"
     result = _probe_component(verdict)
-    result.update({"accepted_delta": accepted_delta, "flow_count": len(flows), "qualities": sorted(qualities)})
+    result.update(
+        {
+            "accepted_delta": accepted_delta,
+            "correlated_events": correlated_events,
+            "flow_count": len(flows),
+            "qualities": sorted(qualities),
+        }
+    )
     return result
 
 

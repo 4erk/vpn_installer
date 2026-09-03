@@ -1073,6 +1073,30 @@ class VerifyTests(unittest.TestCase):
         self.assertEqual(correlation["accepted_delta"], 1)
         self.assertEqual(correlation["flow_count"], 0)
 
+    def test_front_correlation_uses_flow_event_when_rolling_counter_decreases(self) -> None:
+        correlation = _validate_front_correlation(
+            {
+                "baseline": {"events": {"accepted_tcp": 40}, "front": {"flows": {}}},
+                "during": {
+                    "events": {"accepted_tcp": 37},
+                    "flow_events": {"198.51.100.20:37166": {"1.1.1.1:53": 1}},
+                    "front": {
+                        "flows": {
+                            "198.51.100.20:37166": {
+                                "accepted_destinations": {"1.1.1.1:53": 1},
+                                "quality": "observed",
+                            }
+                        }
+                    },
+                },
+            }
+        )
+
+        self.assertEqual(correlation["verdict"], "verified")
+        self.assertEqual(correlation["accepted_delta"], -3)
+        self.assertEqual(correlation["correlated_events"], 1)
+        self.assertEqual(correlation["flow_count"], 1)
+
     def test_public_hysteria_runner_and_validator_keep_separate_contracts(self) -> None:
         env = deployment_env()
         topology = TopologySpec.from_env(env)

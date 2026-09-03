@@ -535,7 +535,6 @@ if (( throughput_seconds > 0 )); then
     event throughput-start
     throughput_start_ns=$(date +%s%N)
     throughput_deadline_ns=$((throughput_start_ns + throughput_seconds * 1000000000))
-    last_progress_ns=$throughput_start_ns
     while :; do
         now_ns=$(date +%s%N)
         remaining_ns=$((throughput_deadline_ns - now_ns))
@@ -557,6 +556,7 @@ if (( throughput_seconds > 0 )); then
             curl -4fsS --proxy "$proxy" --connect-timeout 5 -o "$throughput_payload_path" "$throughput_url" 2>>runner-curl.log &
         curl_pid=$!
         observed_bytes=0
+        attempt_last_progress_ns=0
         while kill -0 "$curl_pid" 2>/dev/null; do
             curl_state=$(ps -o stat= -p "$curl_pid" 2>/dev/null | tr -d '[:space:]')
             [[ -n "$curl_state" && "${curl_state:0:1}" != "Z" ]] || break
@@ -565,12 +565,14 @@ if (( throughput_seconds > 0 )); then
             sample_bytes=$(stat -c %s -- "$throughput_payload_path" 2>/dev/null || printf '0')
             [[ "$sample_bytes" =~ ^[0-9]+$ ]] || sample_bytes=0
             if (( sample_bytes > observed_bytes )); then
-                progress_gap_ns=$((sample_ns - last_progress_ns))
-                (( progress_gap_ns > throughput_max_gap_ns )) && throughput_max_gap_ns=$progress_gap_ns
-                last_progress_ns=$sample_ns
+                if (( attempt_last_progress_ns > 0 )); then
+                    progress_gap_ns=$((sample_ns - attempt_last_progress_ns))
+                    (( progress_gap_ns > throughput_max_gap_ns )) && throughput_max_gap_ns=$progress_gap_ns
+                fi
+                attempt_last_progress_ns=$sample_ns
                 observed_bytes=$sample_bytes
-            else
-                current_gap_ns=$((sample_ns - last_progress_ns))
+            elif (( attempt_last_progress_ns > 0 )); then
+                current_gap_ns=$((sample_ns - attempt_last_progress_ns))
                 (( current_gap_ns > throughput_max_gap_ns )) && throughput_max_gap_ns=$current_gap_ns
             fi
         done
@@ -585,12 +587,12 @@ if (( throughput_seconds > 0 )); then
             curl_output=0
         fi
         if (( curl_output > observed_bytes )); then
-            progress_gap_ns=$((now_ns - last_progress_ns))
-            (( progress_gap_ns > throughput_max_gap_ns )) && throughput_max_gap_ns=$progress_gap_ns
-            last_progress_ns=$now_ns
+            if (( attempt_last_progress_ns > 0 )); then
+                progress_gap_ns=$((now_ns - attempt_last_progress_ns))
+                (( progress_gap_ns > throughput_max_gap_ns )) && throughput_max_gap_ns=$progress_gap_ns
+            fi
+            attempt_last_progress_ns=$now_ns
         fi
-        current_gap_ns=$((now_ns - last_progress_ns))
-        (( current_gap_ns > throughput_max_gap_ns )) && throughput_max_gap_ns=$current_gap_ns
         rm -f -- "$throughput_payload_path"
         if (( metrics_valid == 0 )); then
             throughput_source_failures=$((throughput_source_failures + 1))
@@ -620,8 +622,6 @@ if (( throughput_seconds > 0 )); then
         event "throughput-curl-exit-$curl_status"
     done
     throughput_end_ns=$(date +%s%N)
-    final_gap_ns=$((throughput_end_ns - last_progress_ns))
-    (( final_gap_ns > throughput_max_gap_ns )) && throughput_max_gap_ns=$final_gap_ns
     if (( throughput_attempts == 0 || throughput_bytes == 0 )); then
         throughput_failures=1
     fi

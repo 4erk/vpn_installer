@@ -27,6 +27,12 @@
 - App-owned DNS unit запускает `dnsmasq` через `DynamicUser` и разрешает требуемый `AF_NETLINK` внутри systemd sandbox; отсутствие этого address family было поймано production acceptance до переключения релиза и приводило к безопасному rollback.
 - Переходный adapter переносит network/qdisc evidence из diagnostics `0.21.8`, поэтому rollback проверяет фактический восстановленный `wg0`, а не принимает отсутствие поля adapter-а за runtime drift. Первый неуспешный post-cutover VLESS gate подтверждается вторым полным свежим циклом через один интервал transport watcher; rollback запускается только при двух последовательных отказах.
 - App-owned DNS cache детерминированно отвечает `127.0.0.1` на стандартный `localhost A`. Это сохраняет служебный DNS-over-TCP liveness contract во время rolling update со старым gateway; раньше `no-hosts` возвращал `NXDOMAIN`, хотя оба underlay и пользовательский VLESS-путь были исправны. Docker runtime smoke теперь проверяет именно этот production record без command-line подмены.
+- Transport watcher использует loss как route evidence только в свежей 20-пакетной выборке preferred WireGuard и только когда alternate одновременно доказал доступ к управляемому foreign DNS relay. Возврат с Hysteria2 требует восьми успешных probe без потерь и прежних трёх recovery confirmations; RTT сам по себе маршрут не меняет. Это закрывает длительные зависания живого, но теряющего пакеты underlay без flapping и без перезапуска Xray, router или клиентских TCP-соединений.
+- Full-path verifier коррелирует VLESS-run с явными source-filtered Xray flow events, даже если rolling accept counter пересёк границу окна. Пауза throughput теперь считается только между порциями данных внутри активной загрузки, а не во время запуска curl или смены источника.
+
+### Diagnosed
+
+- На production один и тот же публичный VLESS-путь через preferred WireGuard дал `8.18s` максимального разрыва внутри передачи. Контролируемый прогон через уже настроенный Hysteria2 сохранил `9/9` первых загрузок и уменьшил разрыв до `0.483s`; возврат на WireGuard после эксперимента выполнен штатным selector. Прямые и router-пробы локализовали ограничение в межсерверном участке, а не в CPU, памяти, qdisc, DNS или публичном Xray front.
 
 ### Compatibility
 

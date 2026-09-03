@@ -2530,7 +2530,11 @@ class ServerAgentTests(unittest.TestCase):
                 observed_at="2026-08-07T12:00:00+00:00",
             )
 
-        probe.assert_called_once_with("interserver-underlay-wg")
+        probe.assert_called_once_with(
+            "interserver-underlay-wg",
+            timeout_ms=server_agent.TRANSPORT_CANDIDATE_QUALITY_PROBE_TIMEOUT_MS,
+            attempts=server_agent.TRANSPORT_CANDIDATE_QUALITY_PROBE_ATTEMPTS,
+        )
 
     def test_transport_reconcile_does_not_switch_during_install_transaction(self) -> None:
         previous = {
@@ -2561,6 +2565,25 @@ class ServerAgentTests(unittest.TestCase):
         self.assertEqual(result["target"], "10.75.0.2:1053")
         self.assertTrue(result["health_confirmed"])
         probe.assert_called_once_with(19094, "10.75.0.2", 1053, 1.2)
+
+    def test_transport_candidate_quality_probe_reports_partial_loss(self) -> None:
+        with patch.object(
+            interserver_transport,
+            "_socks_udp_dns_probe",
+            side_effect=[None, TimeoutError("timed out"), None, None],
+        ) as probe:
+            result = server_agent.transport_candidate_probe(
+                "interserver-underlay-wg",
+                timeout_ms=1200,
+                attempts=4,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["health_confirmed"])
+        self.assertFalse(result["quality_ok"])
+        self.assertEqual(result["packet_loss_pct"], 25.0)
+        self.assertEqual(probe.call_count, 4)
+        probe.assert_called_with(19093, "10.75.0.2", 1053, 0.3)
 
     def test_overlay_dns_probe_retries_one_lost_exchange_without_failing_the_path(self) -> None:
         with patch.object(
@@ -2718,7 +2741,7 @@ class ServerAgentTests(unittest.TestCase):
             ["ping"],
             0,
             (
-                "4 packets transmitted, 3 received, 25% packet loss, time 305ms\n"
+                "20 packets transmitted, 15 received, 25% packet loss, time 955ms\n"
                 "rtt min/avg/max/mdev = 24.100/31.250/48.500/8.200 ms\n"
             ),
             "",
@@ -2741,9 +2764,9 @@ class ServerAgentTests(unittest.TestCase):
                 "-I",
                 "wg0",
                 "-c",
-                "4",
+                "20",
                 "-i",
-                "0.1",
+                "0.05",
                 "-w",
                 "2",
                 "-W",
@@ -2782,7 +2805,7 @@ class ServerAgentTests(unittest.TestCase):
         quality = {
             "checked": True,
             "ok": True,
-            "attempts": 4,
+            "attempts": 20,
             "scope": "overlay-quality",
             "quality_checked": True,
             "packet_loss_pct": 0.0,
@@ -2824,8 +2847,16 @@ class ServerAgentTests(unittest.TestCase):
             "error": "WireGuard overlay packet loss 25%",
         }
         env = {"WG_INTERFACE": "wg0", "WG_FOREIGN_ADDRESS": "10.74.0.2/24"}
+        alternate_probe = {
+            "checked": True,
+            "ok": True,
+            "health_confirmed": True,
+            "quality_checked": True,
+            "quality_ok": True,
+            "packet_loss_pct": 0.0,
+        }
         with patch.object(server_agent, "transport_overlay_path_probe", side_effect=(liveness, quality)), patch.object(
-            server_agent, "transport_candidate_probe"
+            server_agent, "transport_candidate_probe", return_value=alternate_probe
         ) as alternate:
             result = server_agent.collect_transport_probes(
                 "interserver-underlay-wg",
@@ -2838,7 +2869,12 @@ class ServerAgentTests(unittest.TestCase):
         self.assertFalse(result["interserver-underlay-wg"]["quality_ok"])
         self.assertTrue(result["interserver-underlay-wg"]["quality_sampled"])
         self.assertEqual(result["interserver-underlay-wg"]["packet_loss_pct"], 25.0)
-        alternate.assert_not_called()
+        self.assertEqual(result["interserver-underlay-hy2"], alternate_probe)
+        alternate.assert_called_once_with(
+            "interserver-underlay-hy2",
+            timeout_ms=server_agent.TRANSPORT_CANDIDATE_QUALITY_PROBE_TIMEOUT_MS,
+            attempts=server_agent.TRANSPORT_CANDIDATE_QUALITY_PROBE_ATTEMPTS,
+        )
 
     def test_transport_cycle_reuses_the_last_quality_sample_until_refresh(self) -> None:
         liveness = {"checked": True, "ok": True, "attempts": 1, "scope": "overlay-dns"}

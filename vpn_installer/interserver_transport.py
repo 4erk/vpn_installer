@@ -34,7 +34,7 @@ TRANSPORT_CANDIDATE_PROBE_TIMEOUT_MS = 1200
 TRANSPORT_OVERLAY_PROBE_ATTEMPTS = 2
 TRANSPORT_PROBE_INTERVAL_SECONDS = 2
 TRANSPORT_QUALITY_PROBE_INTERVAL_SECONDS = 15
-TRANSPORT_QUALITY_PROBE_PACKETS = 4
+TRANSPORT_QUALITY_PROBE_PACKETS = 20
 TRANSPORT_QUALITY_PROBE_PAYLOAD_BYTES = 1200
 TRANSPORT_FAILURE_CONFIRMATIONS = 2
 TRANSPORT_ALTERNATE_HEALTH_CONFIRMATIONS = 2
@@ -42,6 +42,8 @@ TRANSPORT_EVIDENCE_MAX_GAP_SECONDS = TRANSPORT_PROBE_INTERVAL_SECONDS * 5
 TRANSPORT_PREFERRED_TAG = TRANSPORT_WG_TAG
 TRANSPORT_PREFERRED_RECOVERY_CONFIRMATIONS = 3
 TRANSPORT_PREFERRED_PROBE_INTERVAL_SECONDS = 10
+TRANSPORT_CANDIDATE_QUALITY_PROBE_ATTEMPTS = 8
+TRANSPORT_CANDIDATE_QUALITY_PROBE_TIMEOUT_MS = 2400
 TRANSPORT_PREFERRED_EVIDENCE_MAX_GAP_SECONDS = TRANSPORT_PREFERRED_PROBE_INTERVAL_SECONDS * 3
 TRANSPORT_PREFERRED_RETRY_BASE_SECONDS = 60
 TRANSPORT_PREFERRED_RETRY_MAX_SECONDS = 900
@@ -51,7 +53,7 @@ TRANSPORT_SWITCH_RETRY_MAX_SECONDS = 300
 TRANSPORT_SWITCH_PROOF_ATTEMPTS = 5
 TRANSPORT_SWITCH_PROOF_TIMEOUT_MS = 1200
 TRANSPORT_SWITCH_PROOF_RETRY_DELAY_SECONDS = 0.2
-TRANSPORT_STATE_SCHEMA_VERSION = 13
+TRANSPORT_STATE_SCHEMA_VERSION = 14
 UNDERLAY_WG_RU_ADDRESS = "10.75.0.1/32"
 UNDERLAY_WG_FOREIGN_ADDRESS = "10.75.0.2/32"
 UNDERLAY_WG_MTU = 1420
@@ -253,6 +255,7 @@ def transport_candidate_probe(
     tag: str,
     *,
     timeout_ms: int = TRANSPORT_CANDIDATE_PROBE_TIMEOUT_MS,
+    attempts: int = 1,
 ) -> dict[str, Any]:
     """Prove UDP carriage and the controlled foreign DNS relay over one underlay."""
 
@@ -262,12 +265,40 @@ def transport_candidate_probe(
     target = f"{target_host}:{FOREIGN_DNS_RELAY_PORT}"
     if proxy_port is None:
         return _probe_result("raw-underlay-udp", target, started, "unknown transport candidate")
-    timeout_seconds = max(0.001, timeout_ms / 1000)
-    try:
-        _socks_udp_dns_probe(proxy_port, target_host, FOREIGN_DNS_RELAY_PORT, timeout_seconds)
-    except (OSError, ValueError) as exc:
-        return _probe_result("raw-underlay-udp", target, started, str(exc))
-    return _probe_result("raw-underlay-udp", target, started, health_confirmed=True)
+    if attempts < 1:
+        return _probe_result("raw-underlay-udp", target, started, "probe attempts must be positive")
+    attempt_timeout = max(0.001, timeout_ms / 1000 / attempts)
+    delays: list[int] = []
+    last_error = "underlay DNS probe timed out"
+    for _attempt in range(attempts):
+        attempt_started = time.monotonic()
+        try:
+            _socks_udp_dns_probe(proxy_port, target_host, FOREIGN_DNS_RELAY_PORT, attempt_timeout)
+        except (OSError, ValueError) as exc:
+            last_error = str(exc) or last_error
+            continue
+        delays.append(max(1, round((time.monotonic() - attempt_started) * 1000)))
+    if not delays:
+        return _probe_result("raw-underlay-udp", target, started, last_error, attempts=attempts)
+    result = _probe_result(
+        "raw-underlay-udp",
+        target,
+        started,
+        attempts=attempts,
+        health_confirmed=True,
+    )
+    result["delay_ms"] = round(sum(delays) / len(delays))
+    if attempts > 1:
+        loss = round((attempts - len(delays)) * 100 / attempts, 3)
+        result.update(
+            {
+                "quality_checked": True,
+                "quality_ok": loss == 0,
+                "quality_error": "" if loss == 0 else f"underlay probe packet loss {loss:g}%",
+                "packet_loss_pct": loss,
+            }
+        )
+    return result
 
 
 def _bound_tcp_dns_probe(interface: str, target_host: str, target_port: int, timeout_seconds: float) -> None:
@@ -924,6 +955,30 @@ def evaluate_transport_policy(
 
     if selected == TRANSPORT_PREFERRED_TAG:
         state, quality_reason = _selected_quality(selected_probe)
+        if (
+            state == "degraded"
+            and selected_probe.get("quality_sampled") is True
+            and alternate_probe.get("ok") is True
+            and alternate_probe.get("health_confirmed") is True
+            and alternate_probe.get("quality_checked") is True
+            and alternate_probe.get("quality_ok") is True
+        ):
+            failure_reason = _probe_failure_reason({"error": quality_reason})
+            return _policy_state(
+                selected,
+                normalized,
+                observed_at,
+                "recovering",
+                f"preferred overlay has confirmed {failure_reason}; alternate underlay is healthy",
+                recommended=alternate,
+                hard_failure=False,
+                quality_failure={
+                    "path": selected,
+                    "reason": failure_reason,
+                    "packet_loss_pct": selected_probe.get("packet_loss_pct"),
+                },
+                preferred_retry=_next_preferred_retry(prior, failure_reason, observed_at),
+            )
         return _policy_state(
             selected,
             normalized,
@@ -965,6 +1020,18 @@ def evaluate_transport_policy(
             selected_state,
             selected_quality_reason
             or f"fallback overlay path is healthy; preferred underlay {_probe_failure_reason(preferred_probe)}",
+            preferred_probe_at=observed_at,
+            preferred_retry=retry,
+        )
+    if preferred_probe.get("quality_checked") is True and preferred_probe.get("quality_ok") is False:
+        quality_reason = str(preferred_probe.get("quality_error") or "preferred underlay quality probe failed")
+        retry = _next_preferred_retry(prior, _probe_failure_reason({"error": quality_reason}), observed_at)
+        return _policy_state(
+            selected,
+            normalized,
+            observed_at,
+            selected_state,
+            selected_quality_reason or f"fallback overlay is healthy; {quality_reason}",
             preferred_probe_at=observed_at,
             preferred_retry=retry,
         )
