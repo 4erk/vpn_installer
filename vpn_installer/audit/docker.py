@@ -586,6 +586,7 @@ def previous_release_fixture_builder_text() -> str:
 
         from vpn_installer.audit.docker import acceptance_snapshot_fixture
         from vpn_installer.compatibility import COMPATIBLE_INSTALLED_MIN
+        from vpn_installer.diagnostics import SCHEMA_VERSION as DIAGNOSTICS_SCHEMA_VERSION
 
 
         def digest(payload: bytes) -> str:
@@ -612,7 +613,7 @@ def previous_release_fixture_builder_text() -> str:
         source_snapshot = acceptance_snapshot_fixture("verified", node_id=node_id)
         source_snapshot.update(
             {
-                "schema_version": 5,
+                "schema_version": DIAGNOSTICS_SCHEMA_VERSION,
                 "release": {
                     "version": previous_version,
                     "release_id": f"{previous_version}-audit-{node_id}",
@@ -743,11 +744,6 @@ def compatible_update_acceptance_script() -> str:
         from vpn_installer.install_contract import InstallContractError, validate_installed_bundle
         from vpn_installer.manifest import INSTALL_PLAN_SCHEMA_VERSION, MANIFEST_SCHEMA_VERSION
         from vpn_installer.topology import CONFIG_SCHEMA_VERSION
-        from vpn_installer.transition_0218 import (
-            SOURCE_DIAGNOSTICS_SCHEMA,
-            SOURCE_INSTALL_PLAN_SCHEMA,
-            SOURCE_MANIFEST_SCHEMA,
-        )
 
         source_release = Path(sys.argv[1])
         result_dir = Path(sys.argv[2])
@@ -766,8 +762,8 @@ def compatible_update_acceptance_script() -> str:
         source_plan = json.loads((source_release / "install-plan.json").read_text(encoding="utf-8"))
         assert source_env["CONFIG_SCHEMA"] == str(CONFIG_SCHEMA_VERSION)
         assert source_manifest["version"] == COMPATIBLE_INSTALLED_MIN
-        assert source_manifest["schema_version"] == SOURCE_MANIFEST_SCHEMA
-        assert source_plan["schema_version"] == SOURCE_INSTALL_PLAN_SCHEMA
+        assert source_manifest["schema_version"] == MANIFEST_SCHEMA_VERSION
+        assert source_plan["schema_version"] == INSTALL_PLAN_SCHEMA_VERSION
 
         current = Version.parse(VERSION)
         future = str(Version(current.major, current.minor, current.patch + 1))
@@ -791,9 +787,9 @@ def compatible_update_acceptance_script() -> str:
                 "version": COMPATIBLE_INSTALLED_MIN,
                 "config": CONFIG_SCHEMA_VERSION,
                 "state": CONFIG_SCHEMA_VERSION,
-                "manifest": SOURCE_MANIFEST_SCHEMA,
-                "install_plan": SOURCE_INSTALL_PLAN_SCHEMA,
-                "diagnostics": SOURCE_DIAGNOSTICS_SCHEMA,
+                "manifest": MANIFEST_SCHEMA_VERSION,
+                "install_plan": INSTALL_PLAN_SCHEMA_VERSION,
+                "diagnostics": DIAGNOSTICS_SCHEMA_VERSION,
             },
             "to": {
                 "version": VERSION,
@@ -813,7 +809,7 @@ def compatible_update_acceptance_script() -> str:
     ).replace(
         "__PREVIOUS_VERSION__", COMPATIBLE_INSTALLED_MIN
     ).replace(
-        "__SOURCE_MANIFEST_SCHEMA__", "4"
+        "__SOURCE_MANIFEST_SCHEMA__", str(MANIFEST_SCHEMA_VERSION)
     ).replace(
         "__CURRENT_MANIFEST_SCHEMA__", str(MANIFEST_SCHEMA_VERSION)
     ).replace(
@@ -845,7 +841,7 @@ def test_compatible_update(runner: AuditRunner) -> dict[str, str]:
     return {
         "container": container,
         "deployment": env["DEPLOY_NAME"],
-        "transition": f"{COMPATIBLE_INSTALLED_MIN}->{VERSION} (manifest 4->5, diagnostics 5->6)",
+        "transition": f"{COMPATIBLE_INSTALLED_MIN}->{VERSION} (schemas unchanged)",
         "artifacts": str(result_dir),
     }
 
@@ -1247,7 +1243,7 @@ def transaction_rollback_acceptance_script(verified_snapshot: str, deployment_na
         .replace("__PREVIOUS_VERSION__", COMPATIBLE_INSTALLED_MIN)
         .replace("__CURRENT_DIAGNOSTICS_SCHEMA__", str(DIAGNOSTICS_SCHEMA_VERSION))
         .replace("__CURRENT_MANIFEST_SCHEMA__", str(MANIFEST_SCHEMA_VERSION))
-        .replace("__SOURCE_MANIFEST_SCHEMA__", "4")
+        .replace("__SOURCE_MANIFEST_SCHEMA__", str(MANIFEST_SCHEMA_VERSION))
     )
 
 

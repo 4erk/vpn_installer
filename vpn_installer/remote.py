@@ -688,27 +688,6 @@ def remote_preflight(
         payload = _remote_agent_payload(target, live_probes=run_live_probes, compact=not run_live_probes)
         if int(payload.get("schema_version", 0)) == DIAGNOSTICS_SCHEMA_VERSION:
             return bootstrap_from_snapshot(payload)
-        from .transition_0218 import SOURCE_DIAGNOSTICS_SCHEMA, preflight_projection
-
-        if int(payload.get("schema_version", 0)) == SOURCE_DIAGNOSTICS_SCHEMA:
-            legacy = preflight_projection(payload)
-            host = parse_kv_output(
-                ssh_capture(
-                    target,
-                    preflight_script(
-                        wg_interface,
-                        fresh_since_epoch=fresh_since_epoch,
-                        run_live_probes=False,
-                    ),
-                )
-            )
-            for name in (
-                "login_user", "is_root", "has_sudo", "hostname", "os_id", "os_version",
-                "os_id_like", "architecture", "init_system", "security_mode", "host_firewall", "default_iface",
-            ):
-                if host.get(name):
-                    legacy[name] = host[name]
-            return legacy
         raise AppError("vpn-stack-agent returned an unsupported snapshot schema")
     except (AppError, ValueError, json.JSONDecodeError):
         installed = ssh_capture(
@@ -744,27 +723,9 @@ def remote_agent_snapshot(target: RemoteTarget, *, live_probes: bool = False, pr
         release = payload.get("release")
         if isinstance(release, dict) and release.get("version"):
             try:
-                version = require_compatible_installed(release)
+                require_compatible_installed(release)
             except ValueError as exc:
                 raise AppError(str(exc)) from exc
-            if str(version) == "0.21.8":
-                from .transition_0218 import SOURCE_DIAGNOSTICS_SCHEMA, normalize_snapshot
-
-                if int(payload.get("schema_version", 0)) != SOURCE_DIAGNOSTICS_SCHEMA:
-                    raise AppError("vpn-stack-agent returned an unsupported snapshot schema")
-
-                try:
-                    manifest = json.loads(
-                        ssh_capture(target, "cat /etc/vpn-stack/render-manifest.json", command_timeout=30)
-                    )
-                    payload = normalize_snapshot(
-                        payload,
-                        manifest,
-                        target_schema=DIAGNOSTICS_SCHEMA_VERSION,
-                    )
-                except (ValueError, json.JSONDecodeError) as exc:
-                    raise AppError(str(exc)) from exc
-                return payload
         raise AppError("vpn-stack-agent returned an unsupported snapshot schema")
     return payload
 

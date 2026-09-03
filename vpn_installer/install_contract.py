@@ -106,12 +106,9 @@ def _safe_path(value: str, label: str) -> str:
         "/etc/xray/",
         "/etc/wireguard/",
         "/etc/systemd/system/",
-        "/etc/ssh/sshd_config.d/",
         "/etc/sysctl.d/",
         "/etc/modules-load.d/",
         "/etc/systemd/journald.conf.d/",
-        "/etc/apt/apt.conf.d/",
-        "/etc/systemd/resolved.conf.d/",
         "/usr/local/lib/vpn-stack/",
         "/var/lib/vpn-stack/",
     )
@@ -168,14 +165,6 @@ def validate_installed_bundle(
         version = str(require_compatible_installed(manifest))
     except ValueError as exc:
         _fail(str(exc))
-    if version == "0.21.8":
-        from .transition_0218 import validate_installed_bundle as validate_legacy
-
-        try:
-            validate_legacy(bundle, expected_node, contract_dir)
-        except ValueError as exc:
-            _fail(str(exc))
-        return
     _validate_bundle(
         bundle,
         expected_node,
@@ -194,16 +183,11 @@ def normalize_acceptance_snapshot(
 
     from .diagnostics import SCHEMA_VERSION as diagnostics_schema
 
-    version = str(manifest.get("version", ""))
-    if version == "0.21.8":
-        from .transition_0218 import normalize_snapshot
-
-        try:
-            return normalize_snapshot(payload, manifest, target_schema=diagnostics_schema)
-        except ValueError as exc:
-            _fail(str(exc))
-
-    if version != VERSION or manifest.get("schema_version") != MANIFEST_SCHEMA_VERSION:
+    try:
+        require_compatible_installed(manifest)
+    except ValueError as exc:
+        _fail(str(exc))
+    if manifest.get("schema_version") != MANIFEST_SCHEMA_VERSION:
         _fail("acceptance manifest does not belong to a supported release")
     if payload.get("schema_version") != diagnostics_schema:
         _fail(f"post-activation agent did not return diagnostics schema {diagnostics_schema}")

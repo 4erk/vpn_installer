@@ -37,15 +37,7 @@ from ..vless_verify import render_live_route_probe
 from .runner import AUDIT_IMAGE, VALID_GEOIP_SRS, VALID_GEOSITE_SRS, VPN_CMD, AuditFailure, AuditRunner, python_cmd, write_bytes
 
 COVERAGE_THRESHOLD = 80
-# The one-release adapter is exercised by Docker update/rollback gates; the retired
-# resolver is absent from runtime manifests. Both are deleted in 0.22.1.
-COVERAGE_OMIT = ",".join(
-    (
-        "vpn_installer/audit/*",
-        "vpn_installer/transition_0218.py",
-        "vpn_installer/system_resolver.py",
-    )
-)
+COVERAGE_OMIT = "vpn_installer/audit/*"
 QUICK_ASSET_FIXTURES = {
     "geosite-ru.srs": VALID_GEOSITE_SRS,
     "geoip-ru.srs": VALID_GEOIP_SRS,
@@ -161,8 +153,6 @@ def run(runner: AuditRunner) -> None:
                 str(ROOT_DIR / "vpn_installer" / "specs.py"),
                 str(ROOT_DIR / "vpn_installer" / "interserver_transport.py"),
                 str(ROOT_DIR / "vpn_installer" / "platforms.py"),
-                str(ROOT_DIR / "vpn_installer" / "system_resolver.py"),
-                str(ROOT_DIR / "vpn_installer" / "transition_0218.py"),
                 str(ROOT_DIR / "vpn_installer" / "routing_policy.py"),
                 str(ROOT_DIR / "vpn_installer" / "server_agent.py"),
                 str(ROOT_DIR / "vpn_installer" / "vless_verify.py"),
@@ -264,7 +254,7 @@ def test_coverage(runner: AuditRunner) -> dict[str, str]:
         "coverage_json": str(coverage_data),
         "threshold": str(COVERAGE_THRESHOLD),
         "omit": COVERAGE_OMIT,
-        "modules": "runtime; transition adapter covered by docker gates",
+        "modules": "runtime",
     }
 
 

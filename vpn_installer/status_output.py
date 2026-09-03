@@ -238,24 +238,15 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
     resolver = snapshot.network.get("resolver", {})
     if resolver:
         upstreams = ",".join(str(value) for value in resolver.get("upstreams", [])) or "-"
-        if resolver.get("provider"):
-            lines.append(
-                "app resolver: "
-                f"provider={resolver.get('provider')}, "
-                f"listen={resolver.get('listen_address') or '-'}:{resolver.get('listen_port') or '-'}, "
-                f"cache_entries={resolver.get('cache_capacity', 0)}, "
-                f"concurrent_upstreams={'yes' if resolver.get('concurrent_upstreams') else 'no'}, "
-                f"managed={'yes' if resolver.get('managed_config') else 'no'}, "
-                f"upstreams={upstreams}"
-            )
-        else:
-            lines.append(
-                "host resolver: "
-                f"stub={'active' if resolver.get('managed_stub') else 'inactive'}, "
-                f"cache={'on' if resolver.get('cache_enabled') else 'off'}, "
-                f"stale={resolver.get('stale_retention') or '-'}, "
-                f"upstreams={upstreams}"
-            )
+        lines.append(
+            "app resolver: "
+            f"provider={resolver.get('provider') or '-'}, "
+            f"listen={resolver.get('listen_address') or '-'}:{resolver.get('listen_port') or '-'}, "
+            f"cache_entries={resolver.get('cache_capacity', 0)}, "
+            f"concurrent_upstreams={'yes' if resolver.get('concurrent_upstreams') else 'no'}, "
+            f"managed={'yes' if resolver.get('managed_config') else 'no'}, "
+            f"upstreams={upstreams}"
+        )
     interserver = snapshot.transport.get("interserver", {})
     if has_interserver and interserver:
         selection = interserver.get("selection", {})

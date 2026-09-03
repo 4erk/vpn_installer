@@ -31,7 +31,7 @@ dual:   клиент -> RU gateway Xray/Reality -> sing-box routing policy
 - `HostFacts` и `PlatformSpec` являются единственным каталогом поддерживаемых серверных платформ. Логические package requirements преобразуются в имена пакетов только выбранным package provider.
 - `/etc/vpn-stack/render-manifest.json` schema 5 хранит topology, node capabilities, platform descriptor, install plan schema 5, policy, hashes, pinned binaries, runtime facts и окно совместимых установленных версий. Каждый node получает только собственный `node.env` и принадлежащие ему secrets/artifacts.
 
-Target-side render не объединяет `node.env` с общими defaults и не генерирует ключи. Он принимает только точную `CONFIG_SCHEMA=3` проекцию capability, отклоняет неизвестные поля и cross-node secrets, затем сверяет payload с manifest/install-plan. В переходном `0.22.0` точный установленный `0.21.8` проходит отдельный ограниченный adapter; `0.22.1` удаляет его.
+Target-side render не объединяет `node.env` с общими defaults и не генерирует ключи. Он принимает только точную `CONFIG_SCHEMA=3` проекцию capability, отклоняет неизвестные поля и cross-node secrets, затем сверяет payload с manifest/install-plan. Установленный `0.22.0` имеет те же schemas и проходит общий текущий validator без отдельного adapter.
 
 `single` не компилирует и не устанавливает WireGuard, interserver transport, web-admin, их пакеты, сервисы, credentials, secrets, firewall rules или probes. `dual` устанавливает interserver capability на оба участвующих узла, а web-admin только на gateway. Отсутствующая capability имеет состояние `not_applicable`, а не ложное `healthy`.
 
@@ -53,9 +53,9 @@ DNS-кеш — отдельный app-owned сервис с собственно
 
 ## Совместимость релиза
 
-`0.22.0` поддерживает fresh install, обновление только с `0.21.8` и повторную установку `0.22.0`. Manifest объявляет `installed_min=0.21.8`, `installed_max=0.22.0`. Неподдерживаемый установленный релиз отклоняется до managed transaction; удалить его нужно `.\vpn.cmd` на Windows или `./vpn.sh` на Linux из совпадающего Git-тега, после чего выполняется fresh install.
+`0.22.1` поддерживает fresh install, обновление только с `0.22.0` и повторную установку `0.22.1`. Manifest объявляет `installed_min=0.22.0`, `installed_max=0.22.1`. Неподдерживаемый установленный релиз отклоняется до managed transaction; удалить его нужно `.\vpn.cmd` на Windows или `./vpn.sh` на Linux из совпадающего Git-тега, после чего выполняется fresh install.
 
-Публичный CLI использует только `--node gateway|exit|all`. Role aliases и migration chains отсутствуют. Единственный reader старого формата принадлежит точному переходу `0.21.8 -> 0.22.0` и удаляется в `0.22.1`. Политика окна описана в [DEPRECATIONS.md](./DEPRECATIONS.md).
+Публичный CLI использует только `--node gateway|exit|all`. Role aliases, migration chains и readers старых schemas отсутствуют. Политика окна описана в [DEPRECATIONS.md](./DEPRECATIONS.md).
 
 ## Network adaptation
 

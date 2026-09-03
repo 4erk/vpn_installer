@@ -18,7 +18,6 @@ from vpn_installer.install_contract import (
 )
 from vpn_installer.install_support import main as install_support_main
 from vpn_installer.render import copy_python_package, write_node_rendered_files
-from vpn_installer.transition_0218 import preflight_projection
 
 
 CONTRACT_FILES = (
@@ -33,45 +32,26 @@ CONTRACT_FILES = (
 
 
 class InstallContractTests(unittest.TestCase):
-    def test_previous_release_preflight_preserves_network_lifecycle_evidence(self) -> None:
-        projection = preflight_projection(
-            {
-                "schema_version": 5,
-                "release": {"version": "0.21.8", "release_id": "old-release"},
-                "network": {
-                    "tcp_adaptation": {
-                        "congestion_control": "bbr",
-                        "qdisc": "fq",
-                        "qdisc_limit": 10000,
-                        "qdisc_flow_limit": 512,
-                        "overlay_qdisc": "fq",
-                        "overlay_qdisc_limit": 10000,
-                        "overlay_qdisc_flow_limit": 512,
-                        "mtu_probing": 1,
-                        "mtu_probe_floor": 1024,
-                        "metrics_save_disabled": 0,
-                    }
-                },
-            }
-        )
+    def test_previous_release_acceptance_uses_the_current_schema(self) -> None:
+        payload = {
+            "schema_version": DIAGNOSTICS_SCHEMA_VERSION,
+            "topology": "dual",
+            "node_id": "exit",
+            "location": "foreign",
+            "capabilities": ["interserver-server", "nat-exit"],
+        }
+        manifest = {
+            "version": COMPATIBLE_INSTALLED_MIN,
+            "schema_version": 5,
+            "topology": "dual",
+            "node_id": "exit",
+            "location": "foreign",
+            "capabilities": ["interserver-server", "nat-exit"],
+        }
 
-        self.assertEqual(projection["tcp_default_qdisc"], "fq")
-        self.assertEqual(projection["wg_qdisc"], "fq")
-        self.assertEqual(projection["wg_qdisc_limit"], "10000")
-        self.assertEqual(projection["wg_qdisc_flow_limit"], "512")
+        self.assertEqual(normalize_acceptance_snapshot(payload, manifest), payload)
 
-    def test_previous_release_acceptance_is_normalized_to_current_schema(self) -> None:
-        payload = {"schema_version": 5}
-        manifest = {"version": COMPATIBLE_INSTALLED_MIN}
-        normalized = {"schema_version": DIAGNOSTICS_SCHEMA_VERSION}
-
-        with patch("vpn_installer.transition_0218.normalize_snapshot", return_value=normalized) as adapter:
-            result = normalize_acceptance_snapshot(payload, manifest)
-
-        self.assertEqual(result, normalized)
-        adapter.assert_called_once_with(payload, manifest, target_schema=DIAGNOSTICS_SCHEMA_VERSION)
-
-    def test_installed_bundle_dispatches_exact_previous_release_adapter(self) -> None:
+    def test_installed_previous_bundle_uses_current_validator(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             bundle = root / "bundle"
@@ -80,10 +60,17 @@ class InstallContractTests(unittest.TestCase):
                 json.dumps({"version": COMPATIBLE_INSTALLED_MIN}),
                 encoding="utf-8",
             )
-            with patch("vpn_installer.transition_0218.validate_installed_bundle") as validator:
+            with patch("vpn_installer.install_contract._validate_bundle") as validator:
                 validate_installed_bundle(bundle, "gateway", root / "contract")
 
-        validator.assert_called_once_with(bundle, "gateway", root / "contract")
+        validator.assert_called_once_with(
+            bundle,
+            "gateway",
+            root / "contract",
+            require_assets=True,
+            require_binaries=True,
+            expected_version=COMPATIBLE_INSTALLED_MIN,
+        )
 
     def test_installed_bundle_rejects_out_of_window_version_before_validation(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

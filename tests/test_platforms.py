@@ -188,15 +188,15 @@ class PlatformTests(unittest.TestCase):
             return subprocess.CompletedProcess(command, 0, stdout, "")
 
         with patch("vpn_installer.platforms.require_host_matches"):
-            prepare_host_platform(spec, Path("/etc/vpn-stack/releases/0.22.0-test"), runner=runner)
+            prepare_host_platform(spec, Path("/etc/vpn-stack/releases/candidate-test"), runner=runner)
         self.assertEqual(calls[0][:4], ["semanage", "fcontext", "-a", "-t"])
         self.assertEqual(calls[1][:5], ["semanage", "fcontext", "-a", "-t", "dnsmasq_etc_t"])
         self.assertEqual(calls[2], ["semanage", "port", "-l"])
         self.assertEqual(calls[3][:2], ["restorecon", "-RF"])
-        self.assertEqual(calls[3][2].replace("\\", "/"), "/etc/vpn-stack/releases/0.22.0-test/bin")
+        self.assertEqual(calls[3][2].replace("\\", "/"), "/etc/vpn-stack/releases/candidate-test/bin")
         self.assertEqual(
             calls[3][3].replace("\\", "/"),
-            "/etc/vpn-stack/releases/0.22.0-test/dnsmasq-vpn-stack.conf",
+            "/etc/vpn-stack/releases/candidate-test/dnsmasq-vpn-stack.conf",
         )
 
     def test_selinux_dns_port_is_added_or_conflict_is_rejected(self) -> None:

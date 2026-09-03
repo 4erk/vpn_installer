@@ -8,6 +8,24 @@
 
 Каждый раздел ниже описывает поведение именно указанной версии; действующий контракт задаёт верхний раздел релиза.
 
+## [0.22.1] - 2026-09-03
+
+### Changed
+
+- Окно обновления ограничено точным переходом `0.22.0 -> 0.22.1`; config/state, manifest/install-plan и diagnostics остаются в schemas `3/5/6`, поэтому предыдущий bundle проверяется тем же текущим валидатором без преобразования данных.
+- Docker compatible-update экспортирует опубликованный tag `0.22.0`, рендерит им предыдущий release и проверяет interrupted cutover, rollback, service state и acceptance уже на реальной одинаковой схеме.
+
+### Removed
+
+- Удалены `transition_0218`, чтение diagnostics schema `5`, retired `system_resolver`, одноразовая фильтрация прежних SSH env-полей и связанные тестовые fixtures.
+- Installer больше не разрешает managed paths в `/etc/ssh/sshd_config.d`, `/etc/apt/apt.conf.d` и `/etc/systemd/resolved.conf.d`; эти host-owned каталоги отсутствуют в текущем install plan и transaction scope.
+- Coverage снова включает весь runtime-код без исключений переходного adapter и retired renderer.
+
+### Compatibility
+
+- Fresh install и reinstall `0.22.1` поддерживаются; обновление допускается только с `0.22.0`. Более старую установку нужно удалить установщиком её точного tag до fresh install.
+- Routing policy, adaptive interserver transport, web-admin, Xray/Reality front, WireGuard MTU и основной `vless-uri.txt` не изменены.
+
 ## [0.22.0] - 2026-09-03
 
 ### Added

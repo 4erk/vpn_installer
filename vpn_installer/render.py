@@ -77,7 +77,6 @@ SERVER_RENDER_MODULES = (
     "server_agent.py",
     "specs.py",
     "topology.py",
-    "transition_0218.py",
 )
 
 SERVER_AGENT_BASE_MODULES = (

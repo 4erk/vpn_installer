@@ -9,31 +9,13 @@ from . import VERSION
 from .common import cli_entrypoint
 
 
-COMPATIBLE_INSTALLED_MIN = "0.21.8"
+COMPATIBLE_INSTALLED_MIN = "0.22.0"
 COMPATIBLE_INSTALLED_MAX = VERSION
 
-SOURCE_SCHEMA_0218 = {
-    "config": 3,
-    "state": 3,
-    "manifest": 4,
-    "install_plan": 4,
-    "diagnostics": 5,
-}
-CURRENT_SCHEMA = {
-    "config": 3,
-    "state": 3,
-    "manifest": 5,
-    "install_plan": 5,
-    "diagnostics": 6,
-}
 CURRENT_TRANSITIONS = (
     {
-        "from": "0.21.8",
-        "to": "0.22.0",
-        "source": SOURCE_SCHEMA_0218,
-        "target": CURRENT_SCHEMA,
-        "adapter": "transition_0218",
-        "remove_in": "0.22.1",
+        "from": COMPATIBLE_INSTALLED_MIN,
+        "to": VERSION,
     },
 )
 

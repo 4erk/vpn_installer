@@ -304,7 +304,7 @@ safe_operational_path() {
   local path="$1"
   [[ -n "${path}" && "${path}" == /* && "${path}" != "/" ]] || return 1
   case "${path}" in
-    "${VPNSTACK_ROOT}"/*|/etc/sing-box/*|/etc/xray/*|/etc/wireguard/*|/etc/systemd/system/*|/etc/ssh/sshd_config.d/*|/etc/sysctl.d/*|/etc/modules-load.d/*|/etc/systemd/journald.conf.d/*|/etc/apt/apt.conf.d/*|/etc/systemd/resolved.conf.d/*|/usr/local/lib/vpn-stack/*|/var/lib/vpn-stack/*)
+    "${VPNSTACK_ROOT}"/*|/etc/sing-box/*|/etc/xray/*|/etc/wireguard/*|/etc/systemd/system/*|/etc/sysctl.d/*|/etc/modules-load.d/*|/etc/systemd/journald.conf.d/*|/usr/local/lib/vpn-stack/*|/var/lib/vpn-stack/*)
       return 0
       ;;
   esac

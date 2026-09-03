@@ -54,22 +54,6 @@ class StatusOutputTests(unittest.TestCase):
         )
         self.assertNotIn("host resolver:", rendered)
 
-    def test_labels_transition_snapshot_resolver_as_host_owned(self) -> None:
-        lines = format_snapshot_summary(
-            DiagnosticsSnapshot(
-                network={
-                    "resolver": {
-                        "managed_stub": True,
-                        "cache_enabled": True,
-                        "stale_retention": "1h",
-                        "upstreams": ["1.1.1.1"],
-                    }
-                }
-            )
-        )
-
-        self.assertIn("host resolver: stub=active, cache=on, stale=1h, upstreams=1.1.1.1", lines)
-
     def test_explains_when_read_only_status_skips_live_probes(self) -> None:
         lines = format_snapshot_summary(
             DiagnosticsSnapshot(

@@ -264,7 +264,7 @@ class AuditModuleTests(unittest.TestCase):
         self.assertIn("docker-node-scoped-workflows", runner.records)
 
     def test_compatible_update_gate_migrates_exact_predecessor_and_rejects_out_of_window_releases(self) -> None:
-        self.assertEqual(VERSION, "0.22.0")
+        self.assertEqual(VERSION, "0.22.1")
         self.assertEqual(
             (
                 CONFIG_SCHEMA_VERSION,
@@ -279,7 +279,8 @@ class AuditModuleTests(unittest.TestCase):
         self.assertIn("support validate-installed", script)
         self.assertIn("PYTHONPATH=/work/previous", script)
         self.assertIn('(3, 5, 5, 6)', script)
-        self.assertIn("SOURCE_MANIFEST_SCHEMA", script)
+        self.assertIn('source_manifest["schema_version"] == MANIFEST_SCHEMA_VERSION', script)
+        self.assertNotIn("transition_0218", script)
         self.assertIn(f'= {COMPATIBLE_INSTALLED_MIN}', script)
         self.assertIn("current.patch + 1", script)
         self.assertIn("cannot be updated", script)
