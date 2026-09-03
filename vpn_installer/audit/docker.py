@@ -132,7 +132,6 @@ def platform_contract_driver_text() -> str:
 
         import json
         import os
-        import pwd
         import shutil
         import socket
         import struct
@@ -215,12 +214,12 @@ def platform_contract_driver_text() -> str:
             runtime_config.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(config_source, runtime_config)
             runtime_config.chmod(0o644)
-            account = pwd.getpwnam("nobody")
+            dynamic_uid = 61111
 
             def drop_privileges() -> None:
                 os.setgroups([])
-                os.setgid(account.pw_gid)
-                os.setuid(account.pw_uid)
+                os.setgid(dynamic_uid)
+                os.setuid(dynamic_uid)
 
             process = subprocess.Popen(
                 [
@@ -249,8 +248,8 @@ def platform_contract_driver_text() -> str:
                     status = Path(f"/proc/{process.pid}/status").read_text(encoding="utf-8")
                     uid_line = next(line for line in status.splitlines() if line.startswith("Uid:"))
                     effective_uid = int(uid_line.split()[2])
-                    if effective_uid != account.pw_uid:
-                        error = f"dnsmasq effective uid is {effective_uid}, expected {account.pw_uid}"
+                    if effective_uid != dynamic_uid:
+                        error = f"dnsmasq effective uid is {effective_uid}, expected {dynamic_uid}"
                     break
                 else:
                     error = "dnsmasq did not answer a DNS query within 3 seconds"
@@ -335,7 +334,7 @@ def platform_contract_driver_text() -> str:
                     "os_version": facts.os_version,
                     "architecture": facts.architecture,
                     "detected_init": facts.init_system,
-                    "dns_smoke": "nobody-udp-ok",
+                    "dns_smoke": "dynamic-user-udp-ok",
                     "pid1": pid1,
                     "package_provider": spec.package_provider,
                     "package_count": len(packages),
@@ -432,7 +431,7 @@ def _run_platform_contract_case(
         or result.get("package_count") != len(packages)
     ):
         raise AuditFailure(f"{case.name}: platform contract did not verify any packages")
-    if result.get("pid1") == "systemd" or result.get("dns_smoke") != "nobody-udp-ok":
+    if result.get("pid1") == "systemd" or result.get("dns_smoke") != "dynamic-user-udp-ok":
         raise AuditFailure(f"{case.name}: platform runtime smoke is incomplete")
     python_version = str(result.get("python_version", ""))
     if case.os_id in {"almalinux", "rocky"} and case.version == "9" and not python_version.startswith("3.9."):

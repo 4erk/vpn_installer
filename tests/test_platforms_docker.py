@@ -43,11 +43,11 @@ class PlatformDockerContractTests(unittest.TestCase):
             "dpkg-query",
             "rpm",
             'Path("/usr/sbin/dnsmasq")',
-            'pwd.getpwnam("nobody")',
+            "dynamic_uid = 61111",
             '"--keep-in-foreground"',
             '"--address=/matrix.invalid/192.0.2.123"',
             "dns_query()",
-            "os.setuid(account.pw_uid)",
+            "os.setuid(dynamic_uid)",
             'pid1 == "systemd"',
         ):
             self.assertIn(required, driver)

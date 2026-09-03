@@ -49,10 +49,11 @@ class DnsCacheTests(unittest.TestCase):
             service,
         )
         self.assertIn("Restart=on-failure", service)
-        self.assertIn("User=nobody", service)
+        self.assertIn("DynamicUser=true", service)
+        self.assertNotIn("User=nobody", service)
         self.assertIn("NoNewPrivileges=true", service)
         self.assertIn("ProtectSystem=strict", service)
-        self.assertIn("RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX", service)
+        self.assertIn("RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK AF_UNIX", service)
 
 
 if __name__ == "__main__":

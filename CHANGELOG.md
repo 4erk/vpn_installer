@@ -24,6 +24,7 @@
 - Install/reinstall отклоняет неизвестный init, активные `ufw`/`firewalld` и недоказанный firewall state до managed cutover. Локальный `render-only` остаётся кроссплатформенным и не пытается определить Linux по Windows `/etc/os-release`.
 - Diagnostics schema `6` и manifest/install-plan schema `5` включают platform contract. Пользовательский вывод остаётся кратким; полный trace сохраняется в runtime logs.
 - Rollback на совместимый `0.21.8` проверяет snapshot старым контрактом, но атомарно сохраняет acceptance уже в текущей diagnostics schema `6`. Любой реальный HTTP status при VLESS probe считается доказательством транспорта; application-level `4xx/5xx` остаётся в отчёте и не выдаётся за сетевой timeout.
+- App-owned DNS unit запускает `dnsmasq` через `DynamicUser` и разрешает требуемый `AF_NETLINK` внутри systemd sandbox; отсутствие этого address family было поймано production acceptance до переключения релиза и приводило к безопасному rollback.
 
 ### Compatibility
 
