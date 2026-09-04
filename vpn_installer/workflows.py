@@ -948,7 +948,19 @@ def rollback_changed_nodes(
         target = target_map[node_id]
         plan = topology.plan(target.node_id)
         try:
-            install_remote_node(target, deployment_name, env, "rollback")
+            try:
+                install_remote_node(target, deployment_name, env, "rollback")
+            except Exception as command_error:  # noqa: BLE001
+                warn(
+                    f"{target.label}: управляющее соединение rollback завершилось ошибкой. "
+                    "Сверяю завершение server-side transaction."
+                )
+                try:
+                    wait_for_remote_install_completion(target, wg_interface)
+                except Exception as reconciliation_error:  # noqa: BLE001
+                    raise AppError(
+                        f"{target.label}: rollback transaction не подтверждена: {reconciliation_error}"
+                    ) from command_error
             verify_rollback_node(
                 target,
                 deployment_name,

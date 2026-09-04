@@ -827,6 +827,33 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(verify_node.call_args.args[3], "")
         verify_vless.assert_not_called()
 
+    def test_rollback_changed_nodes_reconciles_a_control_connection_drop(self) -> None:
+        env = generate_default_env("demo", topology="single", gateway_location="ru")
+        env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
+        target = RemoteTarget(node_id=NODE_GATEWAY)
+        with (
+            patch(
+                "vpn_installer.workflows.install_remote_node",
+                side_effect=AppError("remote command exited with status -1"),
+            ),
+            patch("vpn_installer.workflows.wait_for_remote_install_completion", return_value={}) as reconcile,
+            patch("vpn_installer.workflows.verify_rollback_node") as verify_node,
+            patch("vpn_installer.workflows.verify_postcutover") as verify_vless,
+            patch("vpn_installer.workflows.warn") as warning,
+        ):
+            workflows.rollback_changed_nodes(
+                [NODE_GATEWAY],
+                {NODE_GATEWAY: target},
+                "demo",
+                env,
+                {NODE_GATEWAY: "old-release"},
+            )
+
+        reconcile.assert_called_once_with(target, "wg0")
+        self.assertEqual(verify_node.call_args.args[3], "old-release")
+        verify_vless.assert_called_once()
+        warning.assert_called_once()
+
     def test_filter_targets_for_remove_skips_unmanaged_hosts(self) -> None:
         ru = RemoteTarget(node_id=NODE_GATEWAY)
         foreign = RemoteTarget(node_id=NODE_EXIT)
