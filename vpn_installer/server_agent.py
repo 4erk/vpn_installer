@@ -129,7 +129,7 @@ except ImportError:  # Optional on nodes without an interserver capability.
         TRANSPORT_RELAY_INBOUND_TAG = "interserver-overlay-in"
         TRANSPORT_RELAY_PORT = 19091
         TRANSPORT_SELECTOR_TAG = "interserver-underlay-select"
-        TRANSPORT_STATE_SCHEMA_VERSION = 15
+        TRANSPORT_STATE_SCHEMA_VERSION = 16
         TRANSPORT_SWITCH_RETRY_BASE_SECONDS = 30
         TRANSPORT_SWITCH_RETRY_MAX_SECONDS = 300
         TRANSPORT_SWITCH_PROOF_ATTEMPTS = 5

@@ -14,12 +14,12 @@
 
 - Исправлена подтверждённая причина длинных зависаний отдельных Reality TCP-потоков. Gateway сохранял для client source destination metric с `reordering=185`; новые соединения наследовали её, а после потери сегмента PLPMTUD опускал MSS до `536` и exponential RTO доходил до `120s`. Agent теперь после двух соседних source-specific loss-окон, активного stalled-flow evidence и `cached reordering >= 64` удаляет только метрику этого адреса. Global flush, `ss -K`, restart сервисов и разрыв открытых соединений не используются; повторное действие ограничено cooldown `30min`.
 - Managed kernel profile включает `tcp_thin_linear_timeouts=1`: тонкий TCP-поток с единичным неподтверждённым сегментом использует ограниченную линейную RTO recovery вместо многократного экспоненциального ожидания. PLPMTUD, MSS floor `536` и штатное кеширование destination metrics сохранены.
-- Устранено межсерверное flapping: за диагностические сутки selector менялся `176` раз, потому что fallback возвращался на WireGuard после трёх быстрых проб и снова уходил при следующей потере. Возврат теперь требует непрерывных `5min` чистых проверок после exponential backoff `300..3600s`; failure history сбрасывается после `30min` устойчивой работы.
+- Устранено межсерверное flapping: за диагностические сутки selector менялся `176` раз, потому что fallback возвращался на WireGuard после трёх быстрых проб и снова уходил при следующей потере. Возврат теперь требует непрерывных `5min` чистых проверок; retry здорового preferred ограничен `60..300s`, а failure history сбрасывается после `30min` устойчивой работы. Поэтому временные install-time отказы не удерживают трафик на более медленном fallback десятки минут.
 - Деградация уже выбранного fallback немедленно обходит preferred retry delay и проверяет alternate. Это сохраняет быстрый failover в обе стороны, но не переключает здоровый fallback по краткому удачному sample.
 
 ### Changed
 
-- Status/preflight показывает активность thin-stream recovery и последнее адресное восстановление TCP metrics. Transport state schema поднята до `15`; старый runtime state не мигрируется и безопасно набирает свежие evidence.
+- Status/preflight показывает активность thin-stream recovery и последнее адресное восстановление TCP metrics. Transport state schema поднята до `16`; старый runtime state не мигрируется и безопасно набирает свежие evidence.
 
 ### Compatibility
 
