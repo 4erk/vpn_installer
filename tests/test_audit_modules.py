@@ -264,7 +264,7 @@ class AuditModuleTests(unittest.TestCase):
         self.assertIn("docker-node-scoped-workflows", runner.records)
 
     def test_compatible_update_gate_migrates_exact_predecessor_and_rejects_out_of_window_releases(self) -> None:
-        self.assertEqual(VERSION, "0.22.1")
+        self.assertEqual(VERSION, "0.22.2")
         self.assertEqual(
             (
                 CONFIG_SCHEMA_VERSION,

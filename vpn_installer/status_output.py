@@ -385,6 +385,24 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
             f"retrans={aggregate.get('bytes_retrans', 'unknown')}/{aggregate.get('bytes_sent', 'unknown')} "
             f"({aggregate.get('retransmit_ratio_pct', 'unknown')}%)"
         )
+    cache_recovery = snapshot.network.get("front_cache_recovery", {})
+    if has_public_front and isinstance(cache_recovery, dict):
+        actions = cache_recovery.get("actions", [])
+        if not actions:
+            history = cache_recovery.get("last_actions", {})
+            if isinstance(history, dict):
+                actions = sorted(
+                    (value for value in history.values() if isinstance(value, dict)),
+                    key=lambda value: int(value.get("epoch", 0) or 0),
+                    reverse=True,
+                )[:1]
+        if actions:
+            action = actions[0]
+            lines.append(
+                "front TCP metrics recovery: "
+                f"at={action.get('observed_at', '-')}, source={action.get('source', '-')}, "
+                f"status={action.get('status', '-')}, reordering={action.get('cached_reordering', '-')}"
+            )
     front_interval = snapshot.network.get("recent_front_interval", {})
     if has_public_front and front_interval:
         aggregate = front_interval.get("aggregate", {})

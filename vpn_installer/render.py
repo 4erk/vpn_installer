@@ -38,6 +38,7 @@ from .network_profile import (
     FQ_KIND,
     TCP_MTU_PROBE_FLOOR,
     TCP_NO_METRICS_SAVE,
+    TCP_THIN_LINEAR_TIMEOUTS,
     UDP_RMEM_DEFAULT,
     UDP_RMEM_MAX,
     UDP_WMEM_DEFAULT,
@@ -790,6 +791,7 @@ def render_sysctl(node_id: str) -> str:
         "net.ipv4.tcp_mtu_probing=1",
         f"net.ipv4.tcp_mtu_probe_floor={TCP_MTU_PROBE_FLOOR}",
         f"net.ipv4.tcp_no_metrics_save={TCP_NO_METRICS_SAVE}",
+        f"net.ipv4.tcp_thin_linear_timeouts={TCP_THIN_LINEAR_TIMEOUTS}",
         "vm.swappiness=10",
     ]
     if normalize_node_id(node_id) == NODE_GATEWAY:

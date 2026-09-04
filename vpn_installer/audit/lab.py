@@ -7,7 +7,14 @@ import time
 
 from ..common import OUT_DIR
 from ..config import load_env_file
-from ..interserver_transport import HY2_PORT, TRANSPORT_CANDIDATE_TAGS, TRANSPORT_HY2_TAG, TRANSPORT_PREFERRED_TAG
+from ..interserver_transport import (
+    HY2_PORT,
+    TRANSPORT_CANDIDATE_TAGS,
+    TRANSPORT_HY2_TAG,
+    TRANSPORT_PREFERRED_PROBE_INTERVAL_SECONDS,
+    TRANSPORT_PREFERRED_RECOVERY_MIN_SECONDS,
+    TRANSPORT_PREFERRED_TAG,
+)
 from ..network_profile import FQ_FLOW_LIMIT, FQ_KIND, FQ_PACKET_LIMIT
 from ..render import (
     SERVER_AGENT_BASE_MODULES,
@@ -367,7 +374,19 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
             recovery: list[dict[str, object]] = []
             for attempt in range(3):
                 if attempt:
-                    time.sleep(10.1)
+                    start_adjustment = (
+                        f"s['preferred_recovery']['started_at']=(t-timedelta(seconds={TRANSPORT_PREFERRED_RECOVERY_MIN_SECONDS + 1})).isoformat(); "
+                        if attempt == 1
+                        else ""
+                    )
+                    runner.docker_exec(
+                        ru_container,
+                        "python3 -c \"import json; from datetime import datetime,timedelta; "
+                        "p='/var/lib/vpn-stack/transport-state.json'; s=json.load(open(p)); "
+                        "t=datetime.fromisoformat(s['updated_at']); "
+                        f"s['preferred_probe_at']=(t-timedelta(seconds={TRANSPORT_PREFERRED_PROBE_INTERVAL_SECONDS + 1})).isoformat(); "
+                        f"{start_adjustment}open(p,'w').write(json.dumps(s))\"",
+                    )
                 recovery.append(
                     json.loads(
                         runner.docker_exec(ru_container, "python3 /opt/agent/vpn-stack-agent.py transport-reconcile").stdout

@@ -336,7 +336,7 @@ class InterserverTransportIdentityTests(unittest.TestCase):
         self.assertTrue(result["would_switch"])
         self.assertEqual(result["recommended"], TRANSPORT_HY2_TAG)
         self.assertEqual(result["quality_failure"]["reason"], "packet_loss")
-        self.assertEqual(result["preferred_retry"]["retry_at"], "2026-08-06T12:01:00+00:00")
+        self.assertEqual(result["preferred_retry"]["retry_at"], "2026-08-06T12:05:00+00:00")
 
     def test_preferred_quality_loss_does_not_switch_to_a_lossy_fallback(self) -> None:
         result = evaluate_transport_policy(
@@ -519,7 +519,7 @@ class InterserverTransportIdentityTests(unittest.TestCase):
         self.assertEqual(alternate_once["alternate_health"]["confirmations"], 1)
         self.assertFalse(alternate_once["would_switch"])
 
-    def test_healthy_fallback_returns_to_preferred_after_three_fresh_probes(self) -> None:
+    def test_healthy_fallback_returns_only_after_a_continuous_clean_window(self) -> None:
         failure = {
             TRANSPORT_WG_TAG: {"checked": True, "ok": False, "attempts": 2, "error": "timed out"},
             TRANSPORT_HY2_TAG: {"checked": True, "ok": True, "delay_ms": 70},
@@ -536,7 +536,7 @@ class InterserverTransportIdentityTests(unittest.TestCase):
             observed_at="2026-08-06T12:00:02+00:00",
         )
         self.assertTrue(switch["would_switch"])
-        self.assertEqual(switch["preferred_retry"]["retry_at"], "2026-08-06T12:01:02+00:00")
+        self.assertEqual(switch["preferred_retry"]["retry_at"], "2026-08-06T12:05:02+00:00")
 
         state: dict[str, object] = {
             **switch,
@@ -557,7 +557,7 @@ class InterserverTransportIdentityTests(unittest.TestCase):
         self.assertFalse(deferred["would_switch"])
         self.assertIn("deferred until", deferred["reason"])
         state = deferred
-        for stamp in ("12:01:02", "12:01:12", "12:01:22"):
+        for stamp in ("12:05:02", "12:06:02", "12:07:02", "12:08:02", "12:09:02"):
             state = evaluate_transport_policy(
                 selected=TRANSPORT_HY2_TAG,
                 probes=healthy,
@@ -566,10 +566,21 @@ class InterserverTransportIdentityTests(unittest.TestCase):
             )
         self.assertEqual(state["state"], "recovering")
         self.assertEqual(state["selected"], TRANSPORT_HY2_TAG)
+        self.assertEqual(state["recommended"], TRANSPORT_HY2_TAG)
+        self.assertFalse(state["would_switch"])
+        self.assertEqual(state["preferred_recovery"]["continuous_seconds"], 240)
+
+        state = evaluate_transport_policy(
+            selected=TRANSPORT_HY2_TAG,
+            probes=healthy,
+            previous=state,
+            observed_at="2026-08-06T12:10:02+00:00",
+        )
         self.assertEqual(state["recommended"], TRANSPORT_WG_TAG)
         self.assertTrue(state["would_switch"])
-        self.assertEqual(state["preferred_recovery"]["confirmations"], 3)
-        self.assertEqual(state["preferred_retry"]["recovered_at"], "2026-08-06T12:01:22+00:00")
+        self.assertEqual(state["preferred_recovery"]["confirmations"], 6)
+        self.assertEqual(state["preferred_recovery"]["continuous_seconds"], 300)
+        self.assertEqual(state["preferred_retry"]["recovered_at"], "2026-08-06T12:10:02+00:00")
         json.dumps(state)
 
     def test_healthy_fallback_defers_after_a_failed_preferred_probe(self) -> None:
@@ -608,6 +619,46 @@ class InterserverTransportIdentityTests(unittest.TestCase):
         self.assertFalse(result["would_switch"])
         self.assertIn("packet loss 12.5%", result["reason"])
         self.assertEqual(result["preferred_retry"]["reason"], "packet_loss")
+
+    def test_degraded_fallback_switches_to_a_proven_preferred_path_without_waiting_for_retry(self) -> None:
+        result = evaluate_transport_policy(
+            selected=TRANSPORT_HY2_TAG,
+            probes={
+                TRANSPORT_HY2_TAG: {
+                    "checked": True,
+                    "ok": True,
+                    "quality_checked": True,
+                    "quality_sampled": True,
+                    "quality_ok": False,
+                    "quality_error": "Hysteria overlay packet loss 15%",
+                    "packet_loss_pct": 15.0,
+                },
+                TRANSPORT_WG_TAG: {
+                    "checked": True,
+                    "ok": True,
+                    "health_confirmed": True,
+                    "quality_checked": True,
+                    "quality_ok": True,
+                    "packet_loss_pct": 0.0,
+                },
+            },
+            previous={
+                "schema_version": TRANSPORT_STATE_SCHEMA_VERSION,
+                "selected": TRANSPORT_HY2_TAG,
+                "preferred_retry": {
+                    "path": TRANSPORT_WG_TAG,
+                    "attempts": 3,
+                    "retry_at": "2026-08-06T13:00:00+00:00",
+                    "reason": "packet_loss",
+                },
+            },
+            observed_at="2026-08-06T12:00:00+00:00",
+        )
+
+        self.assertTrue(result["would_switch"])
+        self.assertEqual(result["recommended"], TRANSPORT_WG_TAG)
+        self.assertEqual(result["quality_failure"]["path"], TRANSPORT_HY2_TAG)
+        self.assertEqual(result["preferred_retry"]["recovered_at"], "2026-08-06T12:00:00+00:00")
 
     def test_deferred_cycle_preserves_but_does_not_increment_recovery_evidence(self) -> None:
         first = evaluate_transport_policy(
@@ -672,7 +723,7 @@ class InterserverTransportIdentityTests(unittest.TestCase):
         self.assertTrue(second["would_switch"])
         self.assertEqual(second["failure"]["reason"], "packet_loss")
         self.assertEqual(second["preferred_retry"]["attempts"], 2)
-        self.assertEqual(second["preferred_retry"]["retry_at"], "2026-08-06T12:04:02+00:00")
+        self.assertEqual(second["preferred_retry"]["retry_at"], "2026-08-06T12:12:02+00:00")
 
     def test_healthy_preferred_path_closes_and_eventually_clears_retry_history(self) -> None:
         previous = {
@@ -701,7 +752,7 @@ class InterserverTransportIdentityTests(unittest.TestCase):
             selected=TRANSPORT_WG_TAG,
             probes=probes,
             previous=recovered,
-            observed_at="2026-08-06T12:12:00+00:00",
+            observed_at="2026-08-06T12:32:00+00:00",
         )
 
         self.assertEqual(recovered["preferred_retry"]["recovered_at"], "2026-08-06T12:02:00+00:00")

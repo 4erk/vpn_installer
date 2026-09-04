@@ -1161,6 +1161,160 @@ class ServerAgentTests(unittest.TestCase):
         self.assertIn("203.0.113.20:124", evidence["flows"])
         self.assertNotIn("203.0.113.20:100", evidence["flows"])
 
+    def test_tcp_destination_metrics_parser_keeps_only_recovery_fields(self) -> None:
+        metrics = server_agent.parse_tcp_destination_metrics(
+            "5.166.130.228",
+            "5.166.130.228 age 425.952sec cwnd 2150 reordering 185 rtt 104073us rttvar 142185us source 94.232.248.35\n",
+        )
+
+        self.assertEqual(
+            metrics,
+            {
+                "source": "5.166.130.228",
+                "cached": True,
+                "reordering": 185,
+            },
+        )
+
+    def test_front_cache_recovery_deletes_only_confirmed_poisoned_destination(self) -> None:
+        source = "5.166.130.228"
+        front = {
+            "flows": {
+                f"{source}:50123": {
+                    "source": source,
+                    "phase": "active",
+                    "rto_ms": {"max": 120_000},
+                    "mss": 536,
+                    "reordering": 185,
+                }
+            }
+        }
+        interval = {
+            "observed_at": "2026-09-04T12:00:00+00:00",
+            "baseline": False,
+            "degraded_sources": [source],
+        }
+        previous = {
+            "front_interval": {
+                "observed_at": "2026-09-04T11:58:00+00:00",
+                "degraded_sources": [source],
+            }
+        }
+
+        def command(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            if args[:3] == ["ip", "tcp_metrics", "show"]:
+                return subprocess.CompletedProcess(args, 0, f"{source} age 300sec cwnd 2150 reordering 185 rtt 104073us\n", "")
+            if args[:3] == ["ip", "tcp_metrics", "delete"]:
+                return subprocess.CompletedProcess(args, 0, "", "")
+            raise AssertionError(args)
+
+        with patch.object(server_agent, "run", side_effect=command) as run_mock:
+            result = server_agent.reconcile_front_tcp_metrics_cache(
+                front,
+                interval,
+                previous,
+                interval["observed_at"],
+                10_000,
+            )
+
+        self.assertEqual(result["actions"][0]["status"], "ok")
+        self.assertEqual(
+            [call.args[0] for call in run_mock.call_args_list],
+            [["ip", "tcp_metrics", "show", source], ["ip", "tcp_metrics", "delete", source]],
+        )
+
+    def test_front_cache_recovery_preserves_cache_without_stall_or_confirmation(self) -> None:
+        source = "5.166.130.228"
+        interval = {
+            "observed_at": "2026-09-04T12:00:00+00:00",
+            "baseline": False,
+            "degraded_sources": [source],
+        }
+        healthy_front = {
+            "flows": {
+                f"{source}:50123": {
+                    "source": source,
+                    "phase": "active",
+                    "rto_ms": {"max": 500},
+                    "mss": 1428,
+                    "reordering": 185,
+                }
+            }
+        }
+        with patch.object(server_agent, "run") as run_mock:
+            healthy = server_agent.reconcile_front_tcp_metrics_cache(
+                healthy_front,
+                interval,
+                {},
+                interval["observed_at"],
+                10_000,
+            )
+        self.assertEqual(healthy["actions"], [])
+        run_mock.assert_not_called()
+
+        stalled_front = {
+            "flows": {
+                f"{source}:50123": {
+                    "source": source,
+                    "phase": "active",
+                    "rto_ms": {"max": 120_000},
+                    "mss": 536,
+                    "reordering": 185,
+                }
+            }
+        }
+        with patch.object(server_agent, "run") as run_mock:
+            first = server_agent.reconcile_front_tcp_metrics_cache(
+                stalled_front,
+                interval,
+                {},
+                interval["observed_at"],
+                10_000,
+            )
+        self.assertEqual(first["actions"], [])
+        run_mock.assert_not_called()
+
+    def test_front_cache_recovery_honors_per_destination_cooldown(self) -> None:
+        source = "5.166.130.228"
+        observed_at = "2026-09-04T12:00:00+00:00"
+        front = {
+            "flows": {
+                f"{source}:50123": {
+                    "source": source,
+                    "phase": "active",
+                    "rto_ms": {"max": 120_000},
+                    "mss": 536,
+                }
+            }
+        }
+        previous = {
+            "front_interval": {
+                "observed_at": "2026-09-04T11:58:00+00:00",
+                "degraded_sources": [source],
+            },
+            "front_cache_recovery": {
+                "last_actions": {
+                    source: {
+                        "source": source,
+                        "status": "ok",
+                        "epoch": 9_500,
+                    }
+                }
+            },
+        }
+        with patch.object(server_agent, "run") as run_mock:
+            result = server_agent.reconcile_front_tcp_metrics_cache(
+                front,
+                {"observed_at": observed_at, "baseline": False, "degraded_sources": [source]},
+                previous,
+                observed_at,
+                10_000,
+            )
+
+        self.assertEqual(result["actions"], [])
+        self.assertEqual(result["last_actions"][source]["epoch"], 9_500)
+        run_mock.assert_not_called()
+
     def test_recovery_never_routes_foreign_traffic_through_ru(self) -> None:
         current = {
             **self.gateway_contract(),
@@ -1361,6 +1515,7 @@ class ServerAgentTests(unittest.TestCase):
                 "net.ipv4.tcp_mtu_probe_floor": "536\n",
                 "net.ipv4.tcp_probe_interval": "600\n",
                 "net.ipv4.tcp_no_metrics_save": "0\n",
+                "net.ipv4.tcp_thin_linear_timeouts": "1\n",
                 "net.core.rmem_default": "8388608\n",
                 "net.core.rmem_max": "16777216\n",
                 "net.core.wmem_default": "8388608\n",
@@ -1385,6 +1540,7 @@ class ServerAgentTests(unittest.TestCase):
                 "mtu_probe_floor": 536,
                 "probe_interval_seconds": 600,
                 "metrics_save_disabled": 0,
+                "thin_linear_timeouts": 1,
                 "udp_rmem_default": 8388608,
                 "udp_rmem_max": 16777216,
                 "udp_wmem_default": 8388608,
@@ -1514,7 +1670,8 @@ class ServerAgentTests(unittest.TestCase):
                 "net.core.wmem_default=8388608\n"
                 "net.core.wmem_max=16777216\n"
                 "net.ipv4.tcp_mtu_probe_floor=536\n"
-                "net.ipv4.tcp_no_metrics_save=0\n",
+                "net.ipv4.tcp_no_metrics_save=0\n"
+                "net.ipv4.tcp_thin_linear_timeouts=1\n",
                 encoding="utf-8",
             )
             expected = server_agent.managed_network_profile(path)
@@ -1527,6 +1684,7 @@ class ServerAgentTests(unittest.TestCase):
                 "udp_wmem_max": 16_777_216,
                 "mtu_probe_floor": 536,
                 "metrics_save_disabled": 0,
+                "thin_linear_timeouts": 1,
                 "qdisc": "fq",
                 "qdisc_limit": 10_000,
                 "qdisc_flow_limit": 512,
@@ -1544,6 +1702,7 @@ class ServerAgentTests(unittest.TestCase):
                     "udp_wmem_max": 16_777_216,
                     "mtu_probe_floor": 536,
                     "metrics_save_disabled": 0,
+                    "thin_linear_timeouts": 1,
                     "qdisc": "fq",
                     "qdisc_limit": 10_000,
                     "qdisc_flow_limit": 512,
@@ -2525,7 +2684,7 @@ class ServerAgentTests(unittest.TestCase):
         ):
             server_agent.collect_transport_probes(
                 "interserver-underlay-hy2",
-                {"preferred_probe_at": "2026-08-07T11:59:49+00:00"},
+                {"preferred_probe_at": "2026-08-07T11:59:29+00:00"},
                 env=env,
                 observed_at="2026-08-07T12:00:00+00:00",
             )
@@ -2872,6 +3031,49 @@ class ServerAgentTests(unittest.TestCase):
         self.assertEqual(result["interserver-underlay-hy2"], alternate_probe)
         alternate.assert_called_once_with(
             "interserver-underlay-hy2",
+            timeout_ms=server_agent.TRANSPORT_CANDIDATE_QUALITY_PROBE_TIMEOUT_MS,
+            attempts=server_agent.TRANSPORT_CANDIDATE_QUALITY_PROBE_ATTEMPTS,
+        )
+
+    def test_transport_cycle_bypasses_preferred_retry_when_selected_fallback_degrades(self) -> None:
+        liveness = {"checked": True, "ok": True, "attempts": 1, "scope": "overlay-dns", "health_confirmed": True}
+        quality = {
+            "checked": True,
+            "ok": False,
+            "attempts": 20,
+            "scope": "overlay-quality",
+            "quality_checked": True,
+            "packet_loss_pct": 15.0,
+            "error": "Hysteria overlay packet loss 15%",
+        }
+        alternate_probe = {
+            "checked": True,
+            "ok": True,
+            "health_confirmed": True,
+            "quality_checked": True,
+            "quality_ok": True,
+        }
+        previous = {
+            "preferred_retry": {
+                "path": "interserver-underlay-wg",
+                "retry_at": "2026-08-07T13:00:00+00:00",
+            }
+        }
+        env = {"WG_INTERFACE": "wg0", "WG_FOREIGN_ADDRESS": "10.74.0.2/24"}
+        with patch.object(server_agent, "transport_overlay_path_probe", side_effect=(liveness, quality)), patch.object(
+            server_agent, "transport_candidate_probe", return_value=alternate_probe
+        ) as alternate:
+            result = server_agent.collect_transport_probes(
+                "interserver-underlay-hy2",
+                previous,
+                env=env,
+                observed_at="2026-08-07T12:00:00+00:00",
+            )
+
+        self.assertFalse(result["interserver-underlay-hy2"]["quality_ok"])
+        self.assertEqual(result["interserver-underlay-wg"], alternate_probe)
+        alternate.assert_called_once_with(
+            "interserver-underlay-wg",
             timeout_ms=server_agent.TRANSPORT_CANDIDATE_QUALITY_PROBE_TIMEOUT_MS,
             attempts=server_agent.TRANSPORT_CANDIDATE_QUALITY_PROBE_ATTEMPTS,
         )

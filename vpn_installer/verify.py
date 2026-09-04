@@ -17,6 +17,7 @@ from .network_profile import (
     FQ_PACKET_LIMIT,
     TCP_MTU_PROBE_FLOOR,
     TCP_NO_METRICS_SAVE,
+    TCP_THIN_LINEAR_TIMEOUTS,
     UDP_RMEM_DEFAULT,
     UDP_RMEM_MAX,
     UDP_WMEM_DEFAULT,
@@ -195,6 +196,8 @@ def _verify_snapshot(snapshot: DiagnosticsSnapshot, *, expected_plan: NodePlan |
         degradations.append("TCP PLPMTUD floor is not active")
     if tcp_adaptation and tcp_adaptation.get("metrics_save_disabled") != TCP_NO_METRICS_SAVE:
         degradations.append("TCP destination metrics cache is not active")
+    if tcp_adaptation and tcp_adaptation.get("thin_linear_timeouts") != TCP_THIN_LINEAR_TIMEOUTS:
+        degradations.append("TCP thin-stream linear loss recovery is not active")
     try:
         rmem_default = int(tcp_adaptation.get("udp_rmem_default", 0))
         rmem_max = int(tcp_adaptation.get("udp_rmem_max", 0))

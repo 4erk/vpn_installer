@@ -803,6 +803,7 @@ def bootstrap_from_snapshot(snapshot: dict[str, Any]) -> dict[str, str]:
         "tcp_mtu_probing": str(tcp_adaptation.get("mtu_probing", "")),
         "tcp_mtu_probe_floor": str(tcp_adaptation.get("mtu_probe_floor", "")),
         "tcp_metrics_save_disabled": str(tcp_adaptation.get("metrics_save_disabled", "")),
+        "tcp_thin_linear_timeouts": str(tcp_adaptation.get("thin_linear_timeouts", "")),
         "tcp_probe_interval_seconds": str(tcp_adaptation.get("probe_interval_seconds", "")),
         "udp_rmem_default": str(tcp_adaptation.get("udp_rmem_default", "")),
         "udp_rmem_max": str(tcp_adaptation.get("udp_rmem_max", "")),
@@ -868,6 +869,7 @@ def print_preflight(target: RemoteTarget, preflight: dict[str, str]) -> None:
         f"drops={preflight.get('wg_qdisc_drops', '-')},flow_limit_drops={preflight.get('wg_qdisc_flow_limit_drops', '-')}), "
         f"mtu_probing={preflight.get('tcp_mtu_probing', '-')}, mtu_floor={preflight.get('tcp_mtu_probe_floor', '-')}, "
         f"metrics_save_disabled={preflight.get('tcp_metrics_save_disabled', '-')}, "
+        f"thin_linear_timeouts={preflight.get('tcp_thin_linear_timeouts', '-')}, "
         f"probe_interval_s={preflight.get('tcp_probe_interval_seconds', '-')}, "
         f"udp_rmem={preflight.get('udp_rmem_default', '-')}/{preflight.get('udp_rmem_max', '-')}, "
         f"udp_wmem={preflight.get('udp_wmem_default', '-')}/{preflight.get('udp_wmem_max', '-')}"

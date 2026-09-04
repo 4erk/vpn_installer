@@ -41,19 +41,20 @@ TRANSPORT_ALTERNATE_HEALTH_CONFIRMATIONS = 2
 TRANSPORT_EVIDENCE_MAX_GAP_SECONDS = TRANSPORT_PROBE_INTERVAL_SECONDS * 5
 TRANSPORT_PREFERRED_TAG = TRANSPORT_WG_TAG
 TRANSPORT_PREFERRED_RECOVERY_CONFIRMATIONS = 3
-TRANSPORT_PREFERRED_PROBE_INTERVAL_SECONDS = 10
+TRANSPORT_PREFERRED_RECOVERY_MIN_SECONDS = 300
+TRANSPORT_PREFERRED_PROBE_INTERVAL_SECONDS = 30
 TRANSPORT_CANDIDATE_QUALITY_PROBE_ATTEMPTS = 8
 TRANSPORT_CANDIDATE_QUALITY_PROBE_TIMEOUT_MS = 2400
 TRANSPORT_PREFERRED_EVIDENCE_MAX_GAP_SECONDS = TRANSPORT_PREFERRED_PROBE_INTERVAL_SECONDS * 3
-TRANSPORT_PREFERRED_RETRY_BASE_SECONDS = 60
-TRANSPORT_PREFERRED_RETRY_MAX_SECONDS = 900
-TRANSPORT_PREFERRED_STABLE_RESET_SECONDS = 600
+TRANSPORT_PREFERRED_RETRY_BASE_SECONDS = 300
+TRANSPORT_PREFERRED_RETRY_MAX_SECONDS = 3600
+TRANSPORT_PREFERRED_STABLE_RESET_SECONDS = 1800
 TRANSPORT_SWITCH_RETRY_BASE_SECONDS = 30
 TRANSPORT_SWITCH_RETRY_MAX_SECONDS = 300
 TRANSPORT_SWITCH_PROOF_ATTEMPTS = 5
 TRANSPORT_SWITCH_PROOF_TIMEOUT_MS = 1200
 TRANSPORT_SWITCH_PROOF_RETRY_DELAY_SECONDS = 0.2
-TRANSPORT_STATE_SCHEMA_VERSION = 14
+TRANSPORT_STATE_SCHEMA_VERSION = 15
 UNDERLAY_WG_RU_ADDRESS = "10.75.0.1/32"
 UNDERLAY_WG_FOREIGN_ADDRESS = "10.75.0.2/32"
 UNDERLAY_WG_MTU = 1420
@@ -996,6 +997,30 @@ def evaluate_transport_policy(
     if prior.get("preferred_probe_at"):
         recovery_details["preferred_probe_at"] = prior["preferred_probe_at"]
     selected_state, selected_quality_reason = _selected_quality(selected_probe)
+    if (
+        selected_state == "degraded"
+        and selected_probe.get("quality_sampled") is True
+        and preferred_probe.get("ok") is True
+        and preferred_probe.get("health_confirmed") is True
+        and preferred_probe.get("quality_checked") is True
+        and preferred_probe.get("quality_ok") is True
+    ):
+        failure_reason = _probe_failure_reason({"error": selected_quality_reason})
+        return _policy_state(
+            selected,
+            normalized,
+            observed_at,
+            "recovering",
+            f"selected fallback has confirmed {failure_reason}; preferred underlay is healthy",
+            recommended=TRANSPORT_PREFERRED_TAG,
+            hard_failure=False,
+            quality_failure={
+                "path": selected,
+                "reason": failure_reason,
+                "packet_loss_pct": selected_probe.get("packet_loss_pct"),
+            },
+            **_preferred_recovery_details(prior, observed_at, mark_recovered=True),
+        )
     if not preferred_probe["checked"]:
         deferred_reason = (
             f"fallback overlay path is healthy; preferred retry is deferred until "
@@ -1048,7 +1073,26 @@ def evaluate_transport_policy(
         reason="healthy",
         cycle_relation=recovery_relation,
     )
-    confirmed = recovery["confirmations"] >= TRANSPORT_PREFERRED_RECOVERY_CONFIRMATIONS
+    prior_recovery = prior.get("preferred_recovery", {})
+    continuous_recovery = (
+        recovery_relation != "reset"
+        and isinstance(prior_recovery, dict)
+        and prior_recovery.get("path") == TRANSPORT_PREFERRED_TAG
+        and prior_recovery.get("reason") == "healthy"
+    )
+    recovery_started_at = (
+        str(prior_recovery.get("started_at", ""))
+        if continuous_recovery and prior_recovery.get("started_at")
+        else observed_at
+    )
+    started = _parse_timestamp(recovery_started_at)
+    observed = _parse_timestamp(observed_at)
+    recovery_seconds = max(0, int((observed - started).total_seconds())) if started and observed else 0
+    recovery.update({"started_at": recovery_started_at, "continuous_seconds": recovery_seconds})
+    confirmed = (
+        recovery["confirmations"] >= TRANSPORT_PREFERRED_RECOVERY_CONFIRMATIONS
+        and recovery_seconds >= TRANSPORT_PREFERRED_RECOVERY_MIN_SECONDS
+    )
     if confirmed and "preferred_retry" in recovery_details:
         recovery_details["preferred_retry"] = {
             **recovery_details["preferred_retry"],
@@ -1066,7 +1110,8 @@ def evaluate_transport_policy(
             if confirmed
             else (
                 f"preferred underlay recovery confirmation "
-                f"{recovery['confirmations']}/{TRANSPORT_PREFERRED_RECOVERY_CONFIRMATIONS}"
+                f"{recovery['confirmations']}/{TRANSPORT_PREFERRED_RECOVERY_CONFIRMATIONS}, "
+                f"stable {recovery_seconds}/{TRANSPORT_PREFERRED_RECOVERY_MIN_SECONDS}s"
             )
         ),
         recommended=TRANSPORT_PREFERRED_TAG if confirmed else None,

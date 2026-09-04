@@ -788,6 +788,7 @@ class RenderTests(unittest.TestCase):
         self.assertIn("net.ipv4.tcp_mtu_probing=1", foreign_files["sysctl-vpn-stack.conf"])
         self.assertIn("net.ipv4.tcp_mtu_probe_floor=536", ru_files["sysctl-vpn-stack.conf"])
         self.assertIn("net.ipv4.tcp_no_metrics_save=0", ru_files["sysctl-vpn-stack.conf"])
+        self.assertIn("net.ipv4.tcp_thin_linear_timeouts=1", ru_files["sysctl-vpn-stack.conf"])
         self.assertIn("net.core.rmem_default=8388608", ru_files["sysctl-vpn-stack.conf"])
         self.assertIn("net.core.rmem_max=16777216", foreign_files["sysctl-vpn-stack.conf"])
         self.assertIn("net.core.wmem_default=8388608", foreign_files["sysctl-vpn-stack.conf"])

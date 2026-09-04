@@ -8,6 +8,24 @@
 
 Каждый раздел ниже описывает поведение именно указанной версии; действующий контракт задаёт верхний раздел релиза.
 
+## [0.22.2] - 2026-09-04
+
+### Fixed
+
+- Исправлена подтверждённая причина длинных зависаний отдельных Reality TCP-потоков. Gateway сохранял для client source destination metric с `reordering=185`; новые соединения наследовали её, а после потери сегмента PLPMTUD опускал MSS до `536` и exponential RTO доходил до `120s`. Agent теперь после двух соседних source-specific loss-окон, активного stalled-flow evidence и `cached reordering >= 64` удаляет только метрику этого адреса. Global flush, `ss -K`, restart сервисов и разрыв открытых соединений не используются; повторное действие ограничено cooldown `30min`.
+- Managed kernel profile включает `tcp_thin_linear_timeouts=1`: тонкий TCP-поток с единичным неподтверждённым сегментом использует ограниченную линейную RTO recovery вместо многократного экспоненциального ожидания. PLPMTUD, MSS floor `536` и штатное кеширование destination metrics сохранены.
+- Устранено межсерверное flapping: за диагностические сутки selector менялся `176` раз, потому что fallback возвращался на WireGuard после трёх быстрых проб и снова уходил при следующей потере. Возврат теперь требует непрерывных `5min` чистых проверок после exponential backoff `300..3600s`; failure history сбрасывается после `30min` устойчивой работы.
+- Деградация уже выбранного fallback немедленно обходит preferred retry delay и проверяет alternate. Это сохраняет быстрый failover в обе стороны, но не переключает здоровый fallback по краткому удачному sample.
+
+### Changed
+
+- Status/preflight показывает активность thin-stream recovery и последнее адресное восстановление TCP metrics. Transport state schema поднята до `15`; старый runtime state не мигрируется и безопасно набирает свежие evidence.
+
+### Compatibility
+
+- Fresh install и reinstall `0.22.2` поддерживаются; обновление допускается только с `0.22.1`. Config/state, manifest/install-plan и diagnostics остаются в schemas `3/5/6`; transition adapter не добавлен.
+- Основной `out/<deployment>/client/vless-uri.txt`, Xray/Reality, routing policy, WireGuard MTU, web-admin и локальные клиентские настройки не изменены.
+
 ## [0.22.1] - 2026-09-03
 
 ### Changed

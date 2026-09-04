@@ -118,7 +118,7 @@ except ImportError:  # Optional on nodes without an interserver capability.
         TRANSPORT_HY2_TAG = "interserver-underlay-hy2"
         TRANSPORT_CANDIDATE_TAGS = (TRANSPORT_WG_TAG, TRANSPORT_HY2_TAG)
         TRANSPORT_FAILURE_CONFIRMATIONS = 2
-        TRANSPORT_PREFERRED_PROBE_INTERVAL_SECONDS = 10
+        TRANSPORT_PREFERRED_PROBE_INTERVAL_SECONDS = 30
         TRANSPORT_CANDIDATE_QUALITY_PROBE_ATTEMPTS = 8
         TRANSPORT_CANDIDATE_QUALITY_PROBE_TIMEOUT_MS = 2400
         TRANSPORT_PREFERRED_TAG = TRANSPORT_WG_TAG
@@ -129,7 +129,7 @@ except ImportError:  # Optional on nodes without an interserver capability.
         TRANSPORT_RELAY_INBOUND_TAG = "interserver-overlay-in"
         TRANSPORT_RELAY_PORT = 19091
         TRANSPORT_SELECTOR_TAG = "interserver-underlay-select"
-        TRANSPORT_STATE_SCHEMA_VERSION = 14
+        TRANSPORT_STATE_SCHEMA_VERSION = 15
         TRANSPORT_SWITCH_RETRY_BASE_SECONDS = 30
         TRANSPORT_SWITCH_RETRY_MAX_SECONDS = 300
         TRANSPORT_SWITCH_PROOF_ATTEMPTS = 5
@@ -146,9 +146,9 @@ except ImportError:  # Optional on nodes without an interserver capability.
         transport_topology_configured = _missing_transport_module
 
 try:
-    from .network_profile import FQ_FLOW_LIMIT, FQ_KIND, FQ_PACKET_LIMIT, wireguard_policy_spec
+    from .network_profile import FQ_FLOW_LIMIT, FQ_KIND, FQ_PACKET_LIMIT, TCP_MTU_PROBE_FLOOR, wireguard_policy_spec
 except ImportError:  # Installed agent runs as a standalone script.
-    from network_profile import FQ_FLOW_LIMIT, FQ_KIND, FQ_PACKET_LIMIT, wireguard_policy_spec  # type: ignore[no-redef]
+    from network_profile import FQ_FLOW_LIMIT, FQ_KIND, FQ_PACKET_LIMIT, TCP_MTU_PROBE_FLOOR, wireguard_policy_spec  # type: ignore[no-redef]
 
 try:
     from .diagnostics import SCHEMA_VERSION as DIAGNOSTICS_SCHEMA_VERSION, COLLECTOR_NAMES, CollectorState, DiagnosticsSnapshot, LogWindowSnapshot, classify_interserver_adaptation
@@ -216,6 +216,11 @@ FRONT_RTT_INFLATION_FACTOR = 3
 FRONT_RTO_DEGRADED_MS = 1_000
 FRONT_COUNTER_MAX_INTERVAL_SECONDS = 300
 FRONT_CURRENT_ACTIVITY_MAX_IDLE_MS = 30_000
+FRONT_CACHE_REORDERING_THRESHOLD = 64
+FRONT_CACHE_STALLED_RTO_MS = 8_000
+FRONT_CACHE_RECOVERY_COOLDOWN_SECONDS = 1_800
+FRONT_CACHE_RECOVERY_MAX_ACTIONS = 2
+FRONT_CACHE_RECOVERY_HISTORY_LIMIT = 20
 REALITY_PENDING_HANDSHAKE_DEGRADED = 5
 LOG_CONTEXT_MAX_EVENT_IDS = 500
 PROBLEM_LOG_GREP = (
@@ -1255,6 +1260,7 @@ def tcp_adaptation_snapshot(interface: str, overlay_interface: str = "") -> dict
         ("mtu_probe_floor", "net.ipv4.tcp_mtu_probe_floor"),
         ("probe_interval_seconds", "net.ipv4.tcp_probe_interval"),
         ("metrics_save_disabled", "net.ipv4.tcp_no_metrics_save"),
+        ("thin_linear_timeouts", "net.ipv4.tcp_thin_linear_timeouts"),
         ("udp_rmem_default", "net.core.rmem_default"),
         ("udp_rmem_max", "net.core.rmem_max"),
         ("udp_wmem_default", "net.core.wmem_default"),
@@ -1278,6 +1284,7 @@ def managed_network_profile(path: Path = SYSCTL_PATH, *, include_overlay: bool =
         "net.netfilter.nf_conntrack_max": "conntrack_max",
         "net.ipv4.tcp_mtu_probe_floor": "mtu_probe_floor",
         "net.ipv4.tcp_no_metrics_save": "metrics_save_disabled",
+        "net.ipv4.tcp_thin_linear_timeouts": "thin_linear_timeouts",
     }
     values: dict[str, int] = {}
     try:
@@ -2089,6 +2096,117 @@ def front_degradation_evidence(
     }
 
 
+def parse_tcp_destination_metrics(source: str, output: str) -> dict[str, Any]:
+    line = next((raw.strip() for raw in output.splitlines() if raw.strip()), "")
+    metrics: dict[str, Any] = {"source": source, "cached": bool(line)}
+    if match := re.search(r"\breordering\s+(\d+)", line):
+        metrics["reordering"] = int(match.group(1))
+    return metrics
+
+
+def tcp_destination_metrics(source: str) -> dict[str, Any]:
+    try:
+        address = ipaddress.ip_address(source)
+    except ValueError:
+        return {"source": source, "available": False, "error": "invalid source address"}
+    if address.is_loopback or address.is_multicast or address.is_unspecified:
+        return {"source": str(address), "available": False, "error": "source address is not recoverable"}
+    canonical = str(address)
+    result = run(["ip", "tcp_metrics", "show", canonical], timeout=5)
+    if result.returncode != 0:
+        detail = " ".join((result.stderr.strip() or result.stdout.strip() or "ip tcp_metrics failed").split())
+        return {"source": canonical, "available": False, "error": detail[:160]}
+    return {"available": True, **parse_tcp_destination_metrics(canonical, result.stdout)}
+
+
+def front_source_stall(front: Mapping[str, Any], source: str) -> dict[str, Any]:
+    max_rto_ms = 0
+    min_mss: int | None = None
+    active_flows = 0
+    for metrics in front.get("flows", {}).values():
+        if not isinstance(metrics, Mapping) or metrics.get("source") != source or metrics.get("phase") != "active":
+            continue
+        active_flows += 1
+        rto = metrics.get("rto_ms", {})
+        max_rto_ms = max(max_rto_ms, int(rto.get("max", 0) or 0) if isinstance(rto, Mapping) else 0)
+        raw_mss = metrics.get("mss")
+        if isinstance(raw_mss, int):
+            min_mss = raw_mss if min_mss is None else min(min_mss, raw_mss)
+    floor_collapse = min_mss is not None and min_mss <= TCP_MTU_PROBE_FLOOR
+    return {
+        "active_flows": active_flows,
+        "max_rto_ms": max_rto_ms,
+        "min_mss": min_mss,
+        "stalled": max_rto_ms >= FRONT_CACHE_STALLED_RTO_MS or (floor_collapse and max_rto_ms >= FRONT_RTO_DEGRADED_MS),
+    }
+
+
+def previous_front_interval_degraded(previous: Mapping[str, Any], source: str, observed_at: str) -> bool:
+    now = parse_iso_datetime(observed_at)
+    prior_interval = previous.get("front_interval", {})
+    if not isinstance(prior_interval, Mapping) or source not in prior_interval.get("degraded_sources", []):
+        return False
+    age = iso_age_seconds(str(prior_interval.get("observed_at", "")), now=now) if now else None
+    return age is not None and 0 <= age <= FRONT_COUNTER_MAX_INTERVAL_SECONDS
+
+
+def reconcile_front_tcp_metrics_cache(
+    front: Mapping[str, Any],
+    interval: Mapping[str, Any],
+    previous: Mapping[str, Any],
+    observed_at: str,
+    now_epoch: int,
+) -> dict[str, Any]:
+    prior_recovery = previous.get("front_cache_recovery", {})
+    prior_actions = prior_recovery.get("last_actions", {}) if isinstance(prior_recovery, Mapping) else {}
+    last_actions = dict(prior_actions) if isinstance(prior_actions, Mapping) else {}
+    actions: list[dict[str, Any]] = []
+    degraded_sources = interval.get("degraded_sources", []) if interval.get("baseline") is not True else []
+    for source in sorted({str(value) for value in degraded_sources})[:FRONT_CACHE_RECOVERY_HISTORY_LIMIT]:
+        stall = front_source_stall(front, source)
+        if not stall["stalled"] or not previous_front_interval_degraded(previous, source, observed_at):
+            continue
+        last = last_actions.get(source, {})
+        last_epoch = int(last.get("epoch", 0) or 0) if isinstance(last, Mapping) and last.get("status") == "ok" else 0
+        if now_epoch - last_epoch < FRONT_CACHE_RECOVERY_COOLDOWN_SECONDS:
+            continue
+        cached = tcp_destination_metrics(source)
+        reordering = int(cached.get("reordering", 0) or 0)
+        if cached.get("available") is not True or cached.get("cached") is not True or reordering < FRONT_CACHE_REORDERING_THRESHOLD:
+            continue
+        if len(actions) >= FRONT_CACHE_RECOVERY_MAX_ACTIONS:
+            break
+        source = str(cached["source"])
+        result = run(["ip", "tcp_metrics", "delete", source], timeout=5)
+        status = "ok" if result.returncode == 0 else "failed"
+        action = {
+            "source": source,
+            "status": status,
+            "observed_at": observed_at,
+            "epoch": now_epoch,
+            "cached_reordering": reordering,
+            "max_rto_ms": stall["max_rto_ms"],
+            "min_mss": stall["min_mss"],
+        }
+        if status == "failed":
+            action["error"] = " ".join((result.stderr.strip() or result.stdout.strip() or "delete failed").split())[:160]
+        actions.append(action)
+        last_actions[source] = action
+    bounded_actions = dict(
+        sorted(
+            ((str(source), dict(value)) for source, value in last_actions.items() if isinstance(value, Mapping)),
+            key=lambda item: int(item[1].get("epoch", 0) or 0),
+            reverse=True,
+        )[:FRONT_CACHE_RECOVERY_HISTORY_LIMIT]
+    )
+    return {
+        "policy": "exact-destination-metrics-v1",
+        "observed_at": observed_at,
+        "actions": actions,
+        "last_actions": bounded_actions,
+    }
+
+
 def source_in_log_line(line: str, source: str) -> bool:
     return source_from_line(line) == normalize_source(source)
 
@@ -2349,16 +2467,15 @@ def collect_transport_probes(
             }
         )
         probes[selected]["quality_sampled"] = False
-    fresh_preferred_quality_failure = (
-        selected == TRANSPORT_PREFERRED_TAG
-        and probes[selected].get("quality_sampled") is True
+    fresh_selected_quality_failure = (
+        probes[selected].get("quality_sampled") is True
         and probes[selected].get("quality_checked") is True
         and probes[selected].get("quality_ok") is False
     )
-    if probes[selected].get("ok") is not True or fresh_preferred_quality_failure:
+    if probes[selected].get("ok") is not True or fresh_selected_quality_failure:
         alternate = next(tag for tag in TRANSPORT_CANDIDATE_TAGS if tag != selected)
         if transport_switch_backoff_active(previous, alternate, observed_at) is None:
-            if fresh_preferred_quality_failure:
+            if fresh_selected_quality_failure:
                 probes[alternate] = transport_candidate_probe(
                     alternate,
                     timeout_ms=TRANSPORT_CANDIDATE_QUALITY_PROBE_TIMEOUT_MS,
@@ -3697,6 +3814,7 @@ def collect_runtime_facts(*, live_probes: bool = False, profile: str = "light", 
             "health_updated_at": health_state.get("updated_at", ""),
             "health_soft_reasons": health_state.get("soft_reasons", []),
             "last_front_degradation": health_state.get("last_front_degradation", {}),
+            "front_cache_recovery": health_state.get("front_cache_recovery", {}),
             "last_runtime_degradation": health_state.get("last_runtime_degradation", {}),
             "recent_front_interval": recent_front_interval,
         },
@@ -3974,6 +4092,18 @@ def _health_unlocked() -> dict[str, Any]:
             front_interval,
         )
         last_front_degradation = front_evidence or previous.get("last_front_degradation", {})
+        front_cache_recovery = reconcile_front_tcp_metrics_cache(
+            current.get("front", {}),
+            front_interval,
+            previous,
+            observed_at,
+            now_epoch,
+        )
+        failed_cache_actions = [
+            action for action in front_cache_recovery["actions"] if action.get("status") != "ok"
+        ]
+        if failed_cache_actions:
+            soft_reasons.append(f"front_tcp_metrics_cache_recovery_failed={len(failed_cache_actions)}")
         state = "degraded" if soft_reasons else "healthy"
         action = "none"
         recovery_succeeded = False
@@ -4026,6 +4156,7 @@ def _health_unlocked() -> dict[str, Any]:
             "front_interval": front_interval,
             "soft_reasons": soft_reasons,
             "last_front_degradation": last_front_degradation,
+            "front_cache_recovery": front_cache_recovery,
             "verdicts": (postcheck or current)["verdicts"],
         }
         if postcheck is not None:
@@ -4053,6 +4184,9 @@ def health_log_summary(payload: dict[str, Any]) -> dict[str, Any]:
             "observation": interval.get("observation", "observed"),
             "degraded_sources": interval.get("degraded_sources", []),
             "aggregate": interval.get("aggregate", {}),
+        },
+        "front_cache_recovery": {
+            "actions": payload.get("front_cache_recovery", {}).get("actions", []),
         },
     }
 
