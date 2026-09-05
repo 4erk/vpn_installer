@@ -136,7 +136,7 @@ class DiagnoseTests(unittest.TestCase):
                 "\n".join(
                     [
                         "connection: open connection to 149.154.175.100:443 using outbound/vless[proxy]: dial tcp 94.232.248.35:443: i/o timeout",
-                        "dns: exchange failed for plugins.jetbrains.com. IN A: context deadline exceeded",
+                        "dns: exchange failed for plugins.example.com. IN A: context deadline exceeded",
                     ]
                 ),
                 encoding="utf-8",
@@ -154,7 +154,7 @@ class DiagnoseTests(unittest.TestCase):
         self.assertIn("client_front_connect_failed: 1", output)
         self.assertIn("dns_timeout: 1", output)
         self.assertIn("BAD: self-tunnel", output)
-        self.assertIn("Windows bypass helper", output)
+        self.assertIn("Windows direct server route helper", output)
 
     def test_diagnose_client_uses_structured_agent_snapshot(self) -> None:
         gateway = target(NODE_GATEWAY, LOCATION_RU)

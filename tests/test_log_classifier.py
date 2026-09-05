@@ -30,10 +30,10 @@ class LogClassifierTests(unittest.TestCase):
 
     def test_classifies_real_singbox_timeout_formats_into_exclusive_buckets(self) -> None:
         samples = {
-            "domain_to_foreign_timeout": "open connection to github.com:443 using outbound/direct[to-foreign]: dial tcp: i/o timeout",
+            "domain_to_foreign_timeout": "open connection to example.com:443 using outbound/direct[to-foreign]: dial tcp: i/o timeout",
             "ipv4_literal_timeout": "open connection to 91.108.56.103:443 using outbound/direct[to-foreign]: dial tcp: i/o timeout",
             "ipv6_literal_timeout": "open connection to [2a00:1450:4001:82b::200e]:443 using outbound/direct[to-foreign]: dial tcp: i/o timeout",
-            "dns_timeout": "+0300 2026-07-08 12:51:50 ERROR [1484790583 28.98s] dns: exchange failed for ipv6.msftconnecttest.com. IN AAAA: context deadline exceeded",
+            "dns_timeout": "+0300 2026-07-08 12:51:50 ERROR [1484790583 28.98s] dns: exchange failed for ipv6.example.com. IN AAAA: context deadline exceeded",
             "dns_nxdomain": "dns: lookup failed for dead.example: NXDOMAIN",
             "client_front_connect_failed": "+0300 2026-07-08 18:43:36 ERROR [2412979623 5.0s] connection: open connection to 149.154.175.100:443 using outbound/vless[proxy]: dial tcp 94.232.248.35:443: i/o timeout",
             "blocked_private_fake": "open connection to 198.18.0.1:80 using outbound/block[blocked]",
@@ -54,20 +54,20 @@ class LogClassifierTests(unittest.TestCase):
         self.assertEqual(classified.destination, "94.232.248.35:443")
 
     def test_stable_foreign_overlay_uses_destination_buckets(self) -> None:
-        domain = classify_line("ERROR open connection to github.com:443 using outbound/direct[to-foreign]: i/o timeout")
+        domain = classify_line("ERROR open connection to example.com:443 using outbound/direct[to-foreign]: i/o timeout")
         literal = classify_line("ERROR open connection to 91.108.56.103:443 using outbound/direct[to-foreign]: i/o timeout")
         self.assertEqual(domain.bucket, "domain_to_foreign_timeout")
         self.assertEqual(literal.bucket, "ipv4_literal_timeout")
 
     def test_transport_failure_is_not_misreported_as_dns_or_unclassified(self) -> None:
         line = (
-            "ERROR [722003726 25ms] dns: lookup failed for gateway.discord.gg: "
+            "ERROR [722003726 25ms] dns: lookup failed for gateway.example.com: "
             "quic: transport closed: read udp 94.232.248.35:54968->132.243.21.108:18443: read: connection refused"
         )
         classified = classify_line(line)
         self.assertIsNotNone(classified)
         self.assertEqual(classified.bucket, "transport_unavailable")
-        self.assertEqual(classified.destination, "gateway.discord.gg")
+        self.assertEqual(classified.destination, "gateway.example.com")
 
     def test_underlay_wireguard_send_failure_is_a_transport_event(self) -> None:
         classified = classify_line(
@@ -89,11 +89,11 @@ class LogClassifierTests(unittest.TestCase):
 
     def test_dns_exchange_failed_keeps_domain_and_query_type(self) -> None:
         classified = classify_line(
-            "+0300 2026-07-08 12:52:11 ERROR [4186343754 30.0s] dns: exchange failed for www.msftconnecttest.com. IN A: context deadline exceeded"
+            "+0300 2026-07-08 12:52:11 ERROR [4186343754 30.0s] dns: exchange failed for connectivity.example.com. IN A: context deadline exceeded"
         )
         self.assertIsNotNone(classified)
         self.assertEqual(classified.bucket, "dns_timeout")
-        self.assertEqual(classified.destination, "www.msftconnecttest.com:A")
+        self.assertEqual(classified.destination, "connectivity.example.com:A")
 
     def test_dns_outcomes_have_distinct_exclusive_buckets(self) -> None:
         samples = {
@@ -121,20 +121,20 @@ class LogClassifierTests(unittest.TestCase):
     def test_dns_failure_caused_by_missing_route_is_transport_unavailable(self) -> None:
         classified = classify_line(
             "+0300 2026-08-07 12:25:02 ERROR [449403960 8ms] dns: lookup failed for "
-            "youtubei.googleapis.com: exchange4: dial TCP connection: dial tcp 10.74.0.2:1053: "
+            "api.example.com: exchange4: dial TCP connection: dial tcp 10.74.0.2:1053: "
             "connect: no such device"
         )
         self.assertIsNotNone(classified)
         self.assertEqual(classified.bucket, "transport_unavailable")
-        self.assertEqual(classified.destination, "youtubei.googleapis.com")
+        self.assertEqual(classified.destination, "api.example.com")
 
     def test_dns_context_cancelled_is_client_noise_not_dns_failure(self) -> None:
         classified = classify_line(
-            "+0000 2026-07-18 20:22:04 ERROR [364916214 8.1s] dns: lookup failed for www.google.com: context canceled"
+            "+0000 2026-07-18 20:22:04 ERROR [364916214 8.1s] dns: lookup failed for www.example.com: context canceled"
         )
         self.assertIsNotNone(classified)
         self.assertEqual(classified.bucket, "client_reset_eof")
-        self.assertEqual(classified.destination, "www.google.com")
+        self.assertEqual(classified.destination, "www.example.com")
 
     def test_restart_cancellation_is_not_an_unclassified_route_error(self) -> None:
         classified = classify_line(
@@ -162,21 +162,21 @@ class LogClassifierTests(unittest.TestCase):
     def test_closed_network_dns_request_is_client_close_noise(self) -> None:
         classified = classify_line(
             "+0000 2026-08-29 10:01:02 ERROR [42 2.1s] dns: lookup failed for "
-            "sun9-1.userapi.com: use of closed network connection"
+            "media-1.example.com: use of closed network connection"
         )
         self.assertIsNotNone(classified)
         self.assertEqual(classified.bucket, "client_reset_eof")
-        self.assertEqual(classified.destination, "sun9-1.userapi.com")
+        self.assertEqual(classified.destination, "media-1.example.com")
 
     def test_router_lookup_nxdomain_is_dns_and_deduplicated_by_request_id(self) -> None:
         lines = [
-            "+0000 2026-07-15 01:53:31 ERROR [1400782119 31ms] dns: lookup failed for assets0.xboxlive.com: NXDOMAIN",
-            "+0000 2026-07-15 01:53:31 ERROR [1400782119 31ms] router: lookup assets0.xboxlive.com: NXDOMAIN",
+            "+0000 2026-07-15 01:53:31 ERROR [1400782119 31ms] dns: lookup failed for assets0.example.com: NXDOMAIN",
+            "+0000 2026-07-15 01:53:31 ERROR [1400782119 31ms] router: lookup assets0.example.com: NXDOMAIN",
         ]
         classified = classify_line(lines[1])
         self.assertIsNotNone(classified)
         self.assertEqual(classified.bucket, "dns_nxdomain")
-        self.assertEqual(classified.destination, "assets0.xboxlive.com")
+        self.assertEqual(classified.destination, "assets0.example.com")
         summary = summarize_lines(lines)
         self.assertEqual(summary["counts"]["dns_nxdomain"], 1)
         self.assertEqual(summary["counts"]["unclassified_error"], 0)
@@ -211,7 +211,7 @@ class LogClassifierTests(unittest.TestCase):
             [
                 "open connection to 91.108.56.103:443 using outbound/direct[to-foreign]: dial tcp: i/o timeout",
                 "open connection to 91.108.56.103:443 using outbound/direct[to-foreign]: dial tcp: i/o timeout",
-                "dns: exchange failed for ipv6.msftconnecttest.com. IN AAAA: context deadline exceeded",
+                "dns: exchange failed for ipv6.example.com. IN AAAA: context deadline exceeded",
                 "connection: open connection to 149.154.175.100:443 using outbound/vless[proxy]: dial tcp 94.232.248.35:443: i/o timeout",
             ]
         )
@@ -220,23 +220,23 @@ class LogClassifierTests(unittest.TestCase):
         self.assertEqual(summary["counts"]["dns_timeout"], 1)
         self.assertEqual(summary["top_destinations"]["client_front_connect_failed"]["94.232.248.35:443"], 1)
         self.assertEqual(summary["top_destinations"]["ipv4_literal_timeout"]["91.108.56.103:443"], 2)
-        self.assertEqual(summary["top_destinations"]["dns_timeout"]["ipv6.msftconnecttest.com:AAAA"], 1)
+        self.assertEqual(summary["top_destinations"]["dns_timeout"]["ipv6.example.com:AAAA"], 1)
 
     def test_direct_ru_timeout_keeps_original_domain_from_request_trace(self) -> None:
         lines = [
-            "+0000 2026-07-17 12:03:59 INFO [3121755475 1ms] inbound/mixed[router-in]: inbound connection to lk.rosreestr.ru:8000",
-            "+0000 2026-07-17 12:03:59 INFO [3121755475 1ms] dns: lookup succeed for lk.rosreestr.ru: 217.77.104.136",
+            "+0000 2026-07-17 12:03:59 INFO [3121755475 1ms] inbound/mixed[router-in]: inbound connection to account.example.com:8000",
+            "+0000 2026-07-17 12:03:59 INFO [3121755475 1ms] dns: lookup succeed for account.example.com: 217.77.104.136",
             "+0000 2026-07-17 12:04:04 ERROR [3121755475 5.0s] connection: open connection to [217.77.104.136] using outbound/direct[direct-ru]: dial tcp 217.77.104.136:8000: i/o timeout",
         ]
         summary = summarize_lines(lines)
         self.assertEqual(summary["counts"]["direct_ru_timeout"], 1)
         self.assertEqual(summary["counts"]["ipv4_literal_timeout"], 0)
-        self.assertEqual(summary["top_destinations"]["direct_ru_timeout"], {"lk.rosreestr.ru:8000": 1})
+        self.assertEqual(summary["top_destinations"]["direct_ru_timeout"], {"account.example.com:8000": 1})
 
     def test_dns_timeout_keeps_original_client_dns_destination_from_request_trace(self) -> None:
         lines = [
             "+0000 2026-07-18 22:56:00 INFO [877895708 0ms] inbound/mixed[router-in]: inbound connection to 8.8.8.8:53",
-            "+0000 2026-07-18 22:56:10 ERROR [877895708 10.0s] dns: exchange failed for rus-mqtt-cluster02.transsion-os.com. IN A: context deadline exceeded",
+            "+0000 2026-07-18 22:56:10 ERROR [877895708 10.0s] dns: exchange failed for mqtt-cluster02.example.com. IN A: context deadline exceeded",
         ]
         summary = summarize_lines(lines)
         self.assertEqual(summary["counts"]["dns_timeout"], 1)

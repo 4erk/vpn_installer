@@ -990,19 +990,19 @@ def finalize_install_output(env: dict[str, str], deployment_name: str) -> None:
     topology = TopologySpec.from_env(env, require_addresses=False)
     if CAP_WEB_ADMIN in topology.plan(NODE_GATEWAY).capabilities:
         print(f"Web-admin: {admin_url(env)}")
-    print(f"Основной простой VLESS URI: {paths['vless_uri']}")
+    print(f"Основной VLESS URI: {paths['vless_uri']}")
     print(f"Hiddify URI alias: {paths['hiddify_uri_compat']}")
     print(f"Windows/v2rayN Xray JSON fallback: {paths['windows_xray_json']}")
     print(f"Android/v2rayNG Xray JSON fallback: {paths['android_xray_json']}")
     print(f"Route-safe VLESS профиль без multiplex для Hiddify: {paths['hiddify_json']}")
     print(f"Стандартный Hysteria2 URI для Hiddify/v2rayN: {paths['hysteria2_uri']}")
     print(f"Route-safe Android VLESS профиль без multiplex для Hiddify: {paths['android_hiddify_json']}")
-    print(f"Windows route bypass helper: {paths['windows_route_bypass']}")
+    print(f"Windows direct server route helper: {paths['windows_route_bypass']}")
     print(f"JSON backup для Linux: {paths['linux_json']}")
     print(f"Следующие шаги: {paths['next_steps']}")
     print(clipboard_message)
     print("Что делать дальше:")
-    print(f"1. Сначала импортируй простой {paths['vless_uri'].name}. Это основной контракт: обычный VLESS/Reality tunnel, маршрутизация на сервере.")
+    print(f"1. Сначала импортируй {paths['vless_uri'].name}. Это основной контракт: обычный VLESS/Reality tunnel, маршрутизация на сервере.")
     print(f"2. JSON-файлы используй только как fallback, если конкретный клиент не умеет нормально импортировать URI.")
     print(f"3. Если клиент отправляет private/fake IP вместо домена, {cli_command('status')} покажет это в bucket blocked_private_fake.")
     print(f"4. В JSON-профилях multiplex явно выключен, чтобы независимые загрузки не делили один outer TCP stream; URI {paths['hiddify_uri_compat'].name} остаётся основным совместимым VLESS-контрактом.")
@@ -1397,7 +1397,7 @@ def client_check_workflow(deployment: str | None, node: str) -> int:
         print("Явно устаревшие локальные профили не найдены.")
     if failed:
         if route_failed:
-            print("Проблема: IP сервера уходит через VPN-интерфейс. В TUN/full VPN используй route-safe JSON или добавь bypass/direct rule для IP обоих серверов.")
+            print("Проблема: IP сервера уходит через VPN-интерфейс. В TUN/full VPN используй route-safe JSON или добавь прямой маршрут к IP серверов.")
         paths = client_artifact_paths(env)
         print(f"Свежий VLESS URI: {paths['vless_uri']}")
         print(f"Свежий Hiddify JSON: {paths['hiddify_json']}")
@@ -1475,7 +1475,7 @@ def audit_menu_workflow() -> int:
         audit_mode = prompt_choice(
             "Выбери режим самопроверки",
             [
-                ("quick", "Быстрая локальная проверка"),
+                ("quick", "Локальная проверка"),
                 ("docker", "Docker regression"),
                 ("lab", "Глубокий Docker lab"),
                 ("all", "Полный прогон"),

@@ -87,7 +87,7 @@
 ### Diagnosed
 
 - Журналы production за 1 сентября подтвердили одновременный отказ WireGuard и Hysteria2 с `10:58` до `11:11 UTC`. После восстановления alternate старая ICMP-проверка преждевременно отклонила активацию и rollback; новый proof закрывает именно этот дефект, но не выдаёт один недоступный underlay за рабочий.
-- Текущие таймауты `213.59.253.8/213.59.254.8` относятся к `esia.gosuslugi.ru`: TCP не устанавливается ни с RU gateway, ни с foreign exit при TLS `1.2` и `1.3`. Статическая подмена маршрута не добавлена, поскольку доступного серверного egress для этого назначения нет.
+- Наблюдавшиеся таймауты внешнего endpoint по адресам `213.59.253.8/213.59.254.8`: TCP не устанавливается ни с RU gateway, ни с foreign exit при TLS `1.2` и `1.3`. Статическая подмена маршрута не добавлена, поскольку доступного серверного egress для этого назначения нет.
 
 ### Compatibility
 
@@ -125,7 +125,7 @@
 ### Diagnosed
 
 - В сохранённом RU-журнале подтверждены две независимые причины. Реальные selector changes совпадали с частью DNS/domain timeout, поэтому исправлен именно dataplane failover. Отдельно health многократно видел высокий retransmit ratio у конкретных public VLESS TCP sources; этот участок находится до RU gateway и не может быть восстановлен переключением межсерверного egress.
-- Большинство накопленных IP-literal timeout относятся к недоступным или нестабильным Telegram/DC endpoints; часть адресов не отвечает и с RU, и с foreign. Без второго независимого egress сервер не может прозрачно заменить такой literal destination, поэтому статические remap/reject/cache-костыли не добавлены.
+- Большинство накопленных IP-literal timeout относятся к недоступным или нестабильным внешним endpoints дата-центров; часть адресов не отвечает и с RU, и с foreign. Без второго независимого egress сервер не может прозрачно заменить такой literal destination, поэтому статические remap/reject/cache-костыли не добавлены.
 
 ### Compatibility
 
@@ -172,7 +172,7 @@
 
 ### Diagnosed
 
-- Маршрутизация не была причиной текущего инцидента: `vk.ru`, `vk.com` и `api.vk.com` стабильно проходили через `direct-ru`, Google и YouTube — через `to-foreign`; полный неизменённый `vless-uri.txt` прошёл 9 из 9 запросов после автоматического рестарта.
+- Маршрутизация не была причиной текущего инцидента: три проверенных внешних домена стабильно проходили через `direct-ru`, остальные проверенные внешние endpoints — через `to-foreign`; полный неизменённый `vless-uri.txt` прошёл 9 из 9 запросов после автоматического рестарта.
 - Второе короткое окно недоступности совпало с одновременным отказом обоих межсерверных underlay, WireGuard и Hysteria2. Selector корректно сохранил последний доказанный путь и восстановился без рестарта Xray, router или `wg0`; переключение на недоказанный канал и RU-direct fallback не добавлялись.
 - Два независимых post-cutover цикла основного VLESS прошли `9/9`. В последующем steady-state цикле необязательный public Hysteria2 прошёл `8/9`: первый Google static запрос завершился TLS timeout через `3.003s`, следующие восемь прошли. Ошибка сохранена как деградация резервного UDP-пути без скрытого retry; основной VLESS/WireGuard path она не затронула.
 
@@ -203,7 +203,7 @@
 
 - Устранена причина текущего падения скорости: production selector оставался на Hysteria2 по статическому предпочтению из `0.19.9`, хотя синхронный live-тест показал обратное состояние маршрута. Прямой userspace WireGuard передал HTTP со скоростью `154-163 Мбит/с` и потерял `0-0.08%` UDP при `25/100 Мбит/с`; Hysteria2 потерял `3.2%` при `25 Мбит/с` и `40.3%` при `100 Мбит/с`.
 - Отдельный тест официального Hysteria `2.12.1` на том же пути дал `1.56%`, `17.83%` и `59.06%` потерь при `25/50/100 Мбит/с`. Поэтому в production не добавлена ещё одна реализация QUIC и новый бинарник: замена sing-box не устраняет корневую перегрузку UDP-over-Hysteria.
-- Штатным underlay снова является userspace WireGuard как нативный транспорт для постоянного inner-WireGuard overlay; Hysteria2 остаётся независимым обходным каналом при блокировке или подтверждённой деградации прямого UDP. Клиентский VLESS/Reality URI и непрерывный внутренний `wg0` не меняются.
+- Штатным underlay снова является userspace WireGuard как нативный транспорт для постоянного inner-WireGuard overlay; Hysteria2 остаётся независимым alternate transport при недоступности или подтверждённой деградации прямого UDP. Клиентский VLESS/Reality URI и непрерывный внутренний `wg0` не меняются.
 
 ### Changed
 
@@ -315,9 +315,9 @@
 ### Changed
 
 - `vpn.cmd` закреплён как единственная публичная Windows-точка входа. Windows audit запускает реальный CMD wrapper, документация описывает SSH backend, state migration и расположение логов; `vpn.ps1` остаётся внутренним bootstrap-файлом.
-- Первая установка предлагает понятное имя `home-vpn`; `Enter` принимает его, а явно введённое имя по-прежнему имеет приоритет. Существующие установки и создание дополнительных deployment не переименовываются.
+- Первая установка предлагает имя `home-vpn`; `Enter` принимает его, а явно введённое имя по-прежнему имеет приоритет. Существующие установки и создание дополнительных deployment не переименовываются.
 - README сокращён до пользовательского сценария, дополнен актуальными VLESS/Reality-клиентами и практическими примерами web-admin. Подробные форматы routing rules и CLI-команды вынесены в `docs/ADMIN.md`.
-- В README и списке провайдеров добавлена предпочтительная лично проверенная пара FirstByte/iHor с явным указанием referral-параметров в URL.
+- В README и каталоге серверных провайдеров задокументирована пара поставщиков с партнёрскими параметрами ссылок.
 - Серверный dataplane, VLESS URI, маршрутизация, web-admin и локальный VPN-клиент не изменены.
 
 ## [0.19.9] - 2026-08-11
@@ -531,7 +531,7 @@
 
 ### Fixed
 
-- Межсерверный route больше не приравнивает доступный WireGuard к оптимальному. Production A/B показал для Hysteria2 меньшую задержку и большую скорость на том же foreign egress; новые соединения теперь идут по лучшему исправному transport.
+- Межсерверный route больше не выбирает WireGuard только по доступности. Production A/B показал для Hysteria2 меньшую задержку и большую скорость на том же foreign egress; новые соединения теперь идут по исправному transport, выбранному по результатам latency-проб с учётом заданного приоритета.
 - Native sing-box `urltest` использует Hysteria2 как приоритет в пределах `30 ms`, перепроверяет оба пути раз в `10s` при активном трафике и не прерывает существующие соединения. WireGuard автоматически подхватывает только новые потоки, если QUIC недоступен или реально медленнее.
 
 ### Changed
@@ -709,7 +709,7 @@ Dataplane-конфиги и клиентские артефакты не изм�
 - Hysteria2 и WireGuard теперь проверяются одновременно в каждом transport cycle. Решение использует bounded rolling median и требует подтверждения; одиночный delay outlier не меняет selector.
 - Общесистемные `UdpRcvbufErrors` остаются диагностикой и больше не могут сами вызвать transport switch. Passive loss участвует в решении только как свежая дельта конкретного Hysteria-сокета и только когда парная проверка подтверждает худший путь.
 - Возврат с WireGuard на Hysteria2 требует трёх подтверждений, а внешнее изменение selector сбрасывает незавершённое решение. Существующие соединения не прерываются, foreign traffic не переводится в RU-direct.
-- Status помечает устаревшие selector measurements и adaptive/shadow state как stale вместо выдачи старой рекомендации за текущую.
+- Status помечает устаревшие selector measurements и adaptive/shadow state как stale вместо выдачи старых результатов измерений и оценки пути за текущие.
 - `audit quick` использует уже проверенный локальный asset cache и больше не ждёт последовательные сетевые timeout. Канонический клиентский config check выполняется параллельно в существующем RU runtime-контейнере; эквивалентность Hiddify-варианта проверяется структурно, а полный аудит по-прежнему компилирует оба. Обновление rule assets остаётся явной операцией полного аудита, рендера или maintenance.
 - Внешний VLESS verifier гарантированно закрывает SOCKS control и UDP probe sockets также при ошибке; unit-run больше не маскирует утечки дескрипторов `ResourceWarning`.
 
@@ -828,7 +828,7 @@ Dataplane-конфиги и клиентские артефакты не изм�
 - Исправлен клиентозависимый порядок RU-маршрутов. Настоящий IPv4 literal из `ru-geoip` теперь идёт через `direct-ru` до global literal catchall; hostname завершается доменным правилом раньше и не может случайно стать literal после route-level DNS. Это устраняет лишний foreign round-trip для RU CDN/IP, который один клиент передавал доменом, а другой готовым адресом.
 - Удалены дублирующие `resolve -> route` и мёртвый класс `resolved_ru_ip`. DNS выполняется только resolver выбранного outbound; web-admin использует тот же terminal-route контракт и сохранён.
 - Global DNS отклоняет private-ответы до соединения. Lab проверяет это доступным внутренним HTTP, а также отдельно доказывает raw RU direct, raw global foreign и отсутствие аварийной утечки foreign-трафика через RU при остановке egress.
-- Public VLESS throughput verifier использует Cloudflare и Tele2, ограничивает отдельную попытку десятью секундами и выводит per-origin метрики. Capacity gate использует лучший подтверждённый origin, поэтому rate limit одного download-сервера больше не выдаётся за ограничение VPN path.
+- Public VLESS throughput verifier использует Cloudflare и Tele2, ограничивает отдельную попытку десятью секундами и выводит per-origin метрики. Capacity gate использует origin с максимальным измеренным throughput, поэтому rate limit одного download-сервера больше не выдаётся за ограничение VPN path.
 - Явная WireGuard-диагностика измеряет TCP P1/P4 и UDP 25/100 Mbit/s в обе стороны вместо одного P4 и недостаточного UDP 10 Mbit/s.
 
 Основной `out/1/client/vless-uri.txt` не менялся. Foreign traffic остаётся fail-closed и никогда не переводится в `direct-ru` при отказе foreign-egress.
@@ -887,7 +887,7 @@ Dataplane-конфиги и клиентские артефакты не изм�
 - Внешний VLESS throughput gate переведён с расчёта размера range на фиксированное окно наблюдения. Он суммирует реально переданные байты до deadline, повторяет завершённый range, ограниченно завершает ephemeral sing-box и отдаёт фазу runner при ошибке. Controlled load составляет 15 Мбит/с, что на 50% выше acceptance floor 10 Мбит/с и не создаёт многогигабайтную нагрузку на действующих пользователей.
 - Bash runner теперь доставляется байт-в-байт с LF из Windows control host; CRLF не может сломать remote Bash. Тесты проверяют исполняемый runner, syntax и структуру его JSON-метрик.
 - Длительный public VLESS runner отделён от SSH control-plane: он запускается в собственной session/process group, пишет result/stderr на foreign role, а локальный workflow читает короткие status snapshots. Зависший HTTP origin больше не удерживает один Paramiko exec channel; timeout удаляет всю группу runner и возвращает диагностическую фазу.
-- Acceptance больше не делает rollback по одному краткому failed probe cycle. Первый failure обязательных route-инвариантов подтверждается вторым независимым циклом. Telegram остаётся в structured observations, но его изолированная внешняя недоступность не объявляет конфигурацию регрессивной и не откатывает рабочий release.
+- Acceptance больше не делает rollback по одному краткому failed probe cycle. Первый failure обязательных route-инвариантов подтверждается вторым независимым циклом. Наблюдаемый внешний target остаётся в structured observations, но его изолированная недоступность не объявляет конфигурацию регрессивной и не откатывает рабочий release.
 - Добавлен self-contained `tests/run_tests.py`: unit suite теперь одинаково запускается системным и isolated portable Python без неявной зависимости от `PYTHONPATH`.
 - Read-only `vpn status` теперь явно объясняет `inconclusive`, когда live route probes намеренно не запускались; это не маскируется под серверный failure.
 
@@ -922,7 +922,7 @@ Dataplane-конфиги и клиентские артефакты не изм�
 - Парные `dns: lookup failed` и `router: lookup` строки одного sing-box request дедуплицируются по request ID и классифицируются как DNS, а не ложный `unclassified_error`.
 - `vpn verify live` теперь строит эфемерный sing-box client непосредственно из главного `vless-uri.txt` и проверяет public `RU:443 -> Reality/Xray -> sing-box -> WireGuard -> foreign` path. Acceptance требует обе identity: RU direct IP-check и foreign Cloudflare trace; локальные client profiles и deployment env при status/verify/diagnose не изменяются.
 - `vpn verify live --throughput-seconds 600` добавляет controlled десятиминутный VLESS throughput gate: range-capable download держится на 12 Mbit/s и проверяется минимум 10 Mbit/s без короткого synthetic burst.
-- Server-side acceptance разделяет наблюдаемую прямую доступность RU и обязательные пользовательские пути: foreign-домены и IPv4 literal проверяются через WG и router, IPv6 literal через router и foreign egress. Недоступность заблокированного прямого RU Telegram или IPv6 bind на `wg0` больше не даёт ложный rollback.
+- Server-side acceptance разделяет наблюдаемую прямую доступность RU и обязательные пользовательские пути: foreign-домены и IPv4 literal проверяются через WG и router, IPv6 literal через router и foreign egress. Наблюдаемая недоступность внешнего target через прямой RU path или IPv6 bind на `wg0` больше не даёт ложный rollback.
 - Install/reinstall доставляет staged release в `/etc/vpn-stack/releases`, валидирует конфиги и manifest до atomic switch `current`, а при server-side acceptance failure возвращает предыдущие artifacts и service state.
 - Runtime health стал state machine с двухцикловым hard-failure gate, 15-minute recovery cooldown и обязательным post-check. Soft degradation не перезапускает dataplane.
 - `vpn maintain` отделяет отчёт об APT/security/reboot от применения обновлений; обновление roles и refresh assets выполняются только транзакционно и последовательно.
@@ -940,7 +940,7 @@ Dataplane-конфиги и клиентские артефакты не изм�
 - RU routing сведён к детерминированной `RoutingPolicy` с двумя реальными путями: `direct-ru` и `to-foreign`. Удалены дублирующие literal-outbound, runtime promotion и route cache, которые меняли конфиг, но не меняли физический egress.
 - Публичные IPv4/IPv6 literals и обычные foreign-домены идут через один `to-foreign` без искусственного connect timeout. `RU_*LITERAL_POLICY`, `RU_IPV6_POLICY` и `TO_FOREIGN_*CONNECT_TIMEOUT` больше не участвуют в policy и удаляются при миграции.
 - DNS cache RU `sing-box` увеличен до 4096 записей; убран `independent_cache`. NXDOMAIN, transport timeout и прочие DNS-отказы классифицируются раздельно.
-- `vpn status` стал структурной и дешёвой проверкой; тяжёлые route/throughput/IPv6 probes выполняет только `vpn verify live`. Verify использует один fresh snapshot на роль без повторных SSH-обходов.
+- `vpn status` стал структурной проверкой без тяжёлых route/throughput/IPv6 probes; их выполняет только `vpn verify live`. Verify использует один fresh snapshot на роль без повторных SSH-обходов.
 - RU route targets и throughput в `verify live` проходят через `socks5h://127.0.0.1:<router-port>`: acceptance проверяет тот же sing-box DNS/routing path, что и клиент, а не подменяет его `curl --interface wg0` с системным DNS VPS.
 - `DiagnosticsSnapshot` обновлён до schema 2: вместо удалённого dataplane cache он хранит только явные admin runtime overrides; legacy JSON читается через migration path.
 
@@ -1034,7 +1034,7 @@ Dataplane-конфиги и клиентские артефакты не изм�
 ### Fixed
 
 - Runtime route-fail cache больше не завязан только на literal-трафик: health теперь ведёт единый adaptive bucket по классам `domain_foreign`, `ipv4_literal` и `ipv6_literal`, сбрасывает их независимо при чистом окне и показывает каждый класс в `status`/`DiagnosticsSnapshot`. Это убирает старый перекос, где доменные подвисания попадали в логи, но не становились частью runtime-памяти системы.
-- `status` показывает cached деградацию доменного foreign route вместе с literal-бакетами, чтобы повторяющиеся сбои вроде resolved `googlevideo` IP были видны как отдельный класс, а не как очередной повод вручную крутить timeout/env.
+- `status` показывает cached деградацию доменного foreign route вместе с literal-бакетами, чтобы повторяющиеся сбои resolved IP внешнего CDN были видны как отдельный класс, а не как очередной повод вручную крутить timeout/env.
 - Health route-fail collector теперь считает окно от `installed_at + 10s`, если reinstall был свежее обычного TTL, поэтому старые `sing-box` ошибки больше не попадают в новый post-install runtime cache и не создают ложный `degraded`.
 - `diagnose path` стал bounded и быстрее: RU/foreign отчёты собираются параллельно, тяжёлые `ping`/`mtr`/`curl` пробы укорочены до representative samples, а зависший SSH capture сохраняет partial report с `diagnose_error` вместо молчаливого зависания диагностики.
 - `diagnose path` теперь использует то же post-install recent window, что и `status`: grouped Xray/sing-box sections и raw sing-box tail считаются от `installed_at + 10s`, если reinstall свежее 30-минутного окна, и печатают `window_since`.
@@ -1045,14 +1045,14 @@ Dataplane-конфиги и клиентские артефакты не изм�
 
 ### Fixed
 
-- Доменный foreign path получил внутренний connect budget `2s`: свежий сбой после `0.9.12` был не только IP-literal, а `rr2---sn-aj5go5-5i.googlevideo.com` -> `173.194.160.162`, где один resolved address повис на `5.0s` через RU->WG->foreign, хотя сам endpoint был жив при повторной проверке. `TO_FOREIGN_CONNECT_TIMEOUT` остаётся deprecated operator override; пустое env-значение больше не означает неограниченный domain connect.
-- `status` теперь коррелирует fresh domain timeouts по sing-box connection id и показывает исходный домен вместе с resolved IP, например `rr2---...googlevideo.com:443->[173.194.160.162]`, чтобы диагностика не прятала проблему за голым `[ip]`.
+- Доменный foreign path получил внутренний connect budget `2s`: свежий сбой после `0.9.12` был не только IP-literal, а затронул домен внешнего CDN с resolved IP `173.194.160.162`, где один resolved address повис на `5.0s` через RU->WG->foreign, хотя сам endpoint был жив при повторной проверке. `TO_FOREIGN_CONNECT_TIMEOUT` остаётся deprecated operator override; пустое env-значение больше не означает неограниченный domain connect.
+- `status` теперь коррелирует fresh domain timeouts по sing-box connection id и показывает исходный домен вместе с resolved IP: в наблюдавшемся случае это имя внешнего CDN, порт `443` и адрес `173.194.160.162`, чтобы диагностика не прятала проблему за голым `[ip]`.
 
 ## [0.9.12] - 2026-07-10
 
 ### Fixed
 
-- IPv4 literal fail-fast budget снижен с `2s` до `750ms`, а старый default `TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT=2s` мигрирует в `750ms`. Свежие live-логи после проверки клиента показали не доменную проблему YouTube, а повторяющиеся dead IPv4 literals разных приложений: `91.108.56.103:80/443` timeout'ится даже с foreign path, тогда как доменные `googlevideo`, `static.yani.tv`, `solodcdn`, `telegram.org` и `api.telegram.org` с foreign path отвечают. Доменный `to-foreign` по-прежнему без глобального connect timeout.
+- IPv4 literal fail-fast budget снижен с `2s` до `750ms`, а старый default `TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT=2s` мигрирует в `750ms`. Свежие live-логи после проверки клиента показали не доменную проблему видеосервиса, а повторяющиеся dead IPv4 literals разных приложений: `91.108.56.103:80/443` timeout'ится даже с foreign path, тогда как проверенные доменные endpoints внешних сервисов и CDN с foreign path отвечают. Доменный `to-foreign` по-прежнему без глобального connect timeout.
 - Диагностика deprecated routing overrides теперь считает `TO_FOREIGN_IP_LITERAL_CONNECT_TIMEOUT=750ms` штатным значением, чтобы `status` не помечал новый default как ручное отклонение.
 - Admin web routing rules теперь планируют restart `sing-box` внутри успешного `commit_rules()`, а не после HTTP response, чтобы применённые правила не зависели от клиентского соединения с web UI.
 - Docker audit Xray/Reality interop больше не зависит от фиксированной подсети `172.31.240.0/24`: smoke использует Docker DNS aliases, явно ждёт готовность router listener и повторяет только холодный interop probe.
@@ -1061,7 +1061,7 @@ Dataplane-конфиги и клиентские артефакты не изм�
 
 ### Fixed
 
-- IPv6 literal traffic теперь fail-fast reject по умолчанию и старый `RU_IPV6_LITERAL_POLICY=route-with-budget` мигрирует в `reject`: live-логи после `0.9.10` снова показали десятки IPv6 literal destinations от клиента и свежие timeouts на `[2001:67c:4e8:f002::a]:443`, что ухудшало YouTube/Telegram/media path. Явный operator mode `route-with-budget` оставлен в routing model, но больше не является deployment default.
+- IPv6 literal traffic теперь fail-fast reject по умолчанию и старый `RU_IPV6_LITERAL_POLICY=route-with-budget` мигрирует в `reject`: live-логи после `0.9.10` снова показали десятки IPv6 literal destinations от клиента и свежие timeouts на `[2001:67c:4e8:f002::a]:443`, что ухудшало передачу данных приложений и медиа. Явный operator mode `route-with-budget` оставлен в routing model, но больше не является deployment default.
 - Клиентские sing-box/Hiddify JSON и Xray JSON теперь локально блокируют UDP/443, чтобы QUIC/HTTP3 не ехал через TCP-based VLESS path и быстрее переходил на HTTPS/TCP. Основной `vless-uri.txt` не меняется.
 - `DISABLE_NIC_OFFLOADS` теперь default `0`, старое default-значение `1` мигрирует в `0`, а install/health явно включает GRO/GSO/TSO в этом режиме: live A/B на текущих VPS показал, что включённые offloads дают стабильный RU-over-WG throughput около `17.8-18.4 MB/s` на Cloudflare без свежих `sing-box` ошибок.
 
@@ -1083,7 +1083,7 @@ Dataplane-конфиги и клиентские артефакты не изм�
 
 ### Fixed
 
-- IPv6 literal traffic остаётся маршрутизируемым, но его internal fail-fast budget снижен с `3s` до `2s`: live-проверка показала, что часть внешних Meta IPv6 literal endpoints timeout'ится уже на foreign-provider path, и держать пользовательский поток 3 секунды для таких literal destinations нельзя. Старый default `TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT=3s` мигрирует в новый `2s`, явный пустой override по-прежнему сохраняется.
+- IPv6 literal traffic остаётся маршрутизируемым, но его internal fail-fast budget снижен с `3s` до `2s`: live-проверка показала, что часть внешних IPv6 literal endpoints timeout'ится уже на foreign-provider path, задерживая пользовательский поток на 3 секунды. Старый default `TO_FOREIGN_IPV6_LITERAL_CONNECT_TIMEOUT=3s` мигрирует в новый `2s`, явный пустой override по-прежнему сохраняется.
 - `deployment_health_snapshot` теперь берёт fresh `FAST_FOREIGN_RU_PING_LOSS_PCT` перед deep-cache `DEEP_FOREIGN_RU_PING_LOSS_PCT`, чтобы старый deep snapshot не давал ложный `foreign_ru_ping_loss_degraded` после свежего восстановления пути.
 - `verify live` больше не валит роль только по устаревшему `deep_probe_verdict=degraded`: deep metrics учитываются через общий deployment health, где есть fresh download/ping probes и fallback logic.
 - IPv6 literal TCP probe теперь считает весь IPv6-literal path сломанным только если нет ни одного reachable/http результата. Один проблемный внешний IPv6 target больше не приравнивается к поломке всего VPN, но свежие runtime timeout buckets остаются видимыми отдельно.
@@ -1235,7 +1235,7 @@ Dataplane-конфиги и клиентские артефакты не изм�
 
 - Web admin теперь по умолчанию слушает `0.0.0.0:11333`, но доступ получает только множество текущих активных VPN-клиентов российского сервера.
 - Доступ к web admin больше не завязан на один operator IP: `vpn-stack-admin.service` синхронизирует динамический nftables set `admin_clients_ipv4` из established TCP-пиров на VPN-порту.
-- Hairpin/tunneled вход в web admin разрешён только пока есть хотя бы один активный VPN-клиент, чтобы source вида `RU_PUBLIC_IP`/`FOREIGN_PUBLIC_IP` не становился постоянным обходом.
+- Hairpin/tunneled вход в web admin разрешён только пока есть хотя бы один активный VPN-клиент, чтобы source вида `RU_PUBLIC_IP`/`FOREIGN_PUBLIC_IP` не становился постоянным исключением из active-client gate.
 
 ### Security
 
@@ -1246,7 +1246,7 @@ Dataplane-конфиги и клиентские артефакты не изм�
 
 ### Added
 
-- Добавлен web admin на `российском сервере` для server-side исключений маршрутизации: домен, wildcard-поддомены или CIDR можно добавить/удалить через простой Bootstrap 5 + jQuery интерфейс.
+- Добавлен web admin на `российском сервере` для server-side исключений маршрутизации: домен, wildcard-поддомены или CIDR можно добавить/удалить через интерфейс на Bootstrap 5 + jQuery.
 - Добавлены настройки `ADMIN_WEB_ENABLED`, `ADMIN_WEB_BIND`, `ADMIN_WEB_PORT`, `ADMIN_WEB_ALLOWED_CIDR`, `ADMIN_WEB_ALLOW_WG`, `ADMIN_WEB_USERNAME` и `ADMIN_WEB_PASSWORD`.
 - Правила web admin сохраняются в `/etc/vpn-stack/admin-routing-rules.json`, накладываются поверх `/etc/vpn-stack/sing-box.base.json`, проверяются через `sing-box check` и применяются перезапуском `sing-box`.
 
@@ -1317,7 +1317,7 @@ Dataplane-конфиги и клиентские артефакты не изм�
 
 ### Fixed
 
-- IPv6 literal destinations на российском сервере теперь fast-fail до любых `direct-ru` правил. Это закрывает свежий live-сбой, где Google/YouTube/Opera IPv6-адреса попадали в forced-direct маршрут и висели на `i/o timeout` через российский сервер.
+- IPv6 literal destinations на российском сервере теперь fast-fail до любых `direct-ru` правил. Это закрывает свежий live-сбой, где внешние IPv6-адреса попадали в forced-direct маршрут и висели на `i/o timeout` через российский сервер.
 - Обновлена регрессия порядка правил: `sniff` и DNS hijack остаются первыми, но `ip_version: 6` теперь стоит перед forced-direct domain/geosite/CIDR routes и перед общим IPv4 resolve.
 
 ## [0.5.8] - 2026-06-20
@@ -1393,7 +1393,7 @@ Dataplane-конфиги и клиентские артефакты не изм�
 ### Changed
 
 - Для Android/v2rayNG добавлен отдельный управляемый артефакт `android-v2rayng-xray.json`. Он использует полный Xray JSON с inbound sniffing для `http`, `tls` и `quic`, поэтому клиент не отправляет на российский сервер локально разрешённый IPv6 literal вместо домена.
-- Финальный экран, `NEXT-STEPS.txt`, `README.md` и `docs/PROJECT.md` больше не обещают универсальность сырого `VLESS URI`: он остаётся быстрым fallback, но стабильный Android-путь теперь полный Xray JSON.
+- Финальный экран, `NEXT-STEPS.txt`, `README.md` и `docs/PROJECT.md` больше не описывают сырой `VLESS URI` как универсальный профиль: он остаётся fallback, а основным Android-путём теперь является полный Xray JSON.
 
 ### Fixed
 
@@ -1412,17 +1412,17 @@ Dataplane-конфиги и клиентские артефакты не изм�
 
 ### Fixed
 
-- Откатан опасный дефолт `RU_BLOCK_IP_CIDR=91.108.56.0/22`: service-owned Telegram CIDR больше не блокируется сервером по умолчанию, потому блок мог ломать клиентов вместо надёжного fallback
+- Откатан дефолт `RU_BLOCK_IP_CIDR=91.108.56.0/22`: CIDR внешнего сервиса больше не блокируется сервером по умолчанию, потому блок мог ломать клиентов вместо fallback
 - `RU_IPV6_POLICY` снова по умолчанию `to-foreign`; `block` остаётся только явной операторской диагностикой
-- Старые deployment env, уже получившие опасные значения из `0.4.5`, автоматически мигрируют обратно на безопасный профиль при следующем render/reinstall
+- Старые deployment env, уже получившие значения из `0.4.5`, автоматически мигрируют обратно на предыдущий профиль при следующем render/reinstall
 
 ## [0.4.5] - 2026-06-18
 
 ### Fixed
 
-- Российский сервер теперь fail-fast блокирует наблюдавшийся проблемный Telegram DC CIDR `91.108.56.0/22`, чтобы Telegram Desktop и похожие клиенты не зависали на долгом TCP timeout и быстрее переходили к рабочим Telegram endpoints
+- Российский сервер теперь fail-fast блокирует наблюдавшийся проблемный CIDR дата-центра внешнего сервиса `91.108.56.0/22`, чтобы клиентские приложения не зависали на долгом TCP timeout и переходили к доступным альтернативным endpoints того же сервиса
 - IPv6 literal traffic на российском сервере по умолчанию быстро блокируется вместо попытки идти через нестабильный foreign IPv6 path; при необходимости старое поведение можно вернуть через `RU_IPV6_POLICY=to-foreign`
-- health target probes расширены Telegram-доменами, чтобы runtime-диагностика покрывала не только общие сайты, но и реальный пользовательский сценарий Telegram
+- health target probes расширены доменами внешнего сервиса, чтобы runtime-диагностика учитывала endpoints из наблюдавшегося пользовательского инцидента
 
 ## [0.4.4] - 2026-06-18
 
@@ -1463,7 +1463,7 @@ Dataplane-конфиги и клиентские артефакты не изм�
 ### Fixed
 
 - preflight теперь проверяет локальный self-tunnel маршрут после ручного ввода параметров сервера, а не только для сохранённых подключений
-- deployment health теперь учитывает `target_probe` по ключевым внешним сайтам и показывает `*_target_degraded`, если серверный dataplane жив, но конкретный сайт возвращает blocked/broken
+- deployment health теперь учитывает `target_probe` по настроенным внешним endpoints и показывает `*_target_degraded`, если серверный dataplane жив, но конкретный endpoint возвращает `blocked`/`broken`
 - runtime health больше не держит stale `DEEP_PROBE_VERDICT=degraded` до конца интервала: после деградации следующий health-check сразу запускает deep probe и очищает состояние при восстановлении
 
 ## [0.4.0] - 2026-06-11
@@ -1475,7 +1475,7 @@ Dataplane-конфиги и клиентские артефакты не изм�
 
 ### Changed
 
-- default runtime network profile переведён на `RUNTIME_QDISC=fq` с fallback на `fq_codel`, чтобы лучше использовать pacing при `bbr`
+- default runtime network profile переведён на `RUNTIME_QDISC=fq` с fallback на `fq_codel` для per-flow pacing при `bbr`
 - default `WG_MTU` снижен с `1380` до `1360`; legacy env со старым default автоматически мигрирует при следующем merge/reinstall
 - установщик теперь ставит `mtr-tiny` и `iperf3`, чтобы диагностика пути была доступна после обычного `reinstall`
 
@@ -1684,7 +1684,7 @@ Dataplane-конфиги и клиентские артефакты не изм�
 
 ### Fixed
 
-- `vpn-stack-health.timer` больше не перезапускает `ssh`, `WireGuard`, `sing-box`, `nftables` или sync-service из фонового таймера: серверный health теперь только применяет безвредный runtime tuning, обновляет диагностический state и сообщает hard/soft verdict
+- `vpn-stack-health.timer` больше не перезапускает `ssh`, `WireGuard`, `sing-box`, `nftables` или sync-service из фонового таймера: серверный health теперь только применяет runtime tuning, обновляет диагностический state и сообщает hard/soft verdict
 - install/reinstall больше не ломаются от non-zero server-side health script до deployment-level проверки: мастер пишет предупреждение и дальше сам принимает решение по полному health snapshot
 - убраны фоновые repair-действия, которые не могли исправить packet loss до шлюза VPS-провайдера и только маскировали реальную причину деградации `foreign`
 
@@ -1810,7 +1810,7 @@ Dataplane-конфиги и клиентские артефакты не изм�
 ### Fixed
 
 - `foreign` reinstall теперь явно настраивает `net.core.default_qdisc=fq_codel`, чтобы не скатываться на дистровый `pfifo_fast`
-- на живом контуре это даёт заметно более ровный и в среднем более высокий upload через цепочку `RU -> wg -> foreign`
+- на проверенном контуре наблюдались меньшие колебания и более высокий средний upload через цепочку `RU -> wg -> foreign`
 
 ## [0.2.12] - 2026-04-15
 
@@ -1861,7 +1861,7 @@ Dataplane-конфиги и клиентские артефакты не изм�
 
 ### Fixed
 
-- клиентский сценарий для `Hiddify` больше не продвигает сырой `VLESS URI` как основной путь: главным артефактом теперь считается `hiddify-cross-platform.json`, потому что именно он содержит TUN и split-routing
+- клиентский сценарий для `Hiddify` больше не использует сырой `VLESS URI` как основной путь: главным артефактом теперь считается `hiddify-cross-platform.json`, потому что именно он содержит TUN и split-routing
 - финальный вывод и буфер обмена теперь ориентированы на JSON-профиль `Hiddify`, а URI оставлен только как запасной низкоуровневый вариант
 - документация теперь явно предупреждает, что на Windows `Hiddify` нужно запускать с правами администратора и с включённым `TUN/VPN` режимом, иначе сайты могут видеть реальный ISP IP
 
@@ -1933,7 +1933,7 @@ Dataplane-конфиги и клиентские артефакты не изм�
 
 ### Changed
 
-- на Windows основной рекомендуемый путь запуска переведён на `vpn.cmd`
+- на Windows основной путь запуска переведён на `vpn.cmd`
 - документация обновлена под новый Windows-сценарий и правила версионирования
 
 ## [0.1.1] - 2026-04-15

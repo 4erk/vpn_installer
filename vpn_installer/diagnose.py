@@ -415,7 +415,7 @@ def diagnose_client_log_workflow(log_path: str, deployment: str | None = None, n
     if route_failed:
         paths = client_artifact_paths(env)
         print("diagnosis: IP сервера уходит через VPN-интерфейс; это ломает Reality/VLESS connect до входа на сервер.")
-        print(f"Windows bypass helper: {paths['windows_route_bypass']}")
+        print(f"Windows direct server route helper: {paths['windows_route_bypass']}")
         print(f"Route-safe JSON: {paths['hiddify_json']}")
     print(f"Deployment env: {env_path}")
     return 1 if route_failed or int(counts.get("client_front_connect_failed", 0)) > 0 else 0

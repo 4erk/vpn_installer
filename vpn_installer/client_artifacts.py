@@ -246,7 +246,7 @@ def render_windows_route_bypass_script(env: dict[str, str]) -> str:
             Get-NetRoute -DestinationPrefix $prefix -ErrorAction SilentlyContinue |
               Where-Object {{ $_.RouteMetric -eq 1 }} |
               Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue
-            Write-Host "Removed bypass route $prefix"
+            Write-Host "Removed direct server route $prefix"
             continue
           }}
 
@@ -262,7 +262,7 @@ def render_windows_route_bypass_script(env: dict[str, str]) -> str:
           if (-not (Get-NetRoute -DestinationPrefix $prefix -InterfaceIndex $gatewayRoute.InterfaceIndex -NextHop $gatewayRoute.NextHop -ErrorAction SilentlyContinue)) {{
             New-NetRoute -DestinationPrefix $prefix -InterfaceIndex $gatewayRoute.InterfaceIndex -NextHop $gatewayRoute.NextHop -RouteMetric 1 -PolicyStore ActiveStore | Out-Null
           }}
-          Write-Host "Bypass route $prefix via $($gatewayRoute.InterfaceAlias) $($gatewayRoute.NextHop)"
+          Write-Host "Direct server route $prefix via $($gatewayRoute.InterfaceAlias) $($gatewayRoute.NextHop)"
         }}
 
         Write-Host "Done. Re-run: .\\vpn.cmd client-check --deployment {env['DEPLOY_NAME']}"
@@ -353,7 +353,7 @@ def render_next_steps(env: dict[str, str], *, out_dir: Path | None = None) -> st
             f"Deployment: {env['DEPLOY_NAME']}",
             "",
             "Что уже готово:",
-            f"- Основной простой VLESS URI: {paths['vless_uri']}",
+            f"- Основной VLESS URI: {paths['vless_uri']}",
             f"- Совместимый Hiddify URI alias: {paths['hiddify_uri_compat']}",
             f"- Нативный v2rayN URI alias: {paths['v2rayn_uri']}",
             f"- Дополнительный стандартный Hysteria2 URI для Hiddify/v2rayN: {paths['hysteria2_uri']}",
@@ -361,11 +361,11 @@ def render_next_steps(env: dict[str, str], *, out_dir: Path | None = None) -> st
             f"- Дополнительный Android/v2rayNG Xray JSON: {paths['android_xray_json']}",
             f"- Route-safe VLESS профиль без multiplex для Hiddify: {paths['hiddify_json']}",
             f"- Route-safe Android VLESS профиль без multiplex для Hiddify: {paths['android_hiddify_json']}",
-            f"- Windows route bypass helper: {paths['windows_route_bypass']}",
+            f"- Windows direct server route helper: {paths['windows_route_bypass']}",
             f"- JSON backup для Linux sing-box: {paths['linux_json']}",
             "",
             "Что делать дальше:",
-            f"1. Сначала импортируй простой {paths['vless_uri'].name}. Это основной контракт: клиент делает обычный VLESS/Reality tunnel, а маршрутизация остаётся на сервере.",
+            f"1. Сначала импортируй {paths['vless_uri'].name}. Это основной контракт: клиент делает обычный VLESS/Reality tunnel, а маршрутизация остаётся на сервере.",
             f"2. Для v2rayN скопируй строку из {paths['v2rayn_uri'].name} и выбери импорт share link из буфера; это тот же канонический VLESS URI без custom-config слоя.",
             f"3. Если клиенту нужен JSON-импорт, используй {paths['hiddify_json'].name}, {paths['windows_xray_json'].name} или {paths['android_xray_json'].name}. В них multiplex явно выключен: большие загрузки не делят один outer TCP stream.",
             f"4. Если клиентский JSON/TUN начинает отправлять на сервер private/fake IP вместо домена, `{cli_command('status')}` покажет это в отдельном bucket `blocked_private_fake`.",

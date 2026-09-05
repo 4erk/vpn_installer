@@ -378,7 +378,7 @@ class ServerAgentTests(unittest.TestCase):
         context = {
             "__REALTIME_TIMESTAMP": "1786075977103741",
             "_SYSTEMD_UNIT": "sing-box.service",
-            "MESSAGE": "INFO [4252783395 0ms] inbound/mixed[router-in]: inbound connection to cs.pikabu.ru:443",
+            "MESSAGE": "INFO [4252783395 0ms] inbound/mixed[router-in]: inbound connection to service.example.com:443",
         }
         results = [
             subprocess.CompletedProcess(["journalctl"], 0, json.dumps(problem), ""),
@@ -391,10 +391,10 @@ class ServerAgentTests(unittest.TestCase):
         self.assertEqual(len(events), 2)
         self.assertIn("4252783395", command.call_args_list[1].args[0][-1])
         summary = server_agent.summarize_lines(line for _timestamp, line in events)
-        self.assertEqual(summary["top_destinations"]["direct_ru_timeout"], {"cs.pikabu.ru:443": 1})
+        self.assertEqual(summary["top_destinations"]["direct_ru_timeout"], {"service.example.com:443": 1})
 
     def test_classifier_assigns_timeout_to_one_bucket(self) -> None:
-        line = "ERROR dns: exchange failed for www.msftconnecttest.com. IN A: context deadline exceeded"
+        line = "ERROR dns: exchange failed for connectivity.example.com. IN A: context deadline exceeded"
         classified = classify_line(line)
         self.assertIsNotNone(classified)
         self.assertEqual(classified.bucket, "dns_timeout")
@@ -3474,10 +3474,12 @@ class ServerAgentTests(unittest.TestCase):
         self.assertEqual(payload["front"]["flows"]["203.0.113.20:50123"]["accepted_destinations"], {"example.org:443": 1})
 
     def test_ru_acceptance_requires_router_paths_not_direct_foreign_access(self) -> None:
+        observed_url = server_agent.ACCEPTANCE_OBSERVED_TARGETS[0]
+
         def probe(url: str, *, interface: str = "", proxy: str = "", **_kwargs: object) -> dict[str, object]:
-            blocked_telegram = url == "https://telegram.org/"
+            unavailable_observed_target = url == observed_url
             unavailable_wg_ipv6 = "2606:4700:4700::1111" in url and interface == "wg0"
-            return {"target": url, "ok": not (blocked_telegram or unavailable_wg_ipv6)}
+            return {"target": url, "ok": not (unavailable_observed_target or unavailable_wg_ipv6)}
 
         def identity(*, interface: str = "", proxy: str = "") -> dict[str, object]:
             return {"ok": True, "egress_ip": "198.51.100.20" if interface or proxy else "203.0.113.10"}
@@ -3490,12 +3492,12 @@ class ServerAgentTests(unittest.TestCase):
         ):
             result = server_agent.run_probes({"WG_INTERFACE": "wg0", "GATEWAY_PUBLIC_IP": "203.0.113.10", "EXIT_PUBLIC_IP": "198.51.100.20"}, self.gateway_contract(), "acceptance")
 
-        telegram = next(item for item in result["direct"] if item["target"] == "https://telegram.org/")
-        self.assertFalse(telegram["ok"])
+        observed_target = next(item for item in result["direct"] if item["target"] == observed_url)
+        self.assertFalse(observed_target["ok"])
         self.assertEqual(result["required_targets"], ["https://github.com/", "https://www.google.com/generate_204"])
-        self.assertEqual(result["observations"]["https://telegram.org/"]["direct"], telegram)
-        self.assertFalse(result["observations"]["https://telegram.org/"]["via_wg"]["ok"])
-        self.assertFalse(result["observations"]["https://telegram.org/"]["router"]["ok"])
+        self.assertEqual(result["observations"][observed_url]["direct"], observed_target)
+        self.assertFalse(result["observations"][observed_url]["via_wg"]["ok"])
+        self.assertFalse(result["observations"][observed_url]["router"]["ok"])
         self.assertFalse(result["ipv6_literal"]["via_wg"]["ok"])
         self.assertTrue(result["requirements"]["foreign_domains_via_wg"])
         self.assertTrue(result["requirements"]["ipv6_literal_via_router"])

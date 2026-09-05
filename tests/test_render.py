@@ -542,7 +542,7 @@ class RenderTests(unittest.TestCase):
         env = self.make_env()
         text = render.render_next_steps(env)
         self.assertIn("VLESS URI", text)
-        self.assertIn("Основной простой VLESS URI", text)
+        self.assertIn("Основной VLESS URI", text)
         self.assertIn("android-v2rayng-xray.json", text)
         self.assertIn("multiplex", text)
         self.assertIn("fake IP", text)
