@@ -4,7 +4,6 @@ import base64
 import hashlib
 import hmac
 import json
-import os
 import secrets
 import sys
 import time
@@ -57,31 +56,27 @@ def verify_password(password: str, payload: dict[str, Any]) -> bool:
         salt = str(payload["salt"])
         rounds = int(payload.get("rounds", PBKDF2_ROUNDS))
         expected = str(payload["hash"])
+        if payload.get("algorithm") != "pbkdf2_sha256" or rounds != PBKDF2_ROUNDS:
+            return False
+        digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), bytes.fromhex(salt), rounds)
+        return hmac.compare_digest(digest, bytes.fromhex(expected))
     except (KeyError, TypeError, ValueError):
         return False
-    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), bytes.fromhex(salt), rounds)
-    return hmac.compare_digest(digest.hex(), expected)
-
-
-def write_json_atomic(path: Path, payload: Any, mode: int = 0o600) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    os.chmod(tmp, mode)
-    os.replace(tmp, path)
 
 
 def init_auth(username: str, password: str, *, force: bool = False) -> None:
     if AUTH_PATH.exists() and not force:
         return
+    if not username.strip() or not password:
+        raise ValueError("Web-admin bootstrap credentials are missing from deployment.env")
     payload = {"username": username, "password": hash_password(password), "updated_at": int(time.time())}
-    write_json_atomic(AUTH_PATH, payload)
+    admin_apply.write_json_atomic(AUTH_PATH, payload)
 
 
 def load_auth() -> dict[str, Any]:
     env = load_env()
     if not AUTH_PATH.exists():
-        init_auth(env.get("ADMIN_WEB_USERNAME", "user") or "user", env.get("ADMIN_WEB_PASSWORD", "password") or "password")
+        init_auth(env.get("ADMIN_WEB_USERNAME", ""), env.get("ADMIN_WEB_PASSWORD", ""))
     return json.loads(AUTH_PATH.read_text(encoding="utf-8"))
 
 
@@ -94,7 +89,7 @@ def check_basic_auth(header: str | None) -> bool:
     except Exception:
         return False
     auth = load_auth()
-    return hmac.compare_digest(username, str(auth.get("username", ""))) and verify_password(password, auth.get("password", {}))
+    return hmac.compare_digest(username.encode("utf-8"), str(auth.get("username", "")).encode("utf-8")) and verify_password(password, auth.get("password", {}))
 
 
 def load_rules() -> list[dict[str, Any]]:
@@ -614,15 +609,16 @@ class Handler(BaseHTTPRequestHandler):
 def serve() -> None:
     env = load_env()
     port = int(env.get("ADMIN_WEB_PORT", "11333") or "11333")
-    init_auth(env.get("ADMIN_WEB_USERNAME", "user") or "user", env.get("ADMIN_WEB_PASSWORD", "password") or "password")
+    load_auth()
     ThreadingHTTPServer((ADMIN_BIND, port), Handler).serve_forever()
 
 
 def main(argv: list[str] | None = None) -> int:
     argv = argv or sys.argv[1:]
     if argv and argv[0] == "init-auth":
-        username = argv[1] if len(argv) > 1 else "user"
-        password = argv[2] if len(argv) > 2 else "password"
+        if len(argv) < 3 or argv[1].startswith("--") or argv[2].startswith("--"):
+            raise ValueError("init-auth requires an explicit username and password")
+        username, password = argv[1:3]
         force = "--force" in argv
         init_auth(username, password, force=force)
         return 0

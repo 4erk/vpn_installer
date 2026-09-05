@@ -731,7 +731,13 @@ class RenderTests(unittest.TestCase):
                 marker = client_dir / "operator-notes.txt"
                 marker.write_text("keep\n", encoding="utf-8")
 
-                with patch.object(render.shutil, "rmtree", side_effect=AssertionError("client directory must not be reset")):
+                original_rmtree = render.shutil.rmtree
+
+                def keep_client_directory(path, *args, **kwargs):
+                    self.assertNotEqual(Path(path).resolve(), client_dir.resolve(), "client directory must not be reset")
+                    return original_rmtree(path, *args, **kwargs)
+
+                with patch.object(render.shutil, "rmtree", side_effect=keep_client_directory):
                     render.render_client_profiles(env)
 
                 self.assertEqual(marker.read_text(encoding="utf-8"), "keep\n")

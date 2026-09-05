@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import textwrap
@@ -99,61 +101,80 @@ def python_cmd() -> list[str]:
 
 
 def process_is_running(pid: int) -> bool:
+    """Treat an inaccessible owner as live; only proven absence permits cleanup."""
     if pid <= 0:
         return False
     if os.name == "nt":
         import ctypes
+        from ctypes import wintypes
 
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
         process_query_limited_information = 0x1000
-        handle = ctypes.windll.kernel32.OpenProcess(process_query_limited_information, False, pid)
+        handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
         if not handle:
-            return False
-        exit_code = ctypes.c_ulong()
-        queried = ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
-        ctypes.windll.kernel32.CloseHandle(handle)
-        return bool(queried) and exit_code.value == 259
+            return ctypes.get_last_error() != 87  # ERROR_INVALID_PARAMETER: no such PID.
+        try:
+            exit_code = wintypes.DWORD()
+            queried = kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+            return not queried or exit_code.value == 259
+        finally:
+            kernel32.CloseHandle(handle)
     try:
         os.kill(pid, 0)
-    except OSError:
+    except ProcessLookupError:
         return False
+    except OSError:
+        return True
     return True
+
+
+def checkout_identity() -> str:
+    # PIDs are meaningful only on this host and in this process namespace.
+    namespace = os.readlink("/proc/self/ns/pid") if Path("/proc/self/ns/pid").exists() else ""
+    identity = [socket.gethostname(), os.name, namespace, os.path.normcase(str(ROOT_DIR.resolve()))]
+    return hashlib.sha256(json.dumps(identity).encode("utf-8")).hexdigest()
 
 
 @contextmanager
 def audit_run_lock(run_id: str, audit_root: Path | None = None):
-    lock_path = ensure_dir(audit_root or AUDIT_ROOT) / ".run.lock"
-    payload = {"pid": os.getpid(), "run_id": run_id, "started_at": utc_stamp()}
-    for _attempt in range(3):
+    root = ensure_dir(audit_root or AUDIT_ROOT)
+    lock_path = root / ".run.advisory.lock"
+    # Retain this inode: unlinking a locked file allows another owner on POSIX.
+    with lock_path.open("a+b") as handle:
         try:
-            descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError:
-            try:
-                owner = json.loads(lock_path.read_text(encoding="utf-8"))
-            except (OSError, ValueError, TypeError):
-                owner = {}
-            owner_pid = int(owner.get("pid", 0) or 0)
-            if process_is_running(owner_pid):
-                owner_run = str(owner.get("run_id", "unknown"))
-                raise AuditFailure(f"audit already running: {owner_run} (pid {owner_pid})")
-            lock_path.unlink(missing_ok=True)
-            continue
-        else:
-            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
-                json.dump(payload, handle, ensure_ascii=False)
-                handle.write("\n")
-            break
-    else:
-        raise AuditFailure("could not acquire audit lock")
+            if os.name == "nt":
+                import msvcrt
 
-    try:
-        yield
-    finally:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            raise AuditFailure(f"audit already running or lock unavailable: {lock_path}") from exc
         try:
-            owner = json.loads(lock_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, TypeError):
-            owner = {}
-        if owner.get("pid") == payload["pid"] and owner.get("run_id") == run_id:
-            lock_path.unlink(missing_ok=True)
+            legacy_lock = root / ".run.lock"
+            if legacy_lock.exists():
+                raise AuditFailure(f"previous audit lock exists: {legacy_lock}; finish the old audit or inspect its retained lock")
+            payload = {"pid": os.getpid(), "run_id": run_id, "started_at": utc_stamp()}
+            handle.seek(0)
+            handle.truncate()
+            handle.write((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
+            handle.flush()
+            yield
+        finally:
+            if os.name == "nt":
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 class AuditRunner:
@@ -163,6 +184,8 @@ class AuditRunner:
         self.json_output = json_output
         self.started_at = utc_stamp()
         self.run_id = f"{run_stamp()}-{mode}"
+        self.checkout_id = checkout_identity()
+        self.owner_pid = os.getpid()
         self.run_dir = ensure_dir(AUDIT_ROOT / self.run_id)
         self.logs_dir = ensure_dir(self.run_dir / "logs")
         self.work_dir = ensure_dir(self.run_dir / "work")
@@ -558,44 +581,56 @@ class AuditRunner:
         return assets_dir
 
     def cleanup_stale_lab_resources(self) -> None:
-        containers = subprocess.run(
-            [
-                "docker",
-                "ps",
-                "-a",
-                "--filter",
-                "label=vpn-installer.audit=1",
-                "--format",
-                '{{.Names}}|{{.Label "vpn-installer.audit.run"}}',
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=AUDIT_DOCKER_TIMEOUT_SECONDS,
-        )
-        for row in containers.stdout.splitlines():
-            name, _, run_id = row.partition("|")
-            if name and run_id != self.run_id:
-                subprocess.run(["docker", "rm", "-f", name], capture_output=True, text=True, check=False, timeout=AUDIT_DOCKER_TIMEOUT_SECONDS)
-        networks = subprocess.run(
-            [
-                "docker",
-                "network",
-                "ls",
-                "--filter",
-                "label=vpn-installer.audit=1",
-                "--format",
-                '{{.Name}}|{{.Label "vpn-installer.audit.run"}}',
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=AUDIT_DOCKER_TIMEOUT_SECONDS,
-        )
-        for row in networks.stdout.splitlines():
-            name, _, run_id = row.partition("|")
-            if name and run_id != self.run_id:
-                subprocess.run(["docker", "network", "rm", name], capture_output=True, text=True, check=False, timeout=AUDIT_DOCKER_TIMEOUT_SECONDS)
+        for kind, listing, removal in (
+            ("container", ["ps", "-a"], ["rm", "-f"]),
+            ("network", ["network", "ls"], ["network", "rm"]),
+        ):
+            resources = self.docker(
+                f"stale-{kind}-list",
+                [*listing, "--filter", "label=vpn-installer.audit=1", "--filter",
+                 f"label=vpn-installer.audit.checkout={self.checkout_id}", "--no-trunc", "--format", "{{.ID}}"],
+            )
+            for resource_id in resources.stdout.splitlines():
+                if not re.fullmatch(r"[0-9a-f]{64}", resource_id):
+                    continue
+                inspected = self.docker(
+                    f"stale-{kind}-inspect-{resource_id}", [kind, "inspect", resource_id], expected_codes={0, 1},
+                )
+                try:
+                    resource, = json.loads(inspected.stdout)
+                    labels = resource["Config"]["Labels"] if kind == "container" else resource["Labels"]
+                    if inspected.returncode or resource["Id"] != resource_id or not self._stale_owner(labels):
+                        continue
+                except (ValueError, TypeError, KeyError):
+                    continue
+                self._docker_cleanup(f"stale-{kind}-rm-{resource_id}", [*removal, resource_id])
+
+    def _stale_owner(self, labels: dict[str, str] | None) -> bool:
+        if not isinstance(labels, dict):
+            return False
+        prefix = "vpn-installer.audit"
+        run_id = labels.get(f"{prefix}.run")
+        if (labels.get(prefix) != "1" or labels.get(f"{prefix}.checkout") != self.checkout_id
+                or not isinstance(run_id, str) or not run_id.strip() or run_id == self.run_id
+                or labels.get(f"{prefix}.keep") != "0"):
+            return False
+        pid = labels.get(f"{prefix}.pid", "")
+        if (not isinstance(pid, str) or not 1 <= len(pid) <= 10 or not pid.isascii()
+                or not pid.isdecimal() or not 0 < int(pid) <= 0x7FFFFFFF):
+            return False
+        return not process_is_running(int(pid))
+
+    def _docker_labels(self) -> list[str]:
+        labels = {"": "1", ".run": self.run_id, ".checkout": self.checkout_id,
+                  ".pid": str(self.owner_pid), ".keep": str(int(self.keep_docker))}
+        return [arg for suffix, value in labels.items() for arg in ("--label", f"vpn-installer.audit{suffix}={value}")]
+
+    @staticmethod
+    def _created_resource_id(created: subprocess.CompletedProcess[str]) -> str:
+        resource_id = created.stdout.strip()
+        if not re.fullmatch(r"[0-9a-f]{64}", resource_id):
+            raise AuditFailure("Docker create did not return a resource ID; refusing name-based cleanup")
+        return resource_id
 
     def docker_copy(self, container: str, source: Path, destination: str) -> None:
         self.docker("cp", ["cp", str(source), f"{container}:{destination}"])
@@ -620,10 +655,7 @@ class AuditRunner:
             "create",
             "--name",
             name,
-            "--label",
-            "vpn-installer.audit=1",
-            "--label",
-            f"vpn-installer.audit.run={self.run_id}",
+            *self._docker_labels(),
         ]
         if privileged:
             args.append("--privileged")
@@ -634,13 +666,13 @@ class AuditRunner:
         if extra_args:
             args.extend(extra_args)
         args.extend([image, "sleep", "infinity"])
-        self.docker(f"create-{name}", args)
+        resource_id = self._created_resource_id(self.docker(f"create-{name}", args))
         try:
-            self.docker(f"start-{name}", ["start", name])
+            self.docker(f"start-{name}", ["start", resource_id])
             yield name
         finally:
             if not self.keep_docker:
-                self._docker_cleanup(f"rm-{name}", ["rm", "-f", name])
+                self._docker_cleanup(f"rm-{name}", ["rm", "-f", resource_id])
 
     def docker_exec(
         self,
@@ -664,10 +696,7 @@ class AuditRunner:
         args = [
             "network",
             "create",
-            "--label",
-            "vpn-installer.audit=1",
-            "--label",
-            f"vpn-installer.audit.run={self.run_id}",
+            *self._docker_labels(),
             "--driver",
             "bridge",
         ]
@@ -676,15 +705,15 @@ class AuditRunner:
         if gateway is not None:
             args.extend(["--gateway", gateway])
         args.append(name)
-        self.docker(
+        resource_id = self._created_resource_id(self.docker(
             f"network-create-{name}",
             args,
-        )
+        ))
         try:
             yield name
         finally:
             if not self.keep_docker:
-                self._docker_cleanup(f"network-rm-{name}", ["network", "rm", name])
+                self._docker_cleanup(f"network-rm-{name}", ["network", "rm", resource_id])
 
     def docker_network_connect(self, network: str, container: str, ip: str) -> None:
         self.docker(f"network-connect-{network}-{container}", ["network", "connect", "--ip", ip, network, container])

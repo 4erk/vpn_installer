@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import subprocess
+import sys
 import tempfile
+import threading
 import types
 import unittest
 from pathlib import Path
@@ -32,6 +35,32 @@ class AuditRunnerTests(unittest.TestCase):
         with patch.object(audit_runner, "AUDIT_ROOT", root):
             runner = audit_runner.AuditRunner(mode)
         return runner
+
+    def owner_labels(self, runner: audit_runner.AuditRunner, **overrides) -> dict[str, str]:
+        labels = {"": "1", ".checkout": runner.checkout_id, ".run": "previous",
+                  ".pid": "1234", ".keep": "0"}
+        labels.update(overrides)
+        return {f"vpn-installer.audit{key}": value for key, value in labels.items() if value is not None}
+
+    def cleanup_calls(self, runner, resources) -> list[list[str]]:
+        calls: list[list[str]] = []
+
+        def fake_run(args, **_kwargs):
+            calls.append(args)
+            if args[1:3] == ["ps", "-a"] or args[1:3] == ["network", "ls"]:
+                kind = "container" if args[1] == "ps" else "network"
+                return completed(0, stdout="\n".join(key for key, (item_kind, _) in resources.items() if item_kind == kind))
+            if args[1] in ("container", "network") and args[2] == "inspect":
+                kind, labels = resources[args[-1]]
+                resource = {"Id": args[-1], "Config": {"Labels": labels}} if kind == "container" else {"Id": args[-1], "Labels": labels}
+                return completed(0, stdout=json.dumps([resource]))
+            return completed(0)
+
+        with patch.object(audit_runner, "require_command"), patch.object(
+            audit_runner.subprocess, "run", side_effect=fake_run,
+        ):
+            runner.cleanup_stale_lab_resources()
+        return calls
 
     def test_build_parser_parses_flags(self) -> None:
         parser = audit_runner.build_parser()
@@ -113,23 +142,116 @@ class AuditRunnerTests(unittest.TestCase):
         fake_docker.run.assert_not_called()
         fake_lab.run.assert_not_called()
 
-    def test_audit_lock_rejects_a_live_owner_and_reclaims_stale_owner(self) -> None:
+    def test_audit_lock_preserves_previous_implementation_marker_without_parsing_pid(self) -> None:
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         root = Path(temp.name)
         lock = root / ".run.lock"
-        with patch.object(audit_runner, "AUDIT_ROOT", root):
-            lock.write_text(json.dumps({"pid": os.getpid(), "run_id": "active"}), encoding="utf-8")
-            with self.assertRaisesRegex(audit_runner.AuditFailure, "audit already running: active"):
-                with audit_runner.audit_run_lock("second"):
-                    pass
+        for content in ("", "{", json.dumps({"pid": os.getpid(), "run_id": "active"}), '{"pid":"invalid"}'):
+            with self.subTest(content=content):
+                lock.write_text(content, encoding="utf-8")
+                with self.assertRaisesRegex(audit_runner.AuditFailure, "previous audit lock exists"):
+                    with audit_runner.audit_run_lock("second", root):
+                        self.fail("old audit marker must be preserved")
+                self.assertEqual(lock.read_text(encoding="utf-8"), content)
+        lock.unlink()
+        with audit_runner.audit_run_lock("after-old-audit", root):
+            pass
 
-            lock.write_text(json.dumps({"pid": 999_999_999, "run_id": "stale"}), encoding="utf-8")
-            with patch.object(audit_runner, "process_is_running", return_value=False):
-                with audit_runner.audit_run_lock("replacement"):
-                    owner = json.loads(lock.read_text(encoding="utf-8"))
-                    self.assertEqual(owner["run_id"], "replacement")
-            self.assertFalse(lock.exists())
+    def test_audit_lock_metadata_is_not_authority_and_file_is_retained(self) -> None:
+        runner = self.make_runner()
+        root = runner.run_dir.parent
+        lock = root / ".run.advisory.lock"
+        for content in ("", "{", '{"pid":"invalid"}', json.dumps({"pid": os.getpid(), "run_id": "finished"})):
+            lock.write_text(content, encoding="utf-8")
+            inode = lock.stat().st_ino
+            with self.subTest(content=content), audit_runner.audit_run_lock("replacement", root):
+                with self.assertRaisesRegex(audit_runner.AuditFailure, "audit already running"):
+                    with audit_runner.audit_run_lock("overlap", root):
+                        self.fail("nested owner acquired lock")
+            self.assertEqual(lock.stat().st_ino, inode)
+            self.assertEqual(json.loads(lock.read_text(encoding="utf-8"))["run_id"], "replacement")
+
+    def test_audit_lock_releases_after_metadata_or_body_failure(self) -> None:
+        runner = self.make_runner()
+        root = runner.run_dir.parent
+        with patch.object(audit_runner, "utc_stamp", side_effect=RuntimeError("metadata failed")):
+            with self.assertRaisesRegex(RuntimeError, "metadata failed"):
+                with audit_runner.audit_run_lock("first", root):
+                    self.fail("metadata failed")
+        with self.assertRaisesRegex(RuntimeError, "body failed"):
+            with audit_runner.audit_run_lock("second", root):
+                raise RuntimeError("body failed")
+        with audit_runner.audit_run_lock("third", root):
+            pass
+
+    def test_audit_lock_excludes_real_process_before_metadata_and_releases_on_exit(self) -> None:
+        script = """
+import sys
+from pathlib import Path
+from unittest.mock import patch
+sys.path[:0] = sys.argv[2:]
+from vpn_installer.audit import runner
+stamp = runner.utc_stamp
+def paused_stamp():
+    print('LOCKED_BEFORE_METADATA', flush=True)
+    if sys.stdin.readline().strip() != 'write':
+        raise RuntimeError('missing write command')
+    return stamp()
+with patch.object(runner, 'utc_stamp', side_effect=paused_stamp):
+    with runner.audit_run_lock('child', Path(sys.argv[1])):
+        print('ENTERED', flush=True)
+        sys.stdin.readline()
+print('EXITED', flush=True)
+"""
+        for terminate in (False, True):
+            with self.subTest(terminate=terminate):
+                runner = self.make_runner()
+                root = runner.run_dir.parent
+                child = subprocess.Popen(
+                    [sys.executable, "-u", "-c", script, str(root), str(audit_runner.ROOT_DIR), str(audit_runner.RUNTIME_SITE_PACKAGES)],
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8",
+                )
+                messages: queue.Queue[str] = queue.Queue()
+                def read_output():
+                    for line in child.stdout:
+                        messages.put(line.strip())
+                reader = threading.Thread(target=read_output, daemon=True)
+                reader.start()
+                try:
+                    self.assertEqual(messages.get(timeout=10), "LOCKED_BEFORE_METADATA")
+                    lock = root / ".run.advisory.lock"
+                    inode = lock.stat().st_ino
+                    self.assertEqual(lock.stat().st_size, 0)
+                    for _ in range(3):
+                        with self.assertRaisesRegex(audit_runner.AuditFailure, "audit already running"):
+                            with audit_runner.audit_run_lock("contender", root):
+                                self.fail("owner lock stolen before metadata")
+                        self.assertEqual(lock.stat().st_ino, inode)
+                    child.stdin.write("write\n")
+                    child.stdin.flush()
+                    self.assertEqual(messages.get(timeout=10), "ENTERED")
+                    with self.assertRaises(audit_runner.AuditFailure):
+                        with audit_runner.audit_run_lock("contender", root):
+                            self.fail("owner lock stolen after metadata")
+                    if terminate:
+                        child.kill()
+                    else:
+                        child.stdin.write("release\n")
+                        child.stdin.flush()
+                    child.wait(timeout=10)
+                    if not terminate:
+                        self.assertEqual(child.returncode, 0)
+                    with audit_runner.audit_run_lock("next", root):
+                        pass
+                    self.assertEqual(lock.stat().st_ino, inode)
+                finally:
+                    if child.poll() is None:
+                        child.kill()
+                    child.wait(timeout=5)
+                    child.stdin.close()
+                    reader.join(timeout=5)
+                    child.stdout.close()
 
     def test_runner_run_invalid_mode_fails(self) -> None:
         runner = self.make_runner("nope")
@@ -282,7 +404,7 @@ class AuditRunnerTests(unittest.TestCase):
         self.assertEqual(env["EXIT_PUBLIC_IP"], "198.51.100.20")
         self.assertTrue(str(out_dir).endswith("quick"))
 
-    def test_cleanup_stale_lab_resources_filters_names(self) -> None:
+    def test_cleanup_preserves_legacy_unattributed_resources(self) -> None:
         runner = self.make_runner()
         calls: list[list[str]] = []
 
@@ -294,14 +416,144 @@ class AuditRunnerTests(unittest.TestCase):
                 return completed(0, stdout=f"audit-current|{runner.run_id}\naudit-front-123-all|old\naudit-ru-123-lab|\n")
             return completed(0)
 
-        with patch("vpn_installer.audit.runner.subprocess.run", side_effect=fake_run):
+        with patch.object(audit_runner, "require_command"), patch("vpn_installer.audit.runner.subprocess.run", side_effect=fake_run):
             runner.cleanup_stale_lab_resources()
-        self.assertIn(["docker", "rm", "-f", "ru-123-all"], calls)
-        self.assertIn(["docker", "rm", "-f", "client-123-lab"], calls)
-        self.assertIn(["docker", "network", "rm", "audit-front-123-all"], calls)
-        self.assertIn(["docker", "network", "rm", "audit-ru-123-lab"], calls)
-        self.assertNotIn(["docker", "rm", "-f", "ru-current"], calls)
-        self.assertNotIn(["docker", "network", "rm", "audit-current"], calls)
+        self.assertFalse(any(args[1] == "rm" or args[1:3] == ["network", "rm"] for args in calls))
+
+    def test_checkout_identity_is_stable_and_scoped_to_checkout_and_host(self) -> None:
+        runner = self.make_runner()
+        root = runner.work_dir
+        with patch.object(audit_runner, "ROOT_DIR", root), patch.object(audit_runner.socket, "gethostname", return_value="host-a"):
+            first = audit_runner.checkout_identity()
+            self.assertEqual(first, audit_runner.checkout_identity())
+            with patch.object(audit_runner, "ROOT_DIR", root / "another-checkout"):
+                self.assertNotEqual(first, audit_runner.checkout_identity())
+            with patch.object(audit_runner, "ROOT_DIR", root / "child" / ".."):
+                self.assertEqual(first, audit_runner.checkout_identity())
+            with patch.object(audit_runner.socket, "gethostname", return_value="host-b"):
+                self.assertNotEqual(first, audit_runner.checkout_identity())
+        self.assertRegex(first, r"^[0-9a-f]{64}$")
+
+    def test_cleanup_only_removes_proven_dead_owned_containers_and_networks(self) -> None:
+        runner = self.make_runner()
+        labels = [
+            self.owner_labels(runner),
+            self.owner_labels(runner, **{".checkout": "another-checkout"}),
+            self.owner_labels(runner, **{".run": runner.run_id}),
+            self.owner_labels(runner, **{".pid": str(runner.owner_pid)}),
+            self.owner_labels(runner, **{".checkout": None}),
+            self.owner_labels(runner, **{".run": None}),
+            self.owner_labels(runner, **{".run": ""}),
+            self.owner_labels(runner, **{".run": " "}),
+            self.owner_labels(runner, **{".run": ["old"]}),
+            self.owner_labels(runner, **{".pid": None}),
+            self.owner_labels(runner, **{".pid": "broken"}),
+            self.owner_labels(runner, **{".pid": "0"}),
+            self.owner_labels(runner, **{".pid": "-1"}),
+            self.owner_labels(runner, **{".pid": "2147483648"}),
+            self.owner_labels(runner, **{".pid": "9" * 5000}),
+            self.owner_labels(runner, **{".pid": 1234}),
+            self.owner_labels(runner, **{".keep": "1"}),
+            self.owner_labels(runner, **{".keep": None}),
+            self.owner_labels(runner, **{"": "0"}),
+            {"vpn-installer.audit": "1", "vpn-installer.audit.run": "old"},
+            None,
+            [],
+        ]
+        resources = {}
+        for kind in ("container", "network"):
+            for item in labels:
+                resources[f"{len(resources) + 1:064x}"] = (kind, item)
+        with patch.object(audit_runner, "process_is_running", side_effect=lambda pid: pid != 1234):
+            calls = self.cleanup_calls(runner, resources)
+        removals = [args for args in calls if args[1] == "rm" or args[1:3] == ["network", "rm"]]
+        self.assertEqual(removals, [
+            ["docker", "rm", "-f", f"{1:064x}"],
+            ["docker", "network", "rm", f"{len(labels) + 1:064x}"],
+        ])
+        for args in calls:
+            if "--filter" in args:
+                self.assertIn(f"label=vpn-installer.audit.checkout={runner.checkout_id}", args)
+                self.assertIn("--no-trunc", args)
+
+    def test_cleanup_does_not_probe_a_foreign_checkout_owner(self) -> None:
+        runner = self.make_runner()
+        other = self.make_runner()
+        other.checkout_id = "another-checkout"
+        resources = {
+            "a" * 64: ("container", self.owner_labels(other)),
+            "b" * 64: ("network", self.owner_labels(other)),
+        }
+        with patch.object(audit_runner, "process_is_running", side_effect=AssertionError("foreign PID must not be checked")):
+            calls = self.cleanup_calls(runner, resources)
+        self.assertFalse(any(args[1] == "rm" or args[1:3] == ["network", "rm"] for args in calls))
+
+    def test_cleanup_preserves_live_owner_even_without_lock_file(self) -> None:
+        runner = self.make_runner()
+        labels = self.owner_labels(runner, **{".pid": str(os.getpid())})
+        calls = self.cleanup_calls(runner, {"a" * 64: ("container", labels), "b" * 64: ("network", labels)})
+        self.assertFalse(any(args[1] == "rm" or args[1:3] == ["network", "rm"] for args in calls))
+
+    def test_cleanup_preserves_resources_when_inspection_is_unusable(self) -> None:
+        runner = self.make_runner()
+        for inspect in (completed(1), completed(0, "not-json"), completed(0, "[]"), completed(0, "[{}]"),
+                        completed(0, json.dumps([{"Id": "b" * 64, "Labels": self.owner_labels(runner),
+                                                 "Config": {"Labels": self.owner_labels(runner)}}]))):
+            with self.subTest(inspect=inspect.stdout):
+                def docker(_name, args, **_kwargs):
+                    return inspect if "inspect" in args else completed(0, "a" * 64)
+                with patch.object(runner, "docker", side_effect=docker) as mocked, patch.object(
+                    audit_runner, "process_is_running", return_value=False,
+                ):
+                    runner.cleanup_stale_lab_resources()
+                self.assertFalse(any("rm" in call.args[1] for call in mocked.call_args_list))
+
+    def test_cleanup_list_failure_never_deletes_partial_results(self) -> None:
+        runner = self.make_runner()
+        with patch.object(audit_runner, "require_command"), patch.object(
+            audit_runner.subprocess, "run", return_value=completed(1, "a" * 64, "daemon unavailable"),
+        ) as mocked:
+            with self.assertRaises(audit_runner.AuditFailure):
+                runner.cleanup_stale_lab_resources()
+        self.assertEqual(mocked.call_count, 1)
+
+    def test_cleanup_rechecks_live_owner_for_each_resource(self) -> None:
+        runner = self.make_runner()
+        resources = {"a" * 64: ("container", self.owner_labels(runner)),
+                     "b" * 64: ("network", self.owner_labels(runner))}
+        with patch.object(audit_runner, "process_is_running", side_effect=[False, True]) as probe:
+            calls = self.cleanup_calls(runner, resources)
+        self.assertEqual(probe.call_count, 2)
+        self.assertIn(["docker", "rm", "-f", "a" * 64], calls)
+        self.assertNotIn(["docker", "network", "rm", "b" * 64], calls)
+
+    def test_posix_process_probe_treats_unknown_owner_as_live(self) -> None:
+        for error, live in ((ProcessLookupError(), False), (PermissionError(), True), (OSError(), True), (None, True)):
+            with self.subTest(error=error), patch.object(audit_runner.os, "name", "posix"), patch.object(
+                audit_runner.os, "kill", side_effect=error,
+            ):
+                self.assertEqual(audit_runner.process_is_running(1234), live)
+
+    @unittest.skipUnless(os.name == "nt", "Windows process API")
+    def test_windows_process_probe_treats_unknown_owner_as_live_and_closes_handle(self) -> None:
+        import ctypes
+        kernel = types.SimpleNamespace(OpenProcess=MagicMock(return_value=0), GetExitCodeProcess=MagicMock(), CloseHandle=MagicMock())
+        with patch.object(ctypes, "WinDLL", return_value=kernel):
+            for error, live in ((87, False), (5, True), (0, True)):
+                with self.subTest(error=error), patch.object(ctypes, "get_last_error", return_value=error):
+                    self.assertEqual(audit_runner.process_is_running(1234), live)
+            kernel.OpenProcess.return_value = 123
+            kernel.GetExitCodeProcess.return_value = 0
+            self.assertTrue(audit_runner.process_is_running(1234))
+            kernel.CloseHandle.assert_called_once_with(123)
+            for exit_code, live in ((259, True), (0, False)):
+                def queried(_handle, pointer):
+                    pointer._obj.value = exit_code
+                    return 1
+                kernel.GetExitCodeProcess.side_effect = queried
+                with self.subTest(exit_code=exit_code):
+                    self.assertEqual(audit_runner.process_is_running(1234), live)
+            self.assertEqual(kernel.CloseHandle.call_count, 3)
 
     def test_docker_helpers_delegate(self) -> None:
         runner = self.make_runner()
@@ -316,13 +568,39 @@ class AuditRunnerTests(unittest.TestCase):
 
     def test_docker_container_and_network_cleanup_respects_keep_flag(self) -> None:
         runner = self.make_runner()
-        with patch.object(runner, "docker", return_value=completed(0)) as docker:
-            with runner.docker_container("demo", "ubuntu:24.04"):
-                pass
-            with runner.docker_network("net", "198.18.0.0/24", "198.18.0.1"):
-                pass
-        self.assertTrue(any("rm-demo" in call.args[0] for call in docker.call_args_list))
-        self.assertTrue(any("network-rm-net" in call.args[0] for call in docker.call_args_list))
+        for keep in (False, True):
+            runner.keep_docker = keep
+            with self.subTest(keep=keep), patch.object(runner, "docker", return_value=completed(0, "a" * 64)) as docker:
+                with runner.docker_container("demo", "ubuntu:24.04") as name:
+                    self.assertEqual(name, "demo")
+                with runner.docker_network("net", "198.18.0.0/24", "198.18.0.1") as name:
+                    self.assertEqual(name, "net")
+            removals = [call.args[1] for call in docker.call_args_list if "rm" in call.args[1]]
+            self.assertEqual(removals, [] if keep else [["rm", "-f", "a" * 64], ["network", "rm", "a" * 64]])
+            for call in docker.call_args_list:
+                args = call.args[1]
+                if "create" in args:
+                    self.assertIn(f"vpn-installer.audit.checkout={runner.checkout_id}", args)
+                    self.assertIn(f"vpn-installer.audit.pid={runner.owner_pid}", args)
+                    self.assertIn(f"vpn-installer.audit.keep={int(keep)}", args)
+
+    def test_create_failure_or_missing_id_never_removes_by_name(self) -> None:
+        runner = self.make_runner()
+        for create in (completed(0), audit_runner.AuditFailure("name already in use")):
+            for context in (runner.docker_container("demo", "ubuntu:24.04"), runner.docker_network("demo")):
+                with self.subTest(create=create), patch.object(runner, "docker", side_effect=[create]) as docker:
+                    with self.assertRaises(audit_runner.AuditFailure):
+                        with context:
+                            self.fail("resource not created")
+                self.assertEqual(docker.call_count, 1)
+
+    def test_failed_container_start_cleans_up_only_the_created_id(self) -> None:
+        runner = self.make_runner()
+        with patch.object(runner, "docker", side_effect=[completed(0, "a" * 64), audit_runner.AuditFailure("start failed"), completed(0)]) as docker:
+            with self.assertRaisesRegex(audit_runner.AuditFailure, "start failed"):
+                with runner.docker_container("demo", "ubuntu:24.04"):
+                    self.fail("start failed")
+        self.assertEqual(docker.call_args_list[-1].args[1], ["rm", "-f", "a" * 64])
 
     def test_docker_cleanup_ignores_not_found(self) -> None:
         runner = self.make_runner()

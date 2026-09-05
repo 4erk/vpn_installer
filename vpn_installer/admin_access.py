@@ -37,12 +37,14 @@ def admin_access_workflow(
     open_browser: bool = False,
 ) -> int:
     deployment_name = select_existing_deployment(deployment)
-    _env_path, env = load_existing_deployment_env(deployment_name)
+    env_path, env = load_existing_deployment_env(deployment_name)
     url = admin_url(env)
     print_header("Web-admin")
     print(f"deployment: {deployment_name}")
     print(f"Адрес: {url}")
-    print("Доступ разрешается firewall только для источника активного подключения к публичному VPN-входу.")
+    print(f"Начальные данные входа: ADMIN_WEB_USERNAME и ADMIN_WEB_PASSWORD в {env_path}")
+    print("Если пароль менялся в панели, используй установленный там пароль.")
+    print("Публичная панель использует HTTP. Допуск firewall по пакетам VPN не шифрует пароль; для защищённого доступа используй SSH-туннель (docs/ADMIN.md).")
     if open_browser:
         webbrowser.open(url, new=2)
     return 0

@@ -535,11 +535,11 @@ class RemoteTests(unittest.TestCase):
     def test_snapshot_rejects_out_of_window_release_before_reading_old_schema(self) -> None:
         snapshot = {"schema_version": 4, "release": {"version": "0.19.10"}}
         with patch("vpn_installer.remote.ssh_capture", return_value=json.dumps(snapshot)):
-            with self.assertRaisesRegex(AppError, "cannot be updated by 0.22.3.*tag 0.19.10"):
+            with self.assertRaisesRegex(AppError, "cannot be updated by 0.22.4.*tag 0.19.10"):
                 remote_agent_snapshot(RemoteTarget(node_id=NODE_GATEWAY))
 
     def test_snapshot_rejects_wrong_schema_from_compatible_release(self) -> None:
-        snapshot = {"schema_version": 5, "release": {"version": "0.22.2"}}
+        snapshot = {"schema_version": 5, "release": {"version": "0.22.3"}}
         with patch("vpn_installer.remote.ssh_capture", return_value=json.dumps(snapshot)):
             with self.assertRaisesRegex(AppError, "unsupported snapshot schema"):
                 remote_agent_snapshot(RemoteTarget(node_id=NODE_GATEWAY))

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import shlex
+import subprocess
+import sys
 import tempfile
 import unittest
 from io import StringIO
@@ -477,6 +480,8 @@ class WorkflowTests(unittest.TestCase):
         target = RemoteTarget(node_id=NODE_GATEWAY)
         with patch("vpn_installer.workflows.ssh_capture", return_value="busy"):
             self.assertEqual(workflows.remote_install_transaction_state(target), {"state": "busy"})
+        with patch("vpn_installer.workflows.ssh_capture", return_value='{"state":"busy"}'):
+            self.assertEqual(workflows.remote_install_transaction_state(target), {"state": "busy"})
         payload = {
             "state": "idle",
             "acceptance_present": True,
@@ -489,6 +494,60 @@ class WorkflowTests(unittest.TestCase):
         self.assertTrue(capture.call_args.kwargs["as_root"])
         self.assertIn('root / "current"', capture.call_args.args[1])
         self.assertIn('service-state.tsv', capture.call_args.args[1])
+
+    def execute_transaction_collector(self, *, root: Path, unit_state: str = "inactive") -> dict:
+        target = RemoteTarget(node_id=NODE_GATEWAY)
+        with patch("vpn_installer.workflows.ssh_capture", return_value='{"state":"idle"}') as capture:
+            workflows.remote_install_transaction_state(target)
+        tokens = shlex.split(capture.call_args.args[1])
+        source = tokens[tokens.index("python3") + 2]
+        with (
+            patch("pathlib.Path", side_effect=lambda path: root if path == "/etc/vpn-stack" else Path(path)),
+            patch("subprocess.run", return_value=Mock(stdout=unit_state)),
+            patch.object(sys, "argv", ["-c", NODE_GATEWAY]),
+            patch("sys.stdout", new_callable=StringIO) as output,
+        ):
+            try:
+                exec(compile(source, "remote-transaction-collector", "exec"), {})
+            except SystemExit as exc:
+                self.assertEqual(exc.code, 0)
+        return json.loads(output.getvalue())
+
+    def test_transaction_collector_waits_for_detached_unit_without_install_lock(self) -> None:
+        for state in ("active", "activating", "deactivating", "reloading"):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as tmp:
+                self.assertEqual(self.execute_transaction_collector(root=Path(tmp), unit_state=state), {"state": "busy"})
+
+    def test_transaction_collector_rejects_unknown_unit_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(ValueError, "cannot confirm installer unit state"):
+                self.execute_transaction_collector(root=Path(tmp), unit_state="")
+
+    def test_transaction_collector_reads_actual_rollback_snapshot_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshot = root / "backups" / "revisions" / "snapshot-1"
+            (snapshot / "files").mkdir(parents=True)
+            (snapshot / "service-state.tsv").write_text("", encoding="utf-8")
+            release = root / "releases" / "old-release"
+            release.mkdir(parents=True)
+            manifest = release / "render-manifest.json"
+            manifest.write_text(json.dumps({"release_id": "old-release", "node": {"id": "gateway"}}), encoding="utf-8")
+            (snapshot / "paths.tsv").write_text(f"000001\tpresent\t{root / 'current'}\n", encoding="utf-8")
+            try:
+                (root / "backups" / "latest").symlink_to(snapshot, target_is_directory=True)
+                (snapshot / "files" / "000001").symlink_to(release, target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"symlink creation unavailable: {exc}")
+            self.assertEqual(self.execute_transaction_collector(root=root)["rollback_release_id"], "old-release")
+            manifest.write_text(json.dumps({"release_id": "old-release", "node": {"id": "exit"}}), encoding="utf-8")
+            wrong_node = self.execute_transaction_collector(root=root)
+            self.assertNotIn("rollback_release_id", wrong_node)
+            self.assertIn("rollback node", wrong_node["rollback_services_error"])
+            (snapshot / "paths.tsv").write_text(f"000001\tmissing\t{root / 'current'}\n", encoding="utf-8")
+            self.assertEqual(self.execute_transaction_collector(root=root)["rollback_release_id"], "")
+            (snapshot / "paths.tsv").write_text("", encoding="utf-8")
+            self.assertNotIn("rollback_release_id", self.execute_transaction_collector(root=root))
 
     def test_wait_for_remote_install_completion_waits_for_lock_release(self) -> None:
         target = RemoteTarget(node_id=NODE_GATEWAY)
@@ -690,6 +749,160 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("tar -xzf installer-support.tar.gz", ssh_mock.call_args_list[2].args[1])
         self.assertIn("--node gateway --action remove", ssh_mock.call_args_list[2].args[1])
 
+    def test_detached_control_actions_keep_workdir_after_ssh_drop(self) -> None:
+        target = RemoteTarget(node_id=NODE_GATEWAY)
+        for action in ("rollback", "remove", "purge"):
+            with (
+                self.subTest(action=action),
+                patch("vpn_installer.workflows.package_control_bundle", return_value=Path("support.tar.gz")),
+                patch("vpn_installer.workflows.scp_upload"),
+                patch("vpn_installer.workflows.ssh_stream", side_effect=[None, None, AppError("SSH dropped")]),
+                patch("vpn_installer.workflows.cleanup_remote_workdir") as cleanup,
+            ):
+                with self.assertRaisesRegex(AppError, "SSH dropped") as raised:
+                    workflows.install_remote_node(target, "demo", {}, action)
+                cleanup.assert_not_called()
+                self.assertTrue(getattr(raised.exception, "vpn_remote_root", "").startswith("/tmp/vpn-stack-installer-demo-gateway-"))
+
+    def test_control_bundle_upload_failure_cleans_only_unlaunched_workdir(self) -> None:
+        target = RemoteTarget(node_id=NODE_GATEWAY)
+        with (
+            patch("vpn_installer.workflows.package_control_bundle", return_value=Path("support.tar.gz")),
+            patch("vpn_installer.workflows.scp_upload", side_effect=AppError("upload failed")),
+            patch("vpn_installer.workflows.ssh_stream") as stream,
+            patch("vpn_installer.workflows.cleanup_remote_workdir") as cleanup,
+        ):
+            with self.assertRaisesRegex(AppError, "upload failed"):
+                workflows.install_remote_node(target, "demo", {}, "rollback")
+        self.assertEqual(stream.call_count, 1)
+        cleanup.assert_called_once()
+
+    @unittest.skipIf(sys.platform == "win32", "server EXIT trap is exercised in the Linux container")
+    def test_detached_owner_cleans_its_workdir_only_after_command_exits(self) -> None:
+        for status in (0, 7):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as tmp:
+                workdir = Path(tmp) / "installer workdir"
+                workdir.mkdir()
+                (workdir / "payload").write_text("still available", encoding="utf-8")
+                command = f"read -r proceed; cat {shlex.quote(str(workdir / 'payload'))}; exit {status}"
+                tokens = shlex.split(workflows.remote_install_systemd_command(NODE_GATEWAY, str(workdir), command))
+                process = subprocess.Popen(tokens[-3:], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                try:
+                    self.assertTrue(workdir.is_dir())
+                    self.assertIsNone(process.poll())
+                    stdout, stderr = process.communicate("continue\n", timeout=5)
+                    self.assertEqual(process.returncode, status, stderr)
+                    self.assertEqual(stdout, "still available")
+                    self.assertFalse(workdir.exists())
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+                        process.communicate(timeout=5)
+
+    def test_reconciliation_idle_lock_does_not_authorize_workdir_cleanup(self) -> None:
+        target = RemoteTarget(node_id=NODE_EXIT)
+        command_error = AppError("SSH dropped before installer acquired lock")
+        command_error.vpn_remote_root = "/tmp/vpn-stack-installer-demo-exit-123"
+        reconcile_error = AppError("preflight unavailable")
+        reconcile_error.vpn_transaction_state = {"state": "idle"}
+        with (
+            patch("vpn_installer.workflows.expected_release_id_for_node", return_value="new-release"),
+            patch("vpn_installer.workflows.wait_for_remote_install_idle", return_value=transaction_state("old-release")),
+            patch("vpn_installer.workflows.install_remote_node", side_effect=command_error),
+            patch("vpn_installer.workflows.wait_for_remote_install_completion", side_effect=reconcile_error),
+            patch("vpn_installer.workflows.cleanup_remote_workdir") as cleanup,
+        ):
+            with self.assertRaisesRegex(AppError, "не удалось согласовать"):
+                workflows.install_remote_node_with_recovery(target, "demo", {}, "reinstall", "wg0")
+        cleanup.assert_not_called()
+
+    def test_manual_rollback_uses_snapshot_target_and_shared_acceptance(self) -> None:
+        env = generate_default_env("demo", topology="single", gateway_location="ru")
+        env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
+        target = RemoteTarget(node_id=NODE_GATEWAY)
+        with (
+            patch("vpn_installer.workflows.wait_for_remote_install_idle", return_value={
+                "state": "idle", "rollback_release_id": "snapshot-release",
+            }),
+            patch("vpn_installer.workflows.rollback_changed_nodes") as rollback,
+            patch("vpn_installer.workflows.install_remote_node") as direct,
+            patch("vpn_installer.workflows.remote_preflight"),
+            patch("vpn_installer.workflows.print_preflight"),
+        ):
+            workflows.run_selected_remote_action("rollback", "demo", Path("demo.env"), env, [target])
+        rollback.assert_called_once_with(
+            [NODE_GATEWAY], {NODE_GATEWAY: target}, "demo", env, {NODE_GATEWAY: "snapshot-release"},
+        )
+        direct.assert_not_called()
+
+    def test_manual_rollback_rejects_unknown_snapshot_before_mutation(self) -> None:
+        env = generate_default_env("demo", topology="single", gateway_location="ru")
+        env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
+        target = RemoteTarget(node_id=NODE_GATEWAY)
+        with (
+            patch("vpn_installer.workflows.wait_for_remote_install_idle", return_value={"state": "idle"}),
+            patch("vpn_installer.workflows.rollback_changed_nodes") as rollback,
+            patch("vpn_installer.workflows.install_remote_node") as direct,
+            patch("vpn_installer.workflows.remote_preflight"),
+            patch("vpn_installer.workflows.print_preflight"),
+        ):
+            with self.assertRaisesRegex(AppError, "rollback snapshot"):
+                workflows.run_selected_remote_action("rollback", "demo", Path("demo.env"), env, [target])
+        rollback.assert_not_called()
+        direct.assert_not_called()
+
+    def test_manual_rollback_preserves_reverse_cutover_order(self) -> None:
+        env = generate_default_env("demo")
+        env.update(GATEWAY_PUBLIC_IP="203.0.113.10", EXIT_PUBLIC_IP="198.51.100.20")
+        gateway, exit_node = RemoteTarget(node_id=NODE_GATEWAY), RemoteTarget(node_id=NODE_EXIT)
+        order = []
+        with (
+            patch("vpn_installer.workflows.wait_for_remote_install_idle", return_value={"state": "idle", "rollback_release_id": "old-release"}),
+            patch("vpn_installer.workflows.install_remote_node", side_effect=lambda target, *_: order.append(target.node_id)),
+            patch("vpn_installer.workflows.verify_rollback_node"),
+            patch("vpn_installer.workflows.verify_postcutover") as acceptance,
+        ):
+            workflows.run_selected_remote_action("rollback", "demo", Path("demo.env"), env, [gateway, exit_node])
+        self.assertEqual(order, [NODE_GATEWAY, NODE_EXIT])
+        acceptance.assert_called_once_with("demo", throughput_seconds=0, require_native_agent=False)
+
+    def test_manual_rollback_ssh_drop_reconciles_and_rejects_failed_acceptance(self) -> None:
+        env = generate_default_env("demo", topology="single", gateway_location="ru")
+        env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
+        target = RemoteTarget(node_id=NODE_GATEWAY)
+        with (
+            patch("vpn_installer.workflows.wait_for_remote_install_idle", return_value={"state": "idle", "rollback_release_id": "old-release"}),
+            patch("vpn_installer.workflows.install_remote_node", side_effect=AppError("SSH dropped")),
+            patch("vpn_installer.workflows.wait_for_remote_install_completion", return_value={"state": "idle"}) as reconcile,
+            patch("vpn_installer.workflows.verify_rollback_node") as verify_node,
+            patch("vpn_installer.workflows.verify_postcutover", side_effect=AppError("public path failed")) as acceptance,
+            patch("vpn_installer.workflows.cleanup_remote_workdir") as cleanup,
+        ):
+            with self.assertRaisesRegex(AppError, "public path failed"):
+                workflows.run_selected_remote_action("rollback", "demo", Path("demo.env"), env, [target])
+        reconcile.assert_called_once_with(target, "wg0")
+        verify_node.assert_called_once()
+        acceptance.assert_called_once()
+        cleanup.assert_not_called()
+
+    def test_manual_rollback_unknown_completion_never_runs_acceptance_or_cleanup(self) -> None:
+        env = generate_default_env("demo", topology="single", gateway_location="ru")
+        env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
+        target = RemoteTarget(node_id=NODE_GATEWAY)
+        with (
+            patch("vpn_installer.workflows.wait_for_remote_install_idle", return_value={"state": "idle", "rollback_release_id": "old-release"}),
+            patch("vpn_installer.workflows.install_remote_node", side_effect=AppError("SSH dropped")),
+            patch("vpn_installer.workflows.wait_for_remote_install_completion", side_effect=AppError("SSH still unavailable")),
+            patch("vpn_installer.workflows.verify_rollback_node") as verify_node,
+            patch("vpn_installer.workflows.verify_postcutover") as acceptance,
+            patch("vpn_installer.workflows.cleanup_remote_workdir") as cleanup,
+        ):
+            with self.assertRaisesRegex(AppError, "rollback transaction"):
+                workflows.run_selected_remote_action("rollback", "demo", Path("demo.env"), env, [target])
+        verify_node.assert_not_called()
+        acceptance.assert_not_called()
+        cleanup.assert_not_called()
+
     def test_verify_rollback_node_accepts_cross_version_service_evidence(self) -> None:
         observed = {
             "installed": "1", "node": NODE_EXIT, "deployment_name": "demo", "release_id": "old-release",
@@ -723,6 +936,26 @@ class WorkflowTests(unittest.TestCase):
             patch("vpn_installer.workflows.remote_install_transaction_state", return_value=transaction_state("old-release", node_id="exit", rollback_services=services)),
         ):
             with self.assertRaisesRegex(AppError, "release_id=unexpected"):
+                workflows.verify_rollback_node(RemoteTarget(node_id=NODE_EXIT), "demo", "wg0", "old-release")
+
+    def test_verify_rollback_node_rejects_busy_transaction_with_old_valid_artifacts(self) -> None:
+        observed = {
+            "installed": "1", "node": NODE_EXIT, "deployment_name": "demo", "release_id": "old-release",
+            "drift": "none", "wg_qdisc": "fq",
+        }
+        services = [
+            rollback_service("sing-box", "sing-box.service"),
+            rollback_service("nftables", "vpn-stack-nftables.service"),
+            rollback_service("resolver", "systemd-resolved.service", ownership="borrowed"),
+            rollback_service("wireguard", "wg-quick@wg0.service"),
+        ]
+        transaction = transaction_state("old-release", node_id="exit", rollback_services=services)
+        transaction["state"] = "busy"
+        with (
+            patch("vpn_installer.workflows.remote_preflight", return_value=observed),
+            patch("vpn_installer.workflows.remote_install_transaction_state", return_value=transaction),
+        ):
+            with self.assertRaisesRegex(AppError, "rollback transaction is not idle"):
                 workflows.verify_rollback_node(RemoteTarget(node_id=NODE_EXIT), "demo", "wg0", "old-release")
 
     def test_verify_rollback_node_rejects_unrestored_wireguard_qdisc(self) -> None:

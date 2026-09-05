@@ -41,6 +41,33 @@ class AdminWebTests(unittest.TestCase):
         self.assertFalse(admin_web.check_basic_auth("Bearer nope"))
         self.assertFalse(admin_web.check_basic_auth("Basic definitely-not-base64"))
 
+    def test_missing_bootstrap_does_not_create_default_auth(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            auth_path = Path(tmp) / "auth.json"
+            with patch.object(admin_web, "AUTH_PATH", auth_path), patch.object(admin_web, "load_env", return_value={}):
+                with self.assertRaisesRegex(ValueError, "credentials are missing"):
+                    admin_web.load_auth()
+                self.assertFalse(auth_path.exists())
+                with self.assertRaisesRegex(ValueError, "explicit username and password"):
+                    admin_web.main(["init-auth"])
+
+    def test_existing_auth_is_not_rotated_by_new_bootstrap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            auth_path = Path(tmp) / "auth.json"
+            with patch.object(admin_web, "AUTH_PATH", auth_path), patch.object(admin_web, "load_env", return_value={}):
+                admin_web.init_auth("operator", "existing-password")
+                before = auth_path.read_bytes()
+                admin_web.init_auth("other", "new-bootstrap")
+                self.assertEqual(before, auth_path.read_bytes())
+                self.assertTrue(admin_web.check_basic_auth(self.basic_header("operator", "existing-password")))
+                self.assertFalse(admin_web.check_basic_auth(self.basic_header("\u044e\u0437\u0435\u0440", "existing-password")))
+
+    def test_malformed_hash_fails_closed_without_unbounded_kdf(self) -> None:
+        valid = admin_web.hash_password("secret")
+        for changes in ({"salt": "not-hex"}, {"hash": "not-hex"}, {"rounds": -1}, {"rounds": 10**12}, {"algorithm": "unknown"}):
+            with self.subTest(changes=changes):
+                self.assertFalse(admin_web.verify_password("secret", {**valid, **changes}))
+
     def test_check_basic_auth_accepts_current_hash(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             auth_path = Path(tmp) / "auth.json"

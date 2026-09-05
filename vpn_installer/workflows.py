@@ -395,7 +395,19 @@ def remote_install_transaction_state(target: RemoteTarget) -> dict[str, Any]:
         """
         import json
         import subprocess
+        import sys
         from pathlib import Path
+
+        unit = f"vpn-stack-install-{sys.argv[1]}.service"
+        unit_state = subprocess.run(
+            ["systemctl", "show", unit, "--property=ActiveState", "--value"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout.strip()
+        if unit_state in {"active", "activating", "deactivating", "reloading"}:
+            print(json.dumps({"state": "busy"}))
+            raise SystemExit(0)
+        if unit_state not in {"inactive", "failed"}:
+            raise ValueError(f"cannot confirm installer unit state: {unit_state}")
 
         root = Path("/etc/vpn-stack")
         acceptance_path = root / "last-acceptance.json"
@@ -478,6 +490,31 @@ def remote_install_transaction_state(target: RemoteTarget) -> dict[str, Any]:
                     rollback_services_present=True,
                     rollback_services=rows,
                 )
+                paths = [line.split("\\t") for line in (snapshot / "paths.tsv").read_text(encoding="utf-8").splitlines()]
+                current_rows = [row for row in paths if len(row) == 3 and row[2] == str(root / "current")]
+                if len(current_rows) != 1:
+                    raise ValueError("rollback current link snapshot is missing or ambiguous")
+                file_id, state, _ = current_rows[0]
+                if not file_id.isdecimal():
+                    raise ValueError("invalid rollback file id")
+                if state == "missing":
+                    result["rollback_release_id"] = ""
+                elif state == "present":
+                    saved_link = snapshot / "files" / file_id
+                    restored = saved_link.resolve(strict=True)
+                    if not saved_link.is_symlink() or (root / "releases").resolve() not in restored.parents:
+                        raise ValueError("rollback current points outside releases")
+                    manifest = json.loads((restored / "render-manifest.json").read_text(encoding="utf-8"))
+                    node = manifest.get("node")
+                    node_id = manifest.get("node_id") or (node.get("id") if isinstance(node, dict) else "")
+                    if node_id != sys.argv[1]:
+                        raise ValueError("rollback node does not match requested node")
+                    release_id = manifest.get("release_id")
+                    if not isinstance(release_id, str) or not release_id.strip():
+                        raise ValueError("rollback release id is missing")
+                    result["rollback_release_id"] = release_id
+                else:
+                    raise ValueError("invalid rollback current state")
             except (OSError, ValueError, TypeError) as exc:
                 result["rollback_services_error"] = str(exc)
         print(json.dumps(result, separators=(",", ":")))
@@ -485,13 +522,13 @@ def remote_install_transaction_state(target: RemoteTarget) -> dict[str, Any]:
     ).strip()
     command = (
         "if ! flock -n /run/lock/vpn-stack-install.lock -c true; then printf busy; "
-        f"else python3 -c {shlex.quote(source)}; fi"
+        f"else python3 -c {shlex.quote(source)} {shlex.quote(target.node_id)}; fi"
     )
     payload = ssh_capture(target, command, as_root=True, command_timeout=20).strip()
     if payload == "busy":
         return {"state": "busy"}
     parsed = json.loads(payload)
-    if not isinstance(parsed, dict) or parsed.get("state") != "idle":
+    if not isinstance(parsed, dict) or parsed.get("state") not in {"idle", "busy"}:
         raise AppError(f"{target.label}: некорректное состояние install transaction.")
     return parsed
 
@@ -598,6 +635,7 @@ def install_remote_node(target: RemoteTarget, deployment_name: str, env: dict[st
     node_id = target.node_id
     remote_root = f"/tmp/vpn-stack-installer-{sanitize_name(deployment_name)}-{node_id}-{time.time_ns()}"
     archive_name = f"{node_id}.tar.gz"
+    dispatch_attempted = False
     print_header(f"Подготовка {target.label}")
     try:
         ssh_stream(target, f"umask 077 && mkdir -p {shlex.quote(remote_root)}")
@@ -633,6 +671,7 @@ def install_remote_node(target: RemoteTarget, deployment_name: str, env: dict[st
             f": > {shlex.quote(REMOTE_INSTALL_LOG)} && chmod 0600 {shlex.quote(REMOTE_INSTALL_LOG)}",
             as_root=True,
         )
+        dispatch_attempted = True
         ssh_stream(
             target,
             remote_install_systemd_command(node_id, remote_root, remote_command),
@@ -640,10 +679,10 @@ def install_remote_node(target: RemoteTarget, deployment_name: str, env: dict[st
         )
     except Exception as exc:  # noqa: BLE001
         setattr(exc, "vpn_remote_log", REMOTE_INSTALL_LOG)
-        if action in {"install", "reinstall"}:
-            setattr(exc, "vpn_remote_root", remote_root)
-            raise
-        cleanup_remote_workdir(target, remote_root)
+        setattr(exc, "vpn_remote_root", remote_root)
+        # After dispatch only the server-side EXIT trap owns cleanup, even if SSH failed.
+        if not dispatch_attempted:
+            cleanup_remote_workdir(target, remote_root)
         raise
 
 
@@ -689,16 +728,8 @@ def install_remote_node_with_recovery(
         transaction = getattr(reconciliation_error, "vpn_transaction_state", {})
         failure = AppError(f"{target.label}: не удалось согласовать состояние после {action}: {reconciliation_error}")
         setattr(failure, "remote_node_changed", install_cutover_observed(baseline, transaction, expected_release_id))
-        if transaction.get("state") == "idle" and command_error is not None:
-            remote_root = str(getattr(command_error, "vpn_remote_root", ""))
-            if remote_root:
-                cleanup_remote_workdir(target, remote_root)
         raise failure from (command_error or reconciliation_error)
 
-    if command_error is not None:
-        remote_root = str(getattr(command_error, "vpn_remote_root", ""))
-        if remote_root:
-            cleanup_remote_workdir(target, remote_root)
     mismatches = []
     if observed.get("installed") != "1":
         mismatches.append("stack is not installed")
@@ -829,6 +860,8 @@ def verify_rollback_node(
     observed = remote_preflight(target, wg_interface)
     transaction = remote_install_transaction_state(target)
     mismatches = []
+    if transaction.get("state") != "idle":
+        mismatches.append("rollback transaction is not idle")
     expected = {"installed": "1" if expected_release_id else "0"}
     if expected_release_id:
         expected.update(
@@ -1035,6 +1068,17 @@ def run_selected_remote_action(
     requested = requested_node_ids(node_arg)
     available_nodes = [node_id for node_id in requested if node_id in target_map]
     wg_interface = (env.get("WG_INTERFACE", "").strip() or "wg0")
+    if action == "rollback":
+        rollback_release_ids = {}
+        for node_id in available_nodes:
+            transaction = wait_for_remote_install_idle(target_map[node_id])
+            if not isinstance(transaction.get("rollback_release_id"), str):
+                raise AppError(f"{target_map[node_id].label}: rollback snapshot не подтверждён.")
+            rollback_release_ids[node_id] = transaction["rollback_release_id"]
+        if available_nodes:
+            cutover_order = execution_node_ids("install", topology, tuple(available_nodes))
+            rollback_changed_nodes(cutover_order, target_map, deployment_name, env, rollback_release_ids)
+        return
     if action in {"install", "reinstall"}:
         print_header("Локальная сборка артефактов")
         render_all_artifacts(env_path, env)

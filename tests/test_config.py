@@ -25,6 +25,17 @@ class _FakeResponse:
 
 
 class ConfigTests(unittest.TestCase):
+    def test_admin_bootstrap_password_is_unique_and_preserved(self) -> None:
+        first = config.generate_default_env("first")
+        second = config.generate_default_env("second")
+        self.assertGreaterEqual(len(first["ADMIN_WEB_PASSWORD"]), 32)
+        self.assertNotEqual(first["ADMIN_WEB_PASSWORD"], second["ADMIN_WEB_PASSWORD"])
+        self.assertEqual(config.merge_env_with_defaults(first, "first")["ADMIN_WEB_PASSWORD"], first["ADMIN_WEB_PASSWORD"])
+        first["ADMIN_WEB_PASSWORD"] = "existing-operator-password"
+        self.assertEqual(config.merge_env_with_defaults(first, "first")["ADMIN_WEB_PASSWORD"], "existing-operator-password")
+        self.assertEqual(config.generate_example_env()["ADMIN_WEB_PASSWORD"], "")
+        self.assertNotIn("ADMIN_WEB_PASSWORD", config.generate_default_env("single", topology="single"))
+
     def test_validate_deployment_name_normalizes(self) -> None:
         self.assertEqual(config.validate_deployment_name("my vpn!!"), "my-vpn")
 
