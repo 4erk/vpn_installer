@@ -9,7 +9,7 @@ from . import VERSION
 from .common import cli_entrypoint
 
 
-COMPATIBLE_INSTALLED_MIN = "0.22.1"
+COMPATIBLE_INSTALLED_MIN = "0.22.2"
 COMPATIBLE_INSTALLED_MAX = VERSION
 
 CURRENT_TRANSITIONS = (
@@ -104,14 +104,6 @@ class CompatibilityWindow:
         }
 
 
-def _validate_schema_tuple(value: object, label: str) -> None:
-    keys = {"config", "state", "manifest", "install_plan", "diagnostics"}
-    if not isinstance(value, Mapping) or set(value) != keys:
-        raise CompatibilityError(f"{label} schema tuple fields must be exact")
-    if not all(isinstance(item, int) and not isinstance(item, bool) and item > 0 for item in value.values()):
-        raise CompatibilityError(f"{label} schema tuple values must be positive integers")
-
-
 def _validate_transitions(transitions: list[object], window: CompatibilityWindow) -> None:
     if window.minimum == window.maximum:
         if transitions:
@@ -120,20 +112,10 @@ def _validate_transitions(transitions: list[object], window: CompatibilityWindow
     if len(transitions) != 1 or not isinstance(transitions[0], Mapping):
         raise CompatibilityError("compatibility window requires one explicit transition")
     transition = transitions[0]
-    allowed = {"from", "to", "source", "target", "adapter", "remove_in"}
-    if not {"from", "to"}.issubset(transition) or set(transition) - allowed:
+    if set(transition) != {"from", "to"}:
         raise CompatibilityError("transition fields are invalid")
     if str(transition.get("from")) != str(window.minimum) or str(transition.get("to")) != str(window.maximum):
         raise CompatibilityError("transition endpoints do not match the compatibility window")
-    extended = {"source", "target", "adapter", "remove_in"} & set(transition)
-    if extended:
-        if extended != {"source", "target", "adapter", "remove_in"}:
-            raise CompatibilityError("transition adapter metadata must be complete")
-        _validate_schema_tuple(transition.get("source"), "source")
-        _validate_schema_tuple(transition.get("target"), "target")
-        if not re.fullmatch(r"[a-z][a-z0-9_]*", str(transition.get("adapter", ""))):
-            raise CompatibilityError("transition adapter name is invalid")
-        Version.parse(transition.get("remove_in", ""))
 
 
 def installed_version(manifest: Mapping[str, object]) -> Version:

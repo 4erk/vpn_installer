@@ -56,14 +56,14 @@ class DiagnoseTests(unittest.TestCase):
                 patch.object(
                     diagnose,
                     "ssh_capture",
-                    side_effect=lambda remote, *_args, **_kwargs: f"{remote.node_id}-report",
+                    side_effect=lambda remote, *_args, **_kwargs: json.dumps({"node_id": remote.node_id}),
                 ) as ssh_mock,
             ):
                 self.assertEqual(diagnose.diagnose_path_workflow("demo", "all"), 0)
                 reports = sorted(out_dir.glob("diagnostics/*/*.json"))
                 self.assertEqual([path.name for path in reports], ["exit.json", "gateway.json"])
-                self.assertEqual(reports[0].read_text(encoding="utf-8"), "exit-report")
-                self.assertEqual(reports[1].read_text(encoding="utf-8"), "gateway-report")
+                self.assertEqual(json.loads(reports[0].read_text(encoding="utf-8")), {"node_id": NODE_EXIT})
+                self.assertEqual(json.loads(reports[1].read_text(encoding="utf-8")), {"node_id": NODE_GATEWAY})
 
         prepare_mock.assert_called_once()
         self.assertEqual(ssh_mock.call_count, 2)
@@ -82,7 +82,7 @@ class DiagnoseTests(unittest.TestCase):
                     "prepare_remote_session",
                     return_value=("demo", Path("deployments/demo.env"), env, {}, [gateway], {}),
                 ),
-                patch.object(diagnose, "ssh_capture", return_value="gateway-report") as ssh_mock,
+                patch.object(diagnose, "ssh_capture", return_value='{"node_id": "gateway"}') as ssh_mock,
                 patch.object(diagnose, "warn") as warn_mock,
             ):
                 self.assertEqual(diagnose.diagnose_path_workflow("demo", NODE_GATEWAY, iperf=True), 0)
@@ -104,7 +104,7 @@ class DiagnoseTests(unittest.TestCase):
                     "prepare_remote_session",
                     return_value=("demo", Path("deployments/demo.env"), env, {}, [gateway], {}),
                 ),
-                patch.object(diagnose, "ssh_capture", return_value="gateway-report") as ssh_mock,
+                patch.object(diagnose, "ssh_capture", return_value='{"node_id": "gateway"}') as ssh_mock,
             ):
                 self.assertEqual(diagnose.diagnose_path_workflow("demo", "all"), 0)
                 reports = list(out_dir.glob("diagnostics/*/*.json"))
@@ -125,9 +125,66 @@ class DiagnoseTests(unittest.TestCase):
                 ),
                 patch.object(diagnose, "ssh_capture", side_effect=diagnose.AppError("timeout")),
             ):
-                self.assertEqual(diagnose.diagnose_path_workflow("demo", NODE_GATEWAY), 0)
+                self.assertEqual(diagnose.diagnose_path_workflow("demo", NODE_GATEWAY), 1)
                 report = next(out_dir.glob("diagnostics/*/gateway.json"))
-                self.assertIn("diagnose_error=timeout", report.read_text(encoding="utf-8"))
+                self.assertEqual(
+                    json.loads(report.read_text(encoding="utf-8")),
+                    {"node_id": NODE_GATEWAY, "diagnose_error": "timeout"},
+                )
+
+    def test_diagnose_path_returns_nonzero_and_preserves_other_node_on_collection_failure(self) -> None:
+        env = topology_env(TOPOLOGY_DUAL, LOCATION_RU)
+        targets = [target(NODE_GATEWAY, LOCATION_RU), target(NODE_EXIT, LOCATION_FOREIGN)]
+        for failed_node in (NODE_GATEWAY, NODE_EXIT):
+            for error_type in (diagnose.AppError, OSError):
+                with self.subTest(failed_node=failed_node, error_type=error_type), tempfile.TemporaryDirectory() as tmp:
+                    out_dir = Path(tmp) / "out"
+
+                    def collect(remote, *_args, **_kwargs):
+                        if remote.node_id == failed_node:
+                            raise error_type("collection failed")
+                        return json.dumps({"node_id": remote.node_id, "verdict": "verified"})
+
+                    with (
+                        patch.object(diagnose, "OUT_DIR", out_dir),
+                        patch.object(
+                            diagnose,
+                            "prepare_remote_session",
+                            return_value=("demo", Path("deployments/demo.env"), env, {}, targets, {}),
+                        ),
+                        patch.object(diagnose, "ssh_capture", side_effect=collect) as ssh_mock,
+                    ):
+                        self.assertEqual(diagnose.diagnose_path_workflow("demo", "all"), 1)
+                    reports = {
+                        path.stem: json.loads(path.read_text(encoding="utf-8"))
+                        for path in out_dir.glob("diagnostics/*/*.json")
+                    }
+                    self.assertEqual(set(reports), {NODE_GATEWAY, NODE_EXIT})
+                    self.assertEqual(reports[failed_node], {"node_id": failed_node, "diagnose_error": "collection failed"})
+                    other_node = NODE_EXIT if failed_node == NODE_GATEWAY else NODE_GATEWAY
+                    self.assertEqual(reports[other_node], {"node_id": other_node, "verdict": "verified"})
+                    self.assertEqual(ssh_mock.call_count, 2)
+
+    def test_diagnose_path_records_invalid_agent_json_as_collection_failure(self) -> None:
+        env = topology_env(TOPOLOGY_SINGLE, LOCATION_RU)
+        gateway = target(NODE_GATEWAY, LOCATION_RU)
+        for raw_report in ("not json", "[]", "null"):
+            with self.subTest(raw_report=raw_report), tempfile.TemporaryDirectory() as tmp:
+                out_dir = Path(tmp) / "out"
+                with (
+                    patch.object(diagnose, "OUT_DIR", out_dir),
+                    patch.object(
+                        diagnose,
+                        "prepare_remote_session",
+                        return_value=("demo", Path("deployments/demo.env"), env, {}, [gateway], {}),
+                    ),
+                    patch.object(diagnose, "ssh_capture", return_value=raw_report),
+                ):
+                    self.assertEqual(diagnose.diagnose_path_workflow("demo", "all"), 1)
+                report = next(out_dir.glob("diagnostics/*/gateway.json"))
+                payload = json.loads(report.read_text(encoding="utf-8"))
+                self.assertEqual(payload["node_id"], NODE_GATEWAY)
+                self.assertTrue(payload["diagnose_error"])
 
     def test_diagnose_client_log_reports_front_failure_and_self_tunnel(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

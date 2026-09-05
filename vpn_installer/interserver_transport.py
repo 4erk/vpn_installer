@@ -792,6 +792,48 @@ def _next_evidence(
     }
 
 
+def _quality_switch_evidence(
+    selected: str,
+    selected_probe: dict[str, Any],
+    alternate_probe: dict[str, Any],
+    previous: dict[str, Any],
+    observed_at: str,
+) -> tuple[dict[str, Any], bool]:
+    prior = previous.get("quality_failure", {})
+    reason = _probe_failure_reason({"error": selected_probe.get("quality_error", "")})
+    if not isinstance(prior, dict) or prior.get("path") != selected or prior.get("reason") != reason:
+        prior = {}
+    relation = _cycle_relation(
+        prior.get("sampled_at"), observed_at,
+        max_gap_seconds=TRANSPORT_QUALITY_PROBE_INTERVAL_SECONDS * 3,
+    )
+    if selected_probe.get("quality_sampled") is not True:
+        return (dict(prior) if relation != "reset" else {}), False
+    if not (
+        alternate_probe.get("ok") is True
+        and alternate_probe.get("health_confirmed") is True
+        and alternate_probe.get("quality_checked") is True
+        and alternate_probe.get("quality_ok") is True
+    ):
+        return {}, False
+    sampled = _parse_timestamp(prior.get("sampled_at"))
+    observed = _parse_timestamp(observed_at)
+    if sampled and observed and 0 <= (observed - sampled).total_seconds() < TRANSPORT_QUALITY_PROBE_INTERVAL_SECONDS:
+        return dict(prior), False
+
+    # ICMP loss and candidate DNS success are not comparable rates. Require paired
+    # observations at the quality cadence, never cached liveness cycles.
+    evidence = _next_evidence(
+        {"quality_failure": prior}, key="quality_failure", path=selected,
+        reason=reason, cycle_relation=relation,
+    )
+    evidence.update({"sampled_at": observed_at, "packet_loss_pct": selected_probe.get("packet_loss_pct")})
+    confirmed = evidence["confirmations"] >= max(
+        TRANSPORT_FAILURE_CONFIRMATIONS, TRANSPORT_ALTERNATE_HEALTH_CONFIRMATIONS,
+    )
+    return evidence, confirmed
+
+
 def _preferred_retry_active(previous: dict[str, Any], observed_at: str) -> bool:
     retry = previous.get("preferred_retry", {})
     if not isinstance(retry, dict) or retry.get("path") != TRANSPORT_PREFERRED_TAG:
@@ -954,32 +996,28 @@ def evaluate_transport_policy(
             **details,
         )
 
-    if selected == TRANSPORT_PREFERRED_TAG:
-        state, quality_reason = _selected_quality(selected_probe)
-        if (
-            state == "degraded"
-            and selected_probe.get("quality_sampled") is True
-            and alternate_probe.get("ok") is True
-            and alternate_probe.get("health_confirmed") is True
-            and alternate_probe.get("quality_checked") is True
-            and alternate_probe.get("quality_ok") is True
-        ):
-            failure_reason = _probe_failure_reason({"error": quality_reason})
+    state, quality_reason = _selected_quality(selected_probe)
+    if state == "degraded":
+        evidence, confirmed = _quality_switch_evidence(selected, selected_probe, alternate_probe, prior, observed_at)
+        details = _preferred_recovery_details(prior, observed_at)
+        if evidence:
+            details["quality_failure"] = evidence
+        retry_active = selected != TRANSPORT_PREFERRED_TAG and _preferred_retry_active(prior, observed_at)
+        if confirmed and not retry_active:
+            if selected == TRANSPORT_PREFERRED_TAG:
+                details["preferred_retry"] = _next_preferred_retry(prior, evidence["reason"], observed_at)
+            else:
+                details.update(_preferred_recovery_details(prior, observed_at, mark_recovered=True))
             return _policy_state(
-                selected,
-                normalized,
-                observed_at,
-                "recovering",
-                f"preferred overlay has confirmed {failure_reason}; alternate underlay is healthy",
-                recommended=alternate,
-                hard_failure=False,
-                quality_failure={
-                    "path": selected,
-                    "reason": failure_reason,
-                    "packet_loss_pct": selected_probe.get("packet_loss_pct"),
-                },
-                preferred_retry=_next_preferred_retry(prior, failure_reason, observed_at),
+                selected, normalized, observed_at, "recovering",
+                f"{selected} has confirmed {evidence['reason']}; alternate underlay is repeatedly healthy",
+                recommended=alternate, **details,
             )
+        if retry_active:
+            quality_reason += f"; preferred retry is deferred until {prior['preferred_retry'].get('retry_at')}"
+        return _policy_state(selected, normalized, observed_at, state, quality_reason, **details)
+
+    if selected == TRANSPORT_PREFERRED_TAG:
         return _policy_state(
             selected,
             normalized,
@@ -997,30 +1035,6 @@ def evaluate_transport_policy(
     if prior.get("preferred_probe_at"):
         recovery_details["preferred_probe_at"] = prior["preferred_probe_at"]
     selected_state, selected_quality_reason = _selected_quality(selected_probe)
-    if (
-        selected_state == "degraded"
-        and selected_probe.get("quality_sampled") is True
-        and preferred_probe.get("ok") is True
-        and preferred_probe.get("health_confirmed") is True
-        and preferred_probe.get("quality_checked") is True
-        and preferred_probe.get("quality_ok") is True
-    ):
-        failure_reason = _probe_failure_reason({"error": selected_quality_reason})
-        return _policy_state(
-            selected,
-            normalized,
-            observed_at,
-            "recovering",
-            f"selected fallback has confirmed {failure_reason}; preferred underlay is healthy",
-            recommended=TRANSPORT_PREFERRED_TAG,
-            hard_failure=False,
-            quality_failure={
-                "path": selected,
-                "reason": failure_reason,
-                "packet_loss_pct": selected_probe.get("packet_loss_pct"),
-            },
-            **_preferred_recovery_details(prior, observed_at, mark_recovered=True),
-        )
     if not preferred_probe["checked"]:
         deferred_reason = (
             f"fallback overlay path is healthy; preferred retry is deferred until "

@@ -311,6 +311,7 @@ def diagnose_path_workflow(deployment: str | None, node: str, *, iperf: bool = F
     output_dir = _diagnostic_run_dir(deployment_name)
     output_dir.mkdir(parents=True, exist_ok=True)
     print_header("Path diagnostics")
+    collection_failed = False
     with ThreadPoolExecutor(max_workers=max(1, len(plans))) as executor:
         future_to_node: dict[object, tuple[NodePlan, RemoteTarget]] = {}
         for plan in plans:
@@ -330,14 +331,12 @@ def diagnose_path_workflow(deployment: str | None, node: str, *, iperf: bool = F
             plan, target = future_to_node[future]
             try:
                 report = future.result()
-            except AppError as exc:
-                report = f"diagnose_error={exc}\n"
-                warn(f"{_node_label(plan)}: диагностика завершилась неполно: {error_summary(exc)}")
-            try:
                 snapshot = _decode_agent_snapshot(report, f"{plan.node_id} path")
-                rendered = json.dumps(snapshot, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
-            except AppError:
-                rendered = report
+            except Exception as exc:  # noqa: BLE001
+                collection_failed = True
+                snapshot = {"node_id": plan.node_id, "diagnose_error": str(exc)}
+                warn(f"{_node_label(plan)}: диагностика завершилась неполно: {error_summary(exc)}")
+            rendered = json.dumps(snapshot, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
             write_text(output_dir / f"{plan.node_id}.json", rendered)
 
     if iperf:
@@ -346,7 +345,7 @@ def diagnose_path_workflow(deployment: str | None, node: str, *, iperf: bool = F
     if not any(output_dir.iterdir()):
         raise AppError("Диагностика не собрала ни одного файла.")
     print(f"Диагностика сохранена: {output_dir}")
-    return 0
+    return 1 if collection_failed else 0
 
 
 def _print_nonzero_bucket_summary(summary: dict[str, object]) -> None:

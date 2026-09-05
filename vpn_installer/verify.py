@@ -11,6 +11,7 @@ from . import workflows
 from .common import OUT_DIR, print_header
 from .client_artifacts import render_vless_uri
 from .diagnostics import DiagnosticsSnapshot, classify_interserver_adaptation
+from .log_classifier import normalize_source, split_endpoint
 from .network_profile import (
     FQ_FLOW_LIMIT,
     FQ_KIND,
@@ -1210,7 +1211,10 @@ def _verify_public_vless_uri(
         throughput_seconds=throughput_seconds,
         require_private_reject=require_private_reject,
     )
-    correlation = _validate_front_correlation(run_result["result"].get("running_observations"))
+    correlation = _validate_front_correlation(
+        run_result["result"].get("running_observations"),
+        source=topology.node(runner_target.node_id).public_ip,
+    )
     validated["front_correlation"] = correlation
     if correlation["verdict"] != "verified":
         current = str(validated.get("verdict", "failed"))
@@ -1236,7 +1240,8 @@ def _capture_client_front(target, source: str) -> dict[str, object]:
         return {"error": str(exc)[:240]}
 
 
-def _validate_front_correlation(observation: object) -> dict[str, object]:
+def _validate_front_correlation(observation: object, *, source: str) -> dict[str, object]:
+    source = normalize_source(source)
     if isinstance(observation, dict):
         observations = [observation]
     elif isinstance(observation, list) and observation:
@@ -1255,6 +1260,9 @@ def _validate_front_correlation(observation: object) -> dict[str, object]:
         if baseline.get("error") or during.get("error"):
             errors.append(str(during.get("error") or baseline.get("error")))
             continue
+        if not source or any(normalize_source(str(snapshot.get("source") or "")) != source for snapshot in (baseline, during)):
+            errors.append("client-front snapshot source does not match the VLESS runner")
+            continue
         baseline_events = baseline.get("events", {})
         during_events = during.get("events", {})
         try:
@@ -1264,16 +1272,23 @@ def _validate_front_correlation(observation: object) -> dict[str, object]:
         flows = during.get("front", {}).get("flows", {}) if isinstance(during.get("front"), dict) else {}
         if not isinstance(flows, dict):
             flows = {}
+        flows = {key: metrics for key, metrics in flows.items() if split_endpoint(str(key))[0] == source}
+        baseline_flow_events = baseline.get("flow_events", {})
         flow_events = during.get("flow_events", {})
-        if not isinstance(flow_events, dict):
-            flow_events = {}
+        if not isinstance(baseline_flow_events, dict) or not isinstance(flow_events, dict):
+            return _probe_component("failed", "public VLESS flow correlation counters are malformed")
         correlated_events = 0
-        for destinations in flow_events.values():
+        for flow, destinations in flow_events.items():
+            if split_endpoint(str(flow))[0] != source:
+                continue
             if not isinstance(destinations, dict):
                 continue
-            for count in destinations.values():
+            baseline_destinations = baseline_flow_events.get(flow, {})
+            if not isinstance(baseline_destinations, dict):
+                return _probe_component("failed", "public VLESS flow correlation counters are malformed")
+            for destination, count in destinations.items():
                 try:
-                    correlated_events += max(0, int(count))
+                    correlated_events += max(0, int(count) - int(baseline_destinations.get(destination, 0)))
                 except (TypeError, ValueError):
                     return _probe_component("failed", "public VLESS flow correlation counters are malformed")
         candidate = (correlated_events, accepted_delta, flows)

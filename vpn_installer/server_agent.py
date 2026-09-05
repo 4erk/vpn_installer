@@ -57,6 +57,7 @@ try:
         TRANSPORT_FAILURE_CONFIRMATIONS,
         TRANSPORT_HY2_TAG,
         TRANSPORT_PREFERRED_PROBE_INTERVAL_SECONDS,
+        TRANSPORT_PREFERRED_STABLE_RESET_SECONDS,
         TRANSPORT_CANDIDATE_QUALITY_PROBE_ATTEMPTS,
         TRANSPORT_CANDIDATE_QUALITY_PROBE_TIMEOUT_MS,
         TRANSPORT_PREFERRED_TAG,
@@ -89,6 +90,7 @@ except ImportError:  # Optional on nodes without an interserver capability.
             TRANSPORT_FAILURE_CONFIRMATIONS,
             TRANSPORT_HY2_TAG,
             TRANSPORT_PREFERRED_PROBE_INTERVAL_SECONDS,
+            TRANSPORT_PREFERRED_STABLE_RESET_SECONDS,
             TRANSPORT_CANDIDATE_QUALITY_PROBE_ATTEMPTS,
             TRANSPORT_CANDIDATE_QUALITY_PROBE_TIMEOUT_MS,
             TRANSPORT_PREFERRED_TAG,
@@ -119,6 +121,7 @@ except ImportError:  # Optional on nodes without an interserver capability.
         TRANSPORT_CANDIDATE_TAGS = (TRANSPORT_WG_TAG, TRANSPORT_HY2_TAG)
         TRANSPORT_FAILURE_CONFIRMATIONS = 2
         TRANSPORT_PREFERRED_PROBE_INTERVAL_SECONDS = 30
+        TRANSPORT_PREFERRED_STABLE_RESET_SECONDS = 1800
         TRANSPORT_CANDIDATE_QUALITY_PROBE_ATTEMPTS = 8
         TRANSPORT_CANDIDATE_QUALITY_PROBE_TIMEOUT_MS = 2400
         TRANSPORT_PREFERRED_TAG = TRANSPORT_WG_TAG
@@ -2483,7 +2486,11 @@ def collect_transport_probes(
                 )
             else:
                 probes[alternate] = transport_candidate_probe(alternate)
-    elif selected != TRANSPORT_PREFERRED_TAG and preferred_transport_probe_due(previous, observed_at):
+    elif (
+        selected != TRANSPORT_PREFERRED_TAG
+        and preferred_transport_probe_due(previous, observed_at)
+        and transport_switch_backoff_active(previous, TRANSPORT_PREFERRED_TAG, observed_at) is None
+    ):
         probes[TRANSPORT_PREFERRED_TAG] = transport_candidate_probe(
             TRANSPORT_PREFERRED_TAG,
             timeout_ms=TRANSPORT_CANDIDATE_QUALITY_PROBE_TIMEOUT_MS,
@@ -2612,8 +2619,8 @@ def next_transport_switch_failure(
     reason: str,
     observed_at: str,
 ) -> dict[str, Any]:
-    prior = previous.get("switch_backoff", {})
-    attempts = int(prior.get("attempts", 0) or 0) + 1 if isinstance(prior, dict) and prior.get("target") == target else 1
+    prior = transport_switch_failure_history(previous, target, observed_at)
+    attempts = max(0, int(prior.get("attempts", 0) or 0)) + 1 if prior else 1
     delay = min(
         TRANSPORT_SWITCH_RETRY_MAX_SECONDS,
         TRANSPORT_SWITCH_RETRY_BASE_SECONDS * (2 ** min(attempts - 1, 8)),
@@ -2626,6 +2633,22 @@ def next_transport_switch_failure(
         "retry_at": (observed + timedelta(seconds=delay)).isoformat(),
         "reason": reason[:240],
     }
+
+
+def transport_switch_failure_history(
+    previous: dict[str, Any], target: str, observed_at: str,
+) -> dict[str, Any] | None:
+    now = parse_iso_datetime(observed_at)
+    if now is None or target not in TRANSPORT_CANDIDATE_TAGS:
+        return None
+    for key in ("switch_backoff", "last_switch_failure"):
+        failure = previous.get(key, {})
+        if not isinstance(failure, dict) or failure.get("target") != target:
+            continue
+        age = iso_age_seconds(str(failure.get("failed_at", "")), now=now)
+        if age is not None and 0 <= age < TRANSPORT_PREFERRED_STABLE_RESET_SECONDS:
+            return failure
+    return None
 
 
 def current_transport_state(value: Any) -> dict[str, Any]:
@@ -2712,27 +2735,22 @@ def _reconcile_interserver_transport_unlocked() -> dict[str, Any]:
             payload["quality_probe_at"] = previous_state["quality_probe_at"]
             if isinstance(previous_state.get("last_quality_probe"), dict):
                 payload["last_quality_probe"] = previous_state["last_quality_probe"]
-        last_switch_failure = previous_state.get("last_switch_failure")
-        last_failure_target = str(last_switch_failure.get("target", "")) if isinstance(last_switch_failure, dict) else ""
-        if (
-            isinstance(last_switch_failure, dict)
-            and last_failure_target
-            and transport_switch_backoff_active(previous_state, last_failure_target, observed_at) is not None
-        ):
-            payload["last_switch_failure"] = last_switch_failure
         alternate = next((tag for tag in TRANSPORT_CANDIDATE_TAGS if tag != selected), "")
+        last_switch_failure = transport_switch_failure_history(previous_state, alternate, observed_at)
+        if last_switch_failure is not None:
+            payload["last_switch_failure"] = last_switch_failure
         switch_backoff = transport_switch_backoff_active(previous_state, alternate, observed_at)
-        if switch_backoff is not None and probes.get(selected, {}).get("ok") is not True:
+        if switch_backoff is not None:
             payload["switch_backoff"] = switch_backoff
             if payload.get("would_switch"):
                 payload.update(
                     {
-                        "state": "failed",
+                        "state": "degraded" if probes.get(selected, {}).get("ok") is True else "failed",
                         "recommended": selected,
                         "would_switch": False,
                         "changed": False,
                         "reason": (
-                            f"{payload.get('reason', '')}; fallback activation is paused until "
+                            f"{payload.get('reason', '')}; underlay activation is paused until "
                             f"{switch_backoff.get('retry_at', 'the next retry window')}"
                         ),
                     }
@@ -2773,7 +2791,7 @@ def _reconcile_interserver_transport_unlocked() -> dict[str, Any]:
                 )
                 payload.pop("switch_backoff", None)
                 payload.pop("last_switch_failure", None)
-                payload.pop("quality_probe_at", None)
+                payload.pop("quality_failure", None)
                 payload.pop("last_quality_probe", None)
         write_json_atomic(TRANSPORT_STATE_PATH, payload)
         return payload

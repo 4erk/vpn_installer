@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import unittest
+from datetime import datetime, timedelta, timezone
 
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
@@ -14,6 +15,7 @@ from vpn_installer.interserver_transport import (
     TRANSPORT_HY2_TAG,
     TRANSPORT_OVERLAY_TAG,
     TRANSPORT_PREFERRED_TAG,
+    TRANSPORT_QUALITY_PROBE_INTERVAL_SECONDS,
     TRANSPORT_PROBE_INBOUND_TAGS,
     TRANSPORT_PROBE_PORTS,
     TRANSPORT_RELAY_INBOUND_TAG,
@@ -304,7 +306,7 @@ class InterserverTransportIdentityTests(unittest.TestCase):
         self.assertFalse(result["would_switch"])
         self.assertIn("packet loss 25%", result["reason"])
 
-    def test_fresh_preferred_quality_loss_switches_to_a_healthy_fallback(self) -> None:
+    def test_preferred_quality_loss_requires_independent_fresh_pairs(self) -> None:
         result = evaluate_transport_policy(
             selected=TRANSPORT_WG_TAG,
             probes={
@@ -331,12 +333,100 @@ class InterserverTransportIdentityTests(unittest.TestCase):
             observed_at="2026-08-06T12:00:00+00:00",
         )
 
-        self.assertEqual(result["state"], "recovering")
+        self.assertEqual(result["state"], "degraded")
         self.assertFalse(result["hard_failure_evidence"])
-        self.assertTrue(result["would_switch"])
-        self.assertEqual(result["recommended"], TRANSPORT_HY2_TAG)
+        self.assertFalse(result["would_switch"])
+        self.assertEqual(result["quality_failure"]["confirmations"], 1)
+        probes = result["probes"]
+        for second, fresh in ((0, True), (2, True), (4, False), (14, False), (15, True)):
+            with self.subTest(second=second, fresh=fresh):
+                result = evaluate_transport_policy(
+                    selected=TRANSPORT_WG_TAG,
+                    probes={
+                        TRANSPORT_WG_TAG: {**probes[TRANSPORT_WG_TAG], "quality_sampled": fresh},
+                        TRANSPORT_HY2_TAG: probes[TRANSPORT_HY2_TAG] if fresh else {"checked": False},
+                    },
+                    previous=result,
+                    observed_at=f"2026-08-06T12:00:{second:02d}+00:00",
+                )
+                self.assertEqual(result["would_switch"], second == 15)
+                self.assertEqual(result["quality_failure"]["confirmations"], 2 if second == 15 else 1)
         self.assertEqual(result["quality_failure"]["reason"], "packet_loss")
-        self.assertEqual(result["preferred_retry"]["retry_at"], "2026-08-06T12:01:00+00:00")
+        self.assertEqual(result["recommended"], TRANSPORT_HY2_TAG)
+        self.assertEqual(result["preferred_retry"]["retry_at"], "2026-08-06T12:01:15+00:00")
+
+    def test_quality_evidence_resets_after_clean_missing_lossy_or_stale_samples(self) -> None:
+        loss = {
+            "checked": True, "ok": True, "quality_checked": True, "quality_sampled": True,
+            "quality_ok": False, "quality_error": "overlay packet loss 5%", "packet_loss_pct": 5.0,
+        }
+        clean = {
+            "checked": True, "ok": True, "health_confirmed": True,
+            "quality_checked": True, "quality_ok": True,
+        }
+        baseline = evaluate_transport_policy(
+            selected=TRANSPORT_WG_TAG,
+            probes={TRANSPORT_WG_TAG: loss, TRANSPORT_HY2_TAG: clean},
+            observed_at="2026-08-06T12:00:00+00:00",
+        )
+        cases = (
+            ({**loss, "quality_ok": True}, clean),
+            (loss, {"checked": False}),
+            (loss, {**clean, "quality_ok": False}),
+            ({**loss, "quality_checked": False}, clean),
+            ({"checked": False}, clean),
+        )
+        for selected_probe, alternate_probe in cases:
+            with self.subTest(selected=selected_probe, alternate=alternate_probe):
+                interrupted = evaluate_transport_policy(
+                    selected=TRANSPORT_WG_TAG,
+                    probes={TRANSPORT_WG_TAG: selected_probe, TRANSPORT_HY2_TAG: alternate_probe},
+                    previous=baseline,
+                    observed_at="2026-08-06T12:00:15+00:00",
+                )
+                result = evaluate_transport_policy(
+                    selected=TRANSPORT_WG_TAG,
+                    probes={TRANSPORT_WG_TAG: loss, TRANSPORT_HY2_TAG: clean},
+                    previous=interrupted,
+                    observed_at="2026-08-06T12:00:30+00:00",
+                )
+                self.assertFalse(result["would_switch"])
+                self.assertEqual(result["quality_failure"]["confirmations"], 1)
+        stale = evaluate_transport_policy(
+            selected=TRANSPORT_WG_TAG,
+            probes={TRANSPORT_WG_TAG: loss, TRANSPORT_HY2_TAG: clean},
+            previous=baseline,
+            observed_at="2026-08-06T12:01:00+00:00",
+        )
+        self.assertFalse(stale["would_switch"])
+        self.assertEqual(stale["quality_failure"]["confirmations"], 1)
+
+    def test_quality_evidence_cannot_cross_a_successful_path_switch(self) -> None:
+        loss = {
+            "checked": True, "ok": True, "quality_checked": True, "quality_sampled": True,
+            "quality_ok": False, "quality_error": "overlay packet loss 5%",
+        }
+        clean = {
+            "checked": True, "ok": True, "health_confirmed": True,
+            "quality_checked": True, "quality_ok": True,
+        }
+        previous = {
+            "schema_version": TRANSPORT_STATE_SCHEMA_VERSION,
+            "selected": TRANSPORT_HY2_TAG,
+            "quality_failure": {
+                "path": TRANSPORT_WG_TAG, "reason": "packet_loss", "confirmations": 2,
+                "sampled_at": "2026-08-06T12:00:00+00:00",
+            },
+        }
+        result = evaluate_transport_policy(
+            selected=TRANSPORT_HY2_TAG,
+            probes={TRANSPORT_HY2_TAG: loss, TRANSPORT_WG_TAG: clean},
+            previous=previous,
+            observed_at="2026-08-06T12:00:15+00:00",
+        )
+        self.assertFalse(result["would_switch"])
+        self.assertEqual(result["quality_failure"]["path"], TRANSPORT_HY2_TAG)
+        self.assertEqual(result["quality_failure"]["confirmations"], 1)
 
     def test_preferred_quality_loss_does_not_switch_to_a_lossy_fallback(self) -> None:
         result = evaluate_transport_policy(
@@ -620,7 +710,7 @@ class InterserverTransportIdentityTests(unittest.TestCase):
         self.assertIn("packet loss 12.5%", result["reason"])
         self.assertEqual(result["preferred_retry"]["reason"], "packet_loss")
 
-    def test_degraded_fallback_switches_to_a_proven_preferred_path_without_waiting_for_retry(self) -> None:
+    def test_degraded_fallback_requires_fresh_pairs_and_honors_preferred_retry(self) -> None:
         result = evaluate_transport_policy(
             selected=TRANSPORT_HY2_TAG,
             probes={
@@ -648,17 +738,27 @@ class InterserverTransportIdentityTests(unittest.TestCase):
                 "preferred_retry": {
                     "path": TRANSPORT_WG_TAG,
                     "attempts": 3,
-                    "retry_at": "2026-08-06T13:00:00+00:00",
+                    "retry_at": "2026-08-06T12:01:00+00:00",
                     "reason": "packet_loss",
                 },
             },
             observed_at="2026-08-06T12:00:00+00:00",
         )
 
-        self.assertTrue(result["would_switch"])
+        self.assertFalse(result["would_switch"])
+        probes = result["probes"]
+        base = datetime(2026, 8, 6, 12, tzinfo=timezone.utc)
+        for seconds in range(TRANSPORT_QUALITY_PROBE_INTERVAL_SECONDS, 61, TRANSPORT_QUALITY_PROBE_INTERVAL_SECONDS):
+            result = evaluate_transport_policy(
+                selected=TRANSPORT_HY2_TAG,
+                probes=probes,
+                previous=result,
+                observed_at=(base + timedelta(seconds=seconds)).isoformat(),
+            )
+            self.assertEqual(result["would_switch"], seconds == 60)
         self.assertEqual(result["recommended"], TRANSPORT_WG_TAG)
         self.assertEqual(result["quality_failure"]["path"], TRANSPORT_HY2_TAG)
-        self.assertEqual(result["preferred_retry"]["recovered_at"], "2026-08-06T12:00:00+00:00")
+        self.assertEqual(result["preferred_retry"]["recovered_at"], "2026-08-06T12:01:00+00:00")
 
     def test_deferred_cycle_preserves_but_does_not_increment_recovery_evidence(self) -> None:
         first = evaluate_transport_policy(

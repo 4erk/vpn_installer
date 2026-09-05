@@ -1065,12 +1065,14 @@ class VerifyTests(unittest.TestCase):
         self.assertIn("below the 50.00 Mbit/s reference", primary["performance"]["observation"])
 
     def test_front_correlation_uses_accept_event_after_short_flow_closes(self) -> None:
-        baseline = {"events": {"accepted_tcp": 4}, "front": {"flows": {}}}
+        source = "198.51.100.20"
+        baseline = {"source": source, "events": {"accepted_tcp": 4}, "front": {"flows": {}}}
         correlation = _validate_front_correlation(
             [
-                {"baseline": baseline, "during": {"events": {"accepted_tcp": 4}, "front": {"flows": {}}}},
-                {"baseline": baseline, "during": {"events": {"accepted_tcp": 5}, "front": {"flows": {}}}},
-            ]
+                {"baseline": baseline, "during": {**baseline, "events": {"accepted_tcp": 4}}},
+                {"baseline": baseline, "during": {**baseline, "events": {"accepted_tcp": 5}}},
+            ],
+            source=source,
         )
 
         self.assertEqual(correlation["verdict"], "verified")
@@ -1080,8 +1082,9 @@ class VerifyTests(unittest.TestCase):
     def test_front_correlation_uses_flow_event_when_rolling_counter_decreases(self) -> None:
         correlation = _validate_front_correlation(
             {
-                "baseline": {"events": {"accepted_tcp": 40}, "front": {"flows": {}}},
+                "baseline": {"source": "198.51.100.20", "events": {"accepted_tcp": 40}, "front": {"flows": {}}},
                 "during": {
+                    "source": "198.51.100.20",
                     "events": {"accepted_tcp": 37},
                     "flow_events": {"198.51.100.20:37166": {"1.1.1.1:53": 1}},
                     "front": {
@@ -1093,13 +1096,77 @@ class VerifyTests(unittest.TestCase):
                         }
                     },
                 },
-            }
+            },
+            source="198.51.100.20",
         )
 
         self.assertEqual(correlation["verdict"], "verified")
         self.assertEqual(correlation["accepted_delta"], -3)
         self.assertEqual(correlation["correlated_events"], 1)
         self.assertEqual(correlation["flow_count"], 1)
+
+    def test_front_correlation_rejects_unchanged_flow_events_with_no_accept_delta(self) -> None:
+        baseline = {
+            "source": "198.51.100.20",
+            "events": {"accepted_tcp": 4},
+            "flow_events": {"198.51.100.20:37166": {"example.com:443": 1}},
+            "front": {"flows": {"198.51.100.20:37166": {"quality": "observed"}}},
+        }
+        for accepted in (4, 3):
+            with self.subTest(accepted=accepted):
+                during = copy.deepcopy(baseline)
+                during["events"]["accepted_tcp"] = accepted
+                correlation = _validate_front_correlation({"baseline": baseline, "during": during}, source=baseline["source"])
+                self.assertEqual(correlation["verdict"], "inconclusive")
+
+    def test_front_correlation_counts_only_new_events_for_runner_source(self) -> None:
+        source = "198.51.100.20"
+        baseline = {
+            "source": source,
+            "events": {"accepted_tcp": 4},
+            "flow_events": {f"{source}:37166": {"example.com:443": 2, "old.example:443": 10}},
+        }
+        during = {
+            "source": source,
+            "events": {"accepted_tcp": 4},
+            "flow_events": {
+                f"{source}:37166": {"example.com:443": 3, "old.example:443": 10},
+                "192.0.2.99:50000": {"unrelated.example:443": 5},
+            },
+            "front": {"flows": {
+                f"{source}:37166": {"quality": "observed"},
+                "192.0.2.99:50000": {"quality": "degraded"},
+            }},
+        }
+        correlation = _validate_front_correlation({"baseline": baseline, "during": during}, source=source)
+        self.assertEqual(correlation["verdict"], "verified")
+        self.assertEqual(correlation["accepted_delta"], 0)
+        self.assertEqual(correlation["correlated_events"], 1)
+        self.assertEqual(correlation["flow_count"], 1)
+        self.assertEqual(correlation["qualities"], ["observed"])
+
+    def test_front_correlation_rejects_unrelated_source_evidence(self) -> None:
+        source = "198.51.100.20"
+        unrelated = "192.0.2.99"
+        baseline = {"source": source, "events": {"accepted_tcp": 4}}
+        during = {
+            "source": source,
+            "events": {"accepted_tcp": 4},
+            "flow_events": {f"{unrelated}:50000": {"example.com:443": 1}},
+            "front": {"flows": {f"{unrelated}:50000": {"quality": "observed"}}},
+        }
+        correlation = _validate_front_correlation({"baseline": baseline, "during": during}, source=source)
+        self.assertEqual(correlation["verdict"], "inconclusive")
+        for baseline_source, during_source in ((source, unrelated), (unrelated, unrelated), ("", source)):
+            with self.subTest(baseline_source=baseline_source, during_source=during_source):
+                correlation = _validate_front_correlation(
+                    {
+                        "baseline": {**baseline, "source": baseline_source},
+                        "during": {**during, "source": during_source, "events": {"accepted_tcp": 5}},
+                    },
+                    source=source,
+                )
+                self.assertEqual(correlation["verdict"], "inconclusive")
 
     def test_public_hysteria_runner_and_validator_keep_separate_contracts(self) -> None:
         env = deployment_env()
@@ -1162,8 +1229,9 @@ class VerifyTests(unittest.TestCase):
                     env,
                     runner,
                     on_running=lambda: {
-                        "baseline": {"events": {"accepted_tcp": 0}, "front": {"flows": {}}},
+                        "baseline": {"source": "198.51.100.20", "events": {"accepted_tcp": 0}, "front": {"flows": {}}},
                         "during": {
+                            "source": "198.51.100.20",
                             "events": {"accepted_tcp": 1},
                             "front": {"flows": {"198.51.100.20:50000": {"quality": "observed"}}},
                         },

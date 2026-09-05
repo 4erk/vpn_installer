@@ -3202,6 +3202,158 @@ class ServerAgentTests(unittest.TestCase):
         self.assertEqual(second["attempts"], 2)
         self.assertEqual(second["retry_at"], "2026-08-09T12:01:30+00:00")
 
+    def run_transport_cycles(
+        self,
+        seconds: list[int],
+        *,
+        fail_switch: bool = False,
+        selected: str = "interserver-underlay-wg",
+        previous: dict[str, object] | None = None,
+        liveness_ok: bool = True,
+    ) -> tuple[list[dict[str, object]], Mock, Mock]:
+        config = {"experimental": {"clash_api": {"external_controller": "127.0.0.1:19090"}}}
+        env = {"WG_INTERFACE": "wg0", "WG_FOREIGN_ADDRESS": "10.74.0.2/24"}
+        state = dict(previous or {})
+        selector = {"available": True, "selected": selected}
+        now = datetime(2026, 9, 5, 12, tzinfo=timezone.utc)
+        live = {"checked": True, "ok": True, "health_confirmed": True, "scope": "overlay-dns"}
+        quality_sample = {
+            "checked": True, "ok": False, "quality_checked": True,
+            "packet_loss_pct": 5.0, "error": "overlay packet loss 5%",
+        }
+        candidate = {
+            "checked": True, "ok": True, "health_confirmed": True,
+            "quality_checked": True, "quality_ok": True, "packet_loss_pct": 0.0,
+        }
+
+        def read(path: Path, _default: object) -> dict[str, object]:
+            return config if path == server_agent.SINGBOX_CONFIG_PATH else dict(state)
+
+        def write(_path: Path, payload: dict[str, object]) -> None:
+            state.clear()
+            state.update(payload)
+
+        def overlay(_env: dict[str, str], *, quality: bool = False) -> dict[str, object]:
+            if quality:
+                return dict(quality_sample)
+            return dict(live) if liveness_ok else {
+                "checked": True, "ok": False, "failure_confirmed": True, "error": "timed out",
+            }
+
+        def api(
+            _controller: str, _path: str, *, method: str = "GET",
+            payload: dict[str, str] | None = None, **_kwargs: object,
+        ) -> dict[str, object]:
+            if method == "PUT":
+                selector["selected"] = payload["name"]
+            return {"connections": []}
+
+        with (
+            patch.object(server_agent, "TRANSPORT_LOCK_PATH", MagicMock()),
+            patch.object(server_agent.fcntl, "flock"),
+            patch.object(server_agent, "read_json", side_effect=read),
+            patch.object(server_agent, "write_json_atomic", side_effect=write),
+            patch.object(server_agent, "parse_env", return_value=env),
+            patch.object(server_agent, "transport_topology_configured", return_value=True),
+            patch.object(server_agent, "transport_selection_snapshot", side_effect=lambda *_args: dict(selector)),
+            patch.object(server_agent, "transport_selector_selection", side_effect=lambda *_args: dict(selector)),
+            patch.object(server_agent, "transport_overlay_path_probe", side_effect=overlay),
+            patch.object(server_agent, "transport_candidate_probe", return_value=candidate),
+            patch.object(server_agent, "transport_overlay_dns_probe", return_value=live) as proof,
+            patch.object(server_agent, "clash_api_json", side_effect=api),
+            patch.object(server_agent, "utc_now", side_effect=[(now + timedelta(seconds=s)).isoformat() for s in seconds]),
+            patch.object(server_agent, "run", side_effect=AssertionError("unexpected subprocess")),
+            patch.object(
+                server_agent, "select_transport", wraps=server_agent.select_transport,
+                side_effect=RuntimeError("activation failed; previous selector path restored and verified") if fail_switch else None,
+            ) as select,
+        ):
+            trace = [server_agent._reconcile_interserver_transport_unlocked() for _ in seconds]
+        return trace, select, proof
+
+    def test_quality_switches_do_not_ping_pong_after_successful_dns_proof(self) -> None:
+        seconds = list(range(0, 85, 2))
+        trace, select, proof = self.run_transport_cycles(seconds)
+
+        switches = [second for second, state in zip(seconds, trace) if state.get("changed")]
+        self.assertEqual(switches, [16, 80])
+        self.assertEqual(select.call_count, 2)
+        self.assertEqual(proof.call_count, 2)
+        self.assertTrue(all(state["overlay_probe"]["ok"] for state in trace))
+        after_switch = trace[seconds.index(18)]
+        self.assertNotIn("last_quality_probe", after_switch)
+        self.assertNotIn("quality_failure", after_switch)
+        self.assertFalse(after_switch["overlay_probe"].get("quality_sampled", False))
+
+    def test_failed_quality_switch_keeps_retry_and_history_across_healthy_cycles(self) -> None:
+        trace, select, _proof = self.run_transport_cycles([0, 16, 18, 32, 48, 64], fail_switch=True)
+
+        first_failure = trace[1]["switch_backoff"]
+        self.assertEqual(first_failure["retry_at"], "2026-09-05T12:00:46+00:00")
+        for state in trace[2:4]:
+            self.assertTrue(state["overlay_probe"]["ok"])
+            self.assertEqual(state["switch_backoff"], first_failure)
+            self.assertEqual(state["last_switch_failure"], first_failure)
+        self.assertNotIn("switch_backoff", trace[4])
+        self.assertEqual(trace[4]["last_switch_failure"], first_failure)
+        self.assertEqual(select.call_count, 2)
+        self.assertEqual(trace[5]["switch_backoff"]["attempts"], 2)
+        self.assertEqual(trace[5]["switch_backoff"]["retry_at"], "2026-09-05T12:02:04+00:00")
+
+    def test_hard_liveness_failure_bypasses_soft_quality_and_preferred_retry(self) -> None:
+        trace, select, proof = self.run_transport_cycles(
+            [0], selected="interserver-underlay-hy2", liveness_ok=False,
+            previous={
+                "schema_version": server_agent.TRANSPORT_STATE_SCHEMA_VERSION,
+                "selected": "interserver-underlay-hy2",
+                "preferred_retry": {
+                    "path": "interserver-underlay-wg", "retry_at": "2026-09-05T12:05:00+00:00",
+                },
+            },
+        )
+        self.assertTrue(trace[0]["changed"])
+        self.assertTrue(trace[0]["hard_failure_evidence"])
+        self.assertEqual(trace[0]["selected"], "interserver-underlay-wg")
+        select.assert_called_once()
+        proof.assert_called_once()
+
+    def test_successful_overlay_proof_clears_target_switch_failure_history(self) -> None:
+        failure = server_agent.next_transport_switch_failure(
+            {}, "interserver-underlay-hy2", "proof failed", "2026-09-05T11:59:00+00:00",
+        )
+        trace, select, proof = self.run_transport_cycles([0, 16, 18], previous={
+            "schema_version": server_agent.TRANSPORT_STATE_SCHEMA_VERSION,
+            "selected": "interserver-underlay-wg", "last_switch_failure": failure,
+        })
+        self.assertEqual(trace[0]["last_switch_failure"], failure)
+        self.assertTrue(trace[1]["changed"])
+        for state in trace[1:]:
+            self.assertNotIn("switch_backoff", state)
+            self.assertNotIn("last_switch_failure", state)
+        select.assert_called_once()
+        proof.assert_called_once()
+
+    def test_reconcile_checks_retry_even_for_a_healthy_path_recommendation(self) -> None:
+        failure = server_agent.next_transport_switch_failure(
+            {}, "interserver-underlay-wg", "proof failed", "2026-09-05T12:00:00+00:00",
+        )
+        evaluated = {
+            "schema_version": server_agent.TRANSPORT_STATE_SCHEMA_VERSION,
+            "selected": "interserver-underlay-hy2", "recommended": "interserver-underlay-wg",
+            "would_switch": True, "state": "recovering", "reason": "preferred recovery confirmed",
+        }
+        with patch.object(server_agent, "evaluate_transport_policy", return_value=evaluated):
+            trace, select, proof = self.run_transport_cycles([2], selected="interserver-underlay-hy2", previous={
+                "schema_version": server_agent.TRANSPORT_STATE_SCHEMA_VERSION,
+                "selected": "interserver-underlay-hy2", "switch_backoff": failure,
+            })
+        self.assertEqual(trace[0]["state"], "degraded")
+        self.assertFalse(trace[0]["would_switch"])
+        self.assertEqual(trace[0]["switch_backoff"], failure)
+        self.assertIn("paused until", trace[0]["reason"])
+        select.assert_not_called()
+        proof.assert_not_called()
+
     def test_transport_reconcile_does_not_repeat_a_failed_switch_inside_backoff(self) -> None:
         config = {"experimental": {"clash_api": {"external_controller": "127.0.0.1:19090"}}}
         env = {"SSH_PORT": "22"}
@@ -3313,7 +3465,7 @@ class ServerAgentTests(unittest.TestCase):
         self.assertEqual(payload["schema_version"], server_agent.TRANSPORT_STATE_SCHEMA_VERSION)
         self.assertNotIn("last_switch_failure", payload)
 
-    def test_transport_reconcile_drops_an_expired_switch_failure(self) -> None:
+    def test_transport_reconcile_expires_retry_but_retains_recent_failure_history(self) -> None:
         config = {"experimental": {"clash_api": {"external_controller": "127.0.0.1:19090"}}}
         expired_failure = {
             "target": "interserver-underlay-hy2",
@@ -3356,8 +3508,31 @@ class ServerAgentTests(unittest.TestCase):
                 payload = server_agent._reconcile_interserver_transport_unlocked()
 
         self.assertNotIn("switch_backoff", payload)
-        self.assertNotIn("last_switch_failure", payload)
+        self.assertEqual(payload["last_switch_failure"], expired_failure)
         write.assert_called_once_with(server_agent.TRANSPORT_STATE_PATH, payload)
+
+    def test_switch_failure_history_expires_and_does_not_cross_targets(self) -> None:
+        failure = server_agent.next_transport_switch_failure(
+            {}, "interserver-underlay-hy2", "proof failed", "2026-09-05T12:00:00+00:00",
+        )
+        previous = {
+            "schema_version": server_agent.TRANSPORT_STATE_SCHEMA_VERSION,
+            "selected": "interserver-underlay-wg", "last_switch_failure": failure,
+        }
+        recent = server_agent.next_transport_switch_failure(
+            previous, "interserver-underlay-hy2", "proof failed", "2026-09-05T12:01:00+00:00",
+        )
+        stale = server_agent.next_transport_switch_failure(
+            previous, "interserver-underlay-hy2", "proof failed", "2026-09-05T12:31:00+00:00",
+        )
+        other = server_agent.next_transport_switch_failure(
+            previous, "interserver-underlay-wg", "proof failed", "2026-09-05T12:01:00+00:00",
+        )
+        self.assertEqual(recent["attempts"], 2)
+        self.assertEqual(stale["attempts"], 1)
+        self.assertEqual(other["attempts"], 1)
+        trace, _select, _proof = self.run_transport_cycles([1860], previous=previous)
+        self.assertNotIn("last_switch_failure", trace[0])
 
     def test_overlay_proof_waits_for_exact_dns_dataplane_convergence(self) -> None:
         env = {"WG_INTERFACE": "wg0", "WG_FOREIGN_ADDRESS": "10.74.0.2/24"}
