@@ -707,6 +707,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("systemd-run --quiet --wait --collect", install_command)
         self.assertIn("StandardOutput=append:/var/log/vpn-stack/install.log", install_command)
         self.assertIn("chmod 0600 ./deployment.env", install_command)
+        self.assertIn("test -f ./expected-manifest.json", install_command)
         self.assertIn("--node gateway", install_command)
 
     def test_install_remote_node_defers_cleanup_after_any_install_error(self) -> None:
@@ -1156,7 +1157,7 @@ class WorkflowTests(unittest.TestCase):
         def remember(target: RemoteTarget, *_args, **_kwargs):
             order.append(target.node_id)
 
-        with patch("vpn_installer.workflows.render_all_artifacts"), patch("vpn_installer.workflows.install_remote_node_with_recovery", side_effect=remember), patch("vpn_installer.workflows.wait_for_ru_transport_ready") as ready, patch("vpn_installer.workflows.verify_postcutover"):
+        with patch("vpn_installer.workflows.render_all_artifacts") as render_all, patch("vpn_installer.workflows.install_remote_node_with_recovery", side_effect=remember), patch("vpn_installer.workflows.wait_for_ru_transport_ready") as ready, patch("vpn_installer.workflows.verify_postcutover"):
             workflows.run_selected_remote_action(
                 "install",
                 "demo",
@@ -1164,9 +1165,12 @@ class WorkflowTests(unittest.TestCase):
                 env,
                 [ru, foreign],
                 node_arg="all",
-                preflights={NODE_GATEWAY: {"installed": "1"}, NODE_EXIT: {"installed": "1"}},
+                preflights={NODE_GATEWAY: supported_host_preflight(installed="1", os_version="22.04"), NODE_EXIT: supported_host_preflight(installed="1", os_id="debian", os_version="13")},
             )
         self.assertEqual(order, [NODE_EXIT, NODE_GATEWAY])
+        platforms = render_all.call_args.kwargs["node_platforms"]
+        self.assertEqual(platforms[NODE_GATEWAY].os_version, "22.04")
+        self.assertEqual(platforms[NODE_EXIT].os_id, "debian")
         self.assertEqual(ready.call_args_list, [call(ru), call(ru)])
 
     def test_settle_transport_after_install_is_not_applicable_to_single_topology(self) -> None:
@@ -1181,6 +1185,19 @@ class WorkflowTests(unittest.TestCase):
             )
         ready.assert_not_called()
 
+    def test_install_with_missing_target_facts_fails_before_render_or_upload(self) -> None:
+        env = generate_default_env("demo", topology="single", gateway_location="foreign")
+        env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
+        target = RemoteTarget(node_id=NODE_GATEWAY)
+        with (
+            patch("vpn_installer.workflows.render_all_artifacts") as render_all,
+            patch("vpn_installer.workflows.install_remote_node_with_recovery") as install,
+        ):
+            with self.assertRaisesRegex(AppError, "unsupported server platform"):
+                workflows.run_selected_remote_action("reinstall", "demo", Path("demo.env"), env, [target])
+        render_all.assert_not_called()
+        install.assert_not_called()
+
     def test_run_selected_remote_action_install_recovers_after_disconnect(self) -> None:
         env = generate_default_env("demo")
         env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
@@ -1193,7 +1210,7 @@ class WorkflowTests(unittest.TestCase):
             "current_target": "/etc/vpn-stack/releases/release-1", "current_node_id": "exit",
         }
         with patch("vpn_installer.workflows.render_all_artifacts"), patch("vpn_installer.workflows.install_remote_node", side_effect=AppError("Socket exception: An existing connection was forcibly closed by the remote host (10054)")), patch("vpn_installer.workflows.wait_for_remote_install_completion", return_value=recovered) as wait_mock, patch("vpn_installer.workflows.remote_install_transaction_state", return_value=transaction_state("old-release", node_id="exit")), patch("vpn_installer.workflows.expected_release_id_for_node", return_value="release-1"), patch("vpn_installer.workflows.warn") as warn_mock, patch("vpn_installer.workflows.verify_postcutover"):
-            workflows.run_selected_remote_action("reinstall", "demo", Path("deployments/demo.env"), env, [foreign], node_arg=NODE_EXIT)
+            workflows.run_selected_remote_action("reinstall", "demo", Path("deployments/demo.env"), env, [foreign], node_arg=NODE_EXIT, preflights={NODE_EXIT: supported_host_preflight()})
         wait_mock.assert_called_once()
         warn_mock.assert_called()
 
@@ -1210,7 +1227,7 @@ class WorkflowTests(unittest.TestCase):
         }
         with patch("vpn_installer.workflows.render_all_artifacts"), patch("vpn_installer.workflows.install_remote_node", side_effect=AppError("connection reset by peer")), patch("vpn_installer.workflows.wait_for_remote_install_completion", return_value=recovered), patch("vpn_installer.workflows.remote_install_transaction_state", return_value=transaction_state("old-release", node_id="exit")), patch("vpn_installer.workflows.expected_release_id_for_node", return_value="new-release"):
             with self.assertRaisesRegex(AppError, "установка не подтверждена"):
-                workflows.run_selected_remote_action("reinstall", "demo", Path("deployments/demo.env"), env, [foreign], node_arg=NODE_EXIT)
+                workflows.run_selected_remote_action("reinstall", "demo", Path("deployments/demo.env"), env, [foreign], node_arg=NODE_EXIT, preflights={NODE_EXIT: supported_host_preflight()})
 
     def test_run_selected_remote_action_reconciles_exit_137_and_rolls_back_cutover(self) -> None:
         env = generate_default_env("demo")
@@ -1233,7 +1250,7 @@ class WorkflowTests(unittest.TestCase):
             patch("vpn_installer.workflows.verify_postcutover"),
         ):
             with self.assertRaisesRegex(AppError, "автоматически возвращены"):
-                workflows.run_selected_remote_action("reinstall", "demo", Path("deployments/demo.env"), env, [foreign], node_arg=NODE_EXIT)
+                workflows.run_selected_remote_action("reinstall", "demo", Path("deployments/demo.env"), env, [foreign], node_arg=NODE_EXIT, preflights={NODE_EXIT: supported_host_preflight()})
         self.assertEqual(install.call_count, 2)
         self.assertEqual(install.call_args_list[-1].args[-1], "rollback")
 
@@ -1250,7 +1267,7 @@ class WorkflowTests(unittest.TestCase):
         }
         with patch("vpn_installer.workflows.render_all_artifacts"), patch("vpn_installer.workflows.install_remote_node", side_effect=AppError("permission denied")) as install, patch("vpn_installer.workflows.wait_for_remote_install_completion", return_value=recovered) as wait_mock, patch("vpn_installer.workflows.remote_install_transaction_state", return_value=transaction_state("old-release", node_id="exit")), patch("vpn_installer.workflows.expected_release_id_for_node", return_value="new-release"):
             with self.assertRaises(AppError):
-                workflows.run_selected_remote_action("reinstall", "demo", Path("deployments/demo.env"), env, [foreign], node_arg=NODE_EXIT)
+                workflows.run_selected_remote_action("reinstall", "demo", Path("deployments/demo.env"), env, [foreign], node_arg=NODE_EXIT, preflights={NODE_EXIT: supported_host_preflight()})
         wait_mock.assert_called_once()
         install.assert_called_once()
 
@@ -1290,9 +1307,11 @@ class WorkflowTests(unittest.TestCase):
         env["EXIT_PUBLIC_IP"] = "198.51.100.20"
         ru = RemoteTarget(node_id=NODE_GATEWAY)
         foreign = RemoteTarget(node_id=NODE_EXIT)
-        with patch("vpn_installer.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), env, {}, [ru, foreign], {NODE_EXIT: {"default_iface": "eth1"}, NODE_GATEWAY: {}})), patch("vpn_installer.workflows.ensure_foreign_wan_interface"), patch("vpn_installer.workflows.write_private_text"), patch("vpn_installer.workflows.write_state"), patch("vpn_installer.workflows.print_summary"), patch("vpn_installer.workflows.ask_install_action", side_effect=["skip", "install"]), patch("vpn_installer.workflows.prompt_yes_no", return_value=True), patch("vpn_installer.workflows.render_all_artifacts") as render_all, patch("vpn_installer.workflows.install_remote_node_with_recovery") as install_remote, patch("vpn_installer.workflows.verify_postcutover") as verify_postcutover, patch("vpn_installer.workflows.finalize_install_output") as finalize:
+        with patch("vpn_installer.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), env, {}, [ru, foreign], {NODE_EXIT: supported_host_preflight(default_iface="eth1", os_id="debian", os_version="13"), NODE_GATEWAY: {}})), patch("vpn_installer.workflows.ensure_foreign_wan_interface"), patch("vpn_installer.workflows.write_private_text"), patch("vpn_installer.workflows.write_state"), patch("vpn_installer.workflows.print_summary"), patch("vpn_installer.workflows.ask_install_action", side_effect=["skip", "install"]), patch("vpn_installer.workflows.prompt_yes_no", return_value=True), patch("vpn_installer.workflows.render_all_artifacts") as render_all, patch("vpn_installer.workflows.install_remote_node_with_recovery") as install_remote, patch("vpn_installer.workflows.verify_postcutover") as verify_postcutover, patch("vpn_installer.workflows.finalize_install_output") as finalize:
             self.assertEqual(workflows.install_workflow("demo"), 0)
         render_all.assert_called_once()
+        self.assertEqual(set(render_all.call_args.kwargs["node_platforms"]), {NODE_EXIT})
+        self.assertEqual(render_all.call_args.kwargs["node_platforms"][NODE_EXIT].os_id, "debian")
         install_remote.assert_called_once()
         verify_postcutover.assert_called_once_with("demo")
         finalize.assert_called_once_with(env, "demo")
@@ -1310,7 +1329,7 @@ class WorkflowTests(unittest.TestCase):
                     env,
                     {},
                     [gateway],
-                    {NODE_GATEWAY: {"installed": "0"}},
+                    {NODE_GATEWAY: supported_host_preflight(installed="0")},
                 ),
             ) as prepare,
             patch("vpn_installer.workflows.ensure_foreign_wan_interface") as ensure_wan,
@@ -1350,7 +1369,7 @@ class WorkflowTests(unittest.TestCase):
             calls.append((target.node_id, action))
 
         with (
-            patch("vpn_installer.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), env, {}, [ru, foreign], {NODE_EXIT: {"default_iface": "eth1", "installed": "1"}, NODE_GATEWAY: {"installed": "1"}})),
+            patch("vpn_installer.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), env, {}, [ru, foreign], {NODE_EXIT: supported_host_preflight(default_iface="eth1", installed="1"), NODE_GATEWAY: supported_host_preflight(installed="1")})),
             patch("vpn_installer.workflows.ensure_foreign_wan_interface"),
             patch("vpn_installer.workflows.write_private_text"),
             patch("vpn_installer.workflows.write_state"),
@@ -1445,9 +1464,9 @@ class WorkflowTests(unittest.TestCase):
             events.append("verify")
 
         with (
-            patch("vpn_installer.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), env, {}, [ru, foreign], {})),
-            patch("vpn_installer.workflows.render_config_artifacts"),
-            patch("vpn_installer.workflows.package_bundle"),
+            patch("vpn_installer.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), env, {}, [ru, foreign], {NODE_GATEWAY: supported_host_preflight(os_version="22.04"), NODE_EXIT: supported_host_preflight(os_id="debian", os_version="13")})),
+            patch("vpn_installer.workflows.render_config_artifacts") as render_config,
+            patch("vpn_installer.workflows.package_bundle") as package,
             patch("vpn_installer.workflows.install_remote_node_with_recovery", side_effect=install),
             patch("vpn_installer.workflows.ssh_stream", side_effect=update),
             patch("vpn_installer.workflows.remote_agent_snapshot", return_value=snapshot),
@@ -1477,6 +1496,10 @@ class WorkflowTests(unittest.TestCase):
             ],
         )
         self.assertEqual(verify_vless.call_count, 4)
+        platforms = render_config.call_args.kwargs["node_platforms"]
+        self.assertEqual(platforms[NODE_GATEWAY].os_version, "22.04")
+        self.assertEqual(platforms[NODE_EXIT].os_id, "debian")
+        self.assertEqual(package.call_args.kwargs["node_platforms"], platforms)
 
     def test_remote_action_workflow_stops_on_user_decline(self) -> None:
         env = generate_default_env("demo")

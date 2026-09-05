@@ -5,12 +5,14 @@ import base64
 import hashlib
 import json
 import os
+import queue
 import shlex
 import socket
 import sys
 import tempfile
 import threading
 import time
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +37,123 @@ SSH_CONNECT_RETRY_DELAY = 1.0
 _PARAMIKO_LOGGER_CONFIGURED = False
 _KNOWN_HOSTS_LOCK = threading.Lock()
 KNOWN_HOSTS_PATH = STATE_DIR / "known_hosts"
+
+
+class _SSHDeadlineExceeded(AppError):
+    pass
+
+
+class _SSHDeadline:
+    """One budget for connect retries, request acknowledgements and transfer I/O."""
+
+    def __init__(self, target: RemoteTarget, seconds: float):
+        self.target = target
+        self.seconds = seconds
+        self.end = time.monotonic() + seconds if seconds > 0 else None
+        self.phase = "connect/auth"
+        self.client: Any = None
+        self.socket: socket.socket | None = None
+        self.expired = threading.Event()
+        self.cleanup_requests: queue.Queue = queue.Queue()
+        self.cleanup_error: Exception | None = None
+        self.worker = threading.Thread(target=self._watch, name="vpn-ssh-deadline", daemon=True)
+
+    def remaining(self, cap: float | None = None) -> float | None:
+        remaining = self.end - time.monotonic() if self.end is not None else None
+        if self.expired.is_set() or (remaining is not None and remaining <= 0):
+            cleanup = f" Cleanup: {self.cleanup_error}" if self.cleanup_error else ""
+            raise _SSHDeadlineExceeded(
+                f"SSH-операция не завершилась за {self.seconds:g} сек. на {self.target.label} "
+                f"(этап: {self.phase}).{cleanup}"
+            )
+        return min(remaining, cap) if remaining is not None and cap is not None else (remaining if remaining is not None else cap)
+
+    def pause(self, seconds: float) -> None:
+        self.expired.wait(self.remaining(seconds))
+        self.remaining()
+
+    def _expire(self) -> None:
+        self.expired.set()
+        self._abort(self.client, self.socket)
+
+    @staticmethod
+    def _abort(client: Any, sock: socket.socket | None) -> None:
+        # Channel request ACK waits ignore settimeout(). Abort the underlying
+        # transport without attempting another channel request (close/EOF).
+        if sock is not None:
+            with suppress(OSError):
+                sock.shutdown(socket.SHUT_RDWR)
+            with suppress(OSError):
+                sock.close()
+        if client is not None:
+            with suppress(Exception):
+                transport = client.get_transport()
+                if transport is not None:
+                    with suppress(OSError):
+                        transport.sock.shutdown(socket.SHUT_RDWR)
+                    with suppress(OSError):
+                        transport.sock.close()
+                    transport.close()
+
+    def _watch(self) -> None:
+        while True:
+            wait = max(0.0, self.end - time.monotonic()) if self.end is not None and not self.expired.is_set() else None
+            try:
+                client, sock, done, final = self.cleanup_requests.get(timeout=wait)
+            except queue.Empty:
+                self._expire()
+                continue
+            try:
+                if not final:
+                    self._abort(client, sock)
+                if client is not None:
+                    client.close()
+            except Exception as error:
+                self.cleanup_error = error
+            finally:
+                if sock is not None:
+                    with suppress(OSError):
+                        sock.close()
+                done.set()
+            if final:
+                return
+
+    def _request_cleanup(self, *, final: bool) -> threading.Event:
+        done = threading.Event()
+        # The queue owns the failed attempt until it is closed. Clearing these
+        # references cannot lose resources or make a later attempt close twice.
+        request = (self.client, self.socket, done, final)
+        self.client = None
+        self.socket = None
+        self.cleanup_requests.put(request)
+        return done
+
+    def close_attempt(self) -> None:
+        done = self._request_cleanup(final=False)
+        if not done.wait(self.remaining(SSH_COMMAND_TIMEOUT_GRACE)):
+            self.cleanup_error = AppError("SSH cleanup did not finish; local resources may remain open.")
+        self.remaining()
+        if self.cleanup_error is not None:
+            raise AppError(f"SSH cleanup failed: {self.cleanup_error}") from self.cleanup_error
+
+    def __enter__(self) -> "_SSHDeadline":
+        self.worker.start()
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        self._request_cleanup(final=True)
+        # Cleanup may itself encounter a stuck agent/OS handle. Never wait on it
+        # indefinitely or claim that such a handle was successfully released.
+        self.worker.join(timeout=SSH_COMMAND_TIMEOUT_GRACE)
+        if self.worker.is_alive():
+            self.cleanup_error = AppError("SSH cleanup did not finish; local resources may remain open.")
+        if exc is None or isinstance(exc, Exception):
+            self.remaining()
+        if self.cleanup_error is not None:
+            if exc is None:
+                raise AppError(f"SSH cleanup failed: {self.cleanup_error}") from self.cleanup_error
+            if hasattr(exc, "add_note"):
+                exc.add_note(f"SSH cleanup failed: {self.cleanup_error}")
 
 
 def ensure_known_hosts_file() -> Path:
@@ -258,7 +377,7 @@ def build_remote_command(
     return shell_command, input_text
 
 
-def open_bound_ssh_socket(target: RemoteTarget) -> socket.socket:
+def open_bound_ssh_socket(target: RemoteTarget, *, deadline: _SSHDeadline | None = None) -> socket.socket:
     """Open an explicitly bound SSH transport without changing the client route table."""
     try:
         source_info = socket.getaddrinfo(target.ssh_bind_address, 0, type=socket.SOCK_STREAM)[0]
@@ -267,14 +386,25 @@ def open_bound_ssh_socket(target: RemoteTarget) -> socket.socket:
     except OSError as exc:
         raise AppError(f"Не удалось подготовить SSH bind {target.ssh_bind_address} для {target.label}: {exc}") from exc
     sock = socket.socket(family, socket.SOCK_STREAM)
+    acquired = False
     try:
-        sock.settimeout(SSH_CONNECT_TIMEOUT)
+        if deadline is not None:
+            deadline.socket = sock
+        sock.settimeout(deadline.remaining(SSH_CONNECT_TIMEOUT) if deadline else SSH_CONNECT_TIMEOUT)
         sock.bind(source_info[4])
         sock.connect(destination)
+        if deadline is not None:
+            deadline.remaining()
+        acquired = True
         return sock
     except OSError as exc:
-        sock.close()
         raise AppError(f"Прямой SSH через {target.ssh_bind_address} к {target.label} недоступен: {exc}") from exc
+    finally:
+        if not acquired:
+            with suppress(OSError):
+                sock.close()
+            if deadline is not None and deadline.socket is sock:
+                deadline.socket = None
 
 
 def open_ssh_socket(target: RemoteTarget) -> socket.socket:
@@ -286,7 +416,7 @@ def open_ssh_socket(target: RemoteTarget) -> socket.socket:
         raise AppError(f"Прямой SSH к {target.label} недоступен: {exc}") from exc
 
 
-def paramiko_connect(target: RemoteTarget):
+def paramiko_connect(target: RemoteTarget, *, deadline: _SSHDeadline | None = None):
     paramiko = ensure_paramiko_installed()
     configure_paramiko_logging()
     connect_kwargs: dict[str, Any] = {
@@ -312,25 +442,38 @@ def paramiko_connect(target: RemoteTarget):
     last_exc: Exception | None = None
     attempts = max(SSH_PASSWORD_AUTH_RETRIES if target.auth_mode == "password" else 1, SSH_BANNER_RETRIES)
     for attempt in range(1, attempts + 1):
+        if deadline is not None:
+            deadline.remaining()
         client = paramiko.SSHClient()
         alias = host_key_alias(target)
         load_trusted_host_keys(client, alias)
         client.set_missing_host_key_policy(paramiko.RejectPolicy())
         bound_socket: socket.socket | None = None
         try:
+            if deadline is not None:
+                deadline.client = client
             attempt_kwargs = connect_kwargs.copy()
             disabled_algorithms = known_host_disabled_algorithms(paramiko, client, alias)
             if disabled_algorithms:
                 attempt_kwargs["disabled_algorithms"] = disabled_algorithms
             if target.ssh_bind_address:
-                bound_socket = open_bound_ssh_socket(target)
+                bound_socket = open_bound_ssh_socket(target, deadline=deadline) if deadline else open_bound_ssh_socket(target)
                 attempt_kwargs["sock"] = bound_socket
+            if deadline is not None:
+                for key in ("timeout", "banner_timeout", "auth_timeout"):
+                    attempt_kwargs[key] = deadline.remaining(connect_kwargs[key])
+                attempt_kwargs["channel_timeout"] = deadline.remaining(SSH_CONNECT_TIMEOUT)
             client.connect(**attempt_kwargs)
+            if deadline is not None:
+                deadline.remaining()
             return client
         except Exception as exc:  # noqa: BLE001
-            client.close()
-            if bound_socket is not None:
-                bound_socket.close()
+            if deadline is not None:
+                deadline.close_attempt()
+            else:
+                with _SSHDeadline(target, SSH_COMMAND_TIMEOUT_GRACE) as cleanup:
+                    cleanup.client = client
+                    cleanup.socket = bound_socket
             last_exc = exc
             retryable_auth_timeout = (
                 target.auth_mode == "password"
@@ -339,12 +482,12 @@ def paramiko_connect(target: RemoteTarget):
                 and attempt < attempts
             )
             if retryable_auth_timeout:
-                time.sleep(SSH_PASSWORD_AUTH_RETRY_DELAY * attempt)
+                (deadline.pause if deadline else time.sleep)(SSH_PASSWORD_AUTH_RETRY_DELAY * attempt)
                 continue
             error_text = str(exc).lower()
             banner_timeout = "error reading ssh protocol banner" in error_text
             if banner_timeout and attempt < attempts:
-                time.sleep(SSH_BANNER_RETRY_DELAY * attempt)
+                (deadline.pause if deadline else time.sleep)(SSH_BANNER_RETRY_DELAY * attempt)
                 continue
             if banner_timeout:
                 raise AppError(
@@ -358,7 +501,7 @@ def paramiko_connect(target: RemoteTarget):
                 ) from exc
             connect_timeout = isinstance(exc, TimeoutError) or "timed out" in error_text or "timeout" in error_text
             if connect_timeout and attempt < attempts:
-                time.sleep(SSH_CONNECT_RETRY_DELAY * attempt)
+                (deadline.pause if deadline else time.sleep)(SSH_CONNECT_RETRY_DELAY * attempt)
                 continue
             if connect_timeout:
                 raise AppError(
@@ -367,10 +510,69 @@ def paramiko_connect(target: RemoteTarget):
                 ) from exc
             connection_reset = "forcibly closed" in error_text or "connection reset" in error_text
             if connection_reset and attempt < attempts:
-                time.sleep(SSH_BANNER_RETRY_DELAY * attempt)
+                (deadline.pause if deadline else time.sleep)(SSH_BANNER_RETRY_DELAY * attempt)
                 continue
             raise AppError(f"SSH connection failed для {target.ssh_user}@{target.ssh_host}:{target.ssh_port}: {exc}") from exc
     raise AppError(f"SSH connection failed для {target.ssh_user}@{target.ssh_host}:{target.ssh_port}: {last_exc}")
+
+
+def _paramiko_command(
+    target: RemoteTarget,
+    remote_command: str,
+    *,
+    input_text: str | None = None,
+    command_timeout: int = SSH_COMMAND_TIMEOUT,
+    get_pty: bool = False,
+    stream: bool = False,
+) -> tuple[int, str, str]:
+    out_chunks: list[bytes] = []
+    err_chunks: list[bytes] = []
+    captured_bytes = 0
+    try:
+        with _SSHDeadline(target, command_timeout) as deadline:
+            client = paramiko_connect(target, deadline=deadline)
+            deadline.client = client
+            deadline.phase = "channel/exec"
+            stdin, stdout, _stderr = client.exec_command(remote_command, get_pty=get_pty, timeout=deadline.remaining())
+            channel = stdout.channel
+            deadline.phase = "stdin"
+            channel.settimeout(deadline.remaining())
+            if input_text:
+                stdin.write(input_text)
+                stdin.flush()
+                with suppress(Exception):
+                    stdin.channel.shutdown_write()
+            deadline.phase = "output/exit"
+            while True:
+                deadline.remaining()
+                for ready, receive, chunks, is_stderr in (
+                    (channel.recv_ready, channel.recv, out_chunks, False),
+                    (channel.recv_stderr_ready, channel.recv_stderr, err_chunks, True),
+                ):
+                    if ready():
+                        chunk = receive(4096)
+                        chunks.append(chunk)
+                        if stream:
+                            chunks[:] = chunks[-20:]
+                            if not is_stderr and chunk:
+                                sys.stdout.write(chunk.decode("utf-8", errors="replace"))
+                                sys.stdout.flush()
+                        else:
+                            captured_bytes += len(chunk)
+                            if captured_bytes > SSH_CAPTURE_MAX_BYTES:
+                                raise AppError(
+                                    f"Удалённая команда на {target.label} превысила лимит вывода "
+                                    f"{SSH_CAPTURE_MAX_BYTES} байт."
+                                )
+                if channel.exit_status_ready() and not channel.recv_ready() and not channel.recv_stderr_ready():
+                    break
+                deadline.pause(0.05)
+            exit_status = channel.recv_exit_status()
+    except _SSHDeadlineExceeded as exc:
+        detail = b"".join(err_chunks or out_chunks).decode("utf-8", errors="replace").strip()
+        suffix = f"\nPartial remote output:\n{detail[-4000:]}" if detail else ""
+        raise AppError(f"{exc}{suffix}") from exc
+    return exit_status, b"".join(out_chunks).decode("utf-8", errors="replace"), b"".join(err_chunks).decode("utf-8", errors="replace")
 
 
 def paramiko_exec(
@@ -381,57 +583,7 @@ def paramiko_exec(
     command_timeout: int = SSH_COMMAND_TIMEOUT,
     get_pty: bool = False,
 ) -> tuple[int, str, str]:
-    client = paramiko_connect(target)
-    try:
-        stdin, stdout, stderr = client.exec_command(remote_command, get_pty=get_pty)
-        if input_text:
-            stdin.write(input_text)
-            stdin.flush()
-            try:
-                stdin.channel.shutdown_write()
-            except Exception:  # noqa: BLE001
-                pass
-        channel = stdout.channel
-        out_chunks: list[bytes] = []
-        err_chunks: list[bytes] = []
-        captured_bytes = 0
-        started_at = time.monotonic()
-        while True:
-            if channel.recv_ready():
-                chunk = channel.recv(4096)
-                out_chunks.append(chunk)
-                captured_bytes += len(chunk)
-            if channel.recv_stderr_ready():
-                chunk = channel.recv_stderr(4096)
-                err_chunks.append(chunk)
-                captured_bytes += len(chunk)
-            if captured_bytes > SSH_CAPTURE_MAX_BYTES:
-                channel.close()
-                raise AppError(
-                    f"Удалённая команда на {target.label} превысила лимит вывода "
-                    f"{SSH_CAPTURE_MAX_BYTES} байт."
-                )
-            if channel.exit_status_ready() and not channel.recv_ready() and not channel.recv_stderr_ready():
-                break
-            if command_timeout > 0 and time.monotonic() - started_at > command_timeout:
-                try:
-                    channel.close()
-                except Exception:  # noqa: BLE001
-                    pass
-                partial_stdout = b"".join(out_chunks).decode("utf-8", errors="replace")
-                partial_stderr = b"".join(err_chunks).decode("utf-8", errors="replace")
-                detail = partial_stderr.strip() or partial_stdout.strip()
-                if detail:
-                    detail = f"\nPartial remote output:\n{detail[-4000:]}"
-                raise AppError(
-                    f"Удалённая команда не завершилась за {command_timeout} сек. на {target.label}."
-                    f"{detail}"
-                )
-            time.sleep(0.05)
-        exit_status = channel.recv_exit_status()
-        return exit_status, b"".join(out_chunks).decode("utf-8", errors="replace"), b"".join(err_chunks).decode("utf-8", errors="replace")
-    finally:
-        client.close()
+    return _paramiko_command(target, remote_command, input_text=input_text, command_timeout=command_timeout, get_pty=get_pty)
 
 
 def paramiko_stream(
@@ -442,70 +594,34 @@ def paramiko_stream(
     command_timeout: int = SSH_COMMAND_TIMEOUT,
     get_pty: bool = False,
 ) -> int:
-    client = paramiko_connect(target)
-    try:
-        stdin, stdout, stderr = client.exec_command(remote_command, get_pty=get_pty)
-        if input_text:
-            stdin.write(input_text)
-            stdin.flush()
-            try:
-                stdin.channel.shutdown_write()
-            except Exception:  # noqa: BLE001
-                pass
-        channel = stdout.channel
-        out_tail: list[str] = []
-        err_tail: list[str] = []
-        started_at = time.monotonic()
-        while True:
-            if channel.recv_ready():
-                text = channel.recv(4096).decode("utf-8", errors="replace")
-                if text:
-                    sys.stdout.write(text)
-                    sys.stdout.flush()
-                    out_tail.append(text)
-                    out_tail[:] = out_tail[-20:]
-            if channel.recv_stderr_ready():
-                text = channel.recv_stderr(4096).decode("utf-8", errors="replace")
-                if text:
-                    err_tail.append(text)
-                    err_tail[:] = err_tail[-20:]
-            if channel.exit_status_ready() and not channel.recv_ready() and not channel.recv_stderr_ready():
-                break
-            if command_timeout > 0 and time.monotonic() - started_at > command_timeout:
-                try:
-                    channel.close()
-                except Exception:  # noqa: BLE001
-                    pass
-                detail = "".join(err_tail).strip() or "".join(out_tail).strip()
-                if detail:
-                    detail = f"\nPartial remote output:\n{detail[-4000:]}"
-                raise AppError(
-                    f"Удалённая команда не завершилась за {command_timeout} сек. на {target.label}."
-                    f"{detail}"
-                )
-            time.sleep(0.05)
-        exit_status = channel.recv_exit_status()
-        if exit_status != 0:
-            detail = "".join(err_tail).strip() or "".join(out_tail).strip()
-            raise AppError(f"Удалённая команда завершилась с ошибкой на {target.label}.\n{detail or exit_status}")
-        return exit_status
-    finally:
-        client.close()
+    exit_status, stdout, stderr = _paramiko_command(
+        target, remote_command, input_text=input_text, command_timeout=command_timeout, get_pty=get_pty, stream=True,
+    )
+    if exit_status != 0:
+        raise AppError(f"Удалённая команда завершилась с ошибкой на {target.label}.\n{stderr.strip() or stdout.strip() or exit_status}")
+    return exit_status
 
 
 def paramiko_upload(target: RemoteTarget, local_path: Path, remote_path: str) -> None:
-    client = paramiko_connect(target)
     try:
-        sftp = client.open_sftp()
-        try:
-            sftp.get_channel().settimeout(SSH_UPLOAD_TIMEOUT)
-            sftp.put(str(local_path), remote_path)
-        finally:
-            sftp.close()
+        with _SSHDeadline(target, SSH_UPLOAD_TIMEOUT) as deadline:
+            client = paramiko_connect(target, deadline=deadline)
+            deadline.client = client
+            deadline.phase = "SFTP setup"
+            deadline.remaining()
+            sftp = client.open_sftp()
+            try:
+                sftp.get_channel().settimeout(deadline.remaining())
+                deadline.phase = "SFTP put/confirm"
+                sftp.put(str(local_path), remote_path)
+            except BaseException:
+                with suppress(Exception):
+                    sftp.close()
+                raise
+            else:
+                sftp.close()
     except Exception as exc:  # noqa: BLE001
         raise AppError(f"Не удалось загрузить {local_path} на {target.label}: {exc}") from exc
-    finally:
-        client.close()
 
 
 def raise_for_system_ssh_failure(

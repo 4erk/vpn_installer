@@ -16,6 +16,9 @@ from vpn_installer.config import generate_default_env
 from vpn_installer import render
 from vpn_installer.client_artifacts import PUBLIC_VLESS_OUTBOUND_TAG
 from vpn_installer.common import cli_command
+from vpn_installer.platforms import HostFacts, resolve_platform
+from vpn_installer.workflows import expected_release_id_for_node
+from vpn_installer.models import AppError
 import json
 
 
@@ -1059,6 +1062,46 @@ class RenderTests(unittest.TestCase):
                 with tarfile.open(bundle_dir / "gateway.tar.gz", "r:gz") as archive:
                     self.assertEqual(archive.getmember("deployment.env").mode & 0o777, 0o600)
                     self.assertEqual(archive.getmember("install.sh").mode & 0o777, 0o700)
+                    self.assertNotIn("expected-manifest.json", archive.getnames())
+
+    def test_mixed_platform_previews_bind_the_exact_upload_archives(self) -> None:
+        env = self.make_env()
+        platforms = {
+            "gateway": resolve_platform(HostFacts("ubuntu", "22.04", "amd64", init_system="systemd")),
+            "exit": resolve_platform(HostFacts("rocky", "9.5", "x86_64", init_system="systemd")),
+        }
+        with tempfile.TemporaryDirectory() as tmp, patch.object(render, "OUT_DIR", Path(tmp)):
+            root = render.render_config_artifacts(Path("demo.env"), env, fetch_assets_first=False, node_platforms=platforms)
+            bundles = render.package_bundle(env, node_platforms=platforms)
+            for node_id, platform in platforms.items():
+                manifest_path = root / "preview" / node_id / "render-manifest.json"
+                expected = json.loads(manifest_path.read_text(encoding="utf-8"))
+                self.assertEqual(expected["platform"], platform.to_dict())
+                self.assertEqual(expected["install_plan"]["platform"], platform.to_dict())
+                with tarfile.open(bundles / f"{node_id}.tar.gz", "r:gz") as archive:
+                    self.assertEqual(json.load(archive.extractfile("expected-manifest.json")), expected)
+                manifest_path.write_text('{"release_id":"stale-preview"}', encoding="utf-8")
+                self.assertEqual(expected_release_id_for_node(env, node_id), expected["release_id"])
+
+    def test_partial_platform_binding_does_not_bind_unselected_node(self) -> None:
+        env = self.make_env()
+        platforms = {"exit": resolve_platform(HostFacts("debian", "13", "x86_64", init_system="systemd"))}
+        with tempfile.TemporaryDirectory() as tmp, patch.object(render, "OUT_DIR", Path(tmp)):
+            render.render_config_artifacts(Path("demo.env"), env, fetch_assets_first=False, node_platforms=platforms)
+            bundles = render.package_bundle(env, node_platforms=platforms)
+            with tarfile.open(bundles / "gateway.tar.gz", "r:gz") as archive:
+                self.assertNotIn("expected-manifest.json", archive.getnames())
+            with self.assertRaises(AppError):
+                expected_release_id_for_node(env, "gateway")
+            self.assertTrue(expected_release_id_for_node(env, "exit"))
+
+    def test_target_bound_packaging_rejects_stale_preview_platform(self) -> None:
+        env = self.make_env()
+        platforms = {"gateway": resolve_platform(HostFacts("debian", "13", "x86_64", init_system="systemd"))}
+        with tempfile.TemporaryDirectory() as tmp, patch.object(render, "OUT_DIR", Path(tmp)):
+            render.render_config_artifacts(Path("demo.env"), env, fetch_assets_first=False)
+            with self.assertRaisesRegex(ValueError, "preview manifest does not match"):
+                render.package_bundle(env, node_platforms=platforms)
 
     def test_single_artifact_tree_contains_only_gateway_node_and_minimal_env(self) -> None:
         env = self.make_single_env("foreign")

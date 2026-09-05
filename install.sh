@@ -184,6 +184,9 @@ render_node_bundle() {
   if [[ "${RENDER_ONLY}" != "1" ]]; then
     args+=(--current-platform)
   fi
+  if [[ -e "${SCRIPT_DIR}/expected-manifest.json" || -L "${SCRIPT_DIR}/expected-manifest.json" ]]; then
+    args+=(--expected-manifest "${SCRIPT_DIR}/expected-manifest.json")
+  fi
   if [[ -n "${ASSETS_DIR}" ]]; then
     args+=(--assets-dir "${ASSETS_DIR}")
   fi

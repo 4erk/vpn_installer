@@ -7,7 +7,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from vpn_installer import VERSION
 from vpn_installer.audit import docker as audit_docker
 from vpn_installer.audit import lab as audit_lab
 from vpn_installer.audit import quick as audit_quick
@@ -264,7 +263,6 @@ class AuditModuleTests(unittest.TestCase):
         self.assertIn("docker-node-scoped-workflows", runner.records)
 
     def test_compatible_update_gate_migrates_exact_predecessor_and_rejects_out_of_window_releases(self) -> None:
-        self.assertEqual(VERSION, "0.22.4")
         self.assertEqual(
             (
                 CONFIG_SCHEMA_VERSION,

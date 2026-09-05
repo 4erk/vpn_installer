@@ -4,6 +4,7 @@ import argparse
 import json
 import shlex
 import shutil
+import tarfile
 import textwrap
 import time
 from pathlib import Path
@@ -32,7 +33,7 @@ from .localnet import assert_server_route_not_self_tunneled, local_route_to_serv
 from .models import AppError, NODE_META, RemoteTarget, UserCancelled
 from .manifest import project_node_env
 from .network_profile import FQ_KIND
-from .platforms import HostFacts, PlatformError, resolve_platform
+from .platforms import HostFacts, PlatformError, PlatformSpec, install_platform
 from .prompts import (
     ask_install_action,
     auth_mode_label,
@@ -144,19 +145,20 @@ def print_step(step: int, total: int, message: str) -> None:
     print(f"[{step}/{total}] {message}")
 
 
-def validate_server_platform(target: RemoteTarget, preflight: dict[str, str]) -> None:
+def validate_server_platform(target: RemoteTarget, preflight: dict[str, str]) -> PlatformSpec:
     try:
-        platform = resolve_platform(HostFacts.from_mapping(preflight))
+        platform = install_platform(HostFacts.from_mapping(preflight))
     except PlatformError as exc:
         raise AppError(f"{target.label}: {exc}") from exc
     preflight["platform_family"] = platform.family
     preflight["package_provider"] = platform.package_provider
-    if preflight.get("host_firewall") not in {"", "none"}:
-        raise AppError(
-            f"{target.label}: активен {preflight['host_firewall']}. "
-            "vpn-stack должен быть единственным владельцем ingress/forward nftables policy; "
-            "отключи сторонний firewall до установки."
-        )
+    return platform
+
+
+def node_platforms_for_targets(
+    targets: list[RemoteTarget], preflights: dict[str, dict[str, str]],
+) -> dict[str, PlatformSpec]:
+    return {target.node_id: validate_server_platform(target, preflights.get(target.node_id, {})) for target in targets}
 
 
 def verify_target_interactively(
@@ -649,6 +651,7 @@ def install_remote_node(target: RemoteTarget, deployment_name: str, env: dict[st
                 f"cd {shlex.quote(remote_root)} && "
                 "umask 077 && "
                 f"tar -xzf {shlex.quote(archive_name)} && "
+                "test -f ./expected-manifest.json && "
                 "chmod 0600 ./deployment.env && "
                 "chmod 0700 ./install.sh && "
                 f"./install.sh --node {shlex.quote(node_id)} --action {shlex.quote(action)} --env-file ./deployment.env --assets-dir ./assets"
@@ -688,13 +691,20 @@ def install_remote_node(target: RemoteTarget, deployment_name: str, env: dict[st
 
 def expected_release_id_for_node(env: dict[str, str], node_id: str) -> str:
     node_id = normalize_node_id(node_id)
-    manifest_path = deployment_out_dir(env) / "preview" / node_id / "render-manifest.json"
+    bundle_path = deployment_out_dir(env) / "bundle" / f"{node_id}.tar.gz"
     try:
-        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
+        with tarfile.open(bundle_path, "r:gz") as archive:
+            member = archive.getmember("expected-manifest.json")
+            if not member.isfile():
+                raise ValueError("expected manifest must be a regular file")
+            with archive.extractfile(member) as source:
+                payload = json.load(source)
+        if not isinstance(payload, dict) or payload.get("node_id") != node_id:
+            raise ValueError("expected manifest belongs to a different node")
+    except (OSError, ValueError, KeyError, tarfile.TarError) as exc:
         raise AppError(f"Не удалось прочитать release manifest для {node_id}: {exc}") from exc
-    release_id = str(payload.get("release_id", "")).strip()
-    if not release_id:
+    release_id = payload.get("release_id")
+    if not isinstance(release_id, str) or not release_id.strip():
         raise AppError(f"Release manifest для {node_id} не содержит release_id.")
     return release_id
 
@@ -1081,7 +1091,8 @@ def run_selected_remote_action(
         return
     if action in {"install", "reinstall"}:
         print_header("Локальная сборка артефактов")
-        render_all_artifacts(env_path, env)
+        platforms = node_platforms_for_targets([target_map[node_id] for node_id in available_nodes], preflights or {})
+        render_all_artifacts(env_path, env, node_platforms=platforms)
     changed_nodes: list[str] = []
     previous_release_ids = {
         node_id: str((preflights or {}).get(node_id, {}).get("release_id", ""))
@@ -1157,7 +1168,8 @@ def install_workflow(
     total_steps = 1 + sum(1 for action in actions.values() if action != "skip")
     step = 1
     print_step(step, total_steps, "Локальная сборка артефактов")
-    render_all_artifacts(env_path, env)
+    platforms = node_platforms_for_targets([target for target in targets if actions[target.node_id] != "skip"], preflights)
+    render_all_artifacts(env_path, env, node_platforms=platforms)
     step += 1
     previous_release_ids = {
         node_id: str(preflights.get(node_id, {}).get("release_id", ""))
@@ -1286,8 +1298,9 @@ def maintain_workflow(
 
     if refresh_assets:
         print_header("Транзакционное обновление rule assets")
-        render_config_artifacts(_env_path, env, fetch_assets_first=True)
-        package_bundle(env)
+        platforms = node_platforms_for_targets(targets, _preflights)
+        render_config_artifacts(_env_path, env, fetch_assets_first=True, node_platforms=platforms)
+        package_bundle(env, node_platforms=platforms)
         for node_id in execution_node_ids("install", topology, tuple(nodes)):
             target = target_map[node_id]
             install_remote_node_with_recovery(

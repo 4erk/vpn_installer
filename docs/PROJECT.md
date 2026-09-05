@@ -17,6 +17,8 @@ dual:   клиент -> RU gateway Xray/Reality -> sing-box routing policy
 - Web-admin существует только на публичном `gateway` в topology `dual`. Он управляет явными operator rules, показывает два скомпилированных выхода и защищён Basic Auth вместе с firewall gate для source IP, недавно достигшего публичного VPN ingress.
 - `VPN_SSH_BIND_ADDRESS` - временный control-plane input, не часть deployment env. Он привязывает SSH/SFTP к физическому локальному адресу, когда default route клиента находится в TUN, и не меняет client/server dataplane.
 
+Paramiko exec/stream и SFTP используют общий monotonic deadline, включая подключение и подтверждение channel request. Watchdog закрывает transport при истечении; cleanup имеет отдельный ограниченный grace и не выдаётся за успешный при зависании. Это ограничение управляющего I/O, не отмена автономной установки. Системный `getaddrinfo` при использовании hostname и зависший OS handle невозможно гарантированно прервать закрытием SSH-сокета; универсальная жёсткая граница для этих внешних вызовов не заявляется.
+
 Узлы:
 
 - `gateway`: публичный Xray front, sing-box router и локальный egress; в `dual` дополнительно получает interserver client и web-admin capabilities. Находится в России или за рубежом.
@@ -31,7 +33,7 @@ dual:   клиент -> RU gateway Xray/Reality -> sing-box routing policy
 - `HostFacts` и `PlatformSpec` являются единственным каталогом поддерживаемых серверных платформ. Логические package requirements преобразуются в имена пакетов только выбранным package provider.
 - `/etc/vpn-stack/render-manifest.json` schema 5 хранит topology, node capabilities, platform descriptor, install plan schema 5, policy, hashes, pinned binaries, runtime facts и окно совместимых установленных версий. Каждый node получает только собственный `node.env` и принадлежащие ему secrets/artifacts.
 
-Target-side render не объединяет `node.env` с общими defaults и не генерирует ключи. Он принимает только точную `CONFIG_SCHEMA=3` проекцию capability, отклоняет неизвестные поля и cross-node secrets, затем сверяет payload с manifest/install-plan. Установленный `0.22.3` имеет те же schemas и проходит общий текущий validator без отдельного adapter.
+Target-side render не объединяет `node.env` с общими defaults и не генерирует ключи. Он принимает только точную `CONFIG_SCHEMA=3` проекцию capability, отклоняет неизвестные поля и cross-node secrets, затем сверяет payload с manifest/install-plan. Установленный `0.22.4` имеет те же schemas и проходит общий текущий validator без отдельного adapter.
 
 `single` не компилирует и не устанавливает WireGuard, interserver transport, web-admin, их пакеты, сервисы, credentials, secrets, firewall rules или probes. `dual` устанавливает interserver capability на оба участвующих узла, а web-admin только на gateway. Отсутствующая capability имеет состояние `not_applicable`, а не ложное `healthy`.
 
@@ -53,7 +55,7 @@ DNS-кеш — отдельный app-owned сервис с собственно
 
 ## Совместимость релиза
 
-`0.22.4` поддерживает fresh install, обновление только с `0.22.3` и повторную установку `0.22.4`. Manifest объявляет `installed_min=0.22.3`, `installed_max=0.22.4`. Неподдерживаемый установленный релиз отклоняется до managed transaction; удалить его нужно `.\vpn.cmd` на Windows или `./vpn.sh` на Linux из совпадающего Git-тега, после чего выполняется fresh install.
+`0.22.5` поддерживает fresh install, обновление только с `0.22.4` и повторную установку `0.22.5`. Manifest объявляет `installed_min=0.22.4`, `installed_max=0.22.5`. Неподдерживаемый установленный релиз отклоняется до managed transaction; удалить его нужно `.\vpn.cmd` на Windows или `./vpn.sh` на Linux из совпадающего Git-тега, после чего выполняется fresh install.
 
 Публичный CLI использует только `--node gateway|exit|all`. Role aliases, migration chains и readers старых schemas отсутствуют. Политика окна описана в [DEPRECATIONS.md](./DEPRECATIONS.md).
 

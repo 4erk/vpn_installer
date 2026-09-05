@@ -1,16 +1,16 @@
 # Совместимость версий
 
-## Текущее окно 0.22.4
+## Текущее окно 0.22.5
 
-`0.22.4` поддерживает fresh install, повторную установку той же версии и один последовательный переход с точного `0.22.3`.
+`0.22.5` поддерживает fresh install, повторную установку той же версии и один последовательный переход с точного `0.22.4`.
 
-| Формат | `0.22.3` | `0.22.4` |
+| Формат | `0.22.4` | `0.22.5` |
 | --- | --- | --- |
 | config/state | `3` | `3` |
 | manifest/install-plan | `5` | `5` |
 | diagnostics | `6` | `6` |
 
-Manifest `0.22.4` объявляет `installed_min=0.22.3`, `installed_max=0.22.4`. Переход не меняет schemas и не имеет adapter: старый bundle проходит тот же fail-closed validator topology/capabilities, package/service/artifact ownership, hashes, binaries и acceptance snapshot. Разрешены только точные поля `from/to`. Неизвестные версии и приблизительно похожие manifests отклоняются до изменения managed runtime.
+Manifest `0.22.5` объявляет `installed_min=0.22.4`, `installed_max=0.22.5`. Переход не меняет schemas и не имеет adapter: старый bundle проходит тот же fail-closed validator topology/capabilities, package/service/artifact ownership, hashes, binaries и acceptance snapshot. Разрешены только точные поля `from/to`. Неизвестные версии и приблизительно похожие manifests отклоняются до изменения managed runtime.
 
 Runtime не содержит readers старых schemas или цепочки миграций. Host-owned SSH, APT и system resolver не входят в install plan, managed roots или transaction scope.
 

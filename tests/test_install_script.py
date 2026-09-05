@@ -10,6 +10,9 @@ import unittest
 from pathlib import Path
 
 from vpn_installer.config import generate_default_env, render_env_text
+from vpn_installer.manifest import render_node_env_text
+from vpn_installer.platforms import HostFacts, resolve_platform
+from vpn_installer.render import copy_python_package, write_node_rendered_files
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,7 +35,7 @@ def find_bash() -> Path:
 
 def find_python() -> Path:
     bundled = ROOT / ".runtime" / "python" / "windows" / "python.exe"
-    if bundled.is_file():
+    if os.name == "nt" and bundled.is_file():
         return bundled
     return Path(os.sys.executable)
 
@@ -211,6 +214,45 @@ class InstallScriptContractTests(unittest.TestCase):
         self.assertLess(main_body.index("validate_install_request"), main_body.index("bootstrap_python"))
         bootstrap_index = main_body.index("bootstrap_python")
         self.assertLess(bootstrap_index, main_body.index("find_python", bootstrap_index))
+
+    def test_bound_manifest_is_checked_before_install_packages(self) -> None:
+        env = generate_default_env("bound-test", topology="single", gateway_location="foreign")
+        env["GATEWAY_PUBLIC_IP"] = "203.0.113.10"
+        platform = resolve_platform(HostFacts("debian", "13", "x86_64", init_system="systemd"))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stage = root / "upload"
+            stage.mkdir()
+            copy_python_package(stage)
+            write_node_rendered_files(env, "gateway", root / "preview", platform=platform)
+            shutil.copy2(root / "preview" / "render-manifest.json", stage / "expected-manifest.json")
+            env_path = stage / "deployment.env"
+            for changed in (False, True):
+                with self.subTest(changed=changed):
+                    selected_env = {**env, "RU_LISTEN_PORT": "8443"} if changed else env
+                    env_path.write_text(render_node_env_text(selected_env, "gateway"), encoding="utf-8")
+                    script = "\n".join((
+                        "set -Eeuo pipefail",
+                        "export VPNSTACK_INSTALL_LIBRARY_ONLY=1",
+                        f"source '{INSTALL_SCRIPT.as_posix()}'",
+                        f"SCRIPT_DIR='{stage.as_posix()}'",
+                        f"ENV_FILE='{env_path.as_posix()}'",
+                        "NODE=gateway",
+                        "RENDER_ONLY=1",
+                        "trap on_exit EXIT",
+                        "validate_bundle() { :; }",
+                        "prepare_previous_contract() { PREVIOUS_CONTRACT=''; }",
+                        "install_packages_from_plan() { printf 'PACKAGES_REACHED\\n'; exit 0; }",
+                        "install_action",
+                    ))
+                    result = self.run_bash(script=script)
+                    if changed:
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn("target render differs from expected manifest", result.stderr)
+                        self.assertNotIn("PACKAGES_REACHED", result.stdout)
+                    else:
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertIn("PACKAGES_REACHED", result.stdout)
 
     def test_python_bootstrap_uses_exact_supported_provider_commands(self) -> None:
         expected = {

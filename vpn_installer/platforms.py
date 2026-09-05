@@ -488,23 +488,29 @@ def prepare_host_platform(
         ("bin_t", "/etc/vpn-stack/releases(/.*)?/bin(/.*)?"),
         ("dnsmasq_etc_t", r"/etc/vpn-stack/releases(/.*)?/dnsmasq-vpn-stack\.conf"),
     )
-    for context, pattern in contexts:
-        added = runner(
-            ["semanage", "fcontext", "-a", "-t", context, pattern],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=30,
-        )
-        if added.returncode != 0:
-            _run_checked(
-                ["semanage", "fcontext", "-m", "-t", context, pattern],
-                runner=runner,
-                timeout=30,
-            )
-
+    # Validate every conflict before the first host-policy mutation.
     port_listing = _run_checked(["semanage", "port", "-l"], runner=runner, timeout=30)
     owners = _selinux_port_owners(port_listing.stdout, DNS_CACHE_PORT)
+    context_listing = _run_checked(
+        ["semanage", "fcontext", "-l", "-C"], runner=runner, timeout=30,
+        env={**os.environ, "LC_ALL": "C"},
+    )
+    patterns = {pattern for _context, pattern in contexts}
+    context_owners: dict[str, str] = {}
+    for line in context_listing.stdout.splitlines():
+        parts = line.split()
+        if not parts or parts[0] not in patterns:
+            continue
+        if len(parts) != 4 or parts[1:3] != ["all", "files"] or len(parts[-1].split(":")) < 4 or parts[0] in context_owners:
+            raise PlatformError(f"ambiguous SELinux file context: {parts[0]}")
+        context_owners[parts[0]] = parts[-1].split(":")[2]
+    operations: list[tuple[list[str], list[str]]] = []
+    for context, pattern in contexts:
+        owner = context_owners.get(pattern)
+        if owner is not None and owner != context:
+            raise PlatformError(f"SELinux file context {pattern} is owned by {owner}; refusing to reassign it")
+        if owner is None:
+            operations.append((["semanage", "fcontext", "-a", "-t", context, pattern], ["semanage", "fcontext", "-d", pattern]))
     for protocol in ("tcp", "udp"):
         owner = owners.get(protocol)
         if owner is not None and owner != "dns_port_t":
@@ -512,22 +518,31 @@ def prepare_host_platform(
                 f"SELinux {protocol}/{DNS_CACHE_PORT} is already owned by {owner}; refusing to reassign it"
             )
         if owner is None:
-            _run_checked(
+            operations.append((
                 ["semanage", "port", "-a", "-t", "dns_port_t", "-p", protocol, str(DNS_CACHE_PORT)],
-                runner=runner,
-                timeout=30,
-            )
-
-    _run_checked(
-        [
+                ["semanage", "port", "-d", "-p", protocol, str(DNS_CACHE_PORT)],
+            ))
+    applied: list[list[str]] = []
+    try:
+        for command, undo in operations:
+            _run_checked(command, runner=runner, timeout=30)
+            applied.append(undo)
+        _run_checked([
             "restorecon",
             "-RF",
             str(release_dir / "bin"),
             str(release_dir / "dnsmasq-vpn-stack.conf"),
-        ],
-        runner=runner,
-        timeout=60,
-    )
+        ], runner=runner, timeout=60)
+    except Exception as exc:
+        failures = []
+        for command in reversed(applied):
+            try:
+                _run_checked(command, runner=runner, timeout=30)
+            except Exception as rollback_error:
+                failures.append(str(rollback_error))
+        if failures:
+            raise PlatformError(f"SELinux preparation failed: {exc}; cleanup incomplete: {'; '.join(failures)}") from exc
+        raise
 
 
 def _selinux_port_owners(output: str, port: int) -> dict[str, str]:

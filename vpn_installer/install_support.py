@@ -57,6 +57,7 @@ def build_parser() -> argparse.ArgumentParser:
     render_node.add_argument("--output-dir", type=Path, required=True)
     render_node.add_argument("--assets-dir", type=Path, help="Directory with already fetched rule assets.")
     render_node.add_argument("--current-platform", action="store_true", help="Compile for the detected target platform.")
+    render_node.add_argument("--expected-manifest", type=Path, help="Require exact agreement with a target-bound bundle manifest.")
     render_node.add_argument("--set", dest="overrides", action="append", default=[], help="Override a detected runtime value, e.g. WAN_INTERFACE=eth1")
     render_node.set_defaults(func=cmd_render_node)
 
@@ -114,13 +115,21 @@ def cmd_render_node(args: argparse.Namespace) -> int:
     env = load_runtime_env(args.env_file, overrides=overrides)
     node_id = normalize_node_id(args.node)
     TopologySpec.from_env(env).plan(node_id)
-    platform = install_platform() if getattr(args, "current_platform", False) else default_build_platform()
+    expected = None
+    expected_platform = None
+    if args.expected_manifest is not None:
+        expected = json.loads(args.expected_manifest.read_text(encoding="utf-8"))
+        if not isinstance(expected, dict):
+            raise ValueError("expected manifest must be an object")
+        expected_platform = PlatformSpec.from_dict(expected.get("platform"))
+    platform = install_platform() if args.current_platform else expected_platform or default_build_platform()
     write_node_rendered_files(
         env,
         node_id,
         args.output_dir,
         assets=_load_assets(args.assets_dir),
         platform=platform,
+        expected_manifest=expected,
     )
     return 0
 

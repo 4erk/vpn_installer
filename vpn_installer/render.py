@@ -10,7 +10,7 @@ import textwrap
 import urllib.error
 import urllib.parse
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 from .common import INSTALL_SCRIPT_PATH, OUT_DIR, ROOT_DIR, ensure_file_parent, print_header, warn, write_private_text, write_text
 from .config import apply_ru_direct_overlays, download_asset, parse_env_text, render_env_text, require_env, split_asset_sources
@@ -1072,8 +1072,12 @@ def write_node_rendered_files(
     *,
     assets: dict[str, Path] | None = None,
     platform: PlatformSpec | None = None,
+    expected_manifest: Mapping[str, Any] | None = None,
 ) -> Path:
-    for name, content in rendered_files_for_node(env, node_id, assets=assets, platform=platform).items():
+    files = rendered_files_for_node(env, node_id, assets=assets, platform=platform)
+    if expected_manifest is not None and json.loads(files["render-manifest.json"]) != expected_manifest:
+        raise ValueError(f"{node_id}: target render differs from expected manifest; rebuild for the current host and inputs")
+    for name, content in files.items():
         write_private_text(output_dir / name, content)
     return output_dir
 
@@ -1088,14 +1092,26 @@ def copy_python_package(target_root: Path) -> Path:
     return destination
 
 
-def render_preview_files(env: dict[str, str], preview_dir: Path, *, assets: dict[str, Path] | None = None) -> None:
+def render_preview_files(
+    env: dict[str, str], preview_dir: Path, *, assets: dict[str, Path] | None = None,
+    node_platforms: Mapping[str, PlatformSpec] | None = None,
+) -> None:
     topology = TopologySpec.from_env(env)
+    platforms = node_platforms or {}
+    if set(platforms) - {node.node_id for node in topology.nodes}:
+        raise ValueError("target platforms contain a node outside the topology")
     reset_generated_dir(preview_dir)
     for node in topology.nodes:
-        write_node_rendered_files(env, node.node_id, preview_dir_for_node(preview_dir, node.node_id), assets=assets)
+        write_node_rendered_files(
+            env, node.node_id, preview_dir_for_node(preview_dir, node.node_id),
+            assets=assets, platform=platforms.get(node.node_id),
+        )
 
 
-def render_config_artifacts(env_path: Path, env: dict[str, str], *, fetch_assets_first: bool = True) -> Path:
+def render_config_artifacts(
+    env_path: Path, env: dict[str, str], *, fetch_assets_first: bool = True,
+    node_platforms: Mapping[str, PlatformSpec] | None = None,
+) -> Path:
     require_env(env)
     topology = TopologySpec.from_env(env)
     out_dir = deployment_out_dir(env)
@@ -1107,7 +1123,7 @@ def render_config_artifacts(env_path: Path, env: dict[str, str], *, fetch_assets
     for node in topology.nodes:
         node_env_path = server_dir / f"{node.node_id}.env"
         write_private_text(node_env_path, render_node_env_text(env, topology.plan(node.node_id)))
-    render_preview_files(env, preview_dir, assets=assets)
+    render_preview_files(env, preview_dir, assets=assets, node_platforms=node_platforms)
     return out_dir
 
 
@@ -1237,13 +1253,23 @@ def create_tarball(source_dir: Path, destination_tarball: Path) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def package_bundle(env: dict[str, str]) -> Path:
+def package_bundle(env: dict[str, str], *, node_platforms: Mapping[str, PlatformSpec] | None = None) -> Path:
     require_env(env)
     topology = TopologySpec.from_env(env)
     out_dir = deployment_out_dir(env)
     assets_dir = out_dir / "assets"
     server_dir = out_dir / "server"
     bundle_dir = out_dir / "bundle"
+    platforms = node_platforms or {}
+    if set(platforms) - {node.node_id for node in topology.nodes}:
+        raise ValueError("target platforms contain a node outside the topology")
+    expected_manifests = {}
+    for node_id, platform in platforms.items():
+        text = (out_dir / "preview" / node_id / "render-manifest.json").read_text(encoding="utf-8")
+        manifest = json.loads(text)
+        if manifest.get("node_id") != node_id or manifest.get("platform") != platform.to_dict():
+            raise ValueError(f"{node_id}: preview manifest does not match the target platform")
+        expected_manifests[node_id] = text
     if bundle_dir.exists():
         shutil.rmtree(bundle_dir)
     readme: list[str] = []
@@ -1253,6 +1279,8 @@ def package_bundle(env: dict[str, str]) -> Path:
         ensure_file_parent(node_bundle / "assets" / ".keep")
         shutil.copy2(INSTALL_SCRIPT_PATH, node_bundle / "install.sh")
         shutil.copy2(server_dir / f"{node.node_id}.env", node_bundle / "deployment.env")
+        if node.node_id in expected_manifests:
+            write_private_text(node_bundle / "expected-manifest.json", expected_manifests[node.node_id])
         copy_python_package(node_bundle)
         for asset_name in required_asset_names(plan, foreign_block_ru=env.get("FOREIGN_BLOCK_RU", "0") == "1"):
             copy_asset_if_present(assets_dir / asset_name, node_bundle / "assets" / asset_name)
@@ -1289,14 +1317,16 @@ def render_all_artifacts(
     env: dict[str, str],
     *,
     fetch_assets_first: bool = True,
+    node_platforms: Mapping[str, PlatformSpec] | None = None,
 ) -> Path:
     effective_env = apply_ru_direct_overlays(env, env_path)
     out_dir = render_config_artifacts(
         env_path,
         effective_env,
         fetch_assets_first=fetch_assets_first,
+        node_platforms=node_platforms,
     )
     render_client_profiles(effective_env)
     render_cloud_init_artifacts(effective_env)
-    package_bundle(effective_env)
+    package_bundle(effective_env, node_platforms=node_platforms)
     return out_dir

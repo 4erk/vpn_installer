@@ -3,12 +3,19 @@ from __future__ import annotations
 import io
 import json
 import logging
+import re
+import socket
 import tempfile
+import threading
+import time
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import ANY, Mock, patch
 
+from vpn_installer import VERSION, remote
+from vpn_installer.compatibility import COMPATIBLE_INSTALLED_MIN
 from vpn_installer.models import AppError, RemoteTarget
 from vpn_installer.topology import NODE_GATEWAY
 from vpn_installer.diagnostics import DiagnosticsSnapshot
@@ -41,6 +48,11 @@ from vpn_installer.remote import (
     ssh_stream,
     use_python_ssh_backend,
 )
+
+try:
+    import paramiko
+except ImportError:
+    paramiko = None
 
 
 class RemoteTests(unittest.TestCase):
@@ -379,7 +391,9 @@ class RemoteTests(unittest.TestCase):
         with patch("vpn_installer.remote.paramiko_connect", return_value=client), patch("vpn_installer.remote.time.sleep"):
             code, out, err = paramiko_exec(target, "echo test", input_text="secret\n")
         self.assertEqual((code, out, err), (5, "out", "err"))
-        client.exec_command.assert_called_once_with("echo test", get_pty=False)
+        client.exec_command.assert_called_once_with("echo test", get_pty=False, timeout=ANY)
+        self.assertGreater(client.exec_command.call_args.kwargs["timeout"], 0)
+        self.assertLessEqual(client.exec_command.call_args.kwargs["timeout"], remote.SSH_COMMAND_TIMEOUT)
         client.close.assert_called_once()
 
     def test_paramiko_exec_times_out_stuck_channel(self) -> None:
@@ -393,15 +407,16 @@ class RemoteTests(unittest.TestCase):
         client = Mock()
         client.exec_command.return_value = (stdin, stdout, stderr)
         target = RemoteTarget(node_id=NODE_GATEWAY)
+        clock = Mock(return_value=0.0)
+        channel.recv_ready.side_effect = lambda: (setattr(clock, "return_value", 2.0) or False)
         with (
             patch("vpn_installer.remote.paramiko_connect", return_value=client),
-            patch("vpn_installer.remote.time.monotonic", side_effect=[0.0, 2.0]),
+            patch("vpn_installer.remote.time.monotonic", clock),
             patch("vpn_installer.remote.time.sleep"),
         ):
             with self.assertRaises(AppError) as ctx:
                 paramiko_exec(target, "journalctl -f", command_timeout=1)
         self.assertIn("не завершилась за 1 сек", str(ctx.exception))
-        channel.close.assert_called_once()
         client.close.assert_called_once()
 
     def test_paramiko_stream_writes_output_as_it_arrives(self) -> None:
@@ -428,7 +443,7 @@ class RemoteTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("out", out_stream.getvalue())
         self.assertEqual(err_stream.getvalue(), "")
-        client.exec_command.assert_called_once_with("echo test", get_pty=False)
+        client.exec_command.assert_called_once_with("echo test", get_pty=False, timeout=ANY)
         client.close.assert_called_once()
 
     def test_paramiko_stream_hides_stderr_and_raises_with_detail(self) -> None:
@@ -535,11 +550,11 @@ class RemoteTests(unittest.TestCase):
     def test_snapshot_rejects_out_of_window_release_before_reading_old_schema(self) -> None:
         snapshot = {"schema_version": 4, "release": {"version": "0.19.10"}}
         with patch("vpn_installer.remote.ssh_capture", return_value=json.dumps(snapshot)):
-            with self.assertRaisesRegex(AppError, "cannot be updated by 0.22.4.*tag 0.19.10"):
+            with self.assertRaisesRegex(AppError, rf"cannot be updated by {re.escape(VERSION)}.*tag 0\.19\.10"):
                 remote_agent_snapshot(RemoteTarget(node_id=NODE_GATEWAY))
 
     def test_snapshot_rejects_wrong_schema_from_compatible_release(self) -> None:
-        snapshot = {"schema_version": 5, "release": {"version": "0.22.3"}}
+        snapshot = {"schema_version": 5, "release": {"version": COMPATIBLE_INSTALLED_MIN}}
         with patch("vpn_installer.remote.ssh_capture", return_value=json.dumps(snapshot)):
             with self.assertRaisesRegex(AppError, "unsupported snapshot schema"):
                 remote_agent_snapshot(RemoteTarget(node_id=NODE_GATEWAY))
@@ -711,6 +726,362 @@ class RemoteTests(unittest.TestCase):
         target = RemoteTarget(node_id=NODE_GATEWAY)
         with self.assertRaises(AppError):
             ensure_remote_privilege(target, {"is_root": "0", "has_sudo": "0", "login_user": "ubuntu", "hostname": "demo"}, prompt_yes_no=lambda *_args, **_kwargs: False, prompt_secret=lambda *_args, **_kwargs: "secret")
+
+
+class SSHDeadlineTests(unittest.TestCase):
+    def command_client(self):
+        client, stdin, channel = Mock(), Mock(), Mock()
+        channel.recv_ready.return_value = False
+        channel.recv_stderr_ready.return_value = False
+        channel.exit_status_ready.return_value = True
+        channel.recv_exit_status.return_value = 0
+        client.exec_command.return_value = (stdin, Mock(channel=channel), Mock(channel=channel))
+        return client, stdin, channel
+
+    def test_command_budget_includes_connection_setup_for_both_consumers(self) -> None:
+        for operation in (paramiko_exec, paramiko_stream):
+            with self.subTest(operation=operation.__name__):
+                client, _stdin, channel = self.command_client()
+                clock = Mock(return_value=0.0)
+
+                def connect(target, *, deadline):
+                    deadline.client = client
+                    clock.return_value = 0.75
+                    return client
+
+                with patch.object(remote, "paramiko_connect", side_effect=connect), patch.object(remote.time, "monotonic", clock):
+                    operation(RemoteTarget(node_id=NODE_GATEWAY), "true", command_timeout=1)
+                self.assertEqual(client.exec_command.call_args.kwargs["timeout"], 0.25)
+                channel.settimeout.assert_called_once_with(0.25)
+                client.close.assert_called_once()
+
+    def test_connect_auth_retries_keep_original_limits_with_remaining_budget(self) -> None:
+        class AuthTimeout(Exception):
+            pass
+
+        clock = Mock(return_value=0.0)
+        first, second = Mock(), Mock()
+
+        def fail_auth(**kwargs):
+            clock.return_value += 0.5
+            raise AuthTimeout("Authentication timeout.")
+
+        first.connect.side_effect = fail_auth
+        sdk = SimpleNamespace(
+            SSHClient=Mock(side_effect=[first, second]), RejectPolicy=Mock(),
+            ssh_exception=SimpleNamespace(AuthenticationException=AuthTimeout),
+        )
+        target = RemoteTarget(node_id=NODE_GATEWAY, auth_mode="password", ssh_password="fixture-secret")
+        with (
+            patch.object(remote, "ensure_paramiko_installed", return_value=sdk),
+            patch.object(remote, "load_trusted_host_keys"),
+            patch.object(remote, "known_host_disabled_algorithms", return_value=None),
+            patch.object(remote.time, "monotonic", clock),
+            remote._SSHDeadline(target, 5) as deadline,
+        ):
+            def advance(seconds):
+                clock.return_value += deadline.remaining(seconds)
+                deadline.remaining()
+
+            with patch.object(deadline, "pause", side_effect=advance) as retry_wait:
+                self.assertIs(paramiko_connect(target, deadline=deadline), second)
+            retry_wait.assert_called_once_with(remote.SSH_PASSWORD_AUTH_RETRY_DELAY)
+        for key in ("timeout", "banner_timeout", "auth_timeout", "channel_timeout"):
+            self.assertEqual(first.connect.call_args.kwargs[key], 5)
+            self.assertEqual(second.connect.call_args.kwargs[key], 3.5)
+        first.close.assert_called_once()
+        second.close.assert_called_once()
+
+    def test_connect_retry_backoff_stops_at_operation_deadline(self) -> None:
+        first = Mock()
+        first.connect.side_effect = TimeoutError("timed out")
+        sdk = SimpleNamespace(SSHClient=Mock(return_value=first), RejectPolicy=Mock(), ssh_exception=SimpleNamespace(AuthenticationException=Exception))
+        target = RemoteTarget(node_id=NODE_GATEWAY)
+        with (
+            patch.object(remote, "ensure_paramiko_installed", return_value=sdk),
+            patch.object(remote, "load_trusted_host_keys"),
+            patch.object(remote, "known_host_disabled_algorithms", return_value=None),
+        ):
+            with self.assertRaises(remote._SSHDeadlineExceeded):
+                with remote._SSHDeadline(target, 0.1) as deadline:
+                    paramiko_connect(target, deadline=deadline)
+        self.assertEqual(sdk.SSHClient.call_count, 1)
+        self.assertFalse(deadline.worker.is_alive())
+
+    def test_failed_connect_cleanup_cannot_block_caller_past_budget_and_grace(self) -> None:
+        release, completed = threading.Event(), threading.Event()
+        close_threads, results, deadlines = [], [], []
+        client = Mock()
+        client.connect.side_effect = RuntimeError("connect failed")
+
+        def blocked_close():
+            close_threads.append(threading.get_ident())
+            release.wait(2)
+
+        client.close.side_effect = blocked_close
+        sdk = SimpleNamespace(SSHClient=Mock(return_value=client), RejectPolicy=Mock(), ssh_exception=SimpleNamespace(AuthenticationException=Exception))
+
+        def invoke():
+            try:
+                with remote._SSHDeadline(RemoteTarget(node_id=NODE_GATEWAY), 0.05) as deadline:
+                    deadlines.append(deadline)
+                    paramiko_connect(deadline.target, deadline=deadline)
+            except Exception as exc:
+                results.append(exc)
+            finally:
+                completed.set()
+
+        caller = threading.Thread(target=invoke, daemon=True)
+        with (
+            patch.object(remote, "ensure_paramiko_installed", return_value=sdk),
+            patch.object(remote, "load_trusted_host_keys"),
+            patch.object(remote, "known_host_disabled_algorithms", return_value=None),
+            patch.object(remote, "SSH_COMMAND_TIMEOUT_GRACE", 0.03),
+        ):
+            try:
+                caller.start()
+                self.assertTrue(completed.wait(0.25), "synchronous failed-attempt close blocked the caller")
+                self.assertIsInstance(results[0], AppError)
+                self.assertIn("cleanup", str(results[0]).lower())
+                self.assertNotIn(caller.ident, close_threads)
+                self.assertEqual(sdk.SSHClient.call_count, 1)
+            finally:
+                release.set()
+                caller.join(1)
+                for deadline in deadlines:
+                    deadline.worker.join(1)
+        self.assertFalse(caller.is_alive())
+        self.assertTrue(all(not deadline.worker.is_alive() for deadline in deadlines))
+
+    def test_late_dns_failure_closes_real_socket_even_after_watchdog_expiry(self) -> None:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        target = RemoteTarget(node_id=NODE_GATEWAY, ssh_host="127.0.0.1", ssh_bind_address="127.0.0.1")
+        client = Mock()
+        sdk = SimpleNamespace(SSHClient=Mock(return_value=client), RejectPolicy=Mock(), ssh_exception=SimpleNamespace(AuthenticationException=Exception))
+        deadline = remote._SSHDeadline(target, 0.03)
+
+        def delayed_resolution(host, port, **kwargs):
+            self.assertTrue(deadline.expired.wait(1))
+            deadline.worker.join(0.04)
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))]
+
+        try:
+            with (
+                patch.object(remote, "ensure_paramiko_installed", return_value=sdk),
+                patch.object(remote, "load_trusted_host_keys"),
+                patch.object(remote, "known_host_disabled_algorithms", return_value=None),
+                patch.object(remote.socket, "getaddrinfo", side_effect=delayed_resolution),
+                patch.object(remote.socket, "socket", return_value=sock),
+            ):
+                with self.assertRaises(remote._SSHDeadlineExceeded):
+                    with deadline:
+                        paramiko_connect(target, deadline=deadline)
+            self.assertEqual(sock.fileno(), -1, "unsuccessful acquisition leaked an actual socket")
+            self.assertFalse(deadline.worker.is_alive())
+        finally:
+            sock.close()
+
+    def test_stalled_stdin_write_and_flush_are_aborted_without_replay(self) -> None:
+        for method in ("write", "flush"):
+            with self.subTest(method=method):
+                client, stdin, _channel = self.command_client()
+                aborted = threading.Event()
+                client.get_transport.return_value.close.side_effect = aborted.set
+
+                def stall(*args):
+                    self.assertTrue(aborted.wait(2), "deadline did not abort transport")
+                    raise EOFError("transport closed")
+
+                getattr(stdin, method).side_effect = stall
+                with patch.object(remote, "paramiko_connect", return_value=client):
+                    with self.assertRaisesRegex(AppError, "этап: stdin") as raised:
+                        paramiko_exec(RemoteTarget(node_id=NODE_GATEWAY), "sudo fixture", input_text="private-fixture-password\n", command_timeout=0.1)
+                self.assertNotIn("private-fixture-password", str(raised.exception))
+                client.exec_command.assert_called_once()
+                client.close.assert_called_once()
+
+    def test_cleanup_failure_does_not_mask_original_exception(self) -> None:
+        client = Mock()
+        client.close.side_effect = RuntimeError("close failed")
+        with self.assertRaisesRegex(ValueError, "original failure"):
+            with remote._SSHDeadline(RemoteTarget(node_id=NODE_GATEWAY), 1) as deadline:
+                deadline.client = client
+                raise ValueError("original failure")
+        self.assertFalse(deadline.worker.is_alive())
+
+    def test_stuck_cleanup_is_reported_without_unbounded_join(self) -> None:
+        release = threading.Event()
+        client = Mock()
+        client.close.side_effect = lambda: release.wait(2)
+        try:
+            with patch.object(remote, "SSH_COMMAND_TIMEOUT_GRACE", 0.1):
+                started = time.monotonic()
+                with self.assertRaisesRegex(AppError, "cleanup did not finish"):
+                    with remote._SSHDeadline(RemoteTarget(node_id=NODE_GATEWAY), 1) as deadline:
+                        deadline.client = client
+                self.assertLess(time.monotonic() - started, 1)
+        finally:
+            release.set()
+            deadline.worker.join(1)
+        self.assertFalse(deadline.worker.is_alive())
+
+    def test_success_stops_watchdog_and_zero_keeps_explicit_unbounded_contract(self) -> None:
+        for seconds in (0, 1):
+            with self.subTest(seconds=seconds):
+                client = Mock()
+                with remote._SSHDeadline(RemoteTarget(node_id=NODE_GATEWAY), seconds) as deadline:
+                    deadline.client = client
+                    self.assertEqual(deadline.remaining(0.1), 0.1)
+                self.assertFalse(deadline.worker.is_alive())
+                self.assertFalse(deadline.expired.is_set())
+                client.close.assert_called_once()
+
+
+@unittest.skipUnless(paramiko is not None, "Paramiko runtime required for loopback SSH fault injection")
+class SSHLoopbackDeadlineTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.host_key = paramiko.RSAKey.generate(1024)
+
+    @contextmanager
+    def server(self, mode):
+        stop = threading.Event()
+        reached = threading.Event()
+        transports, channels, handlers, writes, errors = [], [], [], [], []
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        listener.settimeout(3)
+        port = listener.getsockname()[1]
+
+        def freeze():
+            reached.set()
+            stop.wait(3)
+
+        class Server(paramiko.ServerInterface):
+            def check_auth_password(self, username, password):
+                return paramiko.AUTH_SUCCESSFUL
+
+            def check_channel_request(self, kind, chanid):
+                if mode == "channel":
+                    freeze()
+                return paramiko.OPEN_SUCCEEDED
+
+            def check_channel_pty_request(self, *args):
+                if mode == "pty":
+                    freeze()
+                return True
+
+            def check_channel_exec_request(self, channel, command):
+                if mode == "exec":
+                    freeze()
+                return True
+
+            def check_channel_subsystem_request(self, channel, name):
+                if mode == "subsystem":
+                    freeze()
+                    return False
+                if mode == "version":
+                    reached.set()
+                    return True
+                return super().check_channel_subsystem_request(channel, name)
+
+        class Handle(paramiko.SFTPHandle):
+            def write(self, offset, data):
+                if stop.wait(0.04):
+                    return paramiko.SFTP_FAILURE
+                writes.append((time.monotonic(), len(data)))
+                reached.set()
+                return paramiko.SFTP_OK
+
+        class Files(paramiko.SFTPServerInterface):
+            def open(self, path, flags, attr):
+                return Handle()
+
+            def stat(self, path):
+                if mode == "confirm":
+                    freeze()
+                result = paramiko.SFTPAttributes()
+                result.st_size = sum(size for _timestamp, size in writes)
+                return result
+
+        class SFTPServer(paramiko.SFTPServer):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                handlers.append(self)
+
+        def serve():
+            try:
+                sock, _address = listener.accept()
+                transport = paramiko.Transport(sock)
+                transports.append(transport)
+                transport.add_server_key(self.host_key)
+                transport.set_subsystem_handler("sftp", SFTPServer, sftp_si=Files)
+                transport.start_server(server=Server())
+                while not stop.is_set() and transport.is_active():
+                    channel = transport.accept(0.05)
+                    if channel is not None:
+                        channels.append(channel)
+            except Exception as exc:
+                if not stop.is_set():
+                    errors.append(exc)
+
+        worker = threading.Thread(target=serve, name="vpn-ssh-loopback-fixture", daemon=True)
+        with tempfile.TemporaryDirectory() as tmp:
+            known_hosts = Path(tmp) / "known_hosts"
+            keys = paramiko.HostKeys()
+            keys.add(f"[127.0.0.1]:{port}", self.host_key.get_name(), self.host_key)
+            keys.save(str(known_hosts))
+            local = Path(tmp) / "payload.bin"
+            local.write_bytes(b"x" * (1024 * 1024 if mode == "trickle" else 16))
+            target = RemoteTarget(node_id=NODE_GATEWAY, ssh_host="127.0.0.1", ssh_port=port, ssh_user="fixture", auth_mode="password", ssh_password="fixture")
+            worker.start()
+            try:
+                with patch.object(remote, "KNOWN_HOSTS_PATH", known_hosts), patch.object(remote, "ensure_paramiko_installed", return_value=paramiko):
+                    yield target, local, reached, writes
+            finally:
+                stop.set()
+                listener.close()
+                for transport in transports:
+                    transport.close()
+                worker.join(2)
+                for thread in [*transports, *handlers]:
+                    thread.join(2)
+                self.assertFalse(worker.is_alive(), "loopback fixture survived cleanup")
+                self.assertFalse(any(thread.is_alive() for thread in [*transports, *handlers]), "Paramiko fixture thread survived cleanup")
+                self.assertEqual(errors, [])
+
+    def test_missing_channel_pty_and_exec_ack_are_bounded_for_capture_and_stream(self) -> None:
+        for operation in (paramiko_exec, paramiko_stream):
+            for mode in ("channel", "pty", "exec"):
+                with self.subTest(operation=operation.__name__, mode=mode):
+                    with self.server(mode) as (target, _local, reached, _writes):
+                        started = time.monotonic()
+                        with self.assertRaises(AppError):
+                            operation(target, "no-side-effects", get_pty=(mode == "pty"), command_timeout=0.5)
+                        self.assertLess(time.monotonic() - started, 2)
+                        self.assertTrue(reached.is_set(), "test never reached the intended ACK stall")
+
+    def test_sftp_subsystem_version_and_final_confirmation_are_bounded(self) -> None:
+        for mode in ("subsystem", "version", "confirm"):
+            with self.subTest(mode=mode):
+                with self.server(mode) as (target, local, reached, _writes), patch.object(remote, "SSH_UPLOAD_TIMEOUT", 0.5):
+                    started = time.monotonic()
+                    with self.assertRaises(AppError):
+                        paramiko_upload(target, local, "/in-memory-fixture.bin")
+                    self.assertLess(time.monotonic() - started, 2)
+                    self.assertTrue(reached.is_set(), "test never reached the intended SFTP stall")
+
+    def test_continuous_sftp_progress_cannot_renew_total_upload_budget(self) -> None:
+        with self.server("trickle") as (target, local, reached, writes), patch.object(remote, "SSH_UPLOAD_TIMEOUT", 0.5):
+            started = time.monotonic()
+            with self.assertRaisesRegex(AppError, "SFTP put/confirm"):
+                paramiko_upload(target, local, "/in-memory-fixture.bin")
+            self.assertLess(time.monotonic() - started, 2)
+            self.assertTrue(reached.is_set())
+            self.assertGreaterEqual(len(writes), 2)
+            self.assertLess(sum(size for _timestamp, size in writes), local.stat().st_size)
+            self.assertLess(time.monotonic() - writes[-1][0], 0.3, "fixture stopped progressing before the deadline")
 
 
 if __name__ == "__main__":

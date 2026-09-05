@@ -9,6 +9,7 @@ from unittest.mock import patch
 from vpn_installer.config import generate_default_env, render_env_text
 from vpn_installer.install_support import load_runtime_env, main as install_support_main
 from vpn_installer.manifest import render_node_env_text
+from vpn_installer.platforms import HostFacts, resolve_platform
 from vpn_installer.render import write_node_rendered_files
 from vpn_installer.topology import NODE_EXIT, NODE_GATEWAY, TOPOLOGY_DUAL, TOPOLOGY_SINGLE, TopologySpec
 
@@ -21,6 +22,60 @@ class InstallSupportTests(unittest.TestCase):
         if topology == TOPOLOGY_DUAL:
             env["EXIT_PUBLIC_IP"] = "198.51.100.20"
         return env
+
+    def test_target_bound_render_matches_controller_manifest_and_offline_platform(self) -> None:
+        env = self.make_env()
+        platforms = {
+            NODE_GATEWAY: resolve_platform(HostFacts("ubuntu", "22.04", "x86_64", init_system="systemd")),
+            NODE_EXIT: resolve_platform(HostFacts("rocky", "9.5", "x86_64", init_system="systemd")),
+        }
+        for node_id, platform in platforms.items():
+            with self.subTest(node=node_id), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                env_path = root / "deployment.env"
+                env_path.write_text(render_node_env_text(env, node_id), encoding="utf-8")
+                write_node_rendered_files(env, node_id, root / "preview", platform=platform)
+                expected = root / "preview" / "render-manifest.json"
+                args = ["render-node", "--node", node_id, "--env-file", str(env_path),
+                        "--output-dir", str(root / "target"), "--expected-manifest", str(expected)]
+                with patch("vpn_installer.install_support.install_platform", return_value=platform) as detect:
+                    self.assertEqual(install_support_main(args), 0)
+                    detect.assert_not_called()
+                    self.assertEqual(install_support_main([*args, "--current-platform"]), 0)
+                    detect.assert_called_once()
+                self.assertEqual((root / "target" / "render-manifest.json").read_bytes(), expected.read_bytes())
+
+    def test_target_bound_render_rejects_divergence_before_writing_output(self) -> None:
+        env = self.make_env()
+        platform = resolve_platform(HostFacts("debian", "13", "x86_64", init_system="systemd"))
+        different = resolve_platform(HostFacts("ubuntu", "24.04", "x86_64", init_system="systemd"))
+        for mutation in ("platform", "env", "asset", "manifest"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                env_path = root / "deployment.env"
+                assets_dir = root / "assets"
+                assets_dir.mkdir()
+                asset = assets_dir / "geosite-ru.srs"
+                asset.write_bytes(b"initial asset")
+                write_node_rendered_files(env, NODE_GATEWAY, root / "preview", platform=platform, assets={asset.name: asset})
+                expected = root / "preview" / "render-manifest.json"
+                if mutation == "env":
+                    env = {**env, "RU_LISTEN_PORT": "8443"}
+                elif mutation == "asset":
+                    asset.write_bytes(b"changed asset")
+                elif mutation == "manifest":
+                    payload = json.loads(expected.read_text(encoding="utf-8"))
+                    payload["config_sha256"] = "wrong"
+                    expected.write_text(json.dumps(payload), encoding="utf-8")
+                env_path.write_text(render_node_env_text(env, NODE_GATEWAY), encoding="utf-8")
+                with patch("vpn_installer.install_support.install_platform", return_value=different if mutation == "platform" else platform):
+                    with self.assertRaisesRegex(ValueError, "expected manifest"):
+                        install_support_main([
+                            "render-node", "--node", NODE_GATEWAY, "--env-file", str(env_path),
+                            "--output-dir", str(root / "target"), "--assets-dir", str(assets_dir),
+                            "--expected-manifest", str(expected), "--current-platform",
+                        ])
+                self.assertFalse((root / "target").exists())
 
     def test_render_node_writes_flat_gateway_artifacts(self) -> None:
         env = self.make_env()

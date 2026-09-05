@@ -189,13 +189,14 @@ class PlatformTests(unittest.TestCase):
 
         with patch("vpn_installer.platforms.require_host_matches"):
             prepare_host_platform(spec, Path("/etc/vpn-stack/releases/candidate-test"), runner=runner)
-        self.assertEqual(calls[0][:4], ["semanage", "fcontext", "-a", "-t"])
-        self.assertEqual(calls[1][:5], ["semanage", "fcontext", "-a", "-t", "dnsmasq_etc_t"])
-        self.assertEqual(calls[2], ["semanage", "port", "-l"])
-        self.assertEqual(calls[3][:2], ["restorecon", "-RF"])
-        self.assertEqual(calls[3][2].replace("\\", "/"), "/etc/vpn-stack/releases/candidate-test/bin")
+        self.assertEqual(calls[0], ["semanage", "port", "-l"])
+        self.assertEqual(calls[1], ["semanage", "fcontext", "-l", "-C"])
+        self.assertEqual(calls[2][:4], ["semanage", "fcontext", "-a", "-t"])
+        self.assertEqual(calls[3][:5], ["semanage", "fcontext", "-a", "-t", "dnsmasq_etc_t"])
+        self.assertEqual(calls[4][:2], ["restorecon", "-RF"])
+        self.assertEqual(calls[4][2].replace("\\", "/"), "/etc/vpn-stack/releases/candidate-test/bin")
         self.assertEqual(
-            calls[3][3].replace("\\", "/"),
+            calls[4][3].replace("\\", "/"),
             "/etc/vpn-stack/releases/candidate-test/dnsmasq-vpn-stack.conf",
         )
 
@@ -220,6 +221,71 @@ class PlatformTests(unittest.TestCase):
         ):
             prepare_host_platform(spec, Path("/etc/vpn-stack/releases/test"), runner=runner)
         self.assertFalse(any(command[:3] == ["semanage", "port", "-a"] for command in calls))
+        self.assertFalse(any(command[:3] == ["semanage", "fcontext", "-a"] for command in calls))
+
+    def test_selinux_checks_both_port_protocols_before_any_changes(self) -> None:
+        spec = resolve_platform(HostFacts("rocky", "9.5", "x86_64", init_system="systemd"))
+        calls = []
+
+        def runner(command, **_kwargs):
+            calls.append(command)
+            output = "other_port_t udp 1054\n" if command == ["semanage", "port", "-l"] else ""
+            return subprocess.CompletedProcess(command, 0, output, "")
+
+        with patch("vpn_installer.platforms.require_host_matches"), self.assertRaisesRegex(PlatformError, "refusing to reassign"):
+            prepare_host_platform(spec, Path("/etc/vpn-stack/releases/test"), runner=runner)
+        self.assertFalse(any("-a" in command or "-m" in command for command in calls))
+
+    def test_selinux_does_not_reassign_existing_file_context(self) -> None:
+        spec = resolve_platform(HostFacts("rocky", "9.5", "x86_64", init_system="systemd"))
+        calls = []
+
+        def runner(command, **_kwargs):
+            calls.append(command)
+            output = "/etc/vpn-stack/releases(/.*)?/bin(/.*)?  all files  system_u:object_r:other_t:s0\n" if command == ["semanage", "fcontext", "-l", "-C"] else ""
+            return subprocess.CompletedProcess(command, 0, output, "")
+
+        with patch("vpn_installer.platforms.require_host_matches"), self.assertRaisesRegex(PlatformError, "refusing to reassign"):
+            prepare_host_platform(spec, Path("/etc/vpn-stack/releases/test"), runner=runner)
+        self.assertFalse(any("-a" in command or "-m" in command for command in calls))
+
+    def test_selinux_existing_matching_contexts_are_not_rewritten(self) -> None:
+        spec = resolve_platform(HostFacts("rocky", "9.5", "x86_64", init_system="systemd"))
+        calls = []
+
+        def runner(command, **_kwargs):
+            calls.append(command)
+            output = ""
+            if command == ["semanage", "port", "-l"]:
+                output = "dns_port_t tcp 1054\ndns_port_t udp 1054\n"
+            elif command == ["semanage", "fcontext", "-l", "-C"]:
+                output = "/etc/vpn-stack/releases(/.*)?/bin(/.*)?  all files  system_u:object_r:bin_t:s0\n/etc/vpn-stack/releases(/.*)?/dnsmasq-vpn-stack\\.conf  all files  system_u:object_r:dnsmasq_etc_t:s0\n"
+            return subprocess.CompletedProcess(command, 0, output, "")
+
+        with patch("vpn_installer.platforms.require_host_matches"):
+            prepare_host_platform(spec, Path("/etc/vpn-stack/releases/test"), runner=runner)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(calls[-1][:2], ["restorecon", "-RF"])
+
+    def test_failed_selinux_preparation_reverses_only_successful_additions(self) -> None:
+        spec = resolve_platform(HostFacts("rocky", "9.5", "x86_64", init_system="systemd"))
+        for undo_failure in (False, True):
+            calls = []
+
+            def runner(command, **_kwargs):
+                calls.append(command)
+                failure = command[:3] == ["semanage", "port", "-a"] and "udp" in command
+                failure |= undo_failure and command[:3] == ["semanage", "port", "-d"]
+                return subprocess.CompletedProcess(command, int(failure), "", "injected failure" if failure else "")
+
+            with self.subTest(undo_failure=undo_failure), patch("vpn_installer.platforms.require_host_matches"):
+                with self.assertRaisesRegex((RuntimeError, PlatformError), "cleanup incomplete" if undo_failure else "injected failure"):
+                    prepare_host_platform(spec, Path("/etc/vpn-stack/releases/test"), runner=runner)
+            deletes = [command for command in calls if "-d" in command]
+            self.assertEqual(len(deletes), 3)
+            self.assertEqual(deletes[0], ["semanage", "port", "-d", "-p", "tcp", "1054"])
+            self.assertEqual(deletes[-1], ["semanage", "fcontext", "-d", "/etc/vpn-stack/releases(/.*)?/bin(/.*)?"])
+            self.assertFalse(any("-m" in command for command in calls))
 
     def test_apply_updates_uses_provider_specific_command(self) -> None:
         calls: list[list[str]] = []
