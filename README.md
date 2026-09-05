@@ -157,6 +157,20 @@ out/diagnostics/
 - зарубежный сервер: [FirstByte](https://firstbyte.pro/?from=242253);
 - российский сервер: [iHor](https://ihor.online/?from=439652).
 
+Донаты в **USDT**:
+
+**Сеть TRON (TRC20)**
+
+```text
+TNzFUCgyJxnrbvZeUdWLrTvRYv9TPMgHkC
+```
+
+**Сеть TON**
+
+```text
+UQCGu3_xfuxlyFMFDGS-sr3ICgPoSFIQ8yLTaBAFfcyqY296
+```
+
 ## Свойства двойной схемы
 
 - **Один профиль.** Устройство подключается к российскому серверу, а выход в интернет выбирают серверные правила.
