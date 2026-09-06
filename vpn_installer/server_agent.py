@@ -26,6 +26,7 @@ try:
     from .log_classifier import (
         BUCKETS,
         accepted_destination_from_line,
+        classify_lines,
         event_id_from_line,
         inbound_destination_from_line,
         inbound_tag_from_line,
@@ -33,6 +34,7 @@ try:
         source_endpoint_from_line,
         source_from_line,
         split_endpoint,
+        summarize_classified_lines,
         summarize_lines,
     )
 except ImportError:  # Installed agent runs as a standalone script.
@@ -40,6 +42,7 @@ except ImportError:  # Installed agent runs as a standalone script.
     from log_classifier import (  # type: ignore[no-redef]
         BUCKETS,
         accepted_destination_from_line,
+        classify_lines,
         event_id_from_line,
         inbound_destination_from_line,
         inbound_tag_from_line,
@@ -47,6 +50,7 @@ except ImportError:  # Installed agent runs as a standalone script.
         source_endpoint_from_line,
         source_from_line,
         split_endpoint,
+        summarize_classified_lines,
         summarize_lines,
     )
 
@@ -450,19 +454,24 @@ def parse_iso_datetime(value: str) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
-def iso_age_seconds(value: str, *, now: datetime | None = None) -> float | None:
+def _observation_age_seconds(value: str, *, now: datetime | None = None) -> float | None:
     parsed = parse_iso_datetime(value)
     if parsed is None:
         return None
-    age = ((now or datetime.now(timezone.utc)) - parsed.astimezone(timezone.utc)).total_seconds()
-    return max(0.0, age)
+    return ((now or datetime.now(timezone.utc)) - parsed).total_seconds()
+
+
+def iso_age_seconds(value: str, *, now: datetime | None = None) -> float | None:
+    # Policy timers retain their existing clamping; evidence must retain clock skew.
+    age = _observation_age_seconds(value, now=now)
+    return max(0.0, age) if age is not None else None
 
 
 def recent_observation(payload: Any, *, max_age_seconds: int) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
-    age = iso_age_seconds(str(payload.get("observed_at", "")))
-    return payload if age is not None and age <= max_age_seconds else {}
+    age = _observation_age_seconds(str(payload.get("observed_at", "")))
+    return payload if age is not None and 0 <= age <= max_age_seconds else {}
 
 
 def release_scoped_observation(payload: dict[str, Any], installed_at: str) -> dict[str, Any]:
@@ -638,7 +647,13 @@ def _parse_journal_events(result: subprocess.CompletedProcess[str]) -> tuple[lis
     return events, malformed
 
 
-def _journal_event_context(minutes: int, problem_events: list[tuple[float, str]]) -> list[tuple[float, str]]:
+def _journal_window_args(minutes: int, until: float | None) -> list[str]:
+    if until is None:
+        return ["--since", f"{minutes} minutes ago"]
+    return ["--since", f"@{until - minutes * 60:.6f}", "--until", f"@{until:.6f}"]
+
+
+def _journal_event_context(minutes: int, problem_events: list[tuple[float, str]], *, until: float | None = None) -> list[tuple[float, str]]:
     event_ids = list(
         dict.fromkeys(
             event_id
@@ -654,8 +669,7 @@ def _journal_event_context(minutes: int, problem_events: list[tuple[float, str]]
             "journalctl",
             "-u",
             "sing-box.service",
-            "--since",
-            f"{minutes} minutes ago",
+            *_journal_window_args(minutes, until),
             "--no-pager",
             "--output=json",
             rf"--grep=\[(?:\x1B\[[0-9;]*m)*(?:{event_pattern})\b",
@@ -672,7 +686,7 @@ def _journal_event_context(minutes: int, problem_events: list[tuple[float, str]]
     ]
 
 
-def journal_problem_events(minutes: int) -> tuple[list[tuple[float, str]], str]:
+def journal_problem_events(minutes: int, *, until: float | None = None) -> tuple[list[tuple[float, str]], str]:
     result = run(
         [
             "journalctl",
@@ -680,8 +694,7 @@ def journal_problem_events(minutes: int) -> tuple[list[tuple[float, str]], str]:
             "sing-box.service",
             "-u",
             "vpn-stack-xray.service",
-            "--since",
-            f"{minutes} minutes ago",
+            *_journal_window_args(minutes, until),
             "--no-pager",
             "--output=json",
             f"--grep={PROBLEM_LOG_GREP}",
@@ -692,7 +705,7 @@ def journal_problem_events(minutes: int) -> tuple[list[tuple[float, str]], str]:
     if command_error:
         return [], command_error
     events, malformed = _parse_journal_events(result)
-    events.extend(_journal_event_context(minutes, events))
+    events.extend(_journal_event_context(minutes, events, until=until))
     if malformed:
         return events, f"journalctl returned {malformed} malformed JSON record(s)"
     return events, ""
@@ -865,12 +878,25 @@ def summarize_problem_windows(*, full_logs: bool, fresh_since: str) -> tuple[dic
     query_minutes = max(windows)
     if fresh_age_minutes <= COMPLETE_LOG_RETENTION_MINUTES:
         query_minutes = max(query_minutes, fresh_age_minutes)
-    events, collector_error = journal_problem_events(query_minutes)
+    events, collector_error = journal_problem_events(query_minutes, until=now)
+    events = [(timestamp, line) for timestamp, line in events if timestamp <= now]
+    # Resolve each failure once using the bounded query's context, then slice only its counts.
+    classified = list(zip((timestamp for timestamp, _line in events), classify_lines(line for _timestamp, line in events)))
+    observed_at = datetime.fromtimestamp(now, timezone.utc).isoformat()
+
+    def window(since: float) -> dict[str, Any]:
+        return {
+            **summarize_classified_lines(item for timestamp, item in classified if since <= timestamp),
+            "observed_at": observed_at,
+            "since": datetime.fromtimestamp(since, timezone.utc).isoformat(),
+            "until": observed_at,
+        }
+
     summaries = {
-        str(minutes): summarize_lines(line for timestamp, line in events if timestamp >= now - minutes * 60)
+        str(minutes): window(now - minutes * 60)
         for minutes in windows
     }
-    fresh = summarize_lines(line for timestamp, line in events if timestamp >= fresh_epoch)
+    fresh = window(fresh_epoch)
     return summaries, fresh, collector_error
 
 
@@ -2828,11 +2854,11 @@ def transport_state_snapshot(path: Path = TRANSPORT_STATE_PATH) -> dict[str, Any
     state = read_json(path, {})
     if not isinstance(state, dict) or not state:
         return {}
-    age_seconds = iso_age_seconds(str(state.get("updated_at", "")))
+    age_seconds = _observation_age_seconds(str(state.get("updated_at", "")))
     return {
         **state,
         "age_seconds": round(age_seconds, 1) if age_seconds is not None else None,
-        "fresh": age_seconds is not None and age_seconds <= TRANSPORT_PROBE_INTERVAL_SECONDS * 6,
+        "fresh": age_seconds is not None and 0 <= age_seconds <= TRANSPORT_PROBE_INTERVAL_SECONDS * 6,
     }
 
 
@@ -3632,6 +3658,8 @@ def probe_path_ok(probes: dict[str, Any], *requirement_names: str) -> bool:
 
 
 def collect_runtime_facts(*, live_probes: bool = False, profile: str = "light", full_logs: bool = True, include_maintenance: bool = True) -> dict[str, Any]:
+    # A composite collector keeps its earliest acquisition time, not the later envelope time.
+    observed_at = {"artifacts": utc_now()}
     env = parse_env()
     manifest_data = manifest_snapshot()
     manifest = manifest_data.get("manifest", {})
@@ -3662,6 +3690,7 @@ def collect_runtime_facts(*, live_probes: bool = False, profile: str = "light", 
 
     services = {name: "not-applicable" for name in SERVICE_UNIT_DEFAULTS}
     service_units = contract.get("service_units", {}) if isinstance(contract.get("service_units"), Mapping) else {}
+    observed_at["services"] = utc_now()
     for name in contract.get("required_services", ()):
         unit = str(service_units.get(name, SERVICE_UNIT_DEFAULTS.get(name, ""))).format(wg_interface=wg_interface)
         services[str(name)] = service_state(unit) if unit else "unknown"
@@ -3669,19 +3698,29 @@ def collect_runtime_facts(*, live_probes: bool = False, profile: str = "light", 
     fresh_since, fresh_window_minutes = fresh_log_since()
     if not full_logs and fresh_window_minutes > 5:
         fresh_since, fresh_window_minutes = "5 minutes ago", 5
+    if include_maintenance:
+        observed_at["maintenance"] = utc_now()
     maintenance = maintenance_snapshot() if include_maintenance else {}
     release_installed_at = installed_at_value()
+    observed_at["logs"] = utc_now()
     logs, fresh_logs, logs_collector_error = summarize_problem_windows(full_logs=full_logs, fresh_since=fresh_since)
+    if has_public_front:
+        observed_at["front"] = utc_now()
     front = tcp_front_snapshot(port) if has_public_front else {}
+    if live_probes and not contract_error:
+        observed_at["route_probes"] = utc_now()
     probes = run_confirmed_probes(env, contract, profile) if live_probes and not contract_error else {"profile": "none", "ok": None}
     transport: dict[str, Any] = {}
     if has_interserver:
+        observed_at["transport"] = utc_now()
         transport["interserver"] = interserver_transport_snapshot(contract, env)
     if has_public_front:
         transport["udp_443_policy"] = udp_443_policy()
         transport["public_client"] = public_hy2_snapshot(port)
+    observed_at["network"] = utc_now()
     tcp_adaptation = tcp_adaptation_snapshot(public_iface, wg_interface if has_interserver else "")
     resolver = resolver_snapshot()
+    observed_at["storage"] = utc_now()
     root_filesystem = root_filesystem_snapshot()
     storage = storage_snapshot(root_filesystem, release_installed_at)
     conntrack = conntrack_snapshot(full_logs=full_logs)
@@ -3793,9 +3832,17 @@ def collect_runtime_facts(*, live_probes: bool = False, profile: str = "light", 
     overall = "failed" if "failed" in {server_path, public_front, public_quic, host_integrity} else "degraded" if degradations or client_observation in {"client_specific", "degraded"} else "verified" if server_path == "verified" else "inconclusive"
     healthy_exits = int(services.get("sing-box") == "active" and (not live_probes or release_gate_ok(probes)))
     interface_names = (public_iface, wg_interface) if has_interserver else (public_iface,)
+    host = host_snapshot(public_iface)
+    if has_interserver:
+        observed_at["wireguard"] = utc_now()
+    wireguard = wireguard_snapshot(wg_interface) if has_interserver else {}
+    interfaces = interface_counters(interface_names)
+    protocol_counters = protocol_counters_snapshot()
+    softnet_counters = softnet_counters_snapshot()
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": utc_now(),
+        "collector_observed_at": observed_at,
         "deployment": env.get("DEPLOY_NAME", ""),
         "topology": topology,
         "node_id": node_id,
@@ -3812,21 +3859,21 @@ def collect_runtime_facts(*, live_probes: bool = False, profile: str = "light", 
             "runtime": manifest.get("runtime", {}) if isinstance(manifest, Mapping) else {},
             "installed_at": release_installed_at,
         },
-        "host": host_snapshot(public_iface),
+        "host": host,
         "storage": storage,
         "services": services,
         "artifacts": manifest_data,
-        "wireguard": wireguard_snapshot(wg_interface) if has_interserver else {},
+        "wireguard": wireguard,
         "network": {
-            "interfaces": interface_counters(interface_names),
+            "interfaces": interfaces,
             "conntrack": conntrack,
             "tcp_adaptation": tcp_adaptation,
             "resolver": resolver,
             "managed_profile": expected_network_profile,
             "profile_mismatches": profile_mismatches,
             "wireguard_policy": wireguard_policy,
-            "protocol_counters": protocol_counters_snapshot(),
-            "softnet_counters": softnet_counters_snapshot(),
+            "protocol_counters": protocol_counters,
+            "softnet_counters": softnet_counters,
             "recent_health_deltas": health_state.get("network_deltas", {}),
             "health_state": health_state.get("state", "unknown"),
             "health_updated_at": health_state.get("updated_at", ""),
@@ -3841,7 +3888,7 @@ def collect_runtime_facts(*, live_probes: bool = False, profile: str = "light", 
         "probes": probes,
         "logs": {
             "collector_error": logs_collector_error,
-            "fresh": {"since": fresh_since, "window_minutes": fresh_window_minutes, **fresh_logs},
+            "fresh": {**fresh_logs, "since": fresh_since, "window_minutes": fresh_window_minutes},
             "windows_minutes": logs,
         },
         "maintenance": maintenance,
@@ -3867,27 +3914,39 @@ def collect_runtime_facts(*, live_probes: bool = False, profile: str = "light", 
     }
 
 
-def _diagnostics_log_window(raw: object, *, generated_at: str, since: str) -> LogWindowSnapshot:
+def _diagnostics_log_window(raw: object, *, since: str) -> LogWindowSnapshot:
     if not isinstance(raw, Mapping) or not isinstance(raw.get("counts"), Mapping):
         return LogWindowSnapshot.unavailable("log window was not collected")
-    return LogWindowSnapshot.collected(
-        raw["counts"],
-        observed_at=generated_at,
-        since=since,
-        until=generated_at,
-        top_destinations=raw.get("top_destinations") if isinstance(raw.get("top_destinations"), Mapping) else None,
-        top_sources=raw.get("top_sources") if isinstance(raw.get("top_sources"), Mapping) else None,
-        samples=raw.get("samples") if isinstance(raw.get("samples"), Mapping) else None,
-    )
+    if not all(isinstance(raw.get(key), str) and raw[key] for key in ("observed_at", "until")):
+        return LogWindowSnapshot.unavailable("log window acquisition timestamps are unavailable")
+    try:
+        return LogWindowSnapshot.collected(
+            raw["counts"],
+            observed_at=raw["observed_at"],
+            since=raw.get("since", since),
+            until=raw["until"],
+            top_destinations=raw.get("top_destinations") if isinstance(raw.get("top_destinations"), Mapping) else None,
+            top_sources=raw.get("top_sources") if isinstance(raw.get("top_sources"), Mapping) else None,
+            samples=raw.get("samples") if isinstance(raw.get("samples"), Mapping) else None,
+        )
+    except (TypeError, ValueError) as exc:
+        return LogWindowSnapshot.unavailable(str(exc))
 
 
-def _collector_state(condition: bool, generated_at: str, message: str) -> CollectorState:
-    return CollectorState.ok(generated_at) if condition else CollectorState.error(message)
+def _collector_state(condition: bool, observed_at: object, message: str) -> CollectorState:
+    if not condition:
+        return CollectorState.error(message)
+    if not isinstance(observed_at, str) or not observed_at:
+        return CollectorState.error("collector acquisition timestamp is unavailable")
+    return CollectorState.ok(observed_at)
 
 
 def diagnostics_snapshot(**snapshot_options: Any) -> dict[str, Any]:
     facts = collect_runtime_facts(**snapshot_options)
     generated_at = str(facts["generated_at"])
+    observed_at = facts.get("collector_observed_at", {})
+    if not isinstance(observed_at, Mapping):
+        observed_at = {}
     topology = str(facts.get("topology", ""))
     node_id = str(facts.get("node_id", ""))
     location = str(facts.get("location", ""))
@@ -3914,41 +3973,41 @@ def diagnostics_snapshot(**snapshot_options: Any) -> dict[str, Any]:
     transport = facts.get("transport", {}) if isinstance(facts.get("transport"), Mapping) else {}
     maintenance = facts.get("maintenance", {}) if isinstance(facts.get("maintenance"), Mapping) else {}
     collectors = {
-        "services": _collector_state(bool(services) and not contract_error and "unknown" not in services.values(), generated_at, contract_error or "service state is unavailable"),
+        "services": _collector_state(bool(services) and not contract_error and "unknown" not in services.values(), observed_at.get("services"), contract_error or "service state is unavailable"),
         "artifacts": _collector_state(
             isinstance(artifacts.get("manifest"), Mapping) and bool(artifacts.get("manifest")),
-            generated_at,
+            observed_at.get("artifacts"),
             "render manifest is unavailable",
         ),
         "wireguard": (
-            _collector_state(bool(wireguard.get("interface")) and wireguard.get("state") in {"up", "down"}, generated_at, "WireGuard state is unavailable")
+            _collector_state(bool(wireguard.get("interface")) and wireguard.get("state") in {"up", "down"}, observed_at.get("wireguard"), "WireGuard state is unavailable")
             if has_interserver
             else CollectorState.not_applicable("node plan has no interserver overlay")
         ),
         "route_probes": (
-            _collector_state(probes.get("profile") not in {None, "none"}, generated_at, "live route probes were not collected")
+            _collector_state(probes.get("profile") not in {None, "none"}, observed_at.get("route_probes"), "live route probes were not collected")
             if live_probes
             else CollectorState.skipped("live route probes were not requested")
         ),
-        "logs": _collector_state(not log_error, generated_at, log_error or "journal collection failed"),
-        "storage": _collector_state(isinstance(storage.get("root_filesystem"), Mapping) and bool(storage.get("root_filesystem")), generated_at, "root filesystem state is unavailable"),
+        "logs": _collector_state(not log_error, observed_at.get("logs"), log_error or "journal collection failed"),
+        "storage": _collector_state(isinstance(storage.get("root_filesystem"), Mapping) and bool(storage.get("root_filesystem")), observed_at.get("storage"), "root filesystem state is unavailable"),
         "network": _collector_state(
             all(isinstance(network.get(key), Mapping) and bool(network.get(key)) for key in ("tcp_adaptation", "resolver", "conntrack")),
-            generated_at,
+            observed_at.get("network"),
             "network state is incomplete",
         ),
         "front": (
-            _collector_state("listening" in front, generated_at, "public front state is unavailable")
+            _collector_state("listening" in front, observed_at.get("front"), "public front state is unavailable")
             if has_public_front
             else CollectorState.not_applicable("node plan has no public front")
         ),
         "transport": (
-            _collector_state(isinstance(transport.get("interserver"), Mapping) and bool(transport.get("interserver")), generated_at, "interserver transport state is unavailable")
+            _collector_state(isinstance(transport.get("interserver"), Mapping) and bool(transport.get("interserver")), observed_at.get("transport"), "interserver transport state is unavailable")
             if has_interserver
             else CollectorState.not_applicable("node plan has no interserver transport")
         ),
         "maintenance": (
-            _collector_state(bool(maintenance) and not maintenance.get("collector_error"), generated_at, str(maintenance.get("collector_error") or "maintenance state was not collected"))
+            _collector_state(bool(maintenance) and not maintenance.get("collector_error"), observed_at.get("maintenance"), str(maintenance.get("collector_error") or "maintenance state was not collected"))
             if include_maintenance
             else CollectorState.skipped("maintenance state was not requested")
         ),
@@ -3964,16 +4023,16 @@ def diagnostics_snapshot(**snapshot_options: Any) -> dict[str, Any]:
         release = facts.get("release", {}) if isinstance(facts.get("release"), Mapping) else {}
         release_installed_at = str(release.get("installed_at", ""))
         since_release = (
-            _diagnostics_log_window(fresh, generated_at=generated_at, since=release_installed_at)
+            _diagnostics_log_window(fresh, since=release_installed_at)
             if release_installed_at and str(fresh.get("since", "")) == release_installed_at
             else LogWindowSnapshot.skipped("complete since-release log window was not requested")
             if not full_logs
             else LogWindowSnapshot.unavailable("complete since-release log window is unavailable")
         )
         log_windows = {
-            "5m": _diagnostics_log_window(minute_windows.get("5"), generated_at=generated_at, since="5 minutes ago"),
-            "30m": _diagnostics_log_window(minute_windows.get("30"), generated_at=generated_at, since="30 minutes ago") if full_logs else LogWindowSnapshot.skipped("30m window was not requested"),
-            "24h": _diagnostics_log_window(minute_windows.get("1440"), generated_at=generated_at, since="1440 minutes ago") if full_logs else LogWindowSnapshot.skipped("24h window was not requested"),
+            "5m": _diagnostics_log_window(minute_windows.get("5"), since="5 minutes ago"),
+            "30m": _diagnostics_log_window(minute_windows.get("30"), since="30 minutes ago") if full_logs else LogWindowSnapshot.skipped("30m window was not requested"),
+            "24h": _diagnostics_log_window(minute_windows.get("1440"), since="1440 minutes ago") if full_logs else LogWindowSnapshot.skipped("24h window was not requested"),
             "since_release": since_release,
         }
     artifact_files = artifacts.get("files", {}) if isinstance(artifacts, Mapping) else {}

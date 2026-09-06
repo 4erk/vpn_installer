@@ -8,7 +8,7 @@ from .admin_access import admin_access_workflow
 from .android import DEFAULT_HIDDIFY_PACKAGE, android_diagnose
 from .common import cli_entrypoint, error_summary
 from .config import load_existing_deployment_env
-from .diagnose import diagnose_client_log_workflow, diagnose_front_workflow, diagnose_path_workflow, diagnose_server_client_workflow
+from .diagnose import diagnose_client_log_workflow, diagnose_front_workflow, diagnose_path_workflow, diagnose_server_client_workflow, diagnose_telegram_workflow
 from .models import AppError, UserCancelled
 from .prompts import select_existing_deployment
 from .verify import verify_live_workflow
@@ -170,6 +170,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     diagnose = subparsers.add_parser("diagnose", help="Снять диагностику сети и серверного dataplane.")
     diagnose_subparsers = diagnose.add_subparsers(dest="diagnose_command", required=True)
+    telegram = diagnose_subparsers.add_parser("telegram", help="Проверить ответ MTProto к IP из ошибок: через router и непосредственно с exit.")
+    telegram.add_argument("--deployment", help="Имя deployment.")
+    add_node_selector(telegram)
+    telegram.add_argument("--destination", action="append", required=True, help="IP[:port] или [IPv6]:port; по умолчанию порт 443; до 8 адресов повторением флага.")
+    telegram.add_argument("--non-interactive", action="store_true", help="Брать подключение из state/env без вопросов.")
+    telegram.set_defaults(func=lambda args: diagnose_telegram_workflow(args.deployment, selected_node(args), args.destination, non_interactive=args.non_interactive))
     path = diagnose_subparsers.add_parser("path", help="Собрать структурный snapshot маршрутов, WireGuard, front и журналов.")
     path.add_argument("--deployment", help="Имя deployment.")
     add_node_selector(path)

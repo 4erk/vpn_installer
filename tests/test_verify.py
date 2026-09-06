@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+from vpn_installer import server_agent
 from vpn_installer.diagnostics import COLLECTOR_NAMES, LOG_WINDOW_KEYS, CollectorState, DiagnosticsSnapshot, LogWindowSnapshot
 from vpn_installer.log_classifier import BUCKETS
 from vpn_installer.models import RemoteTarget
@@ -219,7 +220,7 @@ def acceptance_snapshot(
         "generated_at": observed_at,
         "collectors": collectors,
         "log_windows": {
-            name: LogWindowSnapshot.collected({bucket: 0 for bucket in BUCKETS}, observed_at=observed_at)
+            name: LogWindowSnapshot.collected({bucket: 0 for bucket in BUCKETS}, observed_at=observed_at, until=observed_at)
             for name in LOG_WINDOW_KEYS
         },
         "services": services,
@@ -288,6 +289,17 @@ class VerifyTests(unittest.TestCase):
         stale = acceptance_snapshot(NODE_EXIT, generated_at="2026-01-01T00:00:00+00:00")
         self.assertEqual(_verify_snapshot(stale).verdict, "inconclusive")
 
+    def test_fresh_envelope_does_not_refresh_old_collectors_or_log_window(self) -> None:
+        old = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+        snapshot = acceptance_snapshot(NODE_EXIT)
+        snapshot.collectors["services"] = CollectorState.ok(old)
+        self.assertEqual(_verify_snapshot(snapshot).verdict, "inconclusive")
+        snapshot.services["sing-box"] = "inactive"
+        self.assertEqual(_verify_snapshot(snapshot).verdict, "failed")
+        snapshot = acceptance_snapshot(NODE_EXIT)
+        snapshot.log_windows["5m"] = LogWindowSnapshot.collected({bucket: 0 for bucket in BUCKETS}, observed_at=snapshot.generated_at, until=old)
+        self.assertEqual(_verify_snapshot(snapshot).verdict, "inconclusive")
+
     def test_verify_snapshot_accepts_native_v5_contract_metadata(self) -> None:
         snapshot = acceptance_snapshot(NODE_GATEWAY)
 
@@ -316,6 +328,7 @@ class VerifyTests(unittest.TestCase):
             name: LogWindowSnapshot.collected(
                 {bucket: 0 for bucket in BUCKETS},
                 observed_at=datetime.now(timezone.utc).isoformat(),
+                until=datetime.now(timezone.utc).isoformat(),
             )
             for name in LOG_WINDOW_KEYS
         }
@@ -1030,8 +1043,8 @@ class VerifyTests(unittest.TestCase):
         }
         self.assertEqual(_validate_public_vless_result(insufficient_sources, uri, topology, throughput_seconds=60)["verdict"], "failed")
         self.assertEqual(_validate_public_vless_result({**result, "throughput": {**result["throughput"], "sustained_bytes_per_second": 1_000_000}}, uri, topology, throughput_seconds=60)["verdict"], "failed")
-        self.assertEqual(_vless_runner_timeout(0), 189)
-        self.assertEqual(_vless_runner_timeout(600), 794)
+        self.assertEqual(_vless_runner_timeout(0), 194)
+        self.assertEqual(_vless_runner_timeout(600), 799)
 
     def test_peak_capacity_is_diagnostic_after_sustained_gate_passes(self) -> None:
         topology = TopologySpec.from_env(deployment_env())
@@ -1064,26 +1077,78 @@ class VerifyTests(unittest.TestCase):
         self.assertFalse(primary["performance"]["peak_capacity_reference_met"])
         self.assertIn("below the 50.00 Mbit/s reference", primary["performance"]["observation"])
 
-    def test_front_correlation_uses_accept_event_after_short_flow_closes(self) -> None:
+    def test_front_correlation_requires_active_flow_for_accept_event(self) -> None:
         source = "198.51.100.20"
-        baseline = {"source": source, "events": {"accepted_tcp": 4}, "front": {"flows": {}}}
+        now = datetime.now(timezone.utc)
+        baseline = {"generated_at": (now - timedelta(seconds=2)).isoformat(), "source": source, "events": {"accepted_tcp": 4}, "front": {"flows": {}}}
         correlation = _validate_front_correlation(
             [
-                {"baseline": baseline, "during": {**baseline, "events": {"accepted_tcp": 4}}},
-                {"baseline": baseline, "during": {**baseline, "events": {"accepted_tcp": 5}}},
+                {"baseline": baseline, "during": {**baseline, "generated_at": now.isoformat(), "events": {"accepted_tcp": 4}}},
+                {"baseline": baseline, "during": {**baseline, "generated_at": now.isoformat(), "events": {"accepted_tcp": 5}, "flow_events": {f"{source}:37166": {"example.com:443": 1}}}},
             ],
             source=source,
+            runner_sockets={"status": "ok", "flows": [f"{source}:37166"]},
         )
 
-        self.assertEqual(correlation["verdict"], "verified")
-        self.assertEqual(correlation["accepted_delta"], 1)
-        self.assertEqual(correlation["flow_count"], 0)
+        self.assertEqual(correlation["verdict"], "inconclusive")
+
+    def test_front_correlation_matches_agent_active_and_closed_flow_output(self) -> None:
+        source = "198.51.100.20"
+        flow = f"{source}:37166"
+        now = datetime.now(timezone.utc)
+        snapshots = []
+        with (
+            patch.object(server_agent, "parse_env", return_value={"RU_LISTEN_PORT": "443"}),
+            patch.object(server_agent, "installed_runtime_contract", return_value={"capabilities": [CAP_PUBLIC_FRONT]}),
+            patch.object(server_agent, "journal_filtered_lines") as logs,
+            patch.object(server_agent, "tcp_front_snapshot") as front,
+            patch.object(server_agent, "service_state", return_value="active"),
+            patch.object(server_agent, "udp_443_policy", return_value="routed"),
+            patch.object(server_agent, "public_hy2_snapshot", return_value={}),
+            patch.object(server_agent, "read_json", return_value={}),
+            patch.object(server_agent, "utc_now") as clock,
+        ):
+            for index, phase in enumerate((None, "active", "closing", None)):
+                logs.return_value = [] if index == 0 else [f"from {flow} accepted tcp:example.com:443"]
+                front.return_value = {"listening": True, "flows": {flow: {"source": source, "source_port": 37166, "phase": phase, "quality": "observed"}} if phase else {}}
+                clock.return_value = (now - timedelta(seconds=4 - index)).isoformat()
+                snapshots.append(server_agent.front_client_snapshot(source, 5))
+        self.assertEqual(snapshots[1]["flow_events"], {flow: {"example.com:443": 1}})
+        for during in snapshots[2:]:
+            self.assertEqual(during["events"]["accepted_tcp"], 1)
+            self.assertEqual(during["flow_events"], {})
+        ownership = {"status": "ok", "flows": [flow]}
+        for during in snapshots[1:]:
+            result = _validate_front_correlation({"baseline": snapshots[0], "during": during}, source=source, runner_sockets=ownership)
+            self.assertEqual(result["verdict"], "verified" if during is snapshots[1] else "inconclusive")
+        result = _validate_front_correlation([{"baseline": snapshots[0], "during": during} for during in snapshots[1:]], source=source, runner_sockets=ownership)
+        self.assertEqual(result["verdict"], "verified")
+
+    def test_front_correlation_rejects_historical_future_or_invalid_timestamps(self) -> None:
+        source = "198.51.100.20"
+        flow = f"{source}:37166"
+        now = datetime.now(timezone.utc)
+        baseline = {"generated_at": (now - timedelta(seconds=2)).isoformat(), "source": source, "events": {"accepted_tcp": 0}, "flow_events": {}}
+        during = {"generated_at": (now - timedelta(seconds=1)).isoformat(), "source": source, "events": {"accepted_tcp": 1}, "flow_events": {flow: {"example.com:443": 1}}, "front": {"flows": {flow: {"quality": "observed", "phase": "active"}}}}
+        for name in ("baseline", "during"):
+            for value in (None, "", "invalid", 123, now.replace(tzinfo=None).isoformat(), (now - timedelta(minutes=10)).isoformat(), (now + timedelta(minutes=10)).isoformat()):
+                with self.subTest(snapshot=name, timestamp=value):
+                    observation = {"baseline": dict(baseline), "during": dict(during)}
+                    observation[name]["generated_at"] = value
+                    result = _validate_front_correlation(observation, source=source, runner_sockets={"status": "ok", "flows": [flow]})
+                    self.assertEqual(result["verdict"], "inconclusive")
+        for stamp in (baseline["generated_at"], (now - timedelta(seconds=3)).isoformat()):
+            with self.subTest(order=stamp):
+                result = _validate_front_correlation({"baseline": baseline, "during": {**during, "generated_at": stamp}}, source=source, runner_sockets={"status": "ok", "flows": [flow]})
+                self.assertEqual(result["verdict"], "inconclusive")
 
     def test_front_correlation_uses_flow_event_when_rolling_counter_decreases(self) -> None:
+        now = datetime.now(timezone.utc)
         correlation = _validate_front_correlation(
             {
-                "baseline": {"source": "198.51.100.20", "events": {"accepted_tcp": 40}, "front": {"flows": {}}},
+                "baseline": {"generated_at": (now - timedelta(seconds=2)).isoformat(), "source": "198.51.100.20", "events": {"accepted_tcp": 40}, "front": {"flows": {}}},
                 "during": {
+                    "generated_at": now.isoformat(),
                     "source": "198.51.100.20",
                     "events": {"accepted_tcp": 37},
                     "flow_events": {"198.51.100.20:37166": {"1.1.1.1:53": 1}},
@@ -1098,6 +1163,7 @@ class VerifyTests(unittest.TestCase):
                 },
             },
             source="198.51.100.20",
+            runner_sockets={"status": "ok", "flows": ["198.51.100.20:37166"]},
         )
 
         self.assertEqual(correlation["verdict"], "verified")
@@ -1106,7 +1172,9 @@ class VerifyTests(unittest.TestCase):
         self.assertEqual(correlation["flow_count"], 1)
 
     def test_front_correlation_rejects_unchanged_flow_events_with_no_accept_delta(self) -> None:
+        now = datetime.now(timezone.utc)
         baseline = {
+            "generated_at": (now - timedelta(seconds=2)).isoformat(),
             "source": "198.51.100.20",
             "events": {"accepted_tcp": 4},
             "flow_events": {"198.51.100.20:37166": {"example.com:443": 1}},
@@ -1115,18 +1183,22 @@ class VerifyTests(unittest.TestCase):
         for accepted in (4, 3):
             with self.subTest(accepted=accepted):
                 during = copy.deepcopy(baseline)
+                during["generated_at"] = now.isoformat()
                 during["events"]["accepted_tcp"] = accepted
-                correlation = _validate_front_correlation({"baseline": baseline, "during": during}, source=baseline["source"])
+                correlation = _validate_front_correlation({"baseline": baseline, "during": during}, source=baseline["source"], runner_sockets={"status": "ok", "flows": ["198.51.100.20:37166"]})
                 self.assertEqual(correlation["verdict"], "inconclusive")
 
     def test_front_correlation_counts_only_new_events_for_runner_source(self) -> None:
         source = "198.51.100.20"
+        now = datetime.now(timezone.utc)
         baseline = {
+            "generated_at": (now - timedelta(seconds=2)).isoformat(),
             "source": source,
             "events": {"accepted_tcp": 4},
             "flow_events": {f"{source}:37166": {"example.com:443": 2, "old.example:443": 10}},
         }
         during = {
+            "generated_at": now.isoformat(),
             "source": source,
             "events": {"accepted_tcp": 4},
             "flow_events": {
@@ -1138,7 +1210,7 @@ class VerifyTests(unittest.TestCase):
                 "192.0.2.99:50000": {"quality": "degraded"},
             }},
         }
-        correlation = _validate_front_correlation({"baseline": baseline, "during": during}, source=source)
+        correlation = _validate_front_correlation({"baseline": baseline, "during": during}, source=source, runner_sockets={"status": "ok", "flows": [f"{source}:37166"]})
         self.assertEqual(correlation["verdict"], "verified")
         self.assertEqual(correlation["accepted_delta"], 0)
         self.assertEqual(correlation["correlated_events"], 1)
@@ -1148,14 +1220,16 @@ class VerifyTests(unittest.TestCase):
     def test_front_correlation_rejects_unrelated_source_evidence(self) -> None:
         source = "198.51.100.20"
         unrelated = "192.0.2.99"
-        baseline = {"source": source, "events": {"accepted_tcp": 4}}
+        now = datetime.now(timezone.utc)
+        baseline = {"generated_at": (now - timedelta(seconds=2)).isoformat(), "source": source, "events": {"accepted_tcp": 4}}
         during = {
+            "generated_at": now.isoformat(),
             "source": source,
             "events": {"accepted_tcp": 4},
             "flow_events": {f"{unrelated}:50000": {"example.com:443": 1}},
             "front": {"flows": {f"{unrelated}:50000": {"quality": "observed"}}},
         }
-        correlation = _validate_front_correlation({"baseline": baseline, "during": during}, source=source)
+        correlation = _validate_front_correlation({"baseline": baseline, "during": during}, source=source, runner_sockets={"status": "ok", "flows": [f"{source}:37166"]})
         self.assertEqual(correlation["verdict"], "inconclusive")
         for baseline_source, during_source in ((source, unrelated), (unrelated, unrelated), ("", source)):
             with self.subTest(baseline_source=baseline_source, during_source=during_source):
@@ -1165,8 +1239,23 @@ class VerifyTests(unittest.TestCase):
                         "during": {**during, "source": during_source, "events": {"accepted_tcp": 5}},
                     },
                     source=source,
+                    runner_sockets={"status": "ok", "flows": [f"{source}:37166"]},
                 )
                 self.assertEqual(correlation["verdict"], "inconclusive")
+
+    def test_front_correlation_rejects_other_process_on_same_source(self) -> None:
+        source = "198.51.100.20"
+        now = datetime.now(timezone.utc)
+        observation = {
+            "baseline": {"generated_at": (now - timedelta(seconds=2)).isoformat(), "source": source, "events": {"accepted_tcp": 0}},
+            "during": {"generated_at": now.isoformat(), "source": source, "events": {"accepted_tcp": 10},
+                       "front": {"flows": {f"{source}:50000": {"quality": "observed"}}},
+                       "flow_events": {f"{source}:50000": {"example.com:443": 10}}},
+        }
+        result = _validate_front_correlation(observation, source=source, runner_sockets={"status": "ok", "flows": [f"{source}:37166"]})
+        self.assertEqual(result["verdict"], "inconclusive")
+        for ownership in (None, {"status": "error"}, {"status": "ok", "flows": []}):
+            self.assertEqual(_validate_front_correlation(observation, source=source, runner_sockets=ownership)["verdict"], "inconclusive")
 
     def test_public_hysteria_runner_and_validator_keep_separate_contracts(self) -> None:
         env = deployment_env()
@@ -1212,6 +1301,7 @@ class VerifyTests(unittest.TestCase):
             "first_load_reliability": FIRST_LOAD_OK,
             "throughput": {},
         }
+        result["runner_sockets"] = {"status": "ok", "flows": ["198.51.100.20:50000"]}
         uploads: dict[str, bytes] = {}
 
         def capture_upload(_target, local_path, remote_path) -> None:
@@ -1229,10 +1319,12 @@ class VerifyTests(unittest.TestCase):
                     env,
                     runner,
                     on_running=lambda: {
-                        "baseline": {"source": "198.51.100.20", "events": {"accepted_tcp": 0}, "front": {"flows": {}}},
+                        "baseline": {"generated_at": (datetime.now(timezone.utc) - timedelta(seconds=2)).isoformat(), "source": "198.51.100.20", "events": {"accepted_tcp": 0}, "front": {"flows": {}}},
                         "during": {
+                            "generated_at": datetime.now(timezone.utc).isoformat(),
                             "source": "198.51.100.20",
                             "events": {"accepted_tcp": 1},
+                            "flow_events": {"198.51.100.20:50000": {"example.com:443": 1}},
                             "front": {"flows": {"198.51.100.20:50000": {"quality": "observed"}}},
                         },
                     },

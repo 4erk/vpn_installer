@@ -61,18 +61,17 @@ def coverage_command(*args: str) -> list[str]:
     return python_cmd() + ["-c", runner, *args]
 
 
-def coverage_driver_text() -> str:
+def coverage_driver_text(report_path: Path | None = None) -> str:
     return textwrap.dedent(
         f"""
         import pathlib
         import sys
-        import unittest
 
         repo = pathlib.Path({str(ROOT_DIR)!r}).resolve()
         sys.path.insert(0, str(repo))
-        suite = unittest.defaultTestLoader.discover(str(repo / "tests"), pattern="test_*.py")
-        result = unittest.TextTestRunner(verbosity=1).run(suite)
-        raise SystemExit(0 if result.wasSuccessful() else 1)
+        from tests.run_tests import main
+        report = pathlib.Path({str(report_path)!r}) if {report_path is not None!r} else None
+        raise SystemExit(main(report))
         """
     ).strip() + "\n"
 
@@ -236,7 +235,8 @@ def test_coverage(runner: AuditRunner) -> dict[str, str]:
     ensure_python_package("coverage", "coverage>=7,<8")
     coverage_data = runner.run_dir / "coverage.json"
     coverage_driver = runner.run_dir / "coverage_driver.py"
-    coverage_driver.write_text(coverage_driver_text(), encoding="utf-8")
+    unit_report = runner.run_dir / "unit-results.json"
+    coverage_driver.write_text(coverage_driver_text(unit_report), encoding="utf-8")
     runner.run_command("coverage-erase", coverage_command("erase"))
     runner.run_command(
         "coverage-branch-run",
@@ -252,6 +252,7 @@ def test_coverage(runner: AuditRunner) -> dict[str, str]:
     )
     return {
         "coverage_json": str(coverage_data),
+        "unit_results": str(unit_report),
         "threshold": str(COVERAGE_THRESHOLD),
         "omit": COVERAGE_OMIT,
         "modules": "runtime",

@@ -33,7 +33,7 @@ Paramiko exec/stream и SFTP используют общий monotonic deadline,
 - `HostFacts` и `PlatformSpec` являются единственным каталогом поддерживаемых серверных платформ. Логические package requirements преобразуются в имена пакетов только выбранным package provider.
 - `/etc/vpn-stack/render-manifest.json` schema 5 хранит topology, node capabilities, platform descriptor, install plan schema 5, policy, hashes, pinned binaries, runtime facts и окно совместимых установленных версий. Каждый node получает только собственный `node.env` и принадлежащие ему secrets/artifacts.
 
-Target-side render не объединяет `node.env` с общими defaults и не генерирует ключи. Он принимает только точную `CONFIG_SCHEMA=3` проекцию capability, отклоняет неизвестные поля и cross-node secrets, затем сверяет payload с manifest/install-plan. Установленный `0.22.4` имеет те же schemas и проходит общий текущий validator без отдельного adapter.
+Target-side render не объединяет `node.env` с общими defaults и не генерирует ключи. Он принимает только точную `CONFIG_SCHEMA=3` проекцию capability, отклоняет неизвестные поля и cross-node secrets, затем сверяет payload с manifest/install-plan. Установленный `0.22.5` имеет те же schemas и проходит общий текущий validator без отдельного adapter.
 
 `single` не компилирует и не устанавливает WireGuard, interserver transport, web-admin, их пакеты, сервисы, credentials, secrets, firewall rules или probes. `dual` устанавливает interserver capability на оба участвующих узла, а web-admin только на gateway. Отсутствующая capability имеет состояние `not_applicable`, а не ложное `healthy`.
 
@@ -55,7 +55,7 @@ DNS-кеш — отдельный app-owned сервис с собственно
 
 ## Совместимость релиза
 
-`0.22.5` поддерживает fresh install, обновление только с `0.22.4` и повторную установку `0.22.5`. Manifest объявляет `installed_min=0.22.4`, `installed_max=0.22.5`. Неподдерживаемый установленный релиз отклоняется до managed transaction; удалить его нужно `.\vpn.cmd` на Windows или `./vpn.sh` на Linux из совпадающего Git-тега, после чего выполняется fresh install.
+`0.22.6` поддерживает fresh install, обновление только с `0.22.5` и повторную установку `0.22.6`. Manifest объявляет `installed_min=0.22.5`, `installed_max=0.22.6`. Неподдерживаемый установленный релиз отклоняется до managed transaction; удалить его нужно `.\vpn.cmd` на Windows или `./vpn.sh` на Linux из совпадающего Git-тега, после чего выполняется fresh install.
 
 Публичный CLI использует только `--node gateway|exit|all`. Role aliases, migration chains и readers старых schemas отсутствуют. Политика окна описана в [DEPRECATIONS.md](./DEPRECATIONS.md).
 
@@ -111,7 +111,7 @@ Snapshot diagnostics schema 6 содержит:
 - problem-записи bounded-обогащаются inbound/DNS INFO-контекстом совпадающего sing-box event ID; парные сообщения одного request ID дедуплицируются, а IP timeout связывается с исходным доменом без полного INFO-сканирования;
 - maintenance state и отдельные `server_path`, `public_front`, `public_quic`, `client_observation`, `closing_churn`, `host_integrity` verdicts.
 
-`.\vpn.cmd status` собирает компактный snapshot за последние 5 минут без live probes и исторического сканирования. `.\vpn.cmd diagnose path` сохраняет полный structured JSON с окнами 5m/30m/24h. `.\vpn.cmd diagnose front` одновременно проверяет публичный listener gateway и все обязательные для topology router/interserver paths. `.\vpn.cmd diagnose client --source <public-ip>` показывает потоки и Xray destinations проблемного источника, не смешивая устройства за одним NAT. На Linux те же команды запускаются через `./vpn.sh`.
+`.\vpn.cmd status` собирает компактный snapshot за последние 5 минут без live probes и исторического сканирования. `.\vpn.cmd diagnose path` сохраняет полный structured JSON с окнами 5m/30m/24h. `.\vpn.cmd diagnose front` одновременно проверяет публичный listener gateway и все обязательные для topology router/interserver paths. `.\vpn.cmd diagnose client --source <public-ip>` показывает отдельные потоки и Xray destinations этого IP; принадлежность потока конкретному устройству за NAT без клиентских данных не определяется. На Linux те же команды запускаются через `./vpn.sh`.
 
 ## Health и восстановление
 
@@ -141,6 +141,14 @@ Journald ограничивается managed drop-in 256 МБ/14 дней. По
 
 Дополнительно проверяются DNS, direct/domain routes, IPv4 literal, IPv6 literal и reject private/fake. Итог только один из `verified`, `degraded`, `failed`, `inconclusive`; зелёный `status` не является acceptance доказательством.
 
+Свежесть проверяется по времени получения каждого обязательного collector и каждого log window, а не только по времени сборки JSON. Неизвестное или устаревшее измерение не подтверждает текущую работоспособность: для snapshot действует возраст не более 180s и допустимое опережение часов не более 30s. Исторические окна сохраняют свой период; журнал запрашивается с фиксированными `--since` и `--until`, ошибки классифицируются один раз с доступным контекстом до разделения на окна.
+
+IP в строке неудачного dial может быть результатом разрешения домена. Без исходного request trace такая ошибка сохраняется в `unclassified_error` вместе с адресом и образцом строки, а не объявляется доказанным literal-запросом. Число ошибок не исчезает из отчёта; ограниченное окно или недоступный контекст не заменяются догадкой.
+
+VLESS runner сопоставляет socket inode с файловыми дескрипторами своего процесса и подтверждает его PID/starttime; `/proc/<pid>/net/tcp` сам по себе содержит таблицу всей network namespace, а не только этого процесса. Только принадлежащие runner TCP endpoints и свежие Xray events могут подтвердить публичный front. Чужой поток того же IP/NAT и историческая запись не являются доказательством. Пропущенный короткий сокет даёт неполное наблюдение, а не подменяется счётчиком всего source. Packet capture и изменение маршрутов клиента не используются.
+
+`diagnose telegram` отправляет только анонимный MTProto `req_pq_multi` и проверяет формат `resPQ` и совпадение nonce. Это проверка доступности протокола, не аутентификация сервера и не пользовательская сессия. Один endpoint получает общий I/O budget 8s, ответ ограничен 4096 байтами, список ограничен восемью адресами и четырьмя worker на узел (до восьми одновременно для `dual --node all`). Канонический stdlib-модуль передаётся по SSH только при запуске команды; постоянный агент, таймер и новые managed artifacts не добавляются. Отчёт фиксирует hash модуля, путь, фазу и результат. Основание формата: [официальный пример Telegram](https://core.telegram.org/mtproto/samples-auth_key).
+
 Server-side route acceptance использует HTTP `HEAD`: его задача доказать DNS, TCP, TLS, HTTP и выбранный route, не скачивая неограниченное тело сторонней страницы внутри короткого health/activation окна. Полные GET, передача данных и скорость проверяются отдельным public VLESS runner.
 
 Для RU acceptance прямой egress подтверждается отдельной identity-проверкой. Foreign-домены обязаны пройти через `wg0` и local router, IPv4 literal через оба пути, а IPv6 literal через router и проверенный IPv6 egress foreign. Прямой запрос RU к внешнему домену, недоступному по direct path, и raw `curl --interface wg0 -6` не являются пользовательским dataplane и записываются как наблюдения, но не вызывают ложный rollback.
@@ -153,15 +161,15 @@ Server-side route acceptance использует HTTP `HEAD`: его задач
 
 - `status`: read-only agent snapshot. Без live probes его `inconclusive` означает только отсутствие route acceptance; это явно выводится вместе с командой `verify live`.
 - `verify live`: full server acceptance plus independent public VLESS/TCP and Hysteria2/QUIC contracts.
-- `diagnose path|front|client`: structured incident evidence.
+- `diagnose path|front|client|telegram`: structured incident evidence; Telegram reachability отдельно от HTTP acceptance.
 - `routes list|add|remove`: CLI к operator-rules backend; в `dual` тот же backend использует web-admin.
 - `maintain`: security-update/reboot reporting and controlled rollout.
 - `audit quick`: compiler/contracts checks; `audit all`: единственный instrumented branch-coverage run с minimum 80% плюс Docker/lab failure injection. Критические policy, health recovery, manifest, public VLESS и transaction paths дополнительно закреплены behaviour tests.
 
 ## Проверки релиза
 
-1. `python tests/run_tests.py` (на Windows с bundled runtime: `& .\.runtime\python\windows\python.exe tests\run_tests.py`). Runner сам добавляет repo root до discovery, поэтому portable embedded Python не зависит от `PYTHONPATH`.
-2. `.\vpn.cmd audit quick`, затем `.\vpn.cmd audit all` (на Linux: `./vpn.sh ...`).
+1. Во время разработки доступны профильные unit tests. Канонический runner: `python tests/run_tests.py` (на Windows: `& .\.runtime\python\windows\python.exe tests\run_tests.py`). Он добавляет repo root до discovery; пустой набор тестов считается ошибкой.
+2. Для выпуска: `.\vpn.cmd audit quick`, затем `.\vpn.cmd audit all` (на Linux: `./vpn.sh ...`). Полный audit один раз вызывает тот же runner под branch coverage, без второго дублирующего discovery. `unit-results.json` содержит фактически запущенные test IDs, длительность, failures/errors и skips с причинами; пропущенная проверка не выдаётся за выполненную.
 3. В `dual` выполнить reinstall сначала `exit`, затем `gateway`; в `single` - только `gateway`, всегда штатным workflow.
 4. `.\vpn.cmd verify live --deployment <name> --non-interactive`. Acceptance подтверждает первую ошибку обязательного route-инварианта повторным циклом; дополнительные внешние targets выводятся отдельно как observations и не подменяют обязательные route checks.
 5. Проверить 30-minute fresh logs, front retransmit telemetry, manifest drift, идентичности обоих egress и проблемные destinations.

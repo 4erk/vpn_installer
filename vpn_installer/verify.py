@@ -108,17 +108,10 @@ def _verify_snapshot(snapshot: DiagnosticsSnapshot, *, expected_plan: NodePlan |
         snapshot.verdict = "inconclusive"
         snapshot.reasons = ["canonical topology/node/location/capabilities evidence is missing"]
         return snapshot
-    try:
-        observed_at = datetime.fromisoformat(snapshot.generated_at.replace("Z", "+00:00"))
-        age_seconds = (datetime.now(timezone.utc) - observed_at.astimezone(timezone.utc)).total_seconds()
-    except (TypeError, ValueError):
-        snapshot.verdict = "inconclusive"
-        snapshot.reasons = ["diagnostics snapshot timestamp is invalid"]
-        return snapshot
-    if age_seconds < -30 or age_seconds > SNAPSHOT_MAX_AGE_SECONDS:
-        snapshot.verdict = "inconclusive"
-        snapshot.reasons = [f"diagnostics snapshot is stale or from the future: age={age_seconds:.1f}s"]
-        return snapshot
+    freshness_issues = snapshot.freshness_issues(
+        now=datetime.now(timezone.utc), max_age_seconds=SNAPSHOT_MAX_AGE_SECONDS,
+        future_skew_seconds=30,
+    )
 
     hard_failures: list[str] = []
     degradations: list[str] = []
@@ -272,7 +265,10 @@ def _verify_snapshot(snapshot: DiagnosticsSnapshot, *, expected_plan: NodePlan |
         hard_failures.append("acceptance probes failed")
     if hard_failures:
         snapshot.verdict = "failed"
-        snapshot.reasons = hard_failures + degradations
+        snapshot.reasons = hard_failures + freshness_issues + degradations
+    elif freshness_issues:
+        snapshot.verdict = "inconclusive"
+        snapshot.reasons = freshness_issues + degradations
     elif degradations:
         snapshot.verdict = "degraded"
         snapshot.reasons = degradations
@@ -841,7 +837,7 @@ def _vless_runner_timeout(throughput_seconds: int) -> int:
         + throughput_seconds
         + RUNNER_THROUGHPUT_CLOCK_SKEW_SECONDS
         + (RUNNER_CURL_WATCHDOG_KILL_SECONDS if throughput_seconds else 0)
-        + RUNNER_SHUTDOWN_SECONDS
+        + 2 * RUNNER_SHUTDOWN_SECONDS
         + RUNNER_REPORT_SECONDS
         + RUNNER_TRANSPORT_DRAIN_SECONDS
     )
@@ -990,6 +986,8 @@ def _run_public_profile(
                 remote_lease,
                 throughput_seconds=throughput_seconds,
             )
+            if on_running is not None:
+                running_observations.append(on_running())
             if running_observations:
                 result["running_observations"] = running_observations
             try:
@@ -1214,6 +1212,7 @@ def _verify_public_vless_uri(
     correlation = _validate_front_correlation(
         run_result["result"].get("running_observations"),
         source=topology.node(runner_target.node_id).public_ip,
+        runner_sockets=run_result["result"].get("runner_sockets"),
     )
     validated["front_correlation"] = correlation
     if correlation["verdict"] != "verified":
@@ -1240,8 +1239,16 @@ def _capture_client_front(target, source: str) -> dict[str, object]:
         return {"error": str(exc)[:240]}
 
 
-def _validate_front_correlation(observation: object, *, source: str) -> dict[str, object]:
+def _validate_front_correlation(observation: object, *, source: str, runner_sockets: object = None) -> dict[str, object]:
     source = normalize_source(source)
+    if not isinstance(runner_sockets, dict) or runner_sockets.get("status") != "ok":
+        return _probe_component("inconclusive", "public VLESS runner socket ownership was not collected")
+    raw_flows = runner_sockets.get("flows")
+    if not isinstance(raw_flows, list) or not all(isinstance(flow, str) for flow in raw_flows):
+        return _probe_component("failed", "public VLESS runner socket ownership is malformed")
+    owned_flows = {flow for flow in raw_flows if split_endpoint(flow)[0] == source}
+    if not owned_flows:
+        return _probe_component("inconclusive", "no runner-owned public VLESS TCP socket was observed")
     if isinstance(observation, dict):
         observations = [observation]
     elif isinstance(observation, list) and observation:
@@ -1250,6 +1257,7 @@ def _validate_front_correlation(observation: object, *, source: str) -> dict[str
         return _probe_component("inconclusive", "public VLESS front was not observed while the runner was active")
     best: tuple[int, int, dict[str, object]] | None = None
     errors: list[str] = []
+    now = datetime.now(timezone.utc)
     for item in observations:
         if not isinstance(item, dict):
             continue
@@ -1263,6 +1271,17 @@ def _validate_front_correlation(observation: object, *, source: str) -> dict[str
         if not source or any(normalize_source(str(snapshot.get("source") or "")) != source for snapshot in (baseline, during)):
             errors.append("client-front snapshot source does not match the VLESS runner")
             continue
+        try:
+            timestamps = [datetime.fromisoformat(snapshot["generated_at"].replace("Z", "+00:00")) for snapshot in (baseline, during)]
+            if any(stamp.utcoffset() is None for stamp in timestamps):
+                raise ValueError("timestamp has no timezone")
+            if any(not 0 <= (now - stamp).total_seconds() <= SNAPSHOT_MAX_AGE_SECONDS for stamp in timestamps):
+                raise ValueError("timestamp is stale or from the future")
+            if timestamps[1] <= timestamps[0]:
+                raise ValueError("during snapshot does not follow baseline")
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            errors.append(f"client-front snapshot timestamp is invalid: {exc}")
+            continue
         baseline_events = baseline.get("events", {})
         during_events = during.get("events", {})
         try:
@@ -1272,14 +1291,18 @@ def _validate_front_correlation(observation: object, *, source: str) -> dict[str
         flows = during.get("front", {}).get("flows", {}) if isinstance(during.get("front"), dict) else {}
         if not isinstance(flows, dict):
             flows = {}
-        flows = {key: metrics for key, metrics in flows.items() if split_endpoint(str(key))[0] == source}
+        flows = {
+            key: metrics for key, metrics in flows.items()
+            if key in owned_flows and isinstance(metrics, dict) and metrics.get("phase", "active") == "active"
+        }
         baseline_flow_events = baseline.get("flow_events", {})
         flow_events = during.get("flow_events", {})
         if not isinstance(baseline_flow_events, dict) or not isinstance(flow_events, dict):
             return _probe_component("failed", "public VLESS flow correlation counters are malformed")
         correlated_events = 0
         for flow, destinations in flow_events.items():
-            if split_endpoint(str(flow))[0] != source:
+            # The agent emits per-endpoint accepts only for active sockets.
+            if flow not in flows:
                 continue
             if not isinstance(destinations, dict):
                 continue
@@ -1302,7 +1325,7 @@ def _validate_front_correlation(observation: object, *, source: str) -> dict[str
         detail = f": {errors[-1]}" if errors else ""
         return _probe_component("inconclusive", f"public VLESS front correlation snapshots are incomplete{detail}")
     correlated_events, accepted_delta, flows = best
-    if accepted_delta < 1 and correlated_events < 1:
+    if correlated_events < 1:
         return _probe_component("inconclusive", "public VLESS runner produced no correlated Xray TCP accept event")
     qualities = {str(metrics.get("quality", "")) for metrics in flows.values() if isinstance(metrics, dict)}
     verdict = "degraded" if "degraded" in qualities else "verified"
@@ -1313,6 +1336,7 @@ def _validate_front_correlation(observation: object, *, source: str) -> dict[str
             "correlated_events": correlated_events,
             "flow_count": len(flows),
             "qualities": sorted(qualities),
+            "scope": "runner-owned TCP endpoints with fresh Xray event deltas",
         }
     )
     return result

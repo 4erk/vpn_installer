@@ -34,8 +34,12 @@ _SOURCE_ENDPOINT_RE = re.compile(r"(?:from|process connection from) (?P<endpoint
 _DNS_LOOKUP_FAILED_RE = re.compile(r"dns: lookup failed for (?P<dst>[^: ]+):")
 _DNS_EXCHANGE_FAILED_RE = re.compile(r"dns: exchange failed for (?P<dst>[^ ]+)\. IN (?P<qtype>[A-Z0-9]+):")
 _ROUTER_LOOKUP_RE = re.compile(r"router: lookup (?P<dst>[^: ]+):")
-_PROXY_DIAL_FAILED_RE = re.compile(r"using outbound/vless\[[^\]]+\]: dial tcp (?P<dst>\[[^\]]+\]:\d+|[^: ]+:\d+): i/o timeout")
-_PROXY_READ_FAILED_RE = re.compile(r"using outbound/vless\[[^\]]+\]: read tcp [^ ]+->(?P<dst>\[[^\]]+\]:\d+|[^: ]+:\d+):")
+_ENDPOINT_PATTERN = r"(?:\[[^\]]+\]|[^\s:>]+):\d+"
+_SOCKET_FAILURE_RE = re.compile(
+    rf"\b(?P<operation>dial|read|write) (?:tcp|udp)[46]?"
+    rf"(?: (?P<local>{_ENDPOINT_PATTERN})(?:->(?P<remote>{_ENDPOINT_PATTERN}))?)?:",
+    re.IGNORECASE,
+)
 _LOG_EVENT_ID_RE = re.compile(r"\b(?:TRACE|DEBUG|INFO|WARN|ERROR|FATAL)\s+\[(?P<event_id>\d+)\b")
 _INBOUND_DESTINATION_RE = re.compile(
     r"inbound/[^\[]+\[(?P<tag>[^\]]+)\]: inbound (?:packet )?connection to (?P<dst>\[[^\]]+\]:\d+|[^ ]+)"
@@ -77,6 +81,9 @@ class ClassifiedLogLine:
     destination: str = ""
     source: str = ""
     event_id: str = ""
+    phase: str = "unknown"
+    requested_destination: str = ""
+    failed_endpoint: str = ""
 
 
 def normalize_source(value: str) -> str:
@@ -136,10 +143,14 @@ def event_id_from_line(line: str) -> str:
 
 
 def _destination(line: str) -> str:
-    for pattern in (_PROXY_DIAL_FAILED_RE, _PROXY_READ_FAILED_RE, _OPEN_CONNECTION_RE, _OUTBOUND_CONNECTION_RE, _ACCEPTED_RE):
+    for pattern in (_OPEN_CONNECTION_RE, _OUTBOUND_CONNECTION_RE, _ACCEPTED_RE):
         match = pattern.search(line)
         if match:
             return match.group("dst")
+    return _dns_destination(line)
+
+
+def _dns_destination(line: str) -> str:
     match = _DNS_LOOKUP_FAILED_RE.search(line)
     if match:
         return match.group("dst")
@@ -191,19 +202,56 @@ def _trace_destination(event_destination: str, fallback_destination: str) -> str
     return f"{event_destination}:{port}" if port else event_destination
 
 
-def classify_line(line: str) -> ClassifiedLogLine | None:
-    destination = _destination(line)
-    source = source_from_line(line)
-    event_id = event_id_from_line(line)
+def _failure_context(line: str) -> tuple[str, str]:
+    matches = list(_SOCKET_FAILURE_RE.finditer(line))
+    if matches:
+        match = matches[-1]
+        operation = match.group("operation").lower()
+        endpoint = match.group("remote") or (match.group("local") if operation == "dial" else "")
+        return "connect" if operation == "dial" else operation, endpoint or ""
+    lower_line = line.lower()
+    if "wsarecv" in lower_line:
+        return "read", ""
+    if "wsasend" in lower_line:
+        return "write", ""
+    return "unknown", ""
+
+
+def classify_line(line: str, *, requested_destination: str | None = None) -> ClassifiedLogLine | None:
+    """None marks a missing request trace, not proof that a reported IP was requested literally."""
+    reported_destination = _destination(line)
+    unknown_request = not requested_destination and _destination_ip_version(reported_destination) is not None
+    requested_destination = "" if unknown_request else _trace_destination(requested_destination or "", reported_destination)
+    phase, failed_endpoint = _failure_context(line)
+    dns_failure = any(
+        token in line.lower()
+        for token in ("dns: exchange failed", "exchange failed for ", "dns: lookup failed", "lookup failed for ", "router: lookup ")
+    )
+    if dns_failure and phase == "unknown":
+        phase = "dns"
+    # DNS queries, requested targets and failed proxy endpoints are different subjects.
+    destination = (_dns_destination(line) or reported_destination) if dns_failure else requested_destination or reported_destination
+    if "using outbound/vless[" in line and not dns_failure:
+        destination = failed_endpoint
+    bucket_destination = "" if unknown_request and not dns_failure and "using outbound/vless[" not in line else destination
+    bucket = _classify_bucket(line, bucket_destination, phase=phase, dns_failure=dns_failure)
+    if bucket is None:
+        return None
+    return ClassifiedLogLine(bucket, destination, source_from_line(line), event_id_from_line(line),
+                             phase, requested_destination, failed_endpoint)
+
+
+def _classify_bucket(line: str, destination: str, *, phase: str, dns_failure: bool) -> str | None:
     lower_line = line.lower()
     if "accepted tcp:disabled.invalid" in line:
-        return ClassifiedLogLine("disabled_invalid", destination, source, event_id)
+        return "disabled_invalid"
     if "REALITY: processed invalid connection" in line:
-        return ClassifiedLogLine("invalid_reality", destination, source, event_id)
+        return "invalid_reality"
     if any(token in lower_line for token in _CANCELLATION_TOKENS):
-        return ClassifiedLogLine("client_reset_eof", destination, source, event_id)
-    if "using outbound/vless[" in line and any(token in line for token in ("dial tcp", "wsarecv", "connected host has failed to respond")):
-        return ClassifiedLogLine("client_front_connect_failed", destination, source, event_id)
+        return "client_reset_eof"
+    proxy_failure = "using outbound/vless[" in line
+    if proxy_failure and phase == "connect" and not dns_failure:
+        return "client_front_connect_failed"
     if "quic: transport closed" in lower_line or (
         "interserver-underlay-" in line
         and any(
@@ -218,48 +266,48 @@ def classify_line(line: str) -> ClassifiedLogLine | None:
             )
         )
     ):
-        return ClassifiedLogLine("transport_unavailable", destination, source, event_id)
-    dns_failure = any(
-        token in lower_line
-        for token in ("dns: exchange failed", "exchange failed for ", "dns: lookup failed", "lookup failed for ", "router: lookup ")
-    )
+        return "transport_unavailable"
     if dns_failure and any(token in lower_line for token in _TRANSPORT_PATH_ERROR_TOKENS):
-        return ClassifiedLogLine("transport_unavailable", destination, source, event_id)
+        return "transport_unavailable"
     if dns_failure and any(token in lower_line for token in ("context deadline exceeded", "i/o timeout")):
-        return ClassifiedLogLine("dns_timeout", destination, source, event_id)
+        return "dns_timeout"
     if dns_failure and "nxdomain" in lower_line:
-        return ClassifiedLogLine("dns_nxdomain", destination, source, event_id)
+        return "dns_nxdomain"
     if dns_failure and ("refused" in lower_line or "rcode 5" in lower_line):
-        return ClassifiedLogLine("dns_refused", destination, source, event_id)
+        return "dns_refused"
     if dns_failure and ("servfail" in lower_line or "server failure" in lower_line or "rcode 2" in lower_line):
-        return ClassifiedLogLine("dns_servfail", destination, source, event_id)
+        return "dns_servfail"
     if dns_failure and any(token in lower_line for token in _DNS_NODATA_TOKENS):
-        return ClassifiedLogLine("dns_nodata", destination, source, event_id)
+        return "dns_nodata"
     if dns_failure:
-        return ClassifiedLogLine("unclassified_error", destination, source, event_id)
+        return "unclassified_error"
     if any(token in line for token in ("outbound/block[blocked]", "using outbound/block[blocked]", "connection rejected")):
-        return ClassifiedLogLine("blocked_private_fake", destination, source, event_id)
+        return "blocked_private_fake"
     if any(token in lower_line for token in _TRANSPORT_PATH_ERROR_TOKENS):
         outbound = _outbound_tag(line)
         if outbound.startswith("to-foreign"):
-            return ClassifiedLogLine("transport_unavailable", destination, source, event_id)
+            return "transport_unavailable"
     if "i/o timeout" in line or "context deadline exceeded" in line:
+        if proxy_failure:
+            return "unclassified_error"
         outbound = _outbound_tag(line)
         if outbound == "direct-ru":
-            return ClassifiedLogLine("direct_ru_timeout", destination, source, event_id)
+            return "direct_ru_timeout"
+        if not destination:
+            return "unclassified_error"
         version = _destination_ip_version(destination)
         if version == 6:
-            return ClassifiedLogLine("ipv6_literal_timeout", destination, source, event_id)
+            return "ipv6_literal_timeout"
         if version == 4:
-            return ClassifiedLogLine("ipv4_literal_timeout", destination, source, event_id)
+            return "ipv4_literal_timeout"
         if outbound.startswith("to-foreign"):
-            return ClassifiedLogLine("domain_to_foreign_timeout", destination, source, event_id)
+            return "domain_to_foreign_timeout"
     if "connect: connection refused" in lower_line:
-        return ClassifiedLogLine("upstream_refused", destination, source, event_id)
+        return "upstream_refused"
     if any(token in line for token in ("mux connection closed", "EOF", "connection reset")):
-        return ClassifiedLogLine("client_reset_eof", destination, source, event_id)
+        return "client_reset_eof"
     if "ERROR" in line:
-        return ClassifiedLogLine("unclassified_error", destination, source, event_id)
+        return "unclassified_error"
     return None
 
 
@@ -288,28 +336,35 @@ def _event_key(line: str, event_id: str) -> str:
     return f"{unit}\x00{event_id}"
 
 
-def summarize_lines(lines: Iterable[str], *, top_n: int = 12) -> dict[str, Any]:
+def classify_lines(lines: Iterable[str]) -> list[tuple[str, ClassifiedLogLine | None]]:
     materialized = list(lines)
     event_destinations = _event_destinations(materialized)
+    return [
+        (line, classify_line(line, requested_destination=event_destinations.get(_event_key(line, event_id_from_line(line)))))
+        for line in materialized
+    ]
+
+
+def summarize_classified_lines(
+    lines: Iterable[tuple[str, ClassifiedLogLine | None]], *, top_n: int = 12,
+) -> dict[str, Any]:
     counts: Counter[str] = Counter()
     destinations: dict[str, Counter[str]] = {bucket: Counter() for bucket in BUCKETS}
     sources: dict[str, Counter[str]] = {bucket: Counter() for bucket in BUCKETS}
     samples: dict[str, str] = {}
     seen_events: set[tuple[str, str, str]] = set()
-    for line in materialized:
-        item = classify_line(line)
+    for line, item in lines:
         if item is None:
             continue
         event_key = _event_key(line, item.event_id)
-        traced_destination = _trace_destination(event_destinations.get(event_key, ""), item.destination)
-        signature = (event_key, item.bucket, traced_destination)
+        signature = (event_key, item.bucket, item.destination)
         if event_key and signature in seen_events:
             continue
         if event_key:
             seen_events.add(signature)
         counts[item.bucket] += 1
         samples.setdefault(item.bucket, line.strip()[:320])
-        destination = traced_destination
+        destination = item.destination
         if destination:
             destinations[item.bucket][destination] += 1
         if item.source:
@@ -320,3 +375,7 @@ def summarize_lines(lines: Iterable[str], *, top_n: int = 12) -> dict[str, Any]:
         "top_sources": {bucket: dict(counter.most_common(top_n)) for bucket, counter in sources.items() if counter},
         "samples": samples,
     }
+
+
+def summarize_lines(lines: Iterable[str], *, top_n: int = 12) -> dict[str, Any]:
+    return summarize_classified_lines(classify_lines(lines), top_n=top_n)

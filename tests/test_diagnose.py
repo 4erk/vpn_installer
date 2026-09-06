@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import io
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from datetime import datetime, timedelta, timezone
 
 from vpn_installer import diagnose
 from vpn_installer.models import RemoteTarget
@@ -39,7 +41,184 @@ def target(node_id: str, location: str) -> RemoteTarget:
     return RemoteTarget(node_id=node_id, location=location, public_ip=host, ssh_host=host, ssh_user="root")
 
 
+def telegram_probe(*, router: bool, success: bool = True, address: str = "149.154.167.50") -> dict:
+    probe = {
+        "address": address, "port": 443,
+        "path": {"kind": "socks5" if router else "direct",
+                 "proxy": "127.0.0.1:2080" if router else None, "interface": None},
+        "phase": "mtproto", "tcp_connected": True,
+        "proxy_accepted": True if router else None,
+        "protocol_response": success, "error": None if success else "timeout", "elapsed": 0.1,
+    }
+    if success:
+        probe["res_pq"] = {
+            "server_nonce": "63248f6748214eab8a2f4cc876e11974",
+            "pq": "2e9cdb98c80cda4b", "fingerprints": ["d09d1d85de64fd85"],
+        }
+    return probe
+
+
+def telegram_report(*probes: dict) -> dict:
+    successes = sum(probe.get("protocol_response") is True for probe in probes)
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "application": "telegram", "scope": "unauthenticated_req_pq_multi",
+        "verdict": "responsive" if successes == len(probes) else "degraded" if successes else "failed",
+        "probes": list(probes),
+    }
+
+
 class DiagnoseTests(unittest.TestCase):
+    def _run_telegram_report(self, reply: dict, *, router: bool = True, destinations=None):
+        env = topology_env(TOPOLOGY_DUAL, LOCATION_RU)
+        targets = [target(NODE_GATEWAY, LOCATION_RU), target(NODE_EXIT, LOCATION_FOREIGN)]
+        node = NODE_GATEWAY if router else NODE_EXIT
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.object(diagnose, "OUT_DIR", Path(tmp)),
+            patch.object(diagnose, "prepare_remote_session", return_value=("demo", Path("unused"), env, {}, targets, {})),
+            patch.object(diagnose, "ssh_capture", return_value=json.dumps(reply)),
+            patch("sys.stdout", io.StringIO()),
+        ):
+            code = diagnose.diagnose_telegram_workflow("demo", node, destinations or ["149.154.167.50"])
+            report = json.loads(next(Path(tmp).glob("diagnostics/*/telegram.json")).read_text(encoding="utf-8"))
+        return code, report["nodes"][node]
+
+    def test_telegram_checks_router_and_exit_and_preserves_negative_results(self) -> None:
+        env = topology_env(TOPOLOGY_DUAL, LOCATION_RU)
+        targets = [target(NODE_GATEWAY, LOCATION_RU), target(NODE_EXIT, LOCATION_FOREIGN)]
+
+        def reply(remote, command, **kwargs):
+            self.assertIn("VPN_APPLICATION_PROBE", command)
+            self.assertEqual("--proxy 127.0.0.1:2080" in command, remote.node_id == NODE_GATEWAY)
+            self.assertTrue(kwargs["as_root"])
+            return json.dumps(telegram_report(telegram_probe(router=remote.node_id == NODE_GATEWAY, success=False)))
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(diagnose, "OUT_DIR", Path(tmp)), patch.object(diagnose, "prepare_remote_session", return_value=("demo", Path("unused"), env, {}, targets, {})), patch.object(diagnose, "ssh_capture", side_effect=reply):
+            self.assertEqual(diagnose.diagnose_telegram_workflow("demo", "all", ["149.154.167.50"]), 1)
+            report = json.loads(next(Path(tmp).glob("diagnostics/*/telegram.json")).read_text(encoding="utf-8"))
+            self.assertEqual(set(report["nodes"]), {NODE_GATEWAY, NODE_EXIT})
+            self.assertEqual(report["nodes"][NODE_GATEWAY]["path"], "router")
+            self.assertEqual(report["nodes"][NODE_EXIT]["probes"][0]["error"], "timeout")
+            self.assertEqual(len(report["probe_sha256"]), 64)
+
+    def test_telegram_requires_complete_success_evidence(self) -> None:
+        for router in (True, False):
+            for missing in telegram_probe(router=router):
+                with self.subTest(router=router, missing=missing):
+                    probe = telegram_probe(router=router)
+                    del probe[missing]
+                    reply = telegram_report(probe)
+                    reply["verdict"] = "responsive"
+                    code, report = self._run_telegram_report(reply, router=router)
+                    self.assertEqual(code, 2)
+                    self.assertEqual(report["verdict"], "inconclusive")
+                    self.assertTrue(report["error"])
+
+    def test_telegram_rejects_contradictory_success_evidence(self) -> None:
+        for router in (True, False):
+            cases = [
+                ("tcp_connected", value) for value in (False, None, 1, "true")
+            ] + [
+                ("proxy_accepted", value) for value in ((False, None, 1, "true") if router else (False, True, 0, "null"))
+            ] + [
+                ("phase", "tcp"), ("phase", "proxy"), ("phase", "unknown"),
+                ("error", "timeout"), ("error", ""), ("error", False),
+                ("elapsed", -1), ("elapsed", True), ("elapsed", "0.1"),
+                ("elapsed", float("nan")), ("elapsed", float("inf")),
+                ("path", None), ("path", {}),
+                ("path", telegram_probe(router=not router)["path"]),
+                ("path", {"kind": "socks5", "proxy": "127.0.0.1:1080", "interface": None}),
+                ("path", {**telegram_probe(router=router)["path"], "interface": "wg0"}),
+                ("path", {"kind": "socks5" if router else "direct"}),
+                ("res_pq", None), ("res_pq", {}),
+            ]
+            valid_pq = telegram_probe(router=router)["res_pq"]
+            for field, value in (("server_nonce", "short"), ("pq", "02"), ("pq", "01"),
+                                 ("pq", "xyz"), ("fingerprints", []), ("fingerprints", ["bad"])):
+                cases.append(("res_pq", {**valid_pq, field: value}))
+            for field, value in cases:
+                with self.subTest(router=router, field=field, value=value):
+                    reply = telegram_report({**telegram_probe(router=router), field: value})
+                    code, report = self._run_telegram_report(reply, router=router)
+                    self.assertEqual(code, 2)
+                    self.assertEqual(report["verdict"], "inconclusive")
+
+    def test_telegram_valid_success_and_degraded_reports_preserve_evidence(self) -> None:
+        for router in (True, False):
+            for mixed in (False, True):
+                with self.subTest(router=router, mixed=mixed):
+                    probes = [telegram_probe(router=router)]
+                    if mixed:
+                        probes.append(telegram_probe(router=router, success=False, address="149.154.167.51"))
+                    reply = telegram_report(*probes)
+                    code, report = self._run_telegram_report(reply, router=router, destinations=[p["address"] for p in probes])
+                    self.assertEqual(code, 1 if mixed else 0)
+                    self.assertEqual(report["verdict"], "degraded" if mixed else "responsive")
+                    self.assertEqual(report["probes"], probes)
+                    self.assertEqual(report["path"], "router" if router else "direct")
+
+    def test_telegram_valid_failures_at_each_phase_remain_failed(self) -> None:
+        for router in (True, False):
+            for phase in (("tcp", "proxy", "mtproto") if router else ("tcp", "mtproto")):
+                with self.subTest(router=router, phase=phase):
+                    probe = telegram_probe(router=router, success=False)
+                    probe.update(phase=phase, tcp_connected=phase != "tcp",
+                                 proxy_accepted=phase == "mtproto" if router else None)
+                    code, report = self._run_telegram_report(telegram_report(probe), router=router)
+                    self.assertEqual(code, 1)
+                    self.assertEqual(report["verdict"], "failed")
+                    self.assertEqual(report["probes"], [probe])
+            # The parser may finish just as the total deadline expires.
+            probe = telegram_probe(router=router)
+            probe.update(protocol_response=False, error="total probe I/O budget exhausted")
+            code, report = self._run_telegram_report(telegram_report(probe), router=router)
+            self.assertEqual(code, 1)
+            self.assertEqual(report["probes"], [probe])
+
+    def test_telegram_rejects_contradictory_failure_evidence(self) -> None:
+        for router in (True, False):
+            for changes in ({"tcp_connected": False}, {"phase": "tcp"}, {"phase": "proxy"},
+                            {"error": None}, {"error": False}, {"proxy_accepted": False}):
+                with self.subTest(router=router, changes=changes):
+                    probe = {**telegram_probe(router=router, success=False), **changes}
+                    code, report = self._run_telegram_report(telegram_report(probe), router=router)
+                    self.assertEqual(code, 2)
+                    self.assertEqual(report["verdict"], "inconclusive")
+
+    def test_telegram_rejects_wrong_report_identity_time_and_destinations(self) -> None:
+        valid = telegram_probe(router=True)
+        for field, value in (
+            ("application", "other"), ("scope", "other"), ("verdict", "failed"),
+            ("generated_at", "invalid"), ("generated_at", datetime.now().isoformat()),
+            ("generated_at", (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()),
+            ("generated_at", (datetime.now(timezone.utc) + timedelta(minutes=2)).isoformat()),
+            ("probes", []), ("probes", [None]), ("probes", [valid, valid]),
+            ("probes", [{**valid, "address": "149.154.167.51"}]),
+            ("probes", [{**valid, "port": 80}]),
+            ("probes", [{**valid, "protocol_response": 1}]),
+        ):
+            with self.subTest(field=field, value=value):
+                code, report = self._run_telegram_report({**telegram_report(valid), field: value})
+                self.assertEqual(code, 2)
+                self.assertEqual(report["verdict"], "inconclusive")
+
+    def test_telegram_rejects_invalid_input_before_ssh(self) -> None:
+        with patch.object(diagnose, "prepare_remote_session") as prepare:
+            for addresses in ([], ["149.154.167.50"] * 9, ["example.com"], ["1.1.1.1;reboot"]):
+                with self.subTest(addresses=addresses), self.assertRaises(diagnose.AppError):
+                    diagnose.diagnose_telegram_workflow("demo", "all", addresses)
+            prepare.assert_not_called()
+
+    def test_telegram_incomplete_collection_returns_two_and_json_error(self) -> None:
+        env = topology_env(TOPOLOGY_SINGLE, LOCATION_FOREIGN)
+        targets = [target(NODE_GATEWAY, LOCATION_FOREIGN)]
+        for reply in ('{}', 'not-json'):
+            with tempfile.TemporaryDirectory() as tmp, patch.object(diagnose, "OUT_DIR", Path(tmp)), patch.object(diagnose, "prepare_remote_session", return_value=("demo", Path("unused"), env, {}, targets, {})), patch.object(diagnose, "ssh_capture", return_value=reply):
+                self.assertEqual(diagnose.diagnose_telegram_workflow("demo", "all", ["149.154.167.50"]), 2)
+                report = json.loads(next(Path(tmp).glob("diagnostics/*/telegram.json")).read_text(encoding="utf-8"))
+                self.assertEqual(report["nodes"][NODE_GATEWAY]["verdict"], "inconclusive")
+
     def test_diagnose_path_dual_writes_gateway_and_exit_reports(self) -> None:
         gateway = target(NODE_GATEWAY, LOCATION_RU)
         exit_target = target(NODE_EXIT, LOCATION_FOREIGN)

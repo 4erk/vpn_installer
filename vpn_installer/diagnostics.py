@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from typing import Any, Mapping
@@ -55,6 +56,16 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _timestamp(value: str, name: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.utcoffset() is None:
+            raise ValueError("timezone is missing")
+        return parsed.astimezone(timezone.utc)
+    except (AttributeError, TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{name} must be a timezone-aware timestamp") from exc
+
+
 def _is_count(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
@@ -76,6 +87,8 @@ class CollectorState:
             raise ValueError(f"{self.status} collector status requires a message")
         if self.status in {"ok", "stale"} and not self.observed_at:
             raise ValueError(f"{self.status} collector status requires observed_at")
+        if self.observed_at is not None:
+            _timestamp(self.observed_at, "collector observed_at")
 
     @classmethod
     def ok(cls, observed_at: str | None = None) -> "CollectorState":
@@ -133,6 +146,9 @@ class LogWindowSnapshot:
         for name, value in (("since", self.since), ("until", self.until)):
             if value is not None and not isinstance(value, str):
                 raise TypeError(f"log window {name} must be a string or null")
+        if self.until is not None:
+            _timestamp(self.until, "log window until")
+        self._validate_bounds()
         if self.collector.status in {"ok", "stale"} and self.counts is None:
             raise ValueError(f"{self.collector.status} log window requires counts")
         if self.collector.status in {"error", "skipped", "not_applicable"} and self.counts is not None:
@@ -154,6 +170,17 @@ class LogWindowSnapshot:
                 raise ValueError("log samples must use known bucket names")
             if not all(isinstance(value, str) for value in self.samples.values()):
                 raise TypeError("log samples must contain strings")
+
+    def _validate_bounds(self) -> None:
+        if self.since is None:
+            return
+        try:
+            datetime.fromisoformat(self.since.replace("Z", "+00:00"))
+        except ValueError:
+            return  # Schema 6 also carries legacy relative journal expressions.
+        since = _timestamp(self.since, "log window since")
+        if self.until is not None and since > _timestamp(self.until, "log window until"):
+            raise ValueError("log window since must be <= until")
 
     @staticmethod
     def _validate_ranked_counts(name: str, values: dict[str, dict[str, int]] | None) -> None:
@@ -283,6 +310,7 @@ class DiagnosticsSnapshot:
             raise ValueError("unsupported diagnostics snapshot schema")
         if not isinstance(self.generated_at, str) or not self.generated_at:
             raise ValueError("generated_at must be a non-empty string")
+        _timestamp(self.generated_at, "generated_at")
         for name, value, supported in (
             ("topology", self.topology, TOPOLOGIES),
             ("node_id", self.node_id, NODE_IDS),
@@ -358,6 +386,57 @@ class DiagnosticsSnapshot:
 
     def has_capability(self, capability: str) -> bool:
         return capability in self.capabilities
+
+    def freshness_issues(
+        self,
+        *,
+        now: datetime,
+        max_age_seconds: float = 180,
+        future_skew_seconds: float = 30,
+    ) -> list[str]:
+        """Validate claimed observations without rewriting historical evidence.
+
+        Availability and required-capability checks remain the caller's responsibility.
+        """
+        if not isinstance(now, datetime) or now.utcoffset() is None:
+            raise ValueError("now must be a timezone-aware datetime")
+        for name, budget in (("max_age_seconds", max_age_seconds), ("future_skew_seconds", future_skew_seconds)):
+            if isinstance(budget, bool) or not isinstance(budget, (int, float)) or not math.isfinite(budget) or budget < 0:
+                raise ValueError(f"{name} must be a finite non-negative number")
+        issues: list[str] = []
+
+        def check(name: str, value: str | None) -> None:
+            if value is None:
+                issues.append(f"{name} is missing")
+                return
+            try:
+                observed = _timestamp(value, name)
+            except ValueError as exc:
+                issues.append(str(exc))
+                return
+            age = (now - observed).total_seconds()
+            if age > max_age_seconds:
+                issues.append(f"{name} is stale: age={age:.3f}s")
+            elif age < -future_skew_seconds:
+                issues.append(f"{name} is from the future: age={age:.3f}s")
+
+        check("snapshot generated_at", self.generated_at)
+        for name, state in self.collectors.items():
+            if state.status in {"ok", "stale"}:
+                check(f"collector {name} observed_at", state.observed_at)
+                if state.status == "stale":
+                    issues.append(f"collector {name} is marked stale")
+        for name, window in self.log_windows.items():
+            if window.collector.status in {"ok", "stale"}:
+                check(f"log window {name} observed_at", window.collector.observed_at)
+                check(f"log window {name} until", window.until)
+                try:
+                    window._validate_bounds()
+                except ValueError as exc:
+                    issues.append(f"log window {name}: {exc}")
+                if window.collector.status == "stale":
+                    issues.append(f"log window {name} is marked stale")
+        return issues
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)

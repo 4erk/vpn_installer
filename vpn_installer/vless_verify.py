@@ -4,6 +4,7 @@ import json
 import shlex
 import textwrap
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import parse_qsl, unquote, urlparse
 
 
@@ -377,6 +378,7 @@ done
 runner_started_ns=$(date +%s%N)
 pid=""
 watchdog_pid=""
+observer_pid=""
 curl_pid=""
 reliability_results_path="$work_dir/reliability-results.tsv"
 reliability_error_path="$work_dir/reliability-error.txt"
@@ -406,7 +408,34 @@ fail() {
     exit 1
 }
 
+stop_observer() {
+    [[ -n "${observer_pid:-}" ]] || return 0
+    local attempt interrupted=0
+    touch "$work_dir/observer.stop"
+    for ((attempt = 0; attempt < __SHUTDOWN_POLLS__; attempt++)); do
+        kill -0 "$observer_pid" 2>/dev/null || break
+        if (( attempt == __SHUTDOWN_POLLS__ / 3 )); then
+            interrupted=1
+            kill -TERM "$observer_pid" >/dev/null 2>&1 || true
+        elif (( attempt == 2 * __SHUTDOWN_POLLS__ / 3 )); then
+            kill -KILL "$observer_pid" >/dev/null 2>&1 || true
+        fi
+        sleep 0.1
+    done
+    # Reap only an exited child; even SIGKILL need not finish a stuck procfs read.
+    if kill -0 "$observer_pid" 2>/dev/null; then
+        interrupted=1
+    else
+        wait "$observer_pid" >/dev/null 2>&1 || interrupted=1
+    fi
+    if (( interrupted )); then
+        printf '%s\n' '{"status":"error","reason":"runner socket observer did not complete normally","flows":[]}' >"$work_dir/runner-sockets.json"
+    fi
+    observer_pid=""
+}
+
 cleanup() {
+    stop_observer
     if [[ -n "${watchdog_pid:-}" ]] && kill -0 "$watchdog_pid" 2>/dev/null; then
         kill "$watchdog_pid" >/dev/null 2>&1 || true
         wait "$watchdog_pid" >/dev/null 2>&1 || true
@@ -459,6 +488,10 @@ if ! "$sing_box_bin" check -c "$config_path" >sing-box.log 2>&1; then
 fi
 "$sing_box_bin" run -c "$config_path" >sing-box.log 2>&1 &
 pid=$!
+python3 - "$pid" "$config_path" "$work_dir/observer.stop" >"$work_dir/runner-sockets.json" <<'OBSERVER_PY' &
+__SOCKET_OBSERVER__
+OBSERVER_PY
+observer_pid=$!
 sleep __STARTUP_SECONDS__
 if ! kill -0 "$pid" 2>/dev/null; then
     fail sing-box-start
@@ -630,11 +663,17 @@ fi
 capacity_source_bytes_csv=$(IFS=,; printf '%s' "${capacity_source_bytes[*]}")
 capacity_source_ns_csv=$(IFS=,; printf '%s' "${capacity_source_ns[*]}")
 throughput_source_failure_counts_csv=$(IFS=,; printf '%s' "${throughput_source_failure_counts[*]}")
+stop_observer
 
 python3 - "$ru_ip" "$foreign_ip" "$github" "$google" "$throughput_bytes" "$throughput_start_ns" "$throughput_end_ns" "$throughput_attempts" "$throughput_failures" "$throughput_source_failures" "$throughput_sources_json" "$capacity_source_bytes_csv" "$capacity_source_ns_csv" "$throughput_source_failure_counts_csv" "$throughput_max_gap_ns" "$udp_dns" "$ipv6_literal" "$reliability_results_path" <<'PY'
 import json
 import sys
 from pathlib import Path
+
+try:
+    runner_sockets = json.loads(Path("runner-sockets.json").read_text(encoding="utf-8"))
+except (OSError, ValueError):
+    runner_sockets = {"status": "error", "reason": "runner socket observer output is unavailable", "flows": []}
 
 bytes_downloaded = int(sys.argv[5])
 started_ns = int(sys.argv[6])
@@ -734,10 +773,13 @@ print(json.dumps({
     "udp_dns": json.loads(sys.argv[16]),
     "ipv6_literal_status": sys.argv[17],
     "first_load_reliability": reliability,
+    "runner_sockets": runner_sockets,
 }))
 PY
 '''
-    return textwrap.dedent(template).lstrip().replace("__LISTEN_PORT__", str(listen_port)).replace(
+    return textwrap.dedent(template).lstrip().replace(
+        "__SOCKET_OBSERVER__", Path(__file__).with_name("runner_observation.py").read_text(encoding="utf-8")
+    ).replace("__LISTEN_PORT__", str(listen_port)).replace(
         "__THROUGHPUT_URLS__", " ".join(shlex.quote(url) for url in throughput_urls)
     ).replace(
         "__RELIABILITY_URLS__", " ".join(shlex.quote(url) for url in reliability_urls)

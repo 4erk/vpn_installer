@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import math
 import shlex
 import time
 from pathlib import Path
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 
 from .common import OUT_DIR, error_summary, print_header, warn, write_text
 from .config import load_existing_deployment_env
@@ -16,6 +19,8 @@ from .prompts import select_existing_deployment
 from .remote import ssh_capture
 from .state import load_state
 from .client_artifacts import client_artifact_paths
+from .application_probe import MAX_DESTINATIONS, parse_endpoint
+from . import VERSION
 from .targets import build_target
 from .topology import NODE_EXIT, NODE_GATEWAY, NodePlan, TopologySpec, normalize_node_id, requested_node_ids
 from .workflows import prepare_remote_session
@@ -346,6 +351,111 @@ def diagnose_path_workflow(deployment: str | None, node: str, *, iperf: bool = F
         raise AppError("Диагностика не собрала ни одного файла.")
     print(f"Диагностика сохранена: {output_dir}")
     return 1 if collection_failed else 0
+
+
+def _validate_telegram_probe(probe: object, path: str) -> None:
+    required = {"address", "port", "path", "phase", "tcp_connected", "proxy_accepted",
+                "protocol_response", "error", "elapsed"}
+    if not isinstance(probe, dict) or not required.issubset(probe):
+        raise AppError("Telegram probe evidence is incomplete")
+    router = path == "router"
+    expected_path = {"kind": "socks5" if router else "direct",
+                     "proxy": "127.0.0.1:2080" if router else None, "interface": None}
+    if probe["path"] != expected_path:
+        raise AppError("Telegram probe path differs from this request")
+    if type(probe["port"]) is not int or not isinstance(probe["protocol_response"], bool):
+        raise AppError("Telegram probe port or protocol response evidence is invalid")
+    phase = probe["phase"]
+    if phase not in (("tcp", "proxy", "mtproto") if router else ("tcp", "mtproto")):
+        raise AppError("Telegram probe phase is invalid for this path")
+    if probe["tcp_connected"] is not (phase != "tcp"):
+        raise AppError("Telegram TCP connection evidence contradicts its phase")
+    expected_proxy = (phase == "mtproto") if router else None
+    if probe["proxy_accepted"] is not expected_proxy:
+        raise AppError("Telegram proxy acceptance evidence contradicts its path or phase")
+    responsive = probe["protocol_response"]
+    if phase != "mtproto" and (responsive or "res_pq" in probe):
+        raise AppError("Telegram protocol evidence contradicts its phase")
+    if (responsive and probe["error"] is not None) or (not responsive and not isinstance(probe["error"], str)):
+        raise AppError("Telegram error evidence contradicts its protocol response")
+    elapsed = probe["elapsed"]
+    if type(elapsed) not in (int, float) or not math.isfinite(elapsed) or elapsed < 0:
+        raise AppError("Telegram probe elapsed time is invalid")
+    # A parsed resPQ can precede a final deadline failure, but success requires it.
+    if responsive or "res_pq" in probe:
+        res_pq = probe.get("res_pq")
+        if not isinstance(res_pq, dict):
+            raise AppError("Telegram resPQ evidence is missing or invalid")
+        nonce, pq, fingerprints = res_pq.get("server_nonce"), res_pq.get("pq"), res_pq.get("fingerprints")
+        if not isinstance(nonce, str) or not re.fullmatch(r"[0-9a-f]{32}", nonce):
+            raise AppError("Telegram resPQ server nonce is invalid")
+        if not isinstance(pq, str) or not re.fullmatch(r"(?:[0-9a-f]{2})+", pq) or int(pq, 16) <= 1 or int(pq, 16) % 2 == 0:
+            raise AppError("Telegram resPQ pq value is invalid")
+        if not isinstance(fingerprints, list) or not fingerprints or not all(
+            isinstance(value, str) and re.fullmatch(r"[0-9a-f]{16}", value) for value in fingerprints
+        ):
+            raise AppError("Telegram resPQ fingerprint evidence is invalid")
+
+
+def diagnose_telegram_workflow(deployment: str | None, node: str, destinations: list[str], *, non_interactive: bool = False) -> int:
+    if not 1 <= len(destinations) <= MAX_DESTINATIONS:
+        raise AppError("Укажи от 1 до 8 IP-адресов Telegram через --destination.")
+    try:
+        requested = [parse_endpoint(destination) for destination in destinations]
+    except ValueError as exc:
+        raise AppError(str(exc)) from exc
+    deployment_name, _env_path, env, _state, targets, _preflights = prepare_remote_session(
+        deployment, nodes=requested_node_ids(node), require_privilege=True, validate_os=False,
+        allow_create=False, persist_local=False, confirm_existing_connections=False,
+        non_interactive=non_interactive, enforce_safe_route=False,
+    )
+    plans = _selected_node_plans(_topology_from_env(env), node)
+    output_dir = _diagnostic_run_dir(deployment_name)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    arguments = " ".join(f"--destination {shlex.quote(destination)}" for destination in destinations)
+    source = Path(__file__).with_name("application_probe.py").read_text(encoding="utf-8")
+    reports = {}
+    exit_code = 0
+    print_header("Telegram MTProto")
+    with ThreadPoolExecutor(max_workers=len(plans)) as executor:
+        pending = {}
+        for plan in plans:
+            path = "router" if "router" in plan.capabilities else "direct"
+            command = f"python3 - {arguments}"
+            if path == "router":
+                command += " --proxy 127.0.0.1:2080"
+            command += " <<'VPN_APPLICATION_PROBE'\n" + source + "\nVPN_APPLICATION_PROBE"
+            future = executor.submit(ssh_capture, _target_for_plan(plan, targets), command, as_root=True, command_timeout=25)
+            pending[future] = (plan.node_id, path)
+        for future in as_completed(pending):
+            node_id, path = pending[future]
+            try:
+                report = _decode_agent_snapshot(future.result(), "Telegram")
+                probes = report.get("probes")
+                if report.get("application") != "telegram" or report.get("scope") != "unauthenticated_req_pq_multi" or not isinstance(probes, list):
+                    raise AppError("Telegram report is missing application probes")
+                observed_at = datetime.fromisoformat(str(report.get("generated_at", "")).replace("Z", "+00:00"))
+                if observed_at.utcoffset() is None or not -30 <= (datetime.now(timezone.utc) - observed_at).total_seconds() <= 60:
+                    raise AppError("Telegram report acquisition time is stale or invalid")
+                for probe in probes:
+                    _validate_telegram_probe(probe, path)
+                if [(item.get("address"), item.get("port")) for item in probes] != requested:
+                    raise AppError("Telegram report destinations differ from this request")
+                successful = sum(item["protocol_response"] for item in probes)
+                expected = "responsive" if successful == len(probes) else "degraded" if successful else "failed"
+                if report.get("verdict") != expected:
+                    raise AppError("Telegram report verdict contradicts its probes")
+                exit_code = max(exit_code, 0 if expected == "responsive" else 1)
+            except Exception as exc:
+                report = {"verdict": "inconclusive", "error": str(exc)}
+                exit_code = 2
+            reports[node_id] = {"path": path, **report}
+            print(f"{node_id} / {path}: {report['verdict']}")
+    output = output_dir / "telegram.json"
+    write_text(output, json.dumps({"deployment": deployment_name, "version": VERSION, "probe_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(), "nodes": reports}, ensure_ascii=False, indent=2) + "\n")
+    print(f"Отчёт: {output}")
+    print("Проверен ответ протокола без входа в аккаунт; доставка сообщений и сеть телефона этой проверкой не подтверждаются.")
+    return exit_code
 
 
 def _print_nonzero_bucket_summary(summary: dict[str, object]) -> None:

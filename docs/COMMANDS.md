@@ -88,6 +88,7 @@ Linux:
 | `diagnose front` | Клиенты не подключаются к серверу входа |
 | `diagnose client --source <IP>` | Проблема проявляется у конкретной внешней сети или устройства за NAT |
 | `diagnose client-log --path <файл>` | Нужно разобрать локальный журнал Hiddify/sing-box |
+| `diagnose telegram --destination <IP>` | Telegram зависает на подключении; проверить конкретный адрес из журнала |
 | `client-check` | Нужно проверить, не направляет ли виртуальный сетевой интерфейс клиента (TUN) соединение с сервером обратно в VPN |
 | `android-diagnose` | Android-устройство подключено по USB и нужен ограниченный фрагмент журнала Android через ADB |
 
@@ -97,6 +98,7 @@ Linux:
 .\vpn.cmd diagnose front --deployment home-vpn
 .\vpn.cmd diagnose client --deployment home-vpn --source 203.0.113.25
 .\vpn.cmd diagnose client-log --deployment home-vpn --path "C:\Logs\client.log"
+.\vpn.cmd diagnose telegram --deployment home-vpn --node all --destination 149.154.167.41
 ```
 
 Пример для Linux:
@@ -105,11 +107,16 @@ Linux:
 ./vpn.sh diagnose front --deployment home-vpn
 ./vpn.sh diagnose client --deployment home-vpn --source 203.0.113.25
 ./vpn.sh diagnose client-log --deployment home-vpn --path /home/user/client.log
+./vpn.sh diagnose telegram --deployment home-vpn --node all --destination 149.154.167.41
 ```
 
 `--source` принимает публичный IP проблемной сети, а не локальный адрес вида `192.168.x.x`.
 
 `diagnose path` сохраняет отдельный JSON-отчёт для каждого сервера. Код завершения `0` означает, что отчёты собраны, а не что все подключения исправны. Код `1` означает, что хотя бы один обязательный отчёт получить не удалось; причина записана в его JSON, остальные отчёты сохраняются. Проверка сайтов через `verify live` не заменяет проверку конкретного приложения, например протокола Telegram.
+
+`diagnose telegram` не требует входа в аккаунт. В двойной схеме команда сравнивает ответ через маршрутизатор сервера входа и напрямую с сервера выхода. Вместо адреса из примера укажи проблемный IP из журнала; можно повторить `--destination` до восьми раз. По умолчанию используется порт `443`, другой порт записывается как `IP:порт`, IPv6 как `[IPv6]:порт`. Отчёт `telegram.json` сохраняется в указанном командой каталоге `out/diagnostics`.
+
+Для этой команды код `0` означает ответ протокола от всех выбранных адресов, `1` означает отказ хотя бы одной проверки, `2` означает неполную или некорректную диагностику. Ответ протокола не доказывает отправку сообщений, загрузку медиа или работоспособность сети телефона. Команда не меняет маршруты и не запускает фоновое наблюдение.
 
 ## Правила маршрутизации
 

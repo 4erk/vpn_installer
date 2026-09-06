@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import tempfile
 import inspect
+import io
+import json
 import subprocess
 import unittest
 from pathlib import Path
@@ -20,8 +22,60 @@ class AuditQuickTests(unittest.TestCase):
 
     def test_coverage_driver_discovers_repo_tests(self) -> None:
         driver = coverage_driver_text()
-        self.assertIn("unittest.defaultTestLoader.discover", driver)
-        self.assertIn('pattern="test_*.py"', driver)
+        self.assertIn("from tests.run_tests import main", driver)
+        self.assertNotIn("discover(", driver)
+
+    def test_canonical_runner_reports_executed_skipped_and_failed_tests(self) -> None:
+        from tests.run_tests import main
+
+        def succeeds():
+            pass
+
+        def skipped():
+            raise unittest.SkipTest("fixture platform unavailable")
+
+        def fails():
+            raise AssertionError("fixture assertion")
+
+        suite = unittest.TestSuite(unittest.FunctionTestCase(function) for function in (succeeds, skipped, fails))
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "results.json"
+            with patch("unittest.defaultTestLoader.discover", return_value=suite), patch("sys.stderr", io.StringIO()):
+                self.assertEqual(main(report), 1)
+            payload = json.loads(report.read_text(encoding="utf-8"))
+        self.assertEqual(payload["tests_run"], 3)
+        self.assertEqual(len(payload["executed"]), 3)
+        self.assertEqual(len(payload["failures"]), 1)
+        self.assertEqual(payload["skipped"][0]["reason"], "fixture platform unavailable")
+        self.assertFalse(payload["successful"])
+
+    def test_canonical_runner_rejects_empty_suite_with_and_without_report(self) -> None:
+        from tests.run_tests import main
+
+        for write_report in (False, True):
+            with self.subTest(write_report=write_report), tempfile.TemporaryDirectory() as tmp:
+                report = Path(tmp) / "results.json" if write_report else None
+                with patch("unittest.defaultTestLoader.discover", return_value=unittest.TestSuite()), patch("sys.stderr", io.StringIO()):
+                    code = main(report)
+                payload = json.loads(report.read_text(encoding="utf-8")) if report else None
+                if payload is not None:
+                    self.assertEqual(payload["tests_run"], 0)
+                    self.assertEqual(payload["executed"], [])
+                    self.assertFalse(payload["successful"])
+                self.assertEqual(code, 1)
+
+    def test_coverage_driver_propagates_empty_and_successful_suite_results(self) -> None:
+        for count in (0, 1):
+            with self.subTest(count=count), tempfile.TemporaryDirectory() as tmp:
+                report = Path(tmp) / "unit-results.json"
+                suite = unittest.TestSuite(unittest.FunctionTestCase(lambda: None) for _ in range(count))
+                with patch("unittest.defaultTestLoader.discover", return_value=suite), patch("sys.stderr", io.StringIO()):
+                    with self.assertRaises(SystemExit) as raised:
+                        exec(compile(coverage_driver_text(report), "coverage_driver.py", "exec"), {})
+                payload = json.loads(report.read_text(encoding="utf-8"))
+                self.assertEqual(payload["tests_run"], count)
+                self.assertEqual(payload["successful"], count > 0)
+                self.assertEqual(raised.exception.code, 0 if count else 1)
 
     def test_quick_render_uses_deterministic_assets_without_network_refresh(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

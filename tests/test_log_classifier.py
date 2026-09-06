@@ -5,15 +5,57 @@ import unittest
 from vpn_installer.log_classifier import (
     BUCKETS,
     classify_line,
+    classify_lines,
     inbound_destination_from_line,
     inbound_tag_from_line,
     source_endpoint_from_line,
     source_from_line,
+    summarize_classified_lines,
     summarize_lines,
 )
 
 
 class LogClassifierTests(unittest.TestCase):
+    def test_preclassified_windows_keep_request_identity_and_deduplicate_locally(self) -> None:
+        context = "[unit=sing-box.service] INFO [42 0ms] inbound/mixed[router-in]: inbound connection to media.example:443"
+        error = "[unit=sing-box.service] ERROR [42 10s] open connection to 203.0.113.5:443 using outbound/direct[to-foreign]: dial tcp 203.0.113.5:443: i/o timeout"
+        classified = classify_lines(iter([context, error, error]))
+        self.assertIsNone(classified[0][1])
+        self.assertEqual(classified[1][1].requested_destination, "media.example:443")
+        self.assertEqual(classified[1][1].failed_endpoint, "203.0.113.5:443")
+        for selected in (classified, classified[1:], classified[2:]):
+            summary = summarize_classified_lines(iter(selected))
+            self.assertEqual(summary["counts"]["domain_to_foreign_timeout"], 1)
+            self.assertEqual(summary["counts"]["ipv4_literal_timeout"], 0)
+            self.assertEqual(summary["samples"]["domain_to_foreign_timeout"], error)
+            self.assertEqual(set(summary), {"counts", "top_destinations", "top_sources", "samples"})
+
+    def test_missing_trace_does_not_invent_literal_request_identity(self) -> None:
+        for endpoint in ("203.0.113.5:443", "[2001:db8::5]:443"):
+            line = f"ERROR [42 10s] open connection to {endpoint} using outbound/direct[to-foreign]: dial tcp {endpoint}: i/o timeout"
+            with self.subTest(endpoint=endpoint):
+                item = classify_lines([line])[0][1]
+                self.assertEqual(item.bucket, "unclassified_error")
+                self.assertEqual(item.requested_destination, "")
+                self.assertEqual(item.failed_endpoint, endpoint)
+                self.assertEqual(item.destination, endpoint)
+                self.assertEqual(item.phase, "connect")
+                self.assertEqual(item.source, "")
+                self.assertEqual(classify_line(line), item)
+                self.assertEqual(classify_line(line, requested_destination=None), item)
+                self.assertEqual(classify_line(line, requested_destination=""), item)
+
+    def test_literal_request_context_keeps_ipv4_and_ipv6_classes(self) -> None:
+        for endpoint, bucket in (("203.0.113.5:443", "ipv4_literal_timeout"), ("[2001:db8::5]:443", "ipv6_literal_timeout")):
+            with self.subTest(endpoint=endpoint):
+                lines = [
+                    f"INFO [42 0ms] inbound/mixed[router-in]: inbound connection to {endpoint}",
+                    f"ERROR [42 10s] open connection to {endpoint} using outbound/direct[to-foreign]: dial tcp {endpoint}: i/o timeout",
+                ]
+                summary = summarize_lines(lines)
+                self.assertEqual(summary["counts"][bucket], 1)
+                self.assertEqual(sum(summary["counts"].values()), 1)
+
     def test_inbound_event_parser_returns_exact_tag_and_destination(self) -> None:
         line = "+0300 2026-08-07 03:54:45 INFO [3039373591 0ms] inbound/mixed[router-in]: inbound connection to 10.0.0.1:80"
         self.assertEqual(inbound_tag_from_line(line), "router-in")
@@ -41,21 +83,135 @@ class LogClassifierTests(unittest.TestCase):
         }
         for bucket, line in samples.items():
             with self.subTest(bucket=bucket):
-                classified = classify_line(line)
+                requested = {
+                    "ipv4_literal_timeout": "91.108.56.103:443",
+                    "ipv6_literal_timeout": "[2a00:1450:4001:82b::200e]:443",
+                }.get(bucket)
+                classified = classify_line(line, requested_destination=requested)
                 self.assertIsNotNone(classified)
                 self.assertEqual(classified.bucket, bucket)
 
-    def test_client_front_connect_failed_keeps_public_endpoint(self) -> None:
+    def test_client_front_read_failure_is_not_a_connect_failure(self) -> None:
         classified = classify_line(
             "+0300 2026-07-08 18:43:41 ERROR [3092694891 27.45s] connection: open connection to 8.8.4.4:443 using outbound/vless[proxy]: read tcp 192.168.0.101:6348->94.232.248.35:443: wsarecv: A connection attempt failed because the connected party did not properly respond after a period of time"
         )
         self.assertIsNotNone(classified)
-        self.assertEqual(classified.bucket, "client_front_connect_failed")
+        self.assertEqual(classified.bucket, "unclassified_error")
         self.assertEqual(classified.destination, "94.232.248.35:443")
+        self.assertEqual(classified.phase, "read")
+        self.assertEqual(classified.requested_destination, "")
+        self.assertEqual(classified.failed_endpoint, "94.232.248.35:443")
+
+    def test_resolved_domain_is_classified_before_ranking_destinations(self) -> None:
+        lines = [
+            "INFO [7 1ms] inbound/mixed[router-in]: inbound connection to example.com:443",
+            "ERROR [7 2s] open connection to 203.0.113.5:443 using outbound/direct[to-foreign]: dial tcp 203.0.113.5:443: i/o timeout",
+        ]
+        summary = summarize_lines(lines)
+        self.assertEqual(summary["counts"]["domain_to_foreign_timeout"], 1)
+        self.assertEqual(summary["counts"]["ipv4_literal_timeout"], 0)
+        self.assertEqual(summary["top_destinations"]["domain_to_foreign_timeout"], {"example.com:443": 1})
+
+    def test_phase_and_failed_endpoint_are_independent_of_requested_target(self) -> None:
+        cases = (
+            ("dial tcp 203.0.113.10:443: i/o timeout", "connect", "203.0.113.10:443", "client_front_connect_failed"),
+            ("dial tcp: i/o timeout", "connect", "", "client_front_connect_failed"),
+            ("read tcp 192.0.2.10:50000->203.0.113.10:443: i/o timeout", "read", "203.0.113.10:443", "unclassified_error"),
+            ("write tcp [2001:db8::1]:50000->[2001:db8::2]:443: i/o timeout", "write", "[2001:db8::2]:443", "unclassified_error"),
+            ("read tcp 192.0.2.10:50000: i/o timeout", "read", "", "unclassified_error"),
+            ("context deadline exceeded", "unknown", "", "unclassified_error"),
+        )
+        for suffix, phase, endpoint, bucket in cases:
+            with self.subTest(suffix=suffix):
+                classified = classify_line(f"ERROR [8 2s] open connection to media.example:443 using outbound/vless[proxy]: {suffix}")
+                self.assertEqual(classified.bucket, bucket)
+                self.assertEqual(classified.phase, phase)
+                self.assertEqual(classified.failed_endpoint, endpoint)
+                self.assertEqual(classified.destination, endpoint)
+                self.assertEqual(classified.requested_destination, "media.example:443")
+                self.assertEqual(classified.source, "")
+
+    def test_front_endpoint_is_not_replaced_by_trace_enrichment(self) -> None:
+        lines = [
+            "INFO [8 1ms] inbound/mixed[router-in]: inbound connection to media.example:443",
+            "ERROR [8 2s] open connection to 203.0.113.5:443 using outbound/vless[proxy]: dial tcp 192.0.2.1:8443: i/o timeout",
+        ]
+        summary = summarize_lines(lines)
+        self.assertEqual(summary["top_destinations"]["client_front_connect_failed"], {"192.0.2.1:8443": 1})
+        item = classify_line(lines[-1], requested_destination="media.example:443")
+        self.assertEqual(item.requested_destination, "media.example:443")
+        self.assertEqual(item.failed_endpoint, "192.0.2.1:8443")
+
+    def test_dns_failure_preserves_query_and_failed_resolver_separately(self) -> None:
+        item = classify_line(
+            "ERROR [9 1s] dns: exchange failed for media.example. IN AAAA: "
+            "read udp [2001:db8::1]:50000->[2001:db8::53]:53: i/o timeout",
+            requested_destination="[2001:db8::54]:53",
+        )
+        self.assertEqual(item.bucket, "dns_timeout")
+        self.assertEqual(item.phase, "read")
+        self.assertEqual(item.destination, "media.example:AAAA")
+        self.assertEqual(item.failed_endpoint, "[2001:db8::53]:53")
+        self.assertEqual(item.requested_destination, "[2001:db8::54]:53")
+
+    def test_dns_failure_inside_proxy_dial_does_not_implicate_public_front(self) -> None:
+        item = classify_line(
+            "ERROR [9 1s] open connection to media.example:443 using outbound/vless[proxy]: "
+            "dns: lookup failed for front.example: dial tcp 192.0.2.53:53: i/o timeout"
+        )
+        self.assertEqual(item.bucket, "dns_timeout")
+        self.assertEqual(item.phase, "connect")
+        self.assertEqual(item.destination, "front.example")
+        self.assertEqual(item.failed_endpoint, "192.0.2.53:53")
+        self.assertEqual(item.requested_destination, "media.example:443")
+
+    def test_literal_trace_stays_literal_and_other_units_do_not_supply_context(self) -> None:
+        lines = [
+            "[unit=other.service] INFO [9 1ms] inbound/mixed[router-in]: inbound connection to media.example:443",
+            "[unit=sing-box.service] INFO [9 1ms] inbound/mixed[router-in]: inbound connection to [2001:db8::5]:443",
+            "[unit=sing-box.service] ERROR [9 2s] open connection to [2001:db8::5]:443 using outbound/direct[to-foreign]: dial tcp [2001:db8::5]:443: i/o timeout",
+        ]
+        summary = summarize_lines(lines)
+        self.assertEqual(summary["counts"]["ipv6_literal_timeout"], 1)
+        self.assertEqual(summary["counts"]["domain_to_foreign_timeout"], 0)
+        self.assertEqual(summary["top_destinations"]["ipv6_literal_timeout"], {"[2001:db8::5]:443": 1})
+
+    def test_phase_reports_inner_io_in_a_wrapped_dial_error(self) -> None:
+        item = classify_line(
+            "ERROR open connection to media.example:443 using outbound/vless[proxy]: "
+            "dial tcp 203.0.113.1:443: read tcp 192.0.2.1:50000->203.0.113.1:443: i/o timeout"
+        )
+        self.assertEqual(item.phase, "read")
+        self.assertEqual(item.bucket, "unclassified_error")
+
+    def test_unresolved_failure_does_not_invent_an_endpoint_or_source(self) -> None:
+        item = classify_line("ERROR [9 10s] dns: exchange failed for media.example. IN A: context deadline exceeded")
+        self.assertEqual(item.phase, "dns")
+        self.assertEqual(item.failed_endpoint, "")
+        self.assertEqual(item.source, "")
+
+    def test_read_timeout_keeps_domain_bucket_without_inventing_connect_phase(self) -> None:
+        item = classify_line(
+            "ERROR open connection to 203.0.113.1:443 using outbound/direct[to-foreign]: "
+            "read tcp 192.0.2.1:50000->203.0.113.1:443: i/o timeout",
+            requested_destination="media.example:443",
+        )
+        self.assertEqual(item.bucket, "domain_to_foreign_timeout")
+        self.assertEqual(item.phase, "read")
+        self.assertEqual(item.destination, "media.example:443")
+        self.assertEqual(item.failed_endpoint, "203.0.113.1:443")
+
+    def test_summary_retains_schema_six_fields_and_raw_sample(self) -> None:
+        line = "ERROR [10 2s] open connection to media.example:443 using outbound/direct[to-foreign]: i/o timeout"
+        summary = summarize_lines([line, line])
+        self.assertEqual(set(summary), {"counts", "top_destinations", "top_sources", "samples"})
+        self.assertEqual(set(summary["counts"]), set(BUCKETS))
+        self.assertEqual(sum(summary["counts"].values()), 1)
+        self.assertEqual(summary["samples"]["domain_to_foreign_timeout"], line)
 
     def test_stable_foreign_overlay_uses_destination_buckets(self) -> None:
         domain = classify_line("ERROR open connection to example.com:443 using outbound/direct[to-foreign]: i/o timeout")
-        literal = classify_line("ERROR open connection to 91.108.56.103:443 using outbound/direct[to-foreign]: i/o timeout")
+        literal = classify_line("ERROR open connection to 91.108.56.103:443 using outbound/direct[to-foreign]: i/o timeout", requested_destination="91.108.56.103:443")
         self.assertEqual(domain.bucket, "domain_to_foreign_timeout")
         self.assertEqual(literal.bucket, "ipv4_literal_timeout")
 
@@ -209,8 +365,10 @@ class LogClassifierTests(unittest.TestCase):
     def test_summary_counts_and_top_destinations(self) -> None:
         summary = summarize_lines(
             [
-                "open connection to 91.108.56.103:443 using outbound/direct[to-foreign]: dial tcp: i/o timeout",
-                "open connection to 91.108.56.103:443 using outbound/direct[to-foreign]: dial tcp: i/o timeout",
+                "INFO [1 0ms] inbound/mixed[router-in]: inbound connection to 91.108.56.103:443",
+                "INFO [2 0ms] inbound/mixed[router-in]: inbound connection to 91.108.56.103:443",
+                "ERROR [1 10s] open connection to 91.108.56.103:443 using outbound/direct[to-foreign]: dial tcp: i/o timeout",
+                "ERROR [2 10s] open connection to 91.108.56.103:443 using outbound/direct[to-foreign]: dial tcp: i/o timeout",
                 "dns: exchange failed for ipv6.example.com. IN AAAA: context deadline exceeded",
                 "connection: open connection to 149.154.175.100:443 using outbound/vless[proxy]: dial tcp 94.232.248.35:443: i/o timeout",
             ]
@@ -233,14 +391,17 @@ class LogClassifierTests(unittest.TestCase):
         self.assertEqual(summary["counts"]["ipv4_literal_timeout"], 0)
         self.assertEqual(summary["top_destinations"]["direct_ru_timeout"], {"account.example.com:8000": 1})
 
-    def test_dns_timeout_keeps_original_client_dns_destination_from_request_trace(self) -> None:
+    def test_dns_timeout_ranking_keeps_query_instead_of_client_resolver_from_trace(self) -> None:
         lines = [
             "+0000 2026-07-18 22:56:00 INFO [877895708 0ms] inbound/mixed[router-in]: inbound connection to 8.8.8.8:53",
             "+0000 2026-07-18 22:56:10 ERROR [877895708 10.0s] dns: exchange failed for mqtt-cluster02.example.com. IN A: context deadline exceeded",
         ]
         summary = summarize_lines(lines)
         self.assertEqual(summary["counts"]["dns_timeout"], 1)
-        self.assertEqual(summary["top_destinations"]["dns_timeout"], {"8.8.8.8:53": 1})
+        self.assertEqual(summary["top_destinations"]["dns_timeout"], {"mqtt-cluster02.example.com:A": 1})
+        item = classify_line(lines[-1], requested_destination="8.8.8.8:53")
+        self.assertEqual(item.requested_destination, "8.8.8.8:53")
+        self.assertEqual(item.failed_endpoint, "")
 
 
 if __name__ == "__main__":

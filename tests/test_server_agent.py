@@ -220,13 +220,18 @@ class ServerAgentTests(unittest.TestCase):
         self.assertEqual(action, "none")
         run_mock.assert_not_called()
 
-    def test_agent_emits_native_diagnostics_v6_end_to_end(self) -> None:
+    def diagnostics_facts(self) -> dict[str, object]:
         generated_at = "2026-08-06T18:00:00+00:00"
         installed_at = "2026-08-06T17:59:00+00:00"
-        empty_logs = server_agent.summarize_lines([])
-        facts = {
+        observed = "2026-08-06T17:59:30+00:00"
+        empty_logs = {**server_agent.summarize_lines([]), "observed_at": observed, "until": observed}
+        return {
             **self.gateway_contract(),
             "generated_at": generated_at,
+            "collector_observed_at": {
+                name: (datetime.fromisoformat(generated_at) - timedelta(seconds=120 - index)).isoformat()
+                for index, name in enumerate(server_agent.COLLECTOR_NAMES)
+            },
             "deployment": "demo",
             "host": {"hostname": "ru", "login_user": "root", "is_root": True},
             "release": {"release_id": "release-1", "installed_at": installed_at},
@@ -247,6 +252,9 @@ class ServerAgentTests(unittest.TestCase):
             },
             "verdicts": {"overall": "verified", "server_path": "verified", "reasons": []},
         }
+
+    def test_agent_emits_native_diagnostics_v6_end_to_end(self) -> None:
+        facts = self.diagnostics_facts()
         with patch.object(server_agent, "collect_runtime_facts", return_value=facts):
             payload = server_agent.diagnostics_snapshot(live_probes=True, full_logs=True, include_maintenance=True)
 
@@ -255,6 +263,57 @@ class ServerAgentTests(unittest.TestCase):
         self.assertEqual(snapshot.collector_status, "ok")
         self.assertEqual(snapshot.host["login_user"], "root")
         self.assertEqual(snapshot.log_windows["since_release"].counts["dns_timeout"], 0)
+        self.assertEqual(
+            {name: state.observed_at for name, state in snapshot.collectors.items()},
+            facts["collector_observed_at"],
+        )
+        self.assertNotIn("collector_observed_at", payload)
+
+    def test_snapshot_envelope_does_not_refresh_collectors_or_log_windows(self) -> None:
+        facts = self.diagnostics_facts()
+        facts["generated_at"] = "2026-08-06T18:10:00+00:00"
+        with patch.object(server_agent, "collect_runtime_facts", return_value=facts):
+            snapshot = DiagnosticsSnapshot.from_agent(server_agent.diagnostics_snapshot(live_probes=True))
+        for name, state in snapshot.collectors.items():
+            self.assertEqual(state.observed_at, facts["collector_observed_at"][name])
+        for window in snapshot.log_windows.values():
+            self.assertEqual(window.collector.observed_at, "2026-08-06T17:59:30+00:00")
+            self.assertEqual(window.until, "2026-08-06T17:59:30+00:00")
+        issues = snapshot.freshness_issues(now=datetime.fromisoformat(facts["generated_at"]))
+        self.assertEqual(len(issues), len(server_agent.COLLECTOR_NAMES) + 2 * len(snapshot.log_windows))
+        self.assertTrue(all("is stale" in issue for issue in issues))
+
+    def test_snapshot_preserves_future_collector_time_for_skew_validation(self) -> None:
+        facts = self.diagnostics_facts()
+        now = datetime.fromisoformat(facts["generated_at"])
+        future = (now + timedelta(seconds=31)).isoformat()
+        facts["collector_observed_at"]["front"] = future
+        with patch.object(server_agent, "collect_runtime_facts", return_value=facts):
+            snapshot = DiagnosticsSnapshot.from_agent(server_agent.diagnostics_snapshot(live_probes=True))
+        self.assertEqual(snapshot.collectors["front"].observed_at, future)
+        issues = snapshot.freshness_issues(now=now)
+        self.assertEqual(len(issues), 1)
+        self.assertIn("collector front observed_at is from the future", issues[0])
+
+    def test_missing_collector_timestamp_is_not_replaced_by_envelope(self) -> None:
+        for name in server_agent.COLLECTOR_NAMES:
+            with self.subTest(collector=name):
+                facts = self.diagnostics_facts()
+                del facts["collector_observed_at"][name]
+                with patch.object(server_agent, "collect_runtime_facts", return_value=facts):
+                    snapshot = DiagnosticsSnapshot.from_agent(server_agent.diagnostics_snapshot(live_probes=True))
+                self.assertEqual(snapshot.collectors[name].status, "error")
+                self.assertIsNone(snapshot.collectors[name].observed_at)
+
+    def test_missing_log_timestamps_are_not_replaced_by_envelope(self) -> None:
+        for key in ("observed_at", "until"):
+            with self.subTest(key=key):
+                facts = self.diagnostics_facts()
+                del facts["logs"]["windows_minutes"]["5"][key]
+                with patch.object(server_agent, "collect_runtime_facts", return_value=facts):
+                    snapshot = DiagnosticsSnapshot.from_agent(server_agent.diagnostics_snapshot())
+                self.assertEqual(snapshot.log_windows["5m"].collector.status, "error")
+                self.assertIsNone(snapshot.log_windows["5m"].counts)
 
     def test_compact_snapshot_marks_intentional_omissions_as_skipped(self) -> None:
         generated_at = "2026-08-06T18:00:00+00:00"
@@ -262,6 +321,7 @@ class ServerAgentTests(unittest.TestCase):
         facts = {
             **self.gateway_contract(),
             "generated_at": generated_at,
+            "collector_observed_at": dict.fromkeys(server_agent.COLLECTOR_NAMES, generated_at),
             "deployment": "demo",
             "host": {},
             "release": {"installed_at": generated_at},
@@ -277,8 +337,8 @@ class ServerAgentTests(unittest.TestCase):
             "redundancy": {},
             "logs": {
                 "collector_error": "",
-                "windows_minutes": {"5": dict(empty_logs)},
-                "fresh": {"since": generated_at, **empty_logs},
+                "windows_minutes": {"5": {**empty_logs, "observed_at": generated_at, "until": generated_at}},
+                "fresh": {"since": generated_at, **empty_logs, "observed_at": generated_at, "until": generated_at},
             },
             "verdicts": {"overall": "inconclusive", "reasons": []},
         }
@@ -335,7 +395,187 @@ class ServerAgentTests(unittest.TestCase):
             server_agent, "journal_problem_events", return_value=([], "")
         ) as journal:
             server_agent.summarize_problem_windows(full_logs=True, fresh_since=installed_at)
-        journal.assert_called_once_with(7 * 24 * 60)
+        journal.assert_called_once_with(7 * 24 * 60, until=now)
+
+    def test_log_windows_preserve_acquisition_time_and_exclude_later_events(self) -> None:
+        now = 1_786_040_000.0
+        line = "ERROR dns: exchange failed for example.com. IN A: context deadline exceeded"
+        with patch.object(server_agent.time, "time", return_value=now), patch.object(
+            server_agent, "journal_problem_events", return_value=([(now - 1, line), (now + 1, line)], "")
+        ) as journal:
+            windows, fresh, error = server_agent.summarize_problem_windows(full_logs=True, fresh_since="5 minutes ago")
+        self.assertEqual(error, "")
+        journal.assert_called_once_with(1440, until=now)
+        expected = datetime.fromtimestamp(now, timezone.utc).isoformat()
+        for window in [*windows.values(), fresh]:
+            self.assertEqual(window["observed_at"], expected)
+            self.assertEqual(window["until"], expected)
+            self.assertEqual(window["counts"]["dns_timeout"], 1)
+        self.assertEqual(windows["5"]["since"], datetime.fromtimestamp(now - 300, timezone.utc).isoformat())
+
+    def test_log_windows_share_context_without_extending_journal_query(self) -> None:
+        now = 1_786_040_000.0
+        inbound = "[unit=sing-box.service] INFO [42 0ms] inbound/mixed[router-in]: inbound connection to media.example:443"
+        error = "[unit=sing-box.service] ERROR [42 10s] open connection to 203.0.113.5:443 using outbound/direct[to-foreign]: dial tcp 203.0.113.5:443: i/o timeout"
+        old_error = "[unit=sing-box.service] ERROR [43 1s] dns: exchange failed for old.example. IN A: context deadline exceeded"
+        events = [(now - 305, inbound), (now - 295, error), (now - 310, old_error)]
+        with patch.object(server_agent.time, "time", return_value=now), patch.object(
+            server_agent, "journal_problem_events", return_value=(events, "")
+        ) as journal:
+            windows, fresh, collector_error = server_agent.summarize_problem_windows(
+                full_logs=True, fresh_since=datetime.fromtimestamp(now - 300, timezone.utc).isoformat(),
+            )
+        journal.assert_called_once_with(1440, until=now)
+        self.assertEqual(collector_error, "")
+        for window in [*windows.values(), fresh]:
+            self.assertEqual(window["counts"]["domain_to_foreign_timeout"], 1)
+            self.assertEqual(window["counts"]["ipv4_literal_timeout"], 0)
+            self.assertEqual(window["top_destinations"]["domain_to_foreign_timeout"], {"media.example:443": 1})
+        self.assertEqual(windows["5"]["counts"]["dns_timeout"], 0)
+        self.assertEqual(fresh["counts"]["dns_timeout"], 0)
+        self.assertEqual(windows["30"]["counts"]["dns_timeout"], 1)
+
+    def test_log_windows_without_request_context_do_not_claim_literal_target(self) -> None:
+        now = 1_786_040_000.0
+        line = "[unit=sing-box.service] ERROR [42 10s] open connection to 203.0.113.5:443 using outbound/direct[to-foreign]: dial tcp 203.0.113.5:443: i/o timeout"
+        with patch.object(server_agent.time, "time", return_value=now), patch.object(
+            server_agent, "journal_problem_events", return_value=([(now - 1, line)], "")
+        ) as journal:
+            windows, fresh, error = server_agent.summarize_problem_windows(full_logs=False, fresh_since="5 minutes ago")
+        journal.assert_called_once_with(5, until=now)
+        self.assertEqual(error, "")
+        for window in (windows["5"], fresh):
+            self.assertEqual(window["counts"]["unclassified_error"], 1)
+            self.assertEqual(window["counts"]["ipv4_literal_timeout"], 0)
+            self.assertEqual(window["counts"]["domain_to_foreign_timeout"], 0)
+            self.assertEqual(window["samples"]["unclassified_error"], line)
+
+    def test_future_release_window_is_unavailable_not_a_collected_zero(self) -> None:
+        facts = self.diagnostics_facts()
+        now = datetime.fromisoformat(facts["generated_at"])
+        future = (now + timedelta(days=1)).isoformat()
+        with patch.object(server_agent.time, "time", return_value=now.timestamp()), patch.object(
+            server_agent, "journal_problem_events", return_value=([], "")
+        ):
+            windows, fresh, error = server_agent.summarize_problem_windows(full_logs=True, fresh_since=future)
+        facts["release"]["installed_at"] = future
+        facts["logs"] = {"windows_minutes": windows, "fresh": fresh, "collector_error": error}
+        with patch.object(server_agent, "collect_runtime_facts", return_value=facts):
+            snapshot = DiagnosticsSnapshot.from_agent(server_agent.diagnostics_snapshot(live_probes=True))
+        window = snapshot.log_windows["since_release"]
+        self.assertEqual(window.collector.status, "error")
+        self.assertIsNone(window.counts)
+        self.assertIn("since", window.collector.message)
+        self.assertEqual(snapshot.log_windows["5m"].collector.status, "ok")
+
+    def test_future_journal_context_cannot_supply_a_request_identity(self) -> None:
+        now = 1_786_040_000.0
+        context = "[unit=sing-box.service] INFO [42 0ms] inbound/mixed[router-in]: inbound connection to media.example:443"
+        line = "[unit=sing-box.service] ERROR [42 10s] open connection to 203.0.113.5:443 using outbound/direct[to-foreign]: dial tcp 203.0.113.5:443: i/o timeout"
+        with patch.object(server_agent.time, "time", return_value=now), patch.object(
+            server_agent, "journal_problem_events", return_value=([(now + 1, context), (now - 1, line)], "")
+        ):
+            windows, _fresh, _error = server_agent.summarize_problem_windows(full_logs=True, fresh_since="5 minutes ago")
+        for window in windows.values():
+            self.assertEqual(window["counts"]["unclassified_error"], 1)
+            self.assertEqual(window["counts"]["domain_to_foreign_timeout"], 0)
+
+    def test_failed_journal_context_query_keeps_request_identity_unknown(self) -> None:
+        now = 1_786_040_000.0
+        message = "ERROR [42 10s] open connection to 203.0.113.5:443 using outbound/direct[to-foreign]: dial tcp 203.0.113.5:443: i/o timeout"
+        record = {"__REALTIME_TIMESTAMP": str(int((now - 1) * 1_000_000)), "_SYSTEMD_UNIT": "sing-box.service", "MESSAGE": message}
+        results = [subprocess.CompletedProcess([], 0, json.dumps(record), ""), subprocess.CompletedProcess([], 2, "", "context unavailable")]
+        with patch.object(server_agent.time, "time", return_value=now), patch.object(server_agent, "run", side_effect=results) as command:
+            windows, _fresh, error = server_agent.summarize_problem_windows(full_logs=False, fresh_since="5 minutes ago")
+        self.assertEqual(error, "")
+        self.assertEqual(command.call_count, 2)
+        for call in command.call_args_list:
+            args = call.args[0]
+            self.assertEqual(args[args.index("--since") + 1], f"@{now - 300:.6f}")
+            self.assertEqual(args[args.index("--until") + 1], f"@{now:.6f}")
+        self.assertEqual(windows["5"]["counts"]["unclassified_error"], 1)
+        self.assertEqual(windows["5"]["counts"]["ipv4_literal_timeout"], 0)
+
+    def test_journal_context_query_keeps_its_event_id_bound(self) -> None:
+        limit = server_agent.LOG_CONTEXT_MAX_EVENT_IDS
+        events = [(0, f"[unit=sing-box.service] ERROR [{number} 10s] connection: i/o timeout") for number in range(limit + 1)]
+        with patch.object(server_agent, "run", return_value=subprocess.CompletedProcess([], 0, "", "")) as command:
+            self.assertEqual(server_agent._journal_event_context(5, events, until=1000), [])
+        args = command.call_args.args[0]
+        expected_ids = "|".join(str(number) for number in range(1, limit + 1))
+        self.assertEqual(args[-1], rf"--grep=\[(?:\x1B\[[0-9;]*m)*(?:{expected_ids})\b")
+        self.assertEqual(args[args.index("--since") + 1], "@700.000000")
+        self.assertEqual(args[args.index("--until") + 1], "@1000.000000")
+
+    def test_cached_future_observations_are_not_fresh(self) -> None:
+        now = datetime(2026, 9, 6, 12, tzinfo=timezone.utc)
+        for age in (-86400, -0.001, 0, 60, 86400):
+            observed = (now - timedelta(seconds=age)).isoformat()
+            state = {"state": "healthy", "updated_at": observed}
+            interval = {"observed_at": observed, "degraded_sources": []}
+            with self.subTest(age=age), patch.object(server_agent, "datetime", wraps=datetime) as clock, patch.object(
+                server_agent, "read_json", return_value=state
+            ):
+                clock.now.return_value = now
+                transport = server_agent.transport_state_snapshot()
+                recent = server_agent.recent_observation(interval, max_age_seconds=300)
+            self.assertEqual(transport["fresh"], 0 <= age <= server_agent.TRANSPORT_PROBE_INTERVAL_SECONDS * 6)
+            self.assertEqual(transport["updated_at"], observed)
+            self.assertEqual(transport["age_seconds"], round(age, 1))
+            self.assertEqual(recent, interval if 0 <= age <= 300 else {})
+            self.assertEqual(server_agent.iso_age_seconds(observed, now=now), max(0, age))
+
+    def test_future_transport_cache_cannot_produce_verified_snapshot(self) -> None:
+        now = datetime(2026, 9, 6, 12, tzinfo=timezone.utc)
+        installed = (now - timedelta(minutes=1)).isoformat()
+        state = {"state": "healthy", "updated_at": (now + timedelta(days=1)).isoformat()}
+        with patch.object(server_agent, "datetime", wraps=datetime) as clock, patch.object(server_agent, "read_json", return_value=state):
+            clock.now.return_value = now
+            adaptive = server_agent.transport_state_snapshot()
+        with patch.object(server_agent.time, "time", return_value=now.timestamp()), patch.object(server_agent, "journal_problem_events", return_value=([], "")):
+            logs = server_agent.summarize_problem_windows(full_logs=True, fresh_since=installed)
+        fixtures = {
+            "utc_now": now.isoformat(), "parse_env": {}, "runtime_contract": self.gateway_contract(),
+            "manifest_snapshot": {"manifest": {"release_id": "fixture"}, "drift": "none"},
+            "default_interface": "eth0", "service_state": "active", "fresh_log_since": (installed, 1),
+            "installed_at_value": installed, "maintenance_snapshot": {"upgradable": 0},
+            "summarize_problem_windows": logs, "tcp_front_snapshot": {"listening": True},
+            "run_confirmed_probes": {"profile": "light", "ok": True, "requirements": {}},
+            "interserver_transport_snapshot": {"configured": True, "selection": {"available": True}, "adaptive_state": adaptive},
+            "udp_443_policy": "routed", "public_hy2_snapshot": {"configured": True, "listening": True, "firewall": True},
+            "tcp_adaptation_snapshot": {"qdisc": "fq"}, "resolver_snapshot": {"managed_config": True},
+            "root_filesystem_snapshot": {"verdict": "verified"},
+            "storage_snapshot": {"root_filesystem": {"verdict": "verified"}, "memory": {"reserve_ready": True, "router": {"go_memory_limit_active": True}}},
+            "conntrack_snapshot": {"count": 1}, "xray_conntrack_bypass_snapshot": {"active": True},
+            "network_profile_mismatches": [], "wireguard_policy_snapshot": {"managed": True, "ok": True},
+            "read_json": {}, "host_snapshot": {}, "wireguard_snapshot": {"interface": "wg0", "state": "up"},
+            "interface_counters": {}, "protocol_counters_snapshot": {}, "softnet_counters_snapshot": {},
+        }
+        with ExitStack() as stack:
+            for name, value in fixtures.items():
+                stack.enter_context(patch.object(server_agent, name, return_value=value))
+            stack.enter_context(patch.object(server_agent, "run", side_effect=AssertionError("unexpected OS command")))
+            snapshot = DiagnosticsSnapshot.from_agent(server_agent.diagnostics_snapshot(live_probes=True))
+        self.assertEqual(snapshot.verdict, "degraded")
+        self.assertEqual(snapshot.reasons, ["interserver_adaptation=stale"])
+        self.assertFalse(snapshot.transport["interserver"]["adaptive_state"]["fresh"])
+        self.assertEqual(snapshot.transport["interserver"]["adaptive_state"]["updated_at"], state["updated_at"])
+        self.assertEqual(snapshot.schema_version, 6)
+
+    def test_journal_problem_and_context_queries_use_the_same_fixed_window(self) -> None:
+        now = 1_786_040_000.0
+        record = {
+            "__REALTIME_TIMESTAMP": str(int(now * 1_000_000)), "_SYSTEMD_UNIT": "sing-box.service",
+            "MESSAGE": "ERROR [42 10s] connection: i/o timeout",
+        }
+        result = subprocess.CompletedProcess(["journalctl"], 0, json.dumps(record), "")
+        with patch.object(server_agent, "run", return_value=result) as command:
+            server_agent.journal_problem_events(5, until=now)
+        self.assertEqual(command.call_count, 2)
+        for call in command.call_args_list:
+            args = call.args[0]
+            self.assertEqual(args[args.index("--since") + 1], f"@{now - 300:.6f}")
+            self.assertEqual(args[args.index("--until") + 1], f"@{now:.6f}")
 
     def test_journal_json_preserves_unit_identity(self) -> None:
         records = [
@@ -401,7 +641,7 @@ class ServerAgentTests(unittest.TestCase):
 
     def test_classifier_separates_ipv6_literal_from_domain_timeout(self) -> None:
         line = "ERROR open connection to [2a0a:f280:203:a:5000::100]:443 using outbound/direct[to-foreign]: i/o timeout"
-        classified = classify_line(line)
+        classified = classify_line(line, requested_destination="[2a0a:f280:203:a:5000::100]:443")
         self.assertIsNotNone(classified)
         self.assertEqual(classified.bucket, "ipv6_literal_timeout")
 
@@ -1506,6 +1746,51 @@ class ServerAgentTests(unittest.TestCase):
         host_snapshot.assert_called_once_with("ens3")
         self.assertEqual(snapshot["release"]["installed_at"], "2026-07-15T00:00:00Z")
         self.assertEqual(snapshot["network"]["tcp_adaptation"]["mtu_probing"], 1)
+
+    def test_runtime_facts_timestamp_each_collector_before_its_acquisition(self) -> None:
+        clock = datetime(2026, 9, 5, 12, tzinfo=timezone.utc)
+        acquired = {}
+        fixtures = {
+            "manifest_snapshot": ("artifacts", {"manifest": {"release_id": "fixture"}, "drift": "none"}),
+            "service_state": ("services", "active"),
+            "maintenance_snapshot": ("maintenance", {"upgradable": 0}),
+            "summarize_problem_windows": ("logs", ({}, {}, "")),
+            "tcp_front_snapshot": ("front", {"listening": True}),
+            "run_confirmed_probes": ("route_probes", {"profile": "acceptance", "requirements": {}}),
+            "interserver_transport_snapshot": ("transport", {"configured": True}),
+            "tcp_adaptation_snapshot": ("network", {"qdisc": "fq"}),
+            "root_filesystem_snapshot": ("storage", {"verdict": "verified"}),
+            "wireguard_snapshot": ("wireguard", {"interface": "wg0", "state": "up"}),
+        }
+
+        def collector(name, value):
+            def acquire(*_args, **_kwargs):
+                nonlocal clock
+                acquired.setdefault(name, clock.isoformat())
+                clock += timedelta(seconds=20)
+                return value
+            return acquire
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(server_agent, "utc_now", side_effect=lambda: clock.isoformat()))
+            for function, (name, value) in fixtures.items():
+                stack.enter_context(patch.object(server_agent, function, side_effect=collector(name, value)))
+            for function, value in {
+                "parse_env": {}, "runtime_contract": self.gateway_contract(), "default_interface": "eth0",
+                "fresh_log_since": ("5 minutes ago", 5), "installed_at_value": "2026-09-05T11:59:00+00:00",
+                "udp_443_policy": "routed", "public_hy2_snapshot": {}, "resolver_snapshot": {},
+                "storage_snapshot": {}, "conntrack_snapshot": {}, "xray_conntrack_bypass_snapshot": {},
+                "network_profile_mismatches": [], "wireguard_policy_snapshot": {}, "read_json": {},
+                "host_snapshot": {}, "interface_counters": {}, "protocol_counters_snapshot": {},
+                "softnet_counters_snapshot": {},
+            }.items():
+                stack.enter_context(patch.object(server_agent, function, return_value=value))
+            stack.enter_context(patch.object(server_agent, "run", side_effect=AssertionError("unexpected OS command")))
+            facts = server_agent.collect_runtime_facts(live_probes=True)
+        self.assertEqual(set(acquired), set(server_agent.COLLECTOR_NAMES))
+        self.assertEqual(facts["collector_observed_at"], acquired)
+        self.assertEqual(facts["generated_at"], clock.isoformat())
+        self.assertGreater((clock - datetime.fromisoformat(acquired["artifacts"])).total_seconds(), 180)
 
     def test_tcp_adaptation_snapshot_reads_runtime_kernel_state(self) -> None:
         def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:

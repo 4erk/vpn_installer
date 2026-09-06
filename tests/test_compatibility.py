@@ -23,23 +23,23 @@ class VersionTests(unittest.TestCase):
             with self.subTest(invalid=invalid), self.assertRaises(CompatibilityError):
                 Version.parse(invalid)
 
-    def test_transition_window_accepts_only_0224_and_current(self) -> None:
+    def test_transition_window_accepts_only_0225_and_current(self) -> None:
         window = CompatibilityWindow.current()
-        self.assertEqual(COMPATIBLE_INSTALLED_MIN, "0.22.4")
+        self.assertEqual(COMPATIBLE_INSTALLED_MIN, "0.22.5")
         self.assertEqual(COMPATIBLE_INSTALLED_MAX, VERSION)
-        self.assertTrue(window.accepts("0.22.4"))
+        self.assertTrue(window.accepts("0.22.5"))
         self.assertTrue(window.accepts(VERSION))
         self.assertFalse(window.accepts("0.21.8"))
 
     def test_manifest_declares_exact_adapter_free_transition(self) -> None:
         contract = CompatibilityWindow.current().to_manifest()
-        self.assertEqual(contract["installed_min"], "0.22.4")
-        self.assertEqual(contract["installed_max"], "0.22.5")
-        self.assertEqual(contract["transitions"], [{"from": "0.22.4", "to": "0.22.5"}])
+        self.assertEqual(contract["installed_min"], "0.22.5")
+        self.assertEqual(contract["installed_max"], "0.22.6")
+        self.assertEqual(contract["transitions"], [{"from": "0.22.5", "to": "0.22.6"}])
 
     def test_previous_release_manifest_needs_no_adapter(self) -> None:
-        contract = {"installed_min": "0.22.3", "installed_max": "0.22.4",
-                    "transitions": [{"from": "0.22.3", "to": "0.22.4"}]}
+        contract = {"installed_min": "0.22.4", "installed_max": "0.22.5",
+                    "transitions": [{"from": "0.22.4", "to": "0.22.5"}]}
         self.assertEqual(CompatibilityWindow.from_manifest(contract).to_manifest(), contract)
 
     def test_unused_adapter_metadata_is_rejected(self) -> None:
@@ -59,7 +59,7 @@ class VersionTests(unittest.TestCase):
             CompatibilityWindow.from_manifest({"installed_min": "0.20.1", "installed_max": "0.20.1"})
 
     def test_out_of_window_release_has_removal_guidance(self) -> None:
-        for version in ("0.22.3", "0.22.6"):
+        for version in ("0.22.4", "0.22.7"):
             with self.subTest(version=version), self.assertRaisesRegex(
                 CompatibilityError,
                 rf"installed release {re.escape(version)}.*{re.escape(cli_entrypoint())} from tag {re.escape(version)}.*remove or purge",
