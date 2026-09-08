@@ -210,6 +210,10 @@ class VlessVerifyTests(unittest.TestCase):
 
     def test_runner_measures_sustained_goodput_and_transfer_gaps(self) -> None:
         runner = render_vless_runner(listen_port=18080)
+        identity = runner.split("event foreign-identity", 1)[1].split("event github", 1)[0]
+        self.assertIn("https://1.1.1.1/cdn-cgi/trace", identity)
+        self.assertNotIn("https://www.cloudflare.com/cdn-cgi/trace", identity)
+        self.assertIn("event ipv6-literal", runner)
         self.assertTrue(runner.startswith("#!/usr/bin/env bash\n"))
         self.assertNotIn("\r", runner)
         self.assertIn("throughput_deadline_ns", runner)

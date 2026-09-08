@@ -52,7 +52,7 @@ TRANSPORT_PREFERRED_STABLE_RESET_SECONDS = 1800
 TRANSPORT_SWITCH_RETRY_BASE_SECONDS = 30
 TRANSPORT_SWITCH_RETRY_MAX_SECONDS = 300
 TRANSPORT_SWITCH_PROOF_ATTEMPTS = 5
-TRANSPORT_SWITCH_PROOF_TIMEOUT_MS = 1200
+TRANSPORT_SWITCH_PROOF_TIMEOUT_MS = TRANSPORT_CANDIDATE_PROBE_TIMEOUT_MS
 TRANSPORT_SWITCH_PROOF_RETRY_DELAY_SECONDS = 0.2
 TRANSPORT_STATE_SCHEMA_VERSION = 16
 UNDERLAY_WG_RU_ADDRESS = "10.75.0.1/32"
@@ -91,10 +91,21 @@ def _interserver_exit_public_ip(env: dict[str, str]) -> str:
     return exit_plan.public_ip
 
 
-def _receive_exact(connection: socket.socket, size: int) -> bytes:
+def _probe_remaining(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("overlay DNS probe deadline expired")
+    return remaining
+
+
+def _receive_exact(connection: socket.socket, size: int, *, deadline: float | None = None) -> bytes:
     chunks: list[bytes] = []
     while size:
+        if deadline is not None:
+            connection.settimeout(_probe_remaining(deadline))
         chunk = connection.recv(size)
+        if deadline is not None:
+            _probe_remaining(deadline)
         if not chunk:
             raise OSError("peer closed before the probe response was complete")
         chunks.append(chunk)
@@ -302,20 +313,44 @@ def transport_candidate_probe(
     return result
 
 
-def _bound_tcp_dns_probe(interface: str, target_host: str, target_port: int, timeout_seconds: float) -> None:
+class _OverlayProbeError(OSError):
+    def __init__(self, phase: str, error: Exception):
+        super().__init__(str(error)[:240] or "overlay DNS exchange failed")
+        self.phase = phase
+
+
+def _bound_tcp_dns_probe(
+    interface: str, target_host: str, target_port: int, timeout_seconds: float,
+    *, deadline: float | None = None,
+) -> None:
+    attempt_deadline = time.monotonic() + timeout_seconds
+    if deadline is not None:
+        attempt_deadline = min(attempt_deadline, deadline)
     query_id, query = _dns_probe_query()
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as connection:
-        connection.setsockopt(
-            socket.SOL_SOCKET,
-            getattr(socket, "SO_BINDTODEVICE", 25),
-            interface.encode("utf-8") + b"\0",
-        )
-        connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        connection.settimeout(timeout_seconds)
-        connection.connect((target_host, target_port))
-        connection.sendall(len(query).to_bytes(2, "big") + query)
-        response_size = int.from_bytes(_receive_exact(connection, 2), "big")
-        _dns_probe_response(_receive_exact(connection, response_size), query_id)
+    phase = "connect"
+    try:
+        _probe_remaining(attempt_deadline)
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as connection:
+            connection.setsockopt(
+                socket.SOL_SOCKET,
+                getattr(socket, "SO_BINDTODEVICE", 25),
+                interface.encode("utf-8") + b"\0",
+            )
+            connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            connection.settimeout(_probe_remaining(attempt_deadline))
+            connection.connect((target_host, target_port))
+            phase = "send"
+            connection.settimeout(_probe_remaining(attempt_deadline))
+            connection.sendall(len(query).to_bytes(2, "big") + query)
+            phase = "receive_length"
+            response_size = int.from_bytes(_receive_exact(connection, 2, deadline=attempt_deadline), "big")
+            phase = "receive_body"
+            response = _receive_exact(connection, response_size, deadline=attempt_deadline)
+            phase = "validate"
+            _dns_probe_response(response, query_id)
+            _probe_remaining(attempt_deadline)
+    except (OSError, ValueError) as exc:
+        raise _OverlayProbeError(phase, exc) from exc
 
 
 def transport_overlay_dns_probe(
@@ -324,43 +359,68 @@ def transport_overlay_dns_probe(
     *,
     timeout_ms: int = TRANSPORT_CANDIDATE_PROBE_TIMEOUT_MS,
     attempts: int = TRANSPORT_OVERLAY_PROBE_ATTEMPTS,
+    deadline: float | None = None,
 ) -> dict[str, Any]:
     """Prove the exact inner-WireGuard DNS dataplane without external dependencies."""
 
     started = time.monotonic()
+    started_at = datetime.now(timezone.utc).isoformat()
     target = f"{target_host}:{FOREIGN_DNS_RELAY_PORT}"
+    exchanges: list[dict[str, Any]] = []
+
+    def result(error: str = "") -> dict[str, Any]:
+        return {
+            **_probe_result(
+                "overlay-dns", target, started, error, attempts=len(exchanges),
+                health_confirmed=not error,
+                failure_confirmed=bool(error) and attempts > 0 and len(exchanges) == attempts,
+            ),
+            "budget_ms": timeout_ms,
+            "attempts_limit": attempts,
+            "attempt_results": exchanges,
+            "started_at": started_at,
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+        }
+
     if not interface or not target_host or attempts < 1:
-        return _probe_result("overlay-dns", target, started, "overlay probe identity is incomplete")
+        return result("overlay probe identity is incomplete")
+    if timeout_ms <= 0:
+        return result("overlay probe budget must be positive")
     try:
         address = ipaddress.ip_address(target_host)
     except ValueError:
-        return _probe_result("overlay-dns", target, started, "overlay probe target is not an IP literal")
+        return result("overlay probe target is not an IP literal")
     if address.version != 4:
-        return _probe_result("overlay-dns", target, started, "overlay probe target is not IPv4")
+        return result("overlay probe target is not IPv4")
 
-    attempt_timeout = max(0.001, timeout_ms / 1000 / attempts)
+    call_deadline = started + timeout_ms / 1000
+    if deadline is not None:
+        call_deadline = min(call_deadline, deadline)
+    attempt_timeout = timeout_ms / 1000 / attempts
     last_error = "overlay DNS probe timed out"
     for attempt in range(1, attempts + 1):
+        attempt_started = time.monotonic()
+        if attempt_started >= call_deadline:
+            last_error = "overlay DNS probe deadline expired"
+            break
+        attempt_deadline = min(call_deadline, attempt_started + attempt_timeout)
+        exchange: dict[str, Any] = {"attempt": attempt, "ok": False}
         try:
-            _bound_tcp_dns_probe(interface, target_host, FOREIGN_DNS_RELAY_PORT, attempt_timeout)
+            _bound_tcp_dns_probe(
+                interface, target_host, FOREIGN_DNS_RELAY_PORT, attempt_timeout,
+                deadline=attempt_deadline,
+            )
+            _probe_remaining(attempt_deadline)
         except (OSError, ValueError) as exc:
-            last_error = str(exc) or last_error
-            continue
-        return _probe_result(
-            "overlay-dns",
-            target,
-            started,
-            attempts=attempt,
-            health_confirmed=True,
-        )
-    return _probe_result(
-        "overlay-dns",
-        target,
-        started,
-        last_error,
-        attempts=attempts,
-        failure_confirmed=True,
-    )
+            last_error = str(exc)[:240] or last_error
+            exchange.update(error=last_error, io_phase=getattr(exc, "phase", "deadline"))
+        else:
+            exchange.update(ok=True, error="", io_phase="complete")
+        exchange["elapsed_ms"] = max(0, round((time.monotonic() - attempt_started) * 1000))
+        exchanges.append(exchange)
+        if exchange["ok"]:
+            return result()
+    return result(last_error)
 
 
 def clamp_x25519_private(private_key: bytes) -> bytes:
@@ -705,6 +765,14 @@ def _normalize_probe(probe: dict[str, Any] | None) -> dict[str, Any]:
         "scope",
         "target",
         "elapsed_ms",
+        "budget_ms",
+        "attempts_limit",
+        "attempt_results",
+        "started_at",
+        "finished_at",
+        "cycle_id",
+        "path",
+        "phase",
         "health_confirmed",
         "failure_confirmed",
         "quality_checked",

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import hashlib
+from contextlib import contextmanager
 import json
+import shlex
 import shutil
 import textwrap
 import time
@@ -14,6 +17,7 @@ from ..interserver_transport import (
     TRANSPORT_PREFERRED_PROBE_INTERVAL_SECONDS,
     TRANSPORT_PREFERRED_RECOVERY_MIN_SECONDS,
     TRANSPORT_PREFERRED_TAG,
+    TRANSPORT_PROBE_INTERVAL_SECONDS,
 )
 from ..network_profile import FQ_FLOW_LIMIT, FQ_KIND, FQ_PACKET_LIMIT
 from ..render import (
@@ -131,8 +135,8 @@ def build_lab_web_server(name: str) -> str:
                     self.send_header("Content-Type", "application/octet-stream")
                     self.send_header("Content-Length", str(len(chunk) * chunks))
                     self.end_headers()
-                    for _ in range(chunks):
-                        self.wfile.write(chunk)
+                    for index in range(chunks):
+                        self.wfile.write(bytes([index % 256]) * len(chunk))
                         self.wfile.flush()
                         time.sleep(0.05)
                     return
@@ -171,6 +175,63 @@ def build_lab_dnsmasq() -> str:
     )
 
 
+def _lab_overlay_probe(runner: AuditRunner, container: str, env: dict[str, str], *, convergence: bool = False) -> dict[str, object]:
+    identity = {key: env[key] for key in ("WG_INTERFACE", "WG_FOREIGN_ADDRESS")}
+    script = textwrap.dedent(f"""\
+        import json, runpy, sys
+        sys.path.insert(0, '/opt/agent')
+        agent = runpy.run_path('/opt/agent/vpn-stack-agent.py', run_name='lab_probe')
+        env = {identity!r}
+        try:
+            result = agent[{'prove_wireguard_overlay' if convergence else 'transport_overlay_path_probe'!r}](env)
+        except agent['TransportSwitchError'] as exc:
+            result = exc.evidence
+        print(json.dumps(result))
+        """)
+    return json.loads(runner.docker_exec(container, f"python3 -c {shlex.quote(script)}").stdout)
+
+
+def _lab_overlay_deadlines(runner: AuditRunner, gateway: str, dns: str, env: dict[str, str]) -> dict[str, object]:
+    # This IPv4 fixture delays DNS data (PSH), not SYN/ACK or UDP candidate probes.
+    runner.docker_exec(dns, "tc qdisc replace dev eth0 root handle 1: prio; "
+                       "tc qdisc add dev eth0 parent 1:3 handle 30: netem delay 800ms; "
+                       "tc filter add dev eth0 protocol ip parent 1:0 prio 1 u32 "
+                       "match ip protocol 6 0xff match ip sport 53 0xffff "
+                       "match u8 0x08 0x08 at 33 flowid 1:3")
+    try:
+        live = _lab_overlay_probe(runner, gateway, env)
+        activation = _lab_overlay_probe(runner, gateway, env, convergence=True)
+        if live.get("ok") is not False or activation.get("ok") is not False:
+            raise AuditFailure(f"Delayed DNS activation/liveness disagree: {live}, {activation}")
+        runner.docker_exec(dns, f"(sleep {TRANSPORT_PROBE_INTERVAL_SECONDS}; tc qdisc del dev eth0 root) "
+                           ">/opt/dns-delay-clear.log 2>&1 &")
+        converged = _lab_overlay_probe(runner, gateway, env, convergence=True)
+        recovered = _lab_overlay_probe(runner, gateway, env)
+        if not (converged.get("ok") is True and len(converged.get("rounds", [])) > 1 and recovered.get("ok") is True):
+            raise AuditFailure(f"DNS convergence did not survive the next liveness probe: {converged}, {recovered}")
+        return {"delayed_liveness": live, "delayed_activation": activation, "convergence": converged, "recovery": recovered}
+    finally:
+        runner.docker_exec(dns, "tc qdisc del dev eth0 root", expected_codes={0, 2})
+
+
+@contextmanager
+def _lab_logs(runner: AuditRunner):
+    try:
+        yield
+    finally:
+        destination = runner.work_dir / "lab" / "runtime-logs"
+        destination.mkdir(parents=True, exist_ok=True)
+        errors = []
+        for role, path in (("gateway", "/opt/ru-singbox.log"), ("exit", "/opt/foreign-singbox.log"),
+                           ("client", "/opt/client-singbox.log"), ("dns", "/opt/dns.log")):
+            try:
+                runner.docker_cp_from(f"{role}-{runner.run_id}", path, destination / f"{role}.log")
+            except AuditFailure as exc:
+                errors.append(f"{role}: {exc}")
+        if errors:
+            write_text(destination / "collection-errors.txt", "\n".join(errors))
+
+
 def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
     runner.cleanup_stale_lab_resources()
     env_path, env = runner.create_env(
@@ -194,7 +255,15 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
     global_lan = f"audit-global-{runner.run_id}"
 
     with runner.docker_network(front, LAB_FRONT_SUBNET, LAB_FRONT_GATEWAY), runner.docker_network(ru_lan, LAB_RU_SUBNET, LAB_RU_GATEWAY), runner.docker_network(global_lan, LAB_GLOBAL_SUBNET, LAB_GLOBAL_GATEWAY):
-        with runner.docker_container(f"gateway-{runner.run_id}", AUDIT_IMAGE, privileged=True, network=front, ip=LAB_IPS["gateway"]) as ru_container, runner.docker_container(f"exit-{runner.run_id}", AUDIT_IMAGE, privileged=True, network=front, ip=LAB_IPS["exit"]) as foreign_container, runner.docker_container(f"client-{runner.run_id}", AUDIT_IMAGE, privileged=True, network=front, ip=LAB_IPS["client"]) as client_container, runner.docker_container(f"dns-{runner.run_id}", AUDIT_IMAGE, privileged=True, network=front, ip=LAB_IPS["dns"]) as dns_container, runner.docker_container(f"ruweb-{runner.run_id}", AUDIT_IMAGE, privileged=True, network=ru_lan, ip=LAB_IPS["ru_web"]) as ru_web_container, runner.docker_container(f"globalweb-{runner.run_id}", AUDIT_IMAGE, privileged=True, network=global_lan, ip=LAB_IPS["global_web"]) as global_web_container:
+        with (
+            runner.docker_container(f"gateway-{runner.run_id}", AUDIT_IMAGE, privileged=True, network=front, ip=LAB_IPS["gateway"]) as ru_container,
+            runner.docker_container(f"exit-{runner.run_id}", AUDIT_IMAGE, privileged=True, network=front, ip=LAB_IPS["exit"]) as foreign_container,
+            runner.docker_container(f"client-{runner.run_id}", AUDIT_IMAGE, privileged=True, network=front, ip=LAB_IPS["client"]) as client_container,
+            runner.docker_container(f"dns-{runner.run_id}", AUDIT_IMAGE, privileged=True, network=front, ip=LAB_IPS["dns"]) as dns_container,
+            runner.docker_container(f"ruweb-{runner.run_id}", AUDIT_IMAGE, privileged=True, network=ru_lan, ip=LAB_IPS["ru_web"]) as ru_web_container,
+            runner.docker_container(f"globalweb-{runner.run_id}", AUDIT_IMAGE, privileged=True, network=global_lan, ip=LAB_IPS["global_web"]) as global_web_container,
+            _lab_logs(runner),
+        ):
             runner.docker_network_connect(ru_lan, ru_container, LAB_IPS["ru_lan"])
             runner.docker_network_connect(global_lan, foreign_container, LAB_IPS["exit_wan"])
             runner.docker_exec(foreign_container, f"ip route replace default via {LAB_GLOBAL_GATEWAY} dev eth1")
@@ -312,6 +381,7 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
             if "server=global-web" not in raw_global_resp or f"source={LAB_IPS['exit_wan']}" not in raw_global_resp:
                 raise AuditFailure(f"Raw global IP ушёл не через foreign:\n{raw_global_resp}")
 
+            deadline_report = _lab_overlay_deadlines(runner, ru_container, dns_container, env)
             runner.docker_exec(
                 client_container,
                 "rm -f /opt/stream.out /opt/stream.rc /opt/stream.time; "
@@ -334,6 +404,11 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
                 transition.get("changed") is True
                 and transition.get("selected") == fallback_tag
                 and transition.get("hard_failure_evidence") is True
+                and transition.get("selector_before") == TRANSPORT_PREFERRED_TAG
+                and transition.get("selector_after") == fallback_tag
+                and transition.get("overlay_probe", {}).get("phase") == "activation"
+                and transition.get("overlay_probe", {}).get("ok") is True
+                and transition.get("last_transition", {}).get("activation_proof", {}).get("ok") is True
             ):
                 raise AuditFailure(f"Transport agent did not perform confirmed failover in one cycle: {transition}")
             fallback_stability = json.loads(
@@ -357,6 +432,12 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
             )
             if stream_result.returncode != 0:
                 raise AuditFailure("Existing TCP stream did not survive the underlay switch")
+            digest = hashlib.sha256()
+            for index in range(LAB_STREAM_CHUNKS):
+                digest.update(bytes([index % 256]) * LAB_STREAM_CHUNK_BYTES)
+            stream_sha256 = runner.docker_exec(client_container, "sha256sum /opt/stream.out").stdout.split()[0]
+            if stream_sha256 != digest.hexdigest():
+                raise AuditFailure("Existing TCP stream checksum changed across the underlay switch")
             stream_seconds = float(runner.docker_exec(client_container, "cat /opt/stream.time").stdout.strip())
             if stream_seconds > 14.0:
                 raise AuditFailure(f"Underlay switch stalled an existing TCP stream for too long: {stream_seconds:.3f}s")
@@ -398,18 +479,57 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
                 and recovery[-1].get("selected") == TRANSPORT_PREFERRED_TAG
             ):
                 raise AuditFailure(f"Transport agent did not return to the recovered preferred underlay: {recovery}")
+            runner.docker_exec(
+                foreign_container,
+                f"nft add table inet underlay_fault; nft 'add chain inet underlay_fault output {{ type filter hook output priority -10; policy accept; }}'; "
+                f"nft add rule inet underlay_fault output ip daddr {LAB_IPS['gateway']} udp sport {fault_port} drop",
+            )
+            try:
+                reverse_loss = json.loads(runner.docker_exec(
+                    ru_container, "python3 /opt/agent/vpn-stack-agent.py transport-reconcile",
+                ).stdout)
+                if not (reverse_loss.get("changed") is True and reverse_loss.get("selected") == fallback_tag
+                        and reverse_loss.get("overlay_probe", {}).get("ok") is True):
+                    raise AuditFailure(f"Reverse one-way loss did not activate the fallback overlay: {reverse_loss}")
+                runner.docker_exec(foreign_container, f"nft add rule inet underlay_fault output "
+                                   f"ip daddr {LAB_IPS['gateway']} udp sport {HY2_PORT} drop")
+                both_loss = json.loads(runner.docker_exec(
+                    ru_container, "python3 /opt/agent/vpn-stack-agent.py transport-reconcile",
+                ).stdout)
+                if both_loss.get("state") != "failed" or both_loss.get("changed") is True:
+                    raise AuditFailure(f"Both-path loss was reported as usable: {both_loss}")
+            finally:
+                runner.docker_exec(foreign_container, "nft delete table inet underlay_fault")
+            restored = json.loads(runner.docker_exec(
+                ru_container, "python3 /opt/agent/vpn-stack-agent.py transport-reconcile",
+            ).stdout)
+            if restored.get("overlay_probe", {}).get("ok") is not True or restored.get("selected") not in {fallback_tag, TRANSPORT_PREFERRED_TAG}:
+                raise AuditFailure(f"No proven overlay recovered after both-path loss: {restored}")
+            if restored.get("changed") is True and restored.get("last_transition", {}).get("activation_proof", {}).get("ok") is not True:
+                raise AuditFailure(f"Recovery switched without a matching activation proof: {restored}")
+            restored_stability = json.loads(runner.docker_exec(
+                ru_container, "python3 /opt/agent/vpn-stack-agent.py transport-reconcile",
+            ).stdout)
+            if restored_stability.get("overlay_probe", {}).get("ok") is not True or restored_stability.get("selected") != restored.get("selected"):
+                raise AuditFailure(f"Recovered overlay failed its next liveness cycle: {restored_stability}")
             continuity_report = lab_dir / "transport-continuity.json"
             write_text(
                 continuity_report,
                 json.dumps(
                     {
                         "transition": transition,
+                        "overlay_deadlines": deadline_report,
                         "fallback_stability": fallback_stability,
                         "switch_seconds": switch_seconds,
                         "stream_bytes": LAB_STREAM_BYTES,
+                        "stream_sha256": stream_sha256,
                         "stream_seconds": stream_seconds,
                         "server_request_count": 1,
                         "preferred_recovery": recovery,
+                        "reverse_one_way_loss": reverse_loss,
+                        "both_path_loss": both_loss,
+                        "restored_path": restored,
+                        "restored_stability": restored_stability,
                     },
                     indent=2,
                     sort_keys=True,

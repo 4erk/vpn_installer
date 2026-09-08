@@ -3498,16 +3498,19 @@ class ServerAgentTests(unittest.TestCase):
         selections = [
             {"available": True, "selected": "interserver-underlay-wg"},
             {"available": True, "selected": "interserver-underlay-hy2"},
+            {"available": True, "selected": "interserver-underlay-hy2"},
         ]
         with (
             patch.object(server_agent, "transport_selector_selection", side_effect=selections),
             patch.object(server_agent, "clash_api_json") as api,
             patch.object(server_agent, "reset_transport_relay", return_value=1) as reset,
-            patch.object(server_agent, "prove_wireguard_overlay") as proof,
+            patch.object(server_agent, "prove_wireguard_overlay", return_value={"ok": True, "probe": {"ok": True}}) as proof,
         ):
             result = server_agent.select_transport(env, "127.0.0.1:19090", "interserver-underlay-hy2")
 
-        self.assertIsNone(result)
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["changed"])
+        self.assertEqual(result["activation_proof"]["path"], "interserver-underlay-hy2")
         reset.assert_called_once_with("127.0.0.1:19090")
         proof.assert_called_once_with(env)
         self.assertEqual(api.call_args.args[1], "/proxies/interserver-underlay-select")
@@ -3520,12 +3523,14 @@ class ServerAgentTests(unittest.TestCase):
             {"available": True, "selected": "interserver-underlay-wg"},
             {"available": True, "selected": "interserver-underlay-wg"},
             {"available": True, "selected": "interserver-underlay-wg"},
+            {"available": True, "selected": "interserver-underlay-wg"},
+            {"available": True, "selected": "interserver-underlay-wg"},
         ]
         with (
             patch.object(server_agent, "transport_selector_selection", side_effect=selections),
             patch.object(server_agent, "clash_api_json") as api,
             patch.object(server_agent, "reset_transport_relay", return_value=1) as reset,
-            patch.object(server_agent, "prove_wireguard_overlay") as proof,
+            patch.object(server_agent, "prove_wireguard_overlay", return_value={"ok": True, "probe": {"ok": True}}) as proof,
         ):
             with self.assertRaisesRegex(RuntimeError, "previous selector path restored and verified"):
                 server_agent.select_transport(env, "127.0.0.1:19090", "interserver-underlay-hy2")
@@ -3632,7 +3637,10 @@ class ServerAgentTests(unittest.TestCase):
             patch.object(server_agent, "run", side_effect=AssertionError("unexpected subprocess")),
             patch.object(
                 server_agent, "select_transport", wraps=server_agent.select_transport,
-                side_effect=RuntimeError("activation failed; previous selector path restored and verified") if fail_switch else None,
+                side_effect=server_agent.TransportSwitchError("activation failed", {
+                    "selector_before": selected, "selector_after": selected, "rollback_verified": True,
+                    "rollback_proof": {"probe": dict(live)},
+                }) if fail_switch else None,
             ) as select,
         ):
             trace = [server_agent._reconcile_interserver_transport_unlocked() for _ in seconds]
@@ -3763,7 +3771,10 @@ class ServerAgentTests(unittest.TestCase):
                 patch.object(
                     server_agent,
                     "select_transport",
-                    side_effect=RuntimeError("activation failed; previous selector path restored and verified"),
+                    side_effect=server_agent.TransportSwitchError("activation failed", {
+                        "selector_before": "interserver-underlay-wg", "selector_after": "interserver-underlay-wg",
+                        "rollback_verified": True, "rollback_proof": {"probe": {"checked": True, "ok": True}},
+                    }),
                 ) as select,
             ):
                 first = server_agent._reconcile_interserver_transport_unlocked()
@@ -3783,15 +3794,24 @@ class ServerAgentTests(unittest.TestCase):
         selections = [
             {"available": True, "selected": "interserver-underlay-wg"},
             {"available": True, "selected": "interserver-underlay-hy2"},
+            {"available": True, "selected": "interserver-underlay-hy2"},
+            {"available": True, "selected": "interserver-underlay-wg"},
+            {"available": True, "selected": "interserver-underlay-wg"},
             {"available": True, "selected": "interserver-underlay-wg"},
         ]
         with patch.object(server_agent, "transport_selector_selection", side_effect=selections), patch.object(
-            server_agent, "prove_wireguard_overlay", side_effect=[RuntimeError("proof failed"), None]
+            server_agent, "prove_wireguard_overlay", side_effect=[
+                server_agent.TransportSwitchError("proof failed", {"ok": False, "probe": {"ok": False}}),
+                {"ok": True, "probe": {"ok": True}},
+            ]
         ), patch.object(server_agent, "clash_api_json") as api, patch.object(
             server_agent, "reset_transport_relay", return_value=1
         ) as reset:
-            with self.assertRaisesRegex(RuntimeError, "previous selector path restored and verified"):
+            with self.assertRaisesRegex(server_agent.TransportSwitchError, "previous selector path restored and verified") as raised:
                 server_agent.select_transport(env, "127.0.0.1:19090", "interserver-underlay-hy2")
+        self.assertTrue(raised.exception.evidence["rollback_verified"])
+        self.assertFalse(raised.exception.evidence["activation_proof"]["ok"])
+        self.assertEqual(raised.exception.evidence["rollback_proof"]["phase"], "rollback")
         self.assertEqual(
             [call.kwargs["payload"] for call in api.call_args_list],
             [{"name": "interserver-underlay-hy2"}, {"name": "interserver-underlay-wg"}],
@@ -3901,6 +3921,127 @@ class ServerAgentTests(unittest.TestCase):
         trace, _select, _proof = self.run_transport_cycles([1860], previous=previous)
         self.assertNotIn("last_switch_failure", trace[0])
 
+    def test_transport_transition_keeps_before_failure_and_after_activation_proof(self) -> None:
+        trace, _select, proof = self.run_transport_cycles([0], liveness_ok=False)
+        state = trace[0]
+        self.assertEqual(state["selector_before"], "interserver-underlay-wg")
+        self.assertEqual(state["selector_after"], "interserver-underlay-hy2")
+        self.assertFalse(state["probes"]["interserver-underlay-wg"]["ok"])
+        self.assertEqual(state["probes"]["interserver-underlay-wg"]["phase"], "before")
+        self.assertTrue(state["overlay_probe"]["ok"])
+        self.assertEqual(state["overlay_probe"]["phase"], "activation")
+        self.assertEqual(state["overlay_probe"]["path"], state["selected"])
+        self.assertEqual(state["last_transition"]["cycle_id"], state["cycle_id"])
+        self.assertTrue(state["last_transition"]["activation_proof"]["ok"])
+        proof.assert_called_once()
+
+    def test_transport_transition_evidence_is_retained_without_refresh(self) -> None:
+        trace, _select, _proof = self.run_transport_cycles([0, 16, 18])
+        self.assertIn("last_transition", trace[1])
+        self.assertEqual(trace[1]["last_transition"], trace[2]["last_transition"])
+        self.assertNotEqual(trace[2]["cycle_id"], trace[2]["last_transition"]["cycle_id"])
+
+    def test_transport_rollback_does_not_trust_exception_wording(self) -> None:
+        with patch.object(server_agent, "select_transport", side_effect=RuntimeError(
+            "previous selector path restored and verified"
+        )):
+            trace, _select, _proof = self.run_transport_cycles([0], liveness_ok=False)
+        self.assertEqual(trace[0]["state"], "failed")
+        self.assertFalse(trace[0]["overlay_probe"]["checked"])
+        self.assertEqual(trace[0]["selector_after"], "")
+
+    def test_transport_both_overlay_proofs_fail_with_bounded_typed_evidence(self) -> None:
+        selector = {"available": True, "selected": "interserver-underlay-wg"}
+
+        def api(_controller, _path, *, payload, **_kwargs):
+            selector["selected"] = payload["name"]
+            return {}
+
+        with (
+            patch.object(server_agent, "transport_selector_selection", side_effect=lambda *_: dict(selector)),
+            patch.object(server_agent, "clash_api_json", side_effect=api),
+            patch.object(server_agent, "reset_transport_relay", return_value=1) as reset,
+            patch.object(server_agent, "prove_wireguard_overlay", side_effect=RuntimeError("x" * 10000)),
+        ):
+            with self.assertRaises(server_agent.TransportSwitchError) as raised:
+                server_agent.select_transport({}, "127.0.0.1:19090", "interserver-underlay-hy2", cycle_id="cycle")
+        evidence = raised.exception.evidence
+        self.assertFalse(evidence["rollback_verified"])
+        self.assertFalse(evidence["ok"])
+        self.assertEqual(evidence["selector_after"], "interserver-underlay-wg")
+        self.assertEqual(evidence["activation_proof"]["phase"], "activation")
+        self.assertEqual(evidence["rollback_proof"]["phase"], "rollback")
+        self.assertEqual(reset.call_count, 2)
+        self.assertLessEqual(len(str(raised.exception)), 240)
+        self.assertLessEqual(len(evidence["rollback_error"]), 240)
+        self.assertLess(len(json.dumps(evidence)), 3000)
+
+    def test_transport_same_selector_proves_without_reset_or_put(self) -> None:
+        selector = {"available": True, "selected": "interserver-underlay-wg"}
+        with (
+            patch.object(server_agent, "transport_selector_selection", return_value=selector),
+            patch.object(server_agent, "clash_api_json") as api,
+            patch.object(server_agent, "reset_transport_relay") as reset,
+            patch.object(server_agent, "prove_wireguard_overlay", return_value={"ok": True, "probe": {"ok": True}}),
+        ):
+            result = server_agent.select_transport({}, "127.0.0.1:19090", "interserver-underlay-wg")
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["changed"])
+        api.assert_not_called()
+        reset.assert_not_called()
+
+    def test_transport_selector_change_during_proof_cannot_verify_activation(self) -> None:
+        with (
+            patch.object(server_agent, "transport_selector_selection", side_effect=[
+                {"available": True, "selected": "interserver-underlay-wg"},
+                {"available": True, "selected": "interserver-underlay-hy2"},
+                {"available": True, "selected": "interserver-underlay-hy2"},
+            ]),
+            patch.object(server_agent, "prove_wireguard_overlay", return_value={"ok": True, "probe": {"ok": True}}),
+            patch.object(server_agent, "reset_transport_relay") as reset,
+            patch.object(server_agent, "clash_api_json") as api,
+        ):
+            with self.assertRaises(server_agent.TransportSwitchError) as raised:
+                server_agent.select_transport({}, "127.0.0.1:19090", "interserver-underlay-wg")
+        self.assertFalse(raised.exception.evidence["activation_proof"]["ok"])
+        self.assertFalse(raised.exception.evidence["activation_proof"]["probe"]["checked"])
+        reset.assert_not_called()
+        api.assert_not_called()
+
+    def test_transport_watch_emits_new_transitions_with_the_same_signature(self) -> None:
+        base = {"state": "failed", "selected": "interserver-underlay-wg", "reason": "activation failed"}
+        records = [
+            {**base, "cycle_id": "a", "last_transition": {"cycle_id": "a"}},
+            {**base, "cycle_id": "b", "last_transition": {"cycle_id": "b"}},
+            {**base, "cycle_id": "c", "last_transition": {"cycle_id": "b"}},
+            {**base, "cycle_id": "d", "last_transition": None},
+        ]
+        with (
+            patch.object(server_agent, "reconcile_interserver_transport", side_effect=records),
+            patch.object(server_agent.time, "sleep", side_effect=[None, None, None, KeyboardInterrupt]),
+            patch("builtins.print") as output,
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                server_agent.watch_interserver_transport()
+        self.assertEqual(output.call_count, 2)
+
+    def test_overlay_convergence_scheduler_overrun_starts_no_extra_round(self) -> None:
+        clock = [0.0]
+
+        def oversleep(_seconds):
+            clock[0] += 7
+
+        with (
+            patch.object(server_agent.time, "monotonic", side_effect=lambda: clock[0]),
+            patch.object(server_agent.time, "sleep", side_effect=oversleep),
+            patch.object(server_agent, "transport_overlay_dns_probe", return_value={"ok": False, "error": "timeout"}) as probe,
+        ):
+            with self.assertRaises(server_agent.TransportSwitchError) as raised:
+                server_agent.prove_wireguard_overlay({"WG_FOREIGN_ADDRESS": "10.74.0.2/24"})
+        probe.assert_called_once_with("wg0", "10.74.0.2", deadline=6.8)
+        self.assertEqual(len(raised.exception.evidence["rounds"]), 1)
+        self.assertFalse(raised.exception.evidence["ok"])
+
     def test_overlay_proof_waits_for_exact_dns_dataplane_convergence(self) -> None:
         env = {"WG_INTERFACE": "wg0", "WG_FOREIGN_ADDRESS": "10.74.0.2/24"}
         failed = {"ok": False, "health_confirmed": False, "error": "timed out"}
@@ -3910,15 +4051,14 @@ class ServerAgentTests(unittest.TestCase):
             "transport_overlay_dns_probe",
             side_effect=[failed, failed, healthy],
         ) as probe, patch.object(server_agent.time, "sleep") as sleep:
-            server_agent.prove_wireguard_overlay(env)
+            report = server_agent.prove_wireguard_overlay(env)
 
         self.assertEqual(probe.call_count, 3)
-        probe.assert_called_with(
-            "wg0",
-            "10.74.0.2",
-            timeout_ms=server_agent.TRANSPORT_SWITCH_PROOF_TIMEOUT_MS,
-            attempts=1,
-        )
+        self.assertEqual(probe.call_args.args, ("wg0", "10.74.0.2"))
+        self.assertEqual(set(probe.call_args.kwargs), {"deadline"})
+        self.assertEqual(len({call.kwargs["deadline"] for call in probe.call_args_list}), 1)
+        self.assertEqual(report["budget_ms"], 6800)
+        self.assertEqual(report["rounds"], [failed, failed, healthy])
         self.assertEqual(sleep.call_count, 2)
         sleep.assert_called_with(server_agent.TRANSPORT_SWITCH_PROOF_RETRY_DELAY_SECONDS)
 
@@ -3930,7 +4070,7 @@ class ServerAgentTests(unittest.TestCase):
             "transport_overlay_dns_probe",
             return_value=failed,
         ) as probe, patch.object(server_agent.time, "sleep"):
-            with self.assertRaisesRegex(RuntimeError, "DNS convergence proof failed after 5 attempts"):
+            with self.assertRaisesRegex(server_agent.TransportSwitchError, "DNS convergence proof failed after 5 rounds"):
                 server_agent.prove_wireguard_overlay(env)
 
         self.assertEqual(probe.call_count, server_agent.TRANSPORT_SWITCH_PROOF_ATTEMPTS)

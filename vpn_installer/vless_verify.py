@@ -502,7 +502,8 @@ if ! ru_ip=$(curl -4fsS --proxy "$proxy" --connect-timeout 5 --max-time __HTTP_T
     fail ru-identity
 fi
 event foreign-identity
-if ! foreign_ip=$(curl -4fsS --proxy "$proxy" --connect-timeout 5 --max-time __HTTP_TIMEOUT_SECONDS__ https://www.cloudflare.com/cdn-cgi/trace 2>>runner-curl.log | awk -F= '/^ip=/{print $2; exit}'); then
+# SOCKS5h delegates DNS; curl -4 alone cannot constrain the remote egress family.
+if ! foreign_ip=$(curl -4fsS --proxy "$proxy" --connect-timeout 5 --max-time __HTTP_TIMEOUT_SECONDS__ https://1.1.1.1/cdn-cgi/trace 2>>runner-curl.log | awk -F= '/^ip=/{print $2; exit}'); then
     fail foreign-identity
 fi
 event github

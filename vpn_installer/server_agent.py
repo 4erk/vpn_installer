@@ -2602,29 +2602,57 @@ def collect_transport_probes(
     return probes
 
 
-def prove_wireguard_overlay(env: dict[str, str]) -> None:
+class TransportSwitchError(RuntimeError):
+    def __init__(self, message: str, evidence: dict[str, Any]):
+        super().__init__(message[:240])
+        self.evidence = evidence
+
+
+def prove_wireguard_overlay(env: dict[str, str]) -> dict[str, Any]:
     interface = env.get("WG_INTERFACE", "wg0")
     target = str(env.get("WG_FOREIGN_ADDRESS", "")).split("/", 1)[0]
     if not interface or not target:
         raise RuntimeError("foreign WireGuard overlay proof identity is missing")
 
-    last_error = "overlay DNS exchange did not complete"
-    for attempt in range(1, TRANSPORT_SWITCH_PROOF_ATTEMPTS + 1):
-        proof = transport_overlay_dns_probe(
-            interface,
-            target,
-            timeout_ms=TRANSPORT_SWITCH_PROOF_TIMEOUT_MS,
-            attempts=1,
-        )
-        if proof.get("ok") is True and proof.get("health_confirmed") is True:
-            return
-        last_error = str(proof.get("error", "") or last_error)
-        if attempt < TRANSPORT_SWITCH_PROOF_ATTEMPTS:
-            time.sleep(TRANSPORT_SWITCH_PROOF_RETRY_DELAY_SECONDS)
-    raise RuntimeError(
-        f"WireGuard overlay DNS convergence proof failed after "
-        f"{TRANSPORT_SWITCH_PROOF_ATTEMPTS} attempts: {last_error[:160]}"
+    started = time.monotonic()
+    budget = (
+        TRANSPORT_SWITCH_PROOF_ATTEMPTS * TRANSPORT_SWITCH_PROOF_TIMEOUT_MS / 1000
+        + (TRANSPORT_SWITCH_PROOF_ATTEMPTS - 1) * TRANSPORT_SWITCH_PROOF_RETRY_DELAY_SECONDS
     )
+    deadline = started + budget
+    report: dict[str, Any] = {
+        "ok": False, "checked": True, "budget_ms": round(budget * 1000),
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "rounds_limit": TRANSPORT_SWITCH_PROOF_ATTEMPTS, "rounds": [],
+        "probe": {"checked": False, "ok": False},
+    }
+    last_error = "overlay DNS convergence deadline expired"
+    for attempt in range(1, TRANSPORT_SWITCH_PROOF_ATTEMPTS + 1):
+        if time.monotonic() >= deadline:
+            break
+        proof = transport_overlay_dns_probe(interface, target, deadline=deadline)
+        report["rounds"].append(proof)
+        report["probe"] = proof
+        if proof.get("ok") is True and proof.get("health_confirmed") is True and time.monotonic() < deadline:
+            report["ok"] = True
+            break
+        last_error = str(proof.get("error", "") or last_error)[:240]
+        if attempt < TRANSPORT_SWITCH_PROOF_ATTEMPTS:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(TRANSPORT_SWITCH_PROOF_RETRY_DELAY_SECONDS, remaining))
+    report.update(
+        elapsed_ms=max(0, round((time.monotonic() - started) * 1000)),
+        finished_at=datetime.now(timezone.utc).isoformat(),
+        error="" if report["ok"] else last_error,
+    )
+    if not report["ok"]:
+        raise TransportSwitchError(
+            f"WireGuard overlay DNS convergence proof failed after {len(report['rounds'])} rounds: {last_error[:160]}",
+            report,
+        )
+    return report
 
 
 def reset_transport_relay(controller: str) -> int:
@@ -2659,17 +2687,35 @@ def reset_transport_relay(controller: str) -> int:
     return closed
 
 
-def select_transport(env: dict[str, str], controller: str, tag: str) -> None:
+def select_transport(
+    env: dict[str, str], controller: str, tag: str, *, cycle_id: str = "",
+) -> dict[str, Any]:
     if tag not in TRANSPORT_CANDIDATE_TAGS:
         raise ValueError(f"unknown transport candidate: {tag}")
+    started = time.monotonic()
+    started_at = datetime.now(timezone.utc).isoformat()
     current = transport_selector_selection(controller)
     old_tag = str(current.get("selected", ""))
-    if old_tag == tag:
-        return
-    if old_tag not in TRANSPORT_CANDIDATE_TAGS:
+    if current.get("available") is not True or old_tag not in TRANSPORT_CANDIDATE_TAGS:
         raise RuntimeError("current underlay selector state is not recoverable")
+    report: dict[str, Any] = {
+        "cycle_id": cycle_id or f"{started_at}:{time.monotonic_ns()}",
+        "phase": "after", "started_at": started_at,
+        "selector_before": old_tag, "selector_requested": tag, "selector_after": old_tag,
+        "changed": False, "ok": False, "rollback_verified": False,
+        "relay_resets": [], "activation_proof": {}, "rollback_proof": {},
+    }
+    stage = "selector_apply"
 
-    def set_selector(value: str) -> None:
+    def observe_selector() -> str:
+        selected = transport_selector_selection(controller)
+        value = str(selected.get("selected", "")) if selected.get("available") is True else ""
+        report["selector_after"] = value
+        return value
+
+    def set_selector(value: str, phase: str) -> None:
+        nonlocal stage
+        stage = f"{phase}_selector"
         clash_api_json(
             controller,
             f"/proxies/{urllib.parse.quote(TRANSPORT_SELECTOR_TAG, safe='')}",
@@ -2677,28 +2723,73 @@ def select_transport(env: dict[str, str], controller: str, tag: str) -> None:
             payload={"name": value},
             timeout=2,
         )
-        selected = transport_selector_selection(controller)
-        if selected.get("selected") != value:
+        if observe_selector() != value:
             raise RuntimeError("underlay selector did not apply the requested path")
-        reset_transport_relay(controller)
+        stage = f"{phase}_relay_reset"
+        closed = reset_transport_relay(controller)
+        report["relay_resets"].append({"phase": phase, "path": value, "closed": closed})
+
+    def prove(phase: str, path: str) -> None:
+        nonlocal stage
+        stage = phase
+        proof: dict[str, Any] = {"checked": False, "ok": False}
+        try:
+            proof = prove_wireguard_overlay(env)
+        except TransportSwitchError as exc:
+            proof = exc.evidence
+            raise
+        except (OSError, RuntimeError, ValueError) as exc:
+            proof["error"] = str(exc)[:240]
+            raise
+        finally:
+            after = observe_selector()
+            evidence = {
+                **proof, "phase": phase, "path": path, "cycle_id": report["cycle_id"],
+                "selector_after": after,
+            }
+            evidence["probe"] = {
+                **proof.get("probe", {"checked": False, "ok": False}),
+                "phase": phase, "path": path, "cycle_id": report["cycle_id"],
+            }
+            if after != path:
+                evidence["ok"] = False
+                evidence["probe"] = {
+                    "checked": False, "ok": False, "phase": phase, "path": after,
+                    "cycle_id": report["cycle_id"], "error": "selector changed during overlay proof",
+                }
+            report[f"{phase}_proof"] = evidence
+        if proof.get("ok") is not True or after != path:
+            raise RuntimeError("selected path has no matching overlay proof")
+
+    def finish() -> None:
+        report.update(
+            finished_at=datetime.now(timezone.utc).isoformat(),
+            elapsed_ms=max(0, round((time.monotonic() - started) * 1000)),
+        )
 
     try:
-        set_selector(tag)
-        prove_wireguard_overlay(env)
+        if old_tag != tag:
+            set_selector(tag, "activation")
+        prove("activation", tag)
     except (OSError, RuntimeError, ValueError, urllib.error.URLError) as exc:
-        rollback_errors: list[str] = []
-        try:
-            set_selector(old_tag)
-        except (OSError, RuntimeError, ValueError, urllib.error.URLError) as rollback_exc:
-            rollback_errors.append(f"selector restore failed: {rollback_exc}")
-        else:
+        report.update(error=str(exc)[:180], failure_stage=stage)
+        if old_tag != tag:
             try:
-                prove_wireguard_overlay(env)
+                set_selector(old_tag, "rollback")
+                prove("rollback", old_tag)
             except (OSError, RuntimeError, ValueError, urllib.error.URLError) as rollback_exc:
-                rollback_errors.append(f"restored overlay proof failed: {rollback_exc}")
-        if rollback_errors:
-            raise RuntimeError(f"{exc}; rollback failed: {'; '.join(rollback_errors)}") from exc
-        raise RuntimeError(f"{exc}; previous selector path restored and verified") from exc
+                report.update(rollback_error=str(rollback_exc)[:240], rollback_failure_stage=stage)
+            else:
+                report["rollback_verified"] = True
+        # A failed PUT may have applied remotely even when no acknowledgement arrived.
+        observe_selector()
+        report["rollback_verified"] = report["rollback_verified"] and report["selector_after"] == old_tag
+        finish()
+        suffix = "previous selector path restored and verified" if report["rollback_verified"] else "rollback not verified"
+        raise TransportSwitchError(f"{report['error']}; {suffix}", report) from exc
+    report.update(ok=True, changed=old_tag != tag, error="")
+    finish()
+    return report
 
 
 def transport_switch_backoff_active(
@@ -2824,12 +2915,20 @@ def _reconcile_interserver_transport_unlocked() -> dict[str, Any]:
             env=env,
             observed_at=observed_at,
         )
+        cycle_id = f"{observed_at}:{time.monotonic_ns()}"
+        probes = {
+            path: {**probe, "cycle_id": cycle_id, "phase": "before", "path": path}
+            for path, probe in probes.items()
+        }
         payload = evaluate_transport_policy(
             selected=selected,
             probes=probes,
             previous=previous_state,
             observed_at=observed_at,
         )
+        payload.update(cycle_id=cycle_id, selector_before=selected, selector_after=selected)
+        if isinstance(previous_state.get("last_transition"), dict):
+            payload["last_transition"] = previous_state["last_transition"]
         payload["overlay_probe"] = probes.get(selected, {})
         if probes.get(selected, {}).get("quality_sampled") is True:
             payload["quality_probe_at"] = observed_at
@@ -2860,11 +2959,14 @@ def _reconcile_interserver_transport_unlocked() -> dict[str, Any]:
                 )
         if payload.get("would_switch"):
             target = str(payload.get("recommended", ""))
+            transition: dict[str, Any] = {}
             try:
-                select_transport(env, controller, target)
+                transition = select_transport(env, controller, target, cycle_id=cycle_id)
             except (OSError, RuntimeError, ValueError) as exc:
                 failure_reason = f"underlay selector update failed: {str(exc)[:180]}"
-                rollback_verified = "previous selector path restored and verified" in str(exc)
+                if isinstance(exc, TransportSwitchError):
+                    transition = exc.evidence
+                rollback_verified = transition.get("rollback_verified") is True
                 switch_failure = next_transport_switch_failure(
                     previous_state,
                     target,
@@ -2885,7 +2987,7 @@ def _reconcile_interserver_transport_unlocked() -> dict[str, Any]:
             else:
                 payload.update(
                     {
-                        "changed": True,
+                        "changed": transition["changed"],
                         "selected": target,
                         "would_switch": False,
                         "state": "degraded" if payload.get("hard_failure_evidence") else "healthy",
@@ -2896,6 +2998,23 @@ def _reconcile_interserver_transport_unlocked() -> dict[str, Any]:
                 payload.pop("last_switch_failure", None)
                 payload.pop("quality_failure", None)
                 payload.pop("last_quality_probe", None)
+            if transition:
+                payload["last_transition"] = transition
+                payload["selector_after"] = transition["selector_after"]
+                payload["selected"] = transition["selector_after"]
+                phase = "rollback" if transition.get("rollback_proof") else "activation"
+                proof = transition.get(f"{phase}_proof", {})
+                current_probe = proof.get("probe", {})
+                payload["overlay_probe"] = current_probe if current_probe.get("path") == transition["selector_after"] else {
+                    "checked": False, "ok": False, "phase": phase,
+                    "path": transition["selector_after"], "cycle_id": cycle_id,
+                }
+            else:
+                payload["selector_after"] = ""
+                payload["selected"] = ""
+                payload["overlay_probe"] = {
+                    "checked": False, "ok": False, "phase": "after", "path": "", "cycle_id": cycle_id,
+                }
         write_json_atomic(TRANSPORT_STATE_PATH, payload)
         return payload
 
@@ -2921,7 +3040,9 @@ def watch_interserver_transport() -> None:
             str(payload.get("selected", "")),
             str(payload.get("reason", "")),
         )
-        if signature != previous_signature:
+        transition = payload.get("last_transition", {})
+        new_transition = isinstance(transition, dict) and bool(payload.get("cycle_id")) and transition.get("cycle_id") == payload["cycle_id"]
+        if signature != previous_signature or new_transition:
             print(json.dumps(payload, ensure_ascii=False, sort_keys=True), flush=True)
             previous_signature = signature
         time.sleep(max(0.1, TRANSPORT_PROBE_INTERVAL_SECONDS - (time.monotonic() - started)))

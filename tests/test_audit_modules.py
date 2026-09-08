@@ -5,7 +5,7 @@ import tarfile
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from vpn_installer.audit import docker as audit_docker
 from vpn_installer.audit import lab as audit_lab
@@ -45,6 +45,17 @@ class FakeRunner:
 
 
 class AuditModuleTests(unittest.TestCase):
+    def test_lab_logs_survive_failure_without_masking_the_original_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runner = Mock(work_dir=Path(temporary), run_id="fixture")
+            runner.docker_cp_from.side_effect = [None, AuditFailure("missing log"), None, None]
+            with self.assertRaisesRegex(RuntimeError, "original probe failure"):
+                with audit_lab._lab_logs(runner):
+                    raise RuntimeError("original probe failure")
+            self.assertEqual(runner.docker_cp_from.call_count, 4)
+            errors = (Path(temporary) / "lab/runtime-logs/collection-errors.txt").read_text(encoding="utf-8")
+            self.assertIn("exit: missing log", errors)
+
     @staticmethod
     def canonical_dual_env() -> dict[str, str]:
         env = generate_default_env("demo", topology=TOPOLOGY_DUAL, gateway_location=LOCATION_RU)

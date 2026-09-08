@@ -4,12 +4,14 @@ import base64
 import hashlib
 import json
 import unittest
+from unittest.mock import Mock, patch
 from datetime import datetime, timedelta, timezone
 
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 
 from vpn_installer.config import generate_default_env
+from vpn_installer import interserver_transport, server_agent
 from vpn_installer.interserver_transport import (
     TRANSPORT_CANDIDATE_TAGS,
     TRANSPORT_HY2_TAG,
@@ -857,6 +859,162 @@ class InterserverTransportIdentityTests(unittest.TestCase):
 
         self.assertEqual(recovered["preferred_retry"]["recovered_at"], "2026-08-06T12:02:00+00:00")
         self.assertNotIn("preferred_retry", stable)
+
+class OverlayDeadlineTests(unittest.TestCase):
+    def run_probe(self, waits, *, activation=False, fragment=False, oversleep=0.0):
+        clock = [0.0]
+        sockets = []
+        _query_id, query = interserver_transport._dns_probe_query()
+        response = bytes.fromhex("565081800001000100000000") + query[12:] + bytes.fromhex(
+            "c00c000100010000003c00047f000001"
+        )
+
+        class Connection:
+            def __init__(self, *_args):
+                self.waits = iter(waits[len(sockets)] if isinstance(waits[0], list) else waits)
+                self.data = bytearray(len(response).to_bytes(2, "big") + response)
+                self.closed = False
+                self.timeout = 0.0
+                sockets.append(self)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                self.closed = True
+
+            def setsockopt(self, *_args):
+                pass
+
+            def settimeout(self, value):
+                self.timeout = value
+
+            def step(self):
+                delay = next(self.waits, 0.4 if fragment else 0.0)
+                clock[0] += min(delay, self.timeout)
+                if delay >= self.timeout:
+                    clock[0] += oversleep
+                    raise TimeoutError("timed out")
+
+            def connect(self, *_args):
+                self.step()
+
+            def sendall(self, *_args):
+                self.step()
+
+            def recv(self, size):
+                self.step()
+                size = min(size, 1) if fragment else size
+                result = bytes(self.data[:size])
+                del self.data[:size]
+                return result
+
+        def sleep(seconds):
+            clock[0] += seconds + oversleep
+
+        with (
+            patch.object(interserver_transport.socket, "socket", side_effect=Connection),
+            patch.object(interserver_transport.time, "monotonic", side_effect=lambda: clock[0]),
+            patch.object(interserver_transport.time, "sleep", side_effect=sleep),
+        ):
+            if activation:
+                try:
+                    result = server_agent.prove_wireguard_overlay(
+                        {"WG_INTERFACE": "wg0", "WG_FOREIGN_ADDRESS": "10.74.0.2/24"}
+                    )
+                except RuntimeError as exc:
+                    result = {"ok": False, "error": str(exc)}
+                else:
+                    result = {"ok": True, "proof": result}
+            else:
+                result = interserver_transport.transport_overlay_dns_probe("wg0", "10.74.0.2")
+        self.assertTrue(all(item.closed for item in sockets))
+        return result, clock[0], len(sockets)
+
+    def test_delayed_response_has_identical_activation_and_liveness_contract(self):
+        live, elapsed, _ = self.run_probe([0, 0, 0.8, 0])
+        activation, convergence, _ = self.run_probe([0, 0, 0.8, 0], activation=True)
+        self.assertFalse(live["ok"])
+        self.assertFalse(activation["ok"])
+        self.assertAlmostEqual(elapsed, 1.2)
+        self.assertAlmostEqual(convergence, 6.8)
+
+    def test_operations_share_one_deadline_instead_of_restarting_socket_timeout(self):
+        result, elapsed, _ = self.run_probe([0.4, 0.4, 0.4, 0.4])
+        self.assertFalse(result["ok"])
+        self.assertAlmostEqual(elapsed, 1.2)
+        self.assertTrue(result["failure_confirmed"])
+
+    def test_fragment_drip_cannot_extend_receive_deadline(self):
+        result, elapsed, _ = self.run_probe([0, 0], fragment=True)
+        self.assertFalse(result["ok"])
+        self.assertAlmostEqual(elapsed, 1.2)
+
+    def test_scheduler_overrun_does_not_invent_second_failed_exchange(self):
+        result, _elapsed, count = self.run_probe([2], oversleep=1.0)
+        self.assertEqual(count, 1)
+        self.assertEqual(result["attempts"], 1)
+        self.assertFalse(result["failure_confirmed"])
+
+    def test_one_lost_exchange_then_recovery_preserves_actual_evidence(self):
+        result, elapsed, count = self.run_probe([[2], [0, 0, 0.1, 0]])
+        self.assertTrue(result["ok"])
+        self.assertAlmostEqual(elapsed, 0.7)
+        self.assertEqual(count, 2)
+        self.assertEqual([item["ok"] for item in result["attempt_results"]], [False, True])
+        self.assertEqual(result["attempt_results"][0]["io_phase"], "connect")
+        self.assertEqual(result["budget_ms"], 1200)
+        self.assertEqual(result["attempts_limit"], 2)
+
+    def test_reply_at_the_deadline_is_not_health_evidence(self):
+        result, elapsed, _ = self.run_probe([0, 0, 0.6, 0])
+        self.assertFalse(result["ok"])
+        self.assertAlmostEqual(elapsed, 1.2)
+
+    def test_expired_parent_deadline_and_invalid_budget_start_no_exchange(self):
+        with patch.object(interserver_transport.socket, "socket") as socket_mock:
+            for kwargs in ({"deadline": 0}, {"timeout_ms": 0}, {"timeout_ms": -1}):
+                result = interserver_transport.transport_overlay_dns_probe("wg0", "10.74.0.2", **kwargs)
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["attempts"], 0)
+                self.assertFalse(result["failure_confirmed"])
+        socket_mock.assert_not_called()
+
+    def test_lab_overlay_probe_uses_the_bundled_agent_and_reports_typed_failure(self):
+        import shlex
+        from vpn_installer.audit import lab
+
+        runner = Mock()
+        runner.docker_exec.return_value.stdout = '{"ok": false}'
+        result = lab._lab_overlay_probe(
+            runner, "gateway-test", {"WG_INTERFACE": "wg0", "WG_FOREIGN_ADDRESS": "10.74.0.2/24"},
+            convergence=True,
+        )
+        command = shlex.split(runner.docker_exec.call_args.args[1])
+        self.assertEqual(command[:2], ["python3", "-c"])
+        compile(command[2], "<lab-overlay-probe>", "exec")
+        self.assertIn("prove_wireguard_overlay", command[2])
+        self.assertIn("exc.evidence", command[2])
+        self.assertFalse(result["ok"])
+
+    def test_lab_dns_fault_is_removed_on_success_and_failure(self):
+        from vpn_installer.audit import lab
+
+        for success in (False, True):
+            runner = Mock()
+            results = [
+                {"ok": not success}, {"ok": False},
+                {"ok": True, "rounds": [{}, {}]}, {"ok": True},
+            ]
+            with patch.object(lab, "_lab_overlay_probe", side_effect=results):
+                if success:
+                    result = lab._lab_overlay_deadlines(runner, "gateway-test", "dns-test", {})
+                    self.assertTrue(result["recovery"]["ok"])
+                else:
+                    with self.assertRaises(lab.AuditFailure):
+                        lab._lab_overlay_deadlines(runner, "gateway-test", "dns-test", {})
+            runner.docker_exec.assert_called_with("dns-test", "tc qdisc del dev eth0 root", expected_codes={0, 2})
+
 
 if __name__ == "__main__":
     unittest.main()
