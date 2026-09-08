@@ -25,11 +25,7 @@ VPN Installer устанавливает и настраивает VPN на од
 
 Подробности для каждой схемы: [требования к серверам](./docs/PROVIDERS.md).
 
-Совместимые клиенты:
-
-- Windows, Linux и macOS: [Happ](https://www.happ.su/main), [Hiddify](https://hiddify.com/) или [v2rayN](https://github.com/2dust/v2rayN);
-- Android: Happ, Hiddify, [v2rayNG](https://github.com/2dust/v2rayNG) или [NekoBox](https://github.com/MatsuriDayo/NekoBoxForAndroid);
-- iPhone и iPad: Happ, Hiddify, [Streisand](https://apps.apple.com/app/streisand/id6450534064) или [Shadowrocket](https://apps.apple.com/app/shadowrocket/id932747118).
+Выбор приложения, импорт подключения и статус проверки конкретных версий: [клиенты для Windows и Android](./docs/CLIENTS.md). Поддержка VLESS в приложении сама по себе не гарантирует работу всех его режимов.
 
 ## Установка через меню
 
@@ -95,6 +91,8 @@ out/home-vpn/client/vless-uri.txt
 3. `hysteria2-uri.txt` содержит дополнительный профиль Hysteria2 на основе QUIC; он не заменяет основную ссылку VLESS.
 4. Инструкции конкретной установки находятся в `NEXT-STEPS.txt` рядом с каталогом `client`.
 
+**Автопрофиль пока не выпускается.** Две ссылки не включают автоматический выбор между VLESS и Hysteria2. Такая возможность планируется отдельно; менять действующий профиль не требуется. [Что сможет автопрофиль и какие у него ограничения](./docs/CLIENTS.md#автопрофиль).
+
 ## Работа через интерфейс
 
 Запускай `.\vpn.cmd` на Windows или `./vpn.sh` на Linux без аргументов. Из меню доступны:
@@ -141,6 +139,7 @@ out/diagnostics/
 
 ## Документация
 
+- [Выбор VPN-клиента и подключение устройства](./docs/CLIENTS.md)
 - [Команды и понятия для пользователя](./docs/COMMANDS.md)
 - [Windows: запуск, SSH-пароли и логи](./docs/WINDOWS.md)
 - [Поддерживаемые серверные Linux-платформы](./docs/PLATFORMS.md)

@@ -1,16 +1,16 @@
 # Совместимость версий
 
-## Текущее окно 0.22.6
+## Текущее окно 0.22.7
 
-`0.22.6` поддерживает fresh install, повторную установку той же версии и один последовательный переход с точного `0.22.5`.
+`0.22.7` поддерживает fresh install, повторную установку той же версии и один последовательный переход с точного `0.22.6`.
 
-| Формат | `0.22.5` | `0.22.6` |
+| Формат | `0.22.6` | `0.22.7` |
 | --- | --- | --- |
 | config/state | `3` | `3` |
 | manifest/install-plan | `5` | `5` |
 | diagnostics | `6` | `6` |
 
-Manifest `0.22.6` объявляет `installed_min=0.22.5`, `installed_max=0.22.6`. Переход не меняет schemas и не имеет adapter: старый bundle проходит тот же fail-closed validator topology/capabilities, package/service/artifact ownership, hashes, binaries и acceptance snapshot. Разрешены только точные поля `from/to`. Неизвестные версии и приблизительно похожие manifests отклоняются до изменения managed runtime.
+Manifest `0.22.7` объявляет `installed_min=0.22.6`, `installed_max=0.22.7`. Переход не меняет schemas и не имеет adapter: старый bundle проходит тот же fail-closed validator topology/capabilities, package/service/artifact ownership, hashes, binaries и acceptance snapshot. Разрешены только точные поля `from/to`. Неизвестные версии и приблизительно похожие manifests отклоняются до изменения managed runtime.
 
 Runtime не содержит readers старых schemas или цепочки миграций. Host-owned SSH, APT и system resolver не входят в install plan, managed roots или transaction scope.
 
@@ -18,7 +18,7 @@ Runtime не содержит readers старых schemas или цепочки
 
 Общий начальный пароль web-admin удалён для новых установок. Существующий `admin-auth.json` сохраняется: обновление не сбрасывает изменённый пароль. Старый общий пароль нужно сменить через защищённый доступ, описанный в [ADMIN.md](./ADMIN.md). Публичный HTTP-порт сохранён; его шифрование не гарантируется наличием активного VPN.
 
-Неиспользуемый `RU_REALITY_MAX_TIME_DIFFERENCE` пока принимается env-контрактом, но renderer его не использует. Поле намечено к удалению на следующей границе схемы, без изменения Reality handshake. Не применять его как средство восстановления соединения.
+Неиспользуемый `RU_REALITY_MAX_TIME_DIFFERENCE` объявлен deprecated в `0.22.7`: пока принимается env-контрактом, но renderer его не использует. Удаление запланировано на границе `0.23.0`, без изменения Reality handshake. Не применять его как средство восстановления соединения.
 
 Каждый следующий несовместимый schema-шаг обязан иметь ровно один явно ограниченный переход с непосредственно предыдущего релиза. Совместимый релиз может сохранить текущие schemas и использовать общий validator без adapter.
 

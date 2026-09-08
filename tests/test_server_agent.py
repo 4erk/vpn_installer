@@ -20,6 +20,88 @@ from vpn_installer.render import render_gateway_singbox
 
 
 class ServerAgentTests(unittest.TestCase):
+    def setUp(self) -> None:
+        coverage = patch.object(server_agent, "journal_coverage", return_value={"since_epoch": 0, "discarded_at": [], "error": ""})
+        coverage.start()
+        self.addCleanup(coverage.stop)
+
+    @staticmethod
+    def journal_header(head: int, tail: int, since: float, until: float, *, state: str = "ARCHIVED") -> str:
+        return (
+            f"File path: /var/log/journal/machine/system{head}.journal\n"
+            "Sequential number ID: 7868558e4bed47e98aa6f9fd64d292b3\n"
+            f"State: {state}\nHead sequential number: {head} (unused)\n"
+            f"Tail sequential number: {tail} (unused)\nEntry objects: {tail-head+1}\n"
+            f"Head realtime timestamp: ignored locale ({int(since*1e6):x})\n"
+            f"Tail realtime timestamp: ignored locale ({int(until*1e6):x})\n\n"
+        )
+
+    def test_journal_retention_detects_missing_file_inside_history(self) -> None:
+        old = self.journal_header(10, 19, 100, 200)
+        current = self.journal_header(30, 39, 300, 400, state="ONLINE")
+        missing = server_agent.journal_retained_range(old + current)
+        self.assertEqual(missing["since_epoch"], 300)
+        continuous = server_agent.journal_retained_range(old + self.journal_header(20, 29, 201, 299) + current)
+        self.assertEqual(continuous["since_epoch"], 100)
+        self.assertEqual(continuous["files"], 3)
+
+    def test_journal_retention_rejects_malformed_or_incomplete_headers(self) -> None:
+        valid = self.journal_header(10, 19, 100, 200, state="ONLINE")
+        for header in ("", valid.replace("Entry objects: 10", "Entry objects: 9"), valid.replace("State: ONLINE", "State: OFFLINE")):
+            with self.subTest(header=header):
+                with self.assertRaises(ValueError):
+                    server_agent.journal_retained_range(header)
+
+    def test_truncated_history_is_unavailable_even_when_all_buckets_are_zero(self) -> None:
+        facts = self.diagnostics_facts()
+        facts["logs"]["fresh"]["coverage_error"] = "requested start precedes retained journal sequence"
+        with patch.object(server_agent, "collect_runtime_facts", return_value=facts):
+            payload = server_agent.diagnostics_snapshot(live_probes=True)
+        snapshot = DiagnosticsSnapshot.from_agent(payload)
+        window = snapshot.log_windows["since_release"]
+        self.assertEqual(window.collector.status, "error")
+        self.assertIsNone(window.counts)
+        partial = snapshot.storage["journal_coverage"]["partial_windows"]["since_release"]
+        self.assertTrue(all(value == 0 for value in partial["counts"].values()))
+
+    def test_unavailable_windows_preserve_raw_observations_and_final_error(self) -> None:
+        for failure in ("coverage", "observed_at", "until", "invalid-since", "old-release", "collector-error"):
+            with self.subTest(failure=failure):
+                facts = self.diagnostics_facts()
+                name = "since_release" if failure in {"old-release", "collector-error"} else "5m"
+                raw = facts["logs"]["fresh"] if name == "since_release" else facts["logs"]["windows_minutes"]["5"]
+                raw.update(server_agent.summarize_lines([
+                    "ERROR dns: exchange failed for example.com. IN A: context deadline exceeded",
+                ]))
+                raw["since"] = facts["release"]["installed_at"]
+                if failure == "old-release":
+                    raw["since"] = "5 minutes ago"
+                elif failure == "collector-error":
+                    facts["logs"]["collector_error"] = "partial journal query failed"
+                    raw["coverage_error"] = "retention is also incomplete"
+                elif failure == "invalid-since":
+                    raw["since"] = facts["generated_at"]
+                else:
+                    del raw[failure]
+                original = dict(raw)
+                with patch.object(server_agent, "collect_runtime_facts", return_value=facts):
+                    snapshot = DiagnosticsSnapshot.from_agent(server_agent.diagnostics_snapshot(live_probes=True))
+                window = snapshot.log_windows[name]
+                self.assertEqual(window.collector.status, "error")
+                self.assertIsNone(window.counts)
+                partial = snapshot.storage["journal_coverage"]["partial_windows"][name]
+                self.assertEqual(partial, {**original, "error": window.collector.message})
+                self.assertEqual(partial["counts"]["dns_timeout"], 1)
+                self.assertEqual(raw, original)
+
+    def test_skipped_windows_do_not_publish_partial_observations(self) -> None:
+        facts = self.diagnostics_facts()
+        facts["logs"]["windows_minutes"]["1440"]["coverage_error"] = "retention is incomplete"
+        with patch.object(server_agent, "collect_runtime_facts", return_value=facts):
+            snapshot = DiagnosticsSnapshot.from_agent(server_agent.diagnostics_snapshot(full_logs=False))
+        self.assertEqual(snapshot.log_windows["24h"].collector.status, "skipped")
+        self.assertNotIn("24h", snapshot.storage["journal_coverage"]["partial_windows"])
+
     def test_agent_main_dispatches_every_managed_command(self) -> None:
         payload = {"state": "healthy"}
         targets = (
@@ -224,7 +306,7 @@ class ServerAgentTests(unittest.TestCase):
         generated_at = "2026-08-06T18:00:00+00:00"
         installed_at = "2026-08-06T17:59:00+00:00"
         observed = "2026-08-06T17:59:30+00:00"
-        empty_logs = {**server_agent.summarize_lines([]), "observed_at": observed, "until": observed}
+        empty_logs = {**server_agent.summarize_lines([]), "observed_at": observed, "until": observed, "coverage": {}, "coverage_error": ""}
         return {
             **self.gateway_contract(),
             "generated_at": generated_at,
@@ -4155,6 +4237,94 @@ class ServerAgentTests(unittest.TestCase):
         self.assertEqual(result["confirmation"]["cycles"], 2)
         self.assertTrue(result["confirmation"]["confirmed_failure"])
         self.assertFalse(result["confirmation"]["recovered_on_retry"])
+
+
+class JournalCoverageTests(unittest.TestCase):
+    def test_suppression_query_stderr_is_not_retention_success(self) -> None:
+        header = ServerAgentTests.journal_header(10, 19, 100, 200, state="ONLINE")
+        warning = "Journal file was truncated, ignoring file."
+        for code in (0, 1, 2):
+            responses = [subprocess.CompletedProcess([], 0, header, ""), subprocess.CompletedProcess([], code, "", warning)]
+            with self.subTest(code=code), patch.object(server_agent, "run", side_effect=responses):
+                result = server_agent.journal_coverage(since=150, until=300)
+            self.assertEqual(result["error"], warning)
+            self.assertEqual(result["since_epoch"], 100)
+
+    def test_fractional_release_age_does_not_clip_initial_events(self) -> None:
+        now = 1_786_040_000.75
+        for full_logs, age, expected_minutes in ((True, 86400.5, 1441), (False, 300.5, 6)):
+            with self.subTest(full_logs=full_logs):
+                since = now - age
+                installed = datetime.fromtimestamp(since, timezone.utc).isoformat()
+                event = (since + 0.25, "ERROR dns: exchange failed for example.com. IN A: context deadline exceeded")
+
+                def query(minutes, *, until):
+                    return ([event] if until - minutes * 60 <= event[0] <= until else []), ""
+
+                with patch.object(server_agent.time, "time", return_value=now), patch.object(
+                    server_agent, "journal_problem_events", side_effect=query,
+                ) as journal, patch.object(server_agent, "journal_coverage", return_value={"since_epoch": 0, "error": ""}):
+                    _windows, fresh, error = server_agent.summarize_problem_windows(full_logs=full_logs, fresh_since=installed)
+                self.assertEqual(error, "")
+                journal.assert_called_once_with(expected_minutes, until=now)
+                self.assertEqual(fresh["coverage_error"], "")
+                self.assertEqual(fresh["counts"]["dns_timeout"], 1)
+                self.assertEqual(fresh["since"], installed)
+
+    def test_retained_but_unqueried_release_prefix_is_not_complete(self) -> None:
+        now = 1_786_040_000.75
+        since = now - server_agent.COMPLETE_LOG_RETENTION_MINUTES * 60 - 0.5
+        installed = datetime.fromtimestamp(since, timezone.utc).isoformat()
+        event = (now - 1, "ERROR dns: exchange failed for example.com. IN A: context deadline exceeded")
+        with patch.object(server_agent.time, "time", return_value=now), patch.object(
+            server_agent, "journal_problem_events", return_value=([event], ""),
+        ) as journal, patch.object(server_agent, "journal_coverage", return_value={"since_epoch": 0, "error": ""}):
+            windows, fresh, error = server_agent.summarize_problem_windows(full_logs=True, fresh_since=installed)
+        self.assertEqual(error, "")
+        journal.assert_called_once_with(1440, until=now)
+        self.assertEqual(windows["5"]["coverage_error"], "")
+        self.assertEqual(fresh["coverage_error"], "requested start precedes collected journal interval")
+        self.assertEqual(fresh["coverage"]["query_since_epoch"], now - 86400)
+        self.assertEqual(fresh["coverage"]["query_until_epoch"], now)
+        self.assertEqual(fresh["since"], installed)
+        self.assertEqual(fresh["counts"]["dns_timeout"], 1)
+        self.assertEqual(server_agent._diagnostics_log_window(fresh, since=installed).collector.status, "error")
+
+    def test_collector_reads_native_headers_and_bounded_loss_evidence(self) -> None:
+        header = ServerAgentTests.journal_header(10, 19, 100, 200, state="ONLINE")
+        responses = [subprocess.CompletedProcess([], 0, header, ""), subprocess.CompletedProcess([], 1, "", "")]
+        with patch.object(server_agent, "run", side_effect=responses) as run:
+            result = server_agent.journal_coverage(since=150, until=300)
+        self.assertEqual(result["error"], "")
+        self.assertEqual(result["since_epoch"], 100)
+        self.assertEqual(result["discarded_at"], [])
+        self.assertIn("--system", run.call_args_list[0].args[0])
+        self.assertIn("--lines=257", run.call_args_list[1].args[0])
+
+    def test_collector_preserves_rate_limit_loss_timestamps(self) -> None:
+        header = ServerAgentTests.journal_header(10, 19, 100, 200, state="ONLINE")
+        event = json.dumps({"__REALTIME_TIMESTAMP": "175000000", "MESSAGE": "Suppressed 7 messages from sing-box.service"})
+        responses = [subprocess.CompletedProcess([], 0, header, ""), subprocess.CompletedProcess([], 0, event, "")]
+        with patch.object(server_agent, "run", side_effect=responses):
+            result = server_agent.journal_coverage(since=150, until=300)
+        self.assertEqual(result["discarded_at"], [175])
+
+    def test_collector_failures_are_not_retention_success(self) -> None:
+        for response in (subprocess.CompletedProcess([], 1, "", "denied"), subprocess.CompletedProcess([], 0, "", "corrupt journal"), subprocess.TimeoutExpired("journalctl", 10)):
+            with self.subTest(response=response), patch.object(server_agent, "run", side_effect=response if isinstance(response, Exception) else None, return_value=response):
+                result = server_agent.journal_coverage(since=150, until=300)
+                self.assertTrue(result["error"])
+
+    def test_old_window_is_partial_but_retained_fresh_window_is_complete(self) -> None:
+        base = 1_786_000_000
+        coverage = {"since_epoch": base + 1000, "discarded_at": [base + 1500], "error": ""}
+        with patch.object(server_agent, "journal_coverage", return_value=coverage), patch.object(server_agent, "journal_problem_events", return_value=([], "")), patch.object(server_agent.time, "time", return_value=base + 3000):
+            windows, fresh, error = server_agent.summarize_problem_windows(full_logs=True, fresh_since=datetime.fromtimestamp(base + 1800, timezone.utc).isoformat())
+        self.assertEqual(error, "")
+        self.assertEqual(windows["5"]["coverage_error"], "")
+        self.assertIn("discarded", windows["30"]["coverage_error"])
+        self.assertIn("precedes", windows["1440"]["coverage_error"])
+        self.assertEqual(fresh["coverage_error"], "")
 
 
 if __name__ == "__main__":

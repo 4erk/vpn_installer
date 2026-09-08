@@ -61,6 +61,7 @@ PLATFORM_PACKAGE_COMMAND_TIMEOUT_SECONDS = 300
 PLATFORM_CONTRACT_MAX_WORKERS = 3
 TRANSACTION_ACCEPTANCE_GATES = (
     "acceptance-marker-path",
+    "fresh-install-with-incomplete-history",
     "failed-acceptance-evidence",
     "single-rollback-without-wireguard",
     "node-mismatch-rejection",
@@ -543,6 +544,7 @@ def acceptance_snapshot_fixture(
         services["transport"] = "active"
     return DiagnosticsSnapshot(
         generated_at=observed_at,
+        release={"installed_at": observed_at},
         deployment="audit-install-rollback",
         topology=topology_spec.mode,
         node_id=plan.node_id,
@@ -550,7 +552,7 @@ def acceptance_snapshot_fixture(
         capabilities=tuple(sorted(plan.capabilities)),
         collectors=collectors,
         log_windows={
-            name: LogWindowSnapshot.collected({bucket: 0 for bucket in BUCKETS}, observed_at=observed_at)
+            name: LogWindowSnapshot.collected({bucket: 0 for bucket in BUCKETS}, observed_at=observed_at, since=observed_at, until=observed_at)
             for name in LOG_WINDOW_KEYS
         },
         services=services,
@@ -637,6 +639,9 @@ def previous_release_fixture_builder_text() -> str:
             "    PAYLOAD['generated_at'] = now\\n"
             "    for state in PAYLOAD['collectors'].values():\\n"
             "        if state.get('status') == 'ok': state['observed_at'] = now\\n"
+            "    for window in PAYLOAD['log_windows'].values():\\n"
+            "        window.update(since=PAYLOAD['release']['installed_at'], until=now)\\n"
+            "        window['collector']['observed_at'] = now\\n"
             "    print(json.dumps(PAYLOAD, separators=(',', ':')))\\n"
             "else:\\n"
             "    raise SystemExit('unsupported fixture command')\\n",
@@ -1016,6 +1021,27 @@ def transaction_rollback_acceptance_script(verified_snapshot: str, deployment_na
             pass_gate acceptance-marker-path
 
             cat >"$agent_path" <<'PY'
+            import json, sys
+            sys.path.insert(0, '/work')
+            from vpn_installer.diagnostics import LogWindowSnapshot, INCOMPLETE_LOG_HISTORY_REASON
+            payload = json.loads(__VERIFIED_SNAPSHOT__)
+            from dataclasses import asdict
+            payload['log_windows']['24h'] = asdict(LogWindowSnapshot.unavailable('new host journal'))
+            payload['verdict'] = 'inconclusive'
+            payload['reasons'] = [INCOMPLETE_LOG_HISTORY_REASON]
+            payload['component_verdicts']['log_history'] = 'inconclusive'
+            print(json.dumps(payload))
+            PY
+            verify_active_release "$single_contract"
+            python3 - "$VPNSTACK_ACCEPTANCE_PATH" <<'PY'
+            import json,sys
+            payload = json.load(open(sys.argv[1]))
+            assert payload['verdict'] == 'inconclusive'
+            assert payload['log_windows']['24h']['collector']['status'] == 'error'
+            PY
+            pass_gate fresh-install-with-incomplete-history
+
+            cat >"$agent_path" <<'PY'
             import json
             payload = json.loads(__VERIFIED_SNAPSHOT__)
             payload["verdict"] = "failed"
@@ -1233,7 +1259,7 @@ def transaction_rollback_acceptance_script(verified_snapshot: str, deployment_na
             test "$(grep -c '^is-active ' "$SYSTEMCTL_LOG")" = "$verified_services"
             cp "$SYSTEMCTL_LOG" /work/result/previous-release-service-verification.log
             pass_gate previous-release-rollback-verification
-            test "$(wc -l </work/result/gates.tsv)" = 6
+            test "$(wc -l </work/result/gates.tsv)" = 7
             """
         ).lstrip()
         .replace("__GEOSITE_SRS_BASE64__", VALID_GEOSITE_SRS_BASE64)

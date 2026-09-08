@@ -95,6 +95,18 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
         lines.append(f"live probes: not run by read-only status; use {cli_command('verify live')} for route acceptance")
     for window_name in LOG_WINDOW_KEYS:
         lines.extend(_format_log_window(window_name, snapshot.log_windows[window_name]))
+    partial_windows = snapshot.storage.get("journal_coverage", {}).get("partial_windows", {})
+    for name, partial in partial_windows.items():
+        counts = partial.get("counts", {})
+        observed = ", ".join(f"{key}>={value}" for key, value in counts.items() if isinstance(value, int) and value > 0)
+        lines.append(f"partial observations [{name}]: {observed or 'no errors observed; full-window totals unknown'}")
+        destinations = ", ".join(
+            f"{bucket}:{destination}>={count}"
+            for bucket, ranked in partial.get("top_destinations", {}).items()
+            for destination, count in ranked.items()
+        )
+        if destinations:
+            lines.append(f"partial top destinations [{name}]: {destinations}")
     if snapshot.runtime_overrides:
         overrides = ", ".join(f"{key}={value}" for key, value in sorted(snapshot.runtime_overrides.items()) if value)
         if overrides:

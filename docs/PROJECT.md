@@ -14,6 +14,7 @@ dual:   клиент -> RU gateway Xray/Reality -> sing-box routing policy
 - `out/<deployment>/client/vless-uri.txt` является главным и неизменным клиентским контрактом.
 - Xray на узле `gateway` владеет основным публичным VLESS/Reality TCP front. Gateway `sing-box` владеет router; в `dual` он дополнительно использует межсерверный overlay, а в `single` отправляет трафик через локальный egress.
 - Routing policy, health и проверка не меняют локальные VPN-клиенты и их профили.
+- Клиентские версии, ограничения JSON и планируемый дополнительный автопрофиль описаны в [CLIENTS.md](./CLIENTS.md). Автопрофиль пока не генерируется; межсерверная адаптация не заменяет переключение публичного протокола на устройстве.
 - Web-admin существует только на публичном `gateway` в topology `dual`. Он управляет явными operator rules, показывает два скомпилированных выхода и защищён Basic Auth вместе с firewall gate для source IP, недавно достигшего публичного VPN ingress.
 - `VPN_SSH_BIND_ADDRESS` - временный control-plane input, не часть deployment env. Он привязывает SSH/SFTP к физическому локальному адресу, когда default route клиента находится в TUN, и не меняет client/server dataplane.
 
@@ -33,7 +34,7 @@ Paramiko exec/stream и SFTP используют общий monotonic deadline,
 - `HostFacts` и `PlatformSpec` являются единственным каталогом поддерживаемых серверных платформ. Логические package requirements преобразуются в имена пакетов только выбранным package provider.
 - `/etc/vpn-stack/render-manifest.json` schema 5 хранит topology, node capabilities, platform descriptor, install plan schema 5, policy, hashes, pinned binaries, runtime facts и окно совместимых установленных версий. Каждый node получает только собственный `node.env` и принадлежащие ему secrets/artifacts.
 
-Target-side render не объединяет `node.env` с общими defaults и не генерирует ключи. Он принимает только точную `CONFIG_SCHEMA=3` проекцию capability, отклоняет неизвестные поля и cross-node secrets, затем сверяет payload с manifest/install-plan. Установленный `0.22.5` имеет те же schemas и проходит общий текущий validator без отдельного adapter.
+Target-side render не объединяет `node.env` с общими defaults и не генерирует ключи. Он принимает только точную `CONFIG_SCHEMA=3` проекцию capability, отклоняет неизвестные поля и cross-node secrets, затем сверяет payload с manifest/install-plan. Установленный `0.22.6` имеет те же schemas и проходит общий текущий validator без отдельного adapter.
 
 `single` не компилирует и не устанавливает WireGuard, interserver transport, web-admin, их пакеты, сервисы, credentials, secrets, firewall rules или probes. `dual` устанавливает interserver capability на оба участвующих узла, а web-admin только на gateway. Отсутствующая capability имеет состояние `not_applicable`, а не ложное `healthy`.
 
@@ -55,7 +56,7 @@ DNS-кеш — отдельный app-owned сервис с собственно
 
 ## Совместимость релиза
 
-`0.22.6` поддерживает fresh install, обновление только с `0.22.5` и повторную установку `0.22.6`. Manifest объявляет `installed_min=0.22.5`, `installed_max=0.22.6`. Неподдерживаемый установленный релиз отклоняется до managed transaction; удалить его нужно `.\vpn.cmd` на Windows или `./vpn.sh` на Linux из совпадающего Git-тега, после чего выполняется fresh install.
+`0.22.7` поддерживает fresh install, обновление только с `0.22.6` и повторную установку `0.22.7`. Manifest объявляет `installed_min=0.22.6`, `installed_max=0.22.7`. Неподдерживаемый установленный релиз отклоняется до managed transaction; удалить его нужно `.\vpn.cmd` на Windows или `./vpn.sh` на Linux из совпадающего Git-тега, после чего выполняется fresh install.
 
 Публичный CLI использует только `--node gateway|exit|all`. Role aliases, migration chains и readers старых schemas отсутствуют. Политика окна описана в [DEPRECATIONS.md](./DEPRECATIONS.md).
 
@@ -142,6 +143,8 @@ Journald ограничивается managed drop-in 256 МБ/14 дней. По
 Дополнительно проверяются DNS, direct/domain routes, IPv4 literal, IPv6 literal и reject private/fake. Итог только один из `verified`, `degraded`, `failed`, `inconclusive`; зелёный `status` не является acceptance доказательством.
 
 Свежесть проверяется по времени получения каждого обязательного collector и каждого log window, а не только по времени сборки JSON. Неизвестное или устаревшее измерение не подтверждает текущую работоспособность: для snapshot действует возраст не более 180s и допустимое опережение часов не более 30s. Исторические окна сохраняют свой период; журнал запрашивается с фиксированными `--since` и `--until`, ошибки классифицируются один раз с доступным контекстом до разделения на окна.
+
+С `0.22.7` полнота истории проверяется по непрерывной последовательности system-journal до активного файла и сообщениям journald о потерях. Удаление ранних файлов или разрыв дают unavailable, а наблюдаемые ошибки остаются отдельными нижними границами счётчиков. Ошибка чтения метаданных также не означает пустой журнал. Эта проверка не обнаруживает события, которые приложение вообще не записало; лимит диска не увеличивается. Общий `verify live` не объявляет неполную историю успешной. Install gate отдельно требует полное окно после установки и публичный путь, сохраняя исторические ограничения в отчёте.
 
 IP в строке неудачного dial может быть результатом разрешения домена. Без исходного request trace такая ошибка сохраняется в `unclassified_error` вместе с адресом и образцом строки, а не объявляется доказанным literal-запросом. Число ошибок не исчезает из отчёта; ограниченное окно или недоступный контекст не заменяются догадкой.
 

@@ -4,6 +4,7 @@ import json
 import shlex
 import tempfile
 import time
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
@@ -103,7 +104,10 @@ def _release_within_complete_log_retention(snapshot: DiagnosticsSnapshot) -> boo
     return -30 <= age_seconds <= COMPLETE_LOG_RETENTION_SECONDS
 
 
-def _verify_snapshot(snapshot: DiagnosticsSnapshot, *, expected_plan: NodePlan | None = None) -> DiagnosticsSnapshot:
+def _verify_snapshot(
+    snapshot: DiagnosticsSnapshot, *, expected_plan: NodePlan | None = None,
+    release_logs_only: bool = False,
+) -> DiagnosticsSnapshot:
     if not snapshot.has_capability_contract:
         snapshot.verdict = "inconclusive"
         snapshot.reasons = ["canonical topology/node/location/capabilities evidence is missing"]
@@ -147,8 +151,10 @@ def _verify_snapshot(snapshot: DiagnosticsSnapshot, *, expected_plan: NodePlan |
         if state.status != "not_applicable":
             hard_failures.append(f"collector {name} must be not_applicable for this node")
     for name, window in snapshot.log_windows.items():
+        if release_logs_only and name != "since_release":
+            continue
         if window.collector.status == "error":
-            if name == "since_release" and not _release_within_complete_log_retention(snapshot):
+            if not release_logs_only and name == "since_release" and not _release_within_complete_log_retention(snapshot):
                 continue
             hard_failures.append(f"log window {name} unavailable: {window.collector.message}")
         elif window.collector.status == "skipped":
@@ -157,6 +163,11 @@ def _verify_snapshot(snapshot: DiagnosticsSnapshot, *, expected_plan: NodePlan |
             hard_failures.append(f"log window {name} is unexpectedly not_applicable")
         elif window.collector.status == "stale":
             degradations.append(f"log window {name} is stale")
+    if release_logs_only:
+        try:
+            snapshot.require_complete_release_logs()
+        except (TypeError, ValueError) as exc:
+            hard_failures.append(str(exc))
     required_services = _required_snapshot_services(capabilities)
     for service_name in sorted(required_services):
         state = snapshot.services.get(service_name)
@@ -317,7 +328,7 @@ def _install_release_gate(
     *,
     same_node_functional_verified: bool,
 ) -> dict[str, object]:
-    """Decide install acceptance without hiding unrelated client-path loss."""
+    """Accept a release from fresh evidence, retaining historical limitations."""
 
     def rejected(reason: str) -> dict[str, object]:
         return {"eligible": False, "reason": reason, "accepted_degradations": []}
@@ -346,7 +357,14 @@ def _install_release_gate(
 
     accepted_degradations: list[str] = []
     for node_id in sorted(expected_nodes):
-        snapshot = snapshots_by_node[node_id]
+        original = snapshots_by_node[node_id]
+        try:
+            snapshot = _verify_snapshot(replace(original), expected_plan=topology.plan(node_id), release_logs_only=True)
+        except (TypeError, ValueError) as exc:
+            return rejected(f"{node_id} native evidence is invalid: {exc}")
+        snapshot = _reconcile_public_capabilities(snapshot, public_vless)
+        if any(window.collector.status == "error" for name, window in original.log_windows.items() if name != "since_release"):
+            accepted_degradations.append(f"{node_id}:incomplete_historical_logs")
         if snapshot.verdict == "verified":
             continue
         verdicts = snapshot.component_verdicts
@@ -369,7 +387,7 @@ def _install_release_gate(
         accepted_degradations.append(f"{node_id}:client_specific_public_front")
     return {
         "eligible": True,
-        "reason": "all release paths passed; only unrelated client-specific front loss remains"
+        "reason": "all release paths and post-install logs passed; operational limitations remain"
         if accepted_degradations
         else "all release paths passed",
         "accepted_degradations": accepted_degradations,

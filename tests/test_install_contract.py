@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+import copy
+from dataclasses import asdict
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -12,6 +15,7 @@ from vpn_installer.diagnostics import SCHEMA_VERSION as DIAGNOSTICS_SCHEMA_VERSI
 from vpn_installer.install_contract import (
     InstallContractError,
     is_planned_install_maintenance,
+    validate_install_runtime,
     normalize_acceptance_snapshot,
     validate_bundle,
     validate_installed_bundle,
@@ -32,6 +36,42 @@ CONTRACT_FILES = (
 
 
 class InstallContractTests(unittest.TestCase):
+    def test_runtime_acceptance_preserves_history_and_requires_fresh_release_logs(self) -> None:
+        from vpn_installer.audit.docker import acceptance_snapshot_fixture
+        from vpn_installer.diagnostics import INCOMPLETE_LOG_HISTORY_REASON, LogWindowSnapshot
+        payload = acceptance_snapshot_fixture("verified")
+        payload["log_windows"]["24h"] = asdict(LogWindowSnapshot.unavailable("new host journal"))
+        payload["verdict"] = "inconclusive"
+        payload["reasons"] = [INCOMPLETE_LOG_HISTORY_REASON]
+        payload["component_verdicts"]["log_history"] = "inconclusive"
+        before = copy.deepcopy(payload)
+        self.assertIsNone(validate_install_runtime(payload))
+        self.assertEqual(payload, before)
+        for damage in ("partial", "skipped", "stale", "late_start", "missing_start", "unrelated"):
+            with self.subTest(damage=damage):
+                broken = copy.deepcopy(payload)
+                window = broken["log_windows"]["since_release"]
+                if damage == "partial":
+                    broken["log_windows"]["since_release"] = asdict(LogWindowSnapshot.unavailable("discarded messages"))
+                elif damage == "skipped":
+                    broken["log_windows"]["since_release"] = asdict(LogWindowSnapshot.skipped("not requested"))
+                elif damage == "stale":
+                    old = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+                    window.update(since=old, until=old)
+                    window["collector"]["observed_at"] = old
+                    broken["release"]["installed_at"] = old
+                elif damage == "late_start":
+                    broken["release"]["installed_at"] = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+                elif damage == "missing_start":
+                    broken["release"] = {}
+                else:
+                    broken["reasons"].append("unexpected failure")
+                with self.assertRaises((TypeError, ValueError)):
+                    validate_install_runtime(broken)
+        payload.update(verdict="degraded", reasons=["interserver_adaptation=maintenance", INCOMPLETE_LOG_HISTORY_REASON],
+            transport={"interserver": {"adaptive_state": {"state": "maintenance", "reason": "install transaction is active"}}})
+        self.assertIsNone(validate_install_runtime(payload))
+
     def test_previous_release_acceptance_uses_the_current_schema(self) -> None:
         payload = {
             "schema_version": DIAGNOSTICS_SCHEMA_VERSION,

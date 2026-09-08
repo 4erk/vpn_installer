@@ -19,6 +19,7 @@ TOPOLOGIES = frozenset({"single", "dual"})
 NODE_IDS = frozenset({"gateway", "exit"})
 LOCATIONS = frozenset({"ru", "foreign"})
 LOG_WINDOW_KEYS = ("5m", "30m", "24h", "since_release")
+INCOMPLETE_LOG_HISTORY_REASON = "journal history is incomplete; partial observations are not full-window counts"
 COLLECTOR_NAMES = (
     "services",
     "artifacts",
@@ -442,6 +443,16 @@ class DiagnosticsSnapshot:
         payload = asdict(self)
         payload["capabilities"] = list(self.capabilities)
         return payload
+
+    def require_complete_release_logs(self) -> None:
+        window = self.log_windows.get("since_release")
+        if window is None or window.collector.status != "ok":
+            raise ValueError("complete post-install log evidence is missing")
+        installed = _timestamp(self.release.get("installed_at"), "release installed_at")
+        start = _timestamp(window.since, "post-install log start")
+        end = _timestamp(window.until, "post-install log end")
+        if not start <= installed <= end:
+            raise ValueError("post-install logs do not cover the installed release")
 
     def to_json(self) -> str:
         return json.dumps(self.to_dict(), ensure_ascii=False, sort_keys=True)

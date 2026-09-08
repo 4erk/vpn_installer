@@ -234,7 +234,8 @@ try {
     $EffectiveArgs = @($ScriptArgs)
     $PythonCommand = Resolve-Python
     $LauncherPath = Join-Path $RepoRoot 'vpn_installer\launcher.py'
-    $CommandLine = @($PythonCommand) + @($LauncherPath) + @($EffectiveArgs)
+    # Keep progress visible when vpn.cmd stdout is redirected to a pipe or file.
+    $CommandLine = @($PythonCommand) + @('-u', $LauncherPath) + @($EffectiveArgs)
     if ($CommandLine.Count -le 1) {
       throw "Внутренняя ошибка launcher: пустая команда запуска Python."
     }

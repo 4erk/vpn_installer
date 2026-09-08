@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import ipaddress
 import json
+import math
 import os
 import re
 import socket
@@ -158,9 +159,9 @@ except ImportError:  # Installed agent runs as a standalone script.
     from network_profile import FQ_FLOW_LIMIT, FQ_KIND, FQ_PACKET_LIMIT, TCP_MTU_PROBE_FLOOR, wireguard_policy_spec  # type: ignore[no-redef]
 
 try:
-    from .diagnostics import SCHEMA_VERSION as DIAGNOSTICS_SCHEMA_VERSION, COLLECTOR_NAMES, CollectorState, DiagnosticsSnapshot, LogWindowSnapshot, classify_interserver_adaptation
+    from .diagnostics import SCHEMA_VERSION as DIAGNOSTICS_SCHEMA_VERSION, COLLECTOR_NAMES, INCOMPLETE_LOG_HISTORY_REASON, CollectorState, DiagnosticsSnapshot, LogWindowSnapshot, classify_interserver_adaptation
 except ImportError:  # Installed agent runs as a standalone script.
-    from diagnostics import SCHEMA_VERSION as DIAGNOSTICS_SCHEMA_VERSION, COLLECTOR_NAMES, CollectorState, DiagnosticsSnapshot, LogWindowSnapshot, classify_interserver_adaptation  # type: ignore[no-redef]
+    from diagnostics import SCHEMA_VERSION as DIAGNOSTICS_SCHEMA_VERSION, COLLECTOR_NAMES, INCOMPLETE_LOG_HISTORY_REASON, CollectorState, DiagnosticsSnapshot, LogWindowSnapshot, classify_interserver_adaptation  # type: ignore[no-redef]
 
 try:
     from .release_integrity import release_tree_digest
@@ -629,6 +630,66 @@ def journal_command_error(result: subprocess.CompletedProcess[str]) -> str:
     return (result.stderr.strip() or f"journalctl exited with {result.returncode}")[:240]
 
 
+def journal_retained_range(headers: str) -> dict[str, Any]:
+    """Find the contiguous system-journal sequence ending in the active file."""
+
+    records = [part for part in headers.split("File path: ")[1:] if part.strip()]
+    if not records or len(records) > 128 or len(headers) > 256_000:
+        raise ValueError("journal header inventory is empty or exceeds its bound")
+    files = []
+    try:
+        for record in records:
+            fields = dict(line.split(": ", 1) for line in record.splitlines()[1:] if ": " in line)
+            count = int(fields["Entry objects"])
+            if count == 0:
+                continue
+            head = int(fields["Head sequential number"].split()[0])
+            tail = int(fields["Tail sequential number"].split()[0])
+            since = int(fields["Head realtime timestamp"].rsplit("(", 1)[1].rstrip(")"), 16) / 1_000_000
+            until = int(fields["Tail realtime timestamp"].rsplit("(", 1)[1].rstrip(")"), 16) / 1_000_000
+            sequence = fields["Sequential number ID"]
+            if not re.fullmatch(r"[0-9a-f]{32}", sequence) or head <= 0 or count != tail - head + 1 or not 0 < since <= until:
+                raise ValueError("journal sequence or timestamps are inconsistent")
+            files.append({"head": head, "tail": tail, "since": since, "until": until, "sequence": sequence, "state": fields["State"]})
+    except (KeyError, IndexError, TypeError, ValueError) as exc:
+        raise ValueError(f"journal header inventory is incomplete: {exc}") from exc
+    active = [item for item in files if item["state"] == "ONLINE"]
+    if len(active) != 1:
+        raise ValueError("a unique active system journal is unavailable")
+    first = active[0]
+    while True:
+        previous = [item for item in files if item["sequence"] == first["sequence"] and item["tail"] + 1 == first["head"]]
+        if len(previous) != 1 or previous[0]["until"] > first["since"]:
+            break
+        first = previous[0]
+    return {"since_epoch": first["since"], "sequence_id": first["sequence"], "files": len(files)}
+
+
+def journal_coverage(*, since: float, until: float) -> dict[str, Any]:
+    coverage: dict[str, Any] = {"method": "system-journal-sequence", "since_epoch": None, "error": ""}
+    try:
+        result = run(["env", "LC_ALL=C", "journalctl", "--system", "--header", "--no-pager"], timeout=10)
+        if result.returncode or result.stderr.strip():
+            raise ValueError(journal_command_error(result) or result.stderr.strip()[:240])
+        coverage.update(journal_retained_range(result.stdout))
+        # Sequence continuity cannot recover records discarded by journald's rate limiter.
+        suppressed = run([
+            "journalctl", "-u", "systemd-journald.service", "--since", f"@{since:.6f}",
+            "--until", f"@{until:.6f}", "--no-pager", "--output=json", "--lines=257",
+            "--grep=Suppressed [0-9]+ messages|Missed [0-9]+ messages",
+        ], timeout=5)
+        suppression_error = journal_command_error(suppressed) or suppressed.stderr.strip()
+        if suppression_error:
+            raise ValueError(suppression_error)
+        discarded, malformed = _parse_journal_events(suppressed)
+        if malformed or len(discarded) > 256:
+            raise ValueError("journal loss evidence is incomplete")
+        coverage["discarded_at"] = [timestamp for timestamp, _line in discarded]
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        coverage["error"] = str(exc)[:240]
+    return coverage
+
+
 def _parse_journal_events(result: subprocess.CompletedProcess[str]) -> tuple[list[tuple[float, str]], int]:
     events: list[tuple[float, str]] = []
     malformed = 0
@@ -874,22 +935,38 @@ def summarize_problem_windows(*, full_logs: bool, fresh_since: str) -> tuple[dic
         fresh_epoch = datetime.fromisoformat(fresh_since.replace("Z", "+00:00")).timestamp()
     except ValueError:
         fresh_epoch = now - 300
-    fresh_age_minutes = max(0, int((now - fresh_epoch + 59) // 60))
+    fresh_age_minutes = max(0, math.ceil((now - fresh_epoch) / 60))
     query_minutes = max(windows)
     if fresh_age_minutes <= COMPLETE_LOG_RETENTION_MINUTES:
         query_minutes = max(query_minutes, fresh_age_minutes)
+    query_since = now - query_minutes * 60
     events, collector_error = journal_problem_events(query_minutes, until=now)
+    coverage = {
+        **journal_coverage(since=query_since, until=now),
+        "query_since_epoch": query_since,
+        "query_until_epoch": now,
+    }
     events = [(timestamp, line) for timestamp, line in events if timestamp <= now]
     # Resolve each failure once using the bounded query's context, then slice only its counts.
     classified = list(zip((timestamp for timestamp, _line in events), classify_lines(line for _timestamp, line in events)))
     observed_at = datetime.fromtimestamp(now, timezone.utc).isoformat()
 
     def window(since: float) -> dict[str, Any]:
+        coverage_error = str(coverage.get("error", ""))
+        retained_since = coverage.get("since_epoch")
+        if not coverage_error and since < query_since:
+            coverage_error = "requested start precedes collected journal interval"
+        if not coverage_error and (retained_since is None or since < retained_since):
+            coverage_error = "requested start precedes retained journal sequence"
+        if not coverage_error and any(since <= timestamp <= now for timestamp in coverage.get("discarded_at", ())):
+            coverage_error = "journald reported discarded messages in this window"
         return {
             **summarize_classified_lines(item for timestamp, item in classified if since <= timestamp),
             "observed_at": observed_at,
             "since": datetime.fromtimestamp(since, timezone.utc).isoformat(),
             "until": observed_at,
+            "coverage": coverage,
+            "coverage_error": coverage_error,
         }
 
     summaries = {
@@ -3919,6 +3996,10 @@ def _diagnostics_log_window(raw: object, *, since: str) -> LogWindowSnapshot:
         return LogWindowSnapshot.unavailable("log window was not collected")
     if not all(isinstance(raw.get(key), str) and raw[key] for key in ("observed_at", "until")):
         return LogWindowSnapshot.unavailable("log window acquisition timestamps are unavailable")
+    if "coverage_error" not in raw or not isinstance(raw.get("coverage"), Mapping):
+        return LogWindowSnapshot.unavailable("journal retention evidence was not collected")
+    if raw.get("coverage_error"):
+        return LogWindowSnapshot.unavailable(str(raw["coverage_error"]))
     try:
         return LogWindowSnapshot.collected(
             raw["counts"],
@@ -4035,6 +4116,17 @@ def diagnostics_snapshot(**snapshot_options: Any) -> dict[str, Any]:
             "24h": _diagnostics_log_window(minute_windows.get("1440"), since="1440 minutes ago") if full_logs else LogWindowSnapshot.skipped("24h window was not requested"),
             "since_release": since_release,
         }
+    raw_windows = {"5m": minute_windows.get("5"), "30m": minute_windows.get("30"), "24h": minute_windows.get("1440"), "since_release": fresh}
+    partial_windows = {
+        name: {**raw, "error": log_windows[name].collector.message}
+        for name, raw in raw_windows.items()
+        if isinstance(raw, Mapping) and log_windows[name].collector.status == "error"
+    }
+    storage = dict(storage)
+    storage["journal_coverage"] = {
+        "partial_windows": partial_windows,
+        "retained_sequence": dict(fresh.get("coverage", {})) if isinstance(fresh, Mapping) else {},
+    }
     artifact_files = artifacts.get("files", {}) if isinstance(artifacts, Mapping) else {}
     sing_box = artifact_files.get("sing-box.json", {}) if isinstance(artifact_files, Mapping) else {}
     verdicts = facts.get("verdicts", {}) if isinstance(facts.get("verdicts"), Mapping) else {}
@@ -4069,6 +4161,11 @@ def diagnostics_snapshot(**snapshot_options: Any) -> dict[str, Any]:
         redundancy=dict(facts.get("redundancy", {})),
         component_verdicts={str(key): str(value) for key, value in verdicts.items() if key not in {"overall", "reasons"}},
     )
+    if any(window.collector.status == "error" for window in log_windows.values()):
+        payload.component_verdicts["log_history"] = "inconclusive"
+        payload.reasons.append(INCOMPLETE_LOG_HISTORY_REASON)
+        if payload.verdict == "verified":
+            payload.verdict = "inconclusive"
     return payload.to_dict()
 
 

@@ -218,9 +218,10 @@ def acceptance_snapshot(
         "location": plan.location,
         "capabilities": tuple(plan.capabilities),
         "generated_at": observed_at,
+        "release": {"installed_at": observed_at},
         "collectors": collectors,
         "log_windows": {
-            name: LogWindowSnapshot.collected({bucket: 0 for bucket in BUCKETS}, observed_at=observed_at, until=observed_at)
+            name: LogWindowSnapshot.collected({bucket: 0 for bucket in BUCKETS}, observed_at=observed_at, since=observed_at, until=observed_at)
             for name in LOG_WINDOW_KEYS
         },
         "services": services,
@@ -355,6 +356,14 @@ class VerifyTests(unittest.TestCase):
         verified = _verify_snapshot(acceptance_snapshot(NODE_GATEWAY, component_verdicts={"server_path": "verified"}))
         self.assertEqual(verified.verdict, "failed")
         self.assertIn("agent verdict fields are incomplete", verified.reasons)
+
+    def test_retained_partial_observations_do_not_satisfy_required_log_window(self) -> None:
+        snapshot = acceptance_snapshot(NODE_EXIT)
+        snapshot.log_windows["24h"] = LogWindowSnapshot.unavailable("requested start precedes retained journal sequence")
+        snapshot.storage["journal_coverage"] = {"partial_windows": {"24h": {"counts": {bucket: 0 for bucket in BUCKETS}}}}
+        verified = _verify_snapshot(snapshot)
+        self.assertEqual(verified.verdict, "failed")
+        self.assertTrue(any("log window 24h unavailable" in reason for reason in verified.reasons))
 
     def test_verify_snapshot_requires_public_front_keepalive_policy(self) -> None:
         verified = _verify_snapshot(acceptance_snapshot(NODE_GATEWAY, front={}))
@@ -637,6 +646,49 @@ class VerifyTests(unittest.TestCase):
                 same_node_functional_verified=False,
             )["eligible"]
         )
+
+    def test_install_gate_uses_complete_post_install_logs_without_claiming_complete_history(self) -> None:
+        topology = TopologySpec.from_env(deployment_env())
+        public = verified_public_vless_evidence(topology)
+        public["paths"]["public_vless"] = {"checked": True}
+        gateway = acceptance_snapshot(NODE_GATEWAY)
+        for name in ("5m", "30m", "24h"):
+            gateway.log_windows[name] = LogWindowSnapshot.unavailable("journal starts after requested window")
+        _verify_snapshot(gateway)
+        before = copy.deepcopy(gateway.to_dict())
+
+        def gate(candidate: DiagnosticsSnapshot) -> dict:
+            return _install_release_gate(topology, public, {"verdict": "verified"},
+                [candidate, acceptance_snapshot(NODE_EXIT)], same_node_functional_verified=False)
+
+        decision = gate(gateway)
+        self.assertTrue(decision["eligible"])
+        self.assertEqual(decision["accepted_degradations"], [f"{NODE_GATEWAY}:incomplete_historical_logs"])
+        self.assertEqual(gateway.to_dict(), before)
+        self.assertEqual(gateway.verdict, "failed")
+        for damage in ("missing", "partial", "stale", "late_start", "missing_installed_at", "xray", "drift", "routes"):
+            with self.subTest(damage=damage):
+                broken = copy.deepcopy(gateway)
+                if damage == "missing":
+                    broken.log_windows.pop("since_release")
+                elif damage == "partial":
+                    broken.log_windows["since_release"] = LogWindowSnapshot.unavailable("discarded messages")
+                elif damage == "stale":
+                    old = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+                    broken.log_windows["since_release"] = LogWindowSnapshot.collected(
+                        {bucket: 0 for bucket in BUCKETS}, observed_at=old, since=old, until=old)
+                    broken.release["installed_at"] = old
+                elif damage == "late_start":
+                    broken.release["installed_at"] = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+                elif damage == "missing_installed_at":
+                    broken.release = {}
+                elif damage == "xray":
+                    broken.services["xray"] = "inactive"
+                elif damage == "drift":
+                    broken.drift = "server-mutated"
+                else:
+                    broken.route_probes["ok"] = False
+                self.assertFalse(gate(broken)["eligible"])
 
     def test_install_gate_does_not_make_operational_client_loss_green(self) -> None:
         env = deployment_env()

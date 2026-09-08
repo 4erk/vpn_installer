@@ -47,6 +47,24 @@ def is_planned_install_maintenance(snapshot: Mapping[str, Any]) -> bool:
     )
 
 
+def validate_install_runtime(payload: Mapping[str, Any]) -> None:
+    """Historical loss remains in the report, not in fresh-release acceptance."""
+    from datetime import datetime, timezone
+    from .diagnostics import DiagnosticsSnapshot, INCOMPLETE_LOG_HISTORY_REASON
+
+    snapshot = DiagnosticsSnapshot.from_dict(payload)
+    snapshot.require_complete_release_logs()
+    stale = snapshot.freshness_issues(now=datetime.now(timezone.utc))
+    if stale:
+        _fail("post-activation evidence is stale: " + "; ".join(stale))
+    runtime = dict(payload)
+    runtime["reasons"] = [reason for reason in snapshot.reasons if reason != INCOMPLETE_LOG_HISTORY_REASON]
+    if snapshot.component_verdicts.get("log_history") == "inconclusive" and snapshot.verdict == "inconclusive" and not runtime["reasons"]:
+        runtime["verdict"] = "verified"
+    if not ((runtime.get("verdict") == "verified" and not runtime["reasons"]) or is_planned_install_maintenance(runtime)):
+        _fail(f"post-activation runtime verdict is {runtime.get('verdict')}: {runtime['reasons']}")
+
+
 def _fail(message: str) -> None:
     raise InstallContractError(message)
 

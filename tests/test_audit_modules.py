@@ -299,6 +299,7 @@ class AuditModuleTests(unittest.TestCase):
             self.assertIn(helper, script)
         for gate in (
             "acceptance-marker-path",
+            "fresh-install-with-incomplete-history",
             "failed-acceptance-evidence",
             "single-rollback-without-wireguard",
             "node-mismatch-rejection",
@@ -332,7 +333,7 @@ class AuditModuleTests(unittest.TestCase):
         self.assertIn("previous_release", crash_section)
         self.assertIn("build-previous-release.py", script)
         self.assertNotIn("manifest_schema", script)
-        self.assertEqual(script.count("pass_gate "), 6)
+        self.assertEqual(script.count("pass_gate "), 7)
         self.assertLessEqual(audit_docker.TRANSACTION_ACCEPTANCE_TIMEOUT_SECONDS, 45)
 
     def test_install_cutover_starts_new_services_before_retiring_previous_services(self) -> None:

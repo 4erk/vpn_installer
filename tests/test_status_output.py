@@ -29,6 +29,16 @@ def collected_windows() -> dict[str, LogWindowSnapshot]:
 
 
 class StatusOutputTests(unittest.TestCase):
+    def test_partial_journal_counts_are_lower_bounds_not_complete_totals(self) -> None:
+        snapshot = DiagnosticsSnapshot(storage={"journal_coverage": {"partial_windows": {
+            "24h": {"counts": {"unclassified_error": 3}, "top_destinations": {"unclassified_error": {"203.0.113.1:443": 3}}},
+            "since_release": {"counts": {"unclassified_error": 0}},
+        }}})
+        output = "\n".join(format_snapshot_summary(snapshot))
+        self.assertIn("partial observations [24h]: unclassified_error>=3", output)
+        self.assertIn("partial top destinations [24h]: unclassified_error:203.0.113.1:443>=3", output)
+        self.assertIn("full-window totals unknown", output)
+
     def test_formats_app_owned_resolver_without_host_resolver_fields(self) -> None:
         lines = format_snapshot_summary(
             DiagnosticsSnapshot(

@@ -1372,7 +1372,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, sys.argv[3])
-from vpn_installer.install_contract import is_planned_install_maintenance, normalize_acceptance_snapshot
+from vpn_installer.install_contract import validate_install_runtime, normalize_acceptance_snapshot
 
 payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 manifest = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
@@ -1414,8 +1414,10 @@ if payload.get("artifacts", {}).get("drift") != "none":
     raise SystemExit("post-activation artifact drift detected")
 if payload.get("network", {}).get("profile_mismatches"):
     raise SystemExit("post-activation network profile drift detected")
-if payload.get("verdict") != "verified" and not is_planned_install_maintenance(payload):
-    raise SystemExit(f"post-activation verdict is {payload.get('verdict')}: {payload.get('reasons', [])}")
+try:
+    validate_install_runtime(payload)
+except (TypeError, ValueError) as exc:
+    raise SystemExit(f"post-activation evidence rejected: {exc}") from exc
 Path(sys.argv[1]).write_text(
     json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
     encoding="utf-8",
