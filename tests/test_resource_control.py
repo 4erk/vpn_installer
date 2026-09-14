@@ -206,6 +206,19 @@ class ResourceControlTests(unittest.TestCase):
         self.assertIn("_TRANSPORT=kernel", runner.call_args.args[0])
         self.assertNotIn("-k", runner.call_args.args[0])
 
+    def test_shared_submicrosecond_cutoff_is_not_rounded_by_oom(self) -> None:
+        for cutoff in (1789366998.4848592, 1789366998.4848588):
+            evidence = {"since_epoch": 0, "query_since_epoch": cutoff - 86400,
+                        "query_until_epoch": cutoff, "discarded_at": [], "error": ""}
+            with self.subTest(cutoff=cutoff), patch.object(
+                resource_control, "_run", return_value=subprocess.CompletedProcess([], 1, "", ""),
+            ):
+                snapshot = resource_control._kernel_oom_snapshot(
+                    "2026-09-14T06:17:02Z", coverage=evidence, cutoff=cutoff,
+                )
+            self.assertEqual(snapshot["counts"], {"5m": 0, "30m": 0, "24h": 0, "since_release": 0})
+            self.assertTrue(all(window["scope"] == "complete" for window in snapshot["windows"].values()))
+
     def test_oom_snapshot_treats_no_journal_matches_as_an_empty_result(self) -> None:
         now = datetime.now(timezone.utc)
         completed = subprocess.CompletedProcess(["journalctl"], 1, "", "")

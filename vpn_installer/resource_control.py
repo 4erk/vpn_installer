@@ -292,14 +292,14 @@ def _kernel_oom_snapshot(
     installed_at: str, *, coverage: Mapping[str, Any] | None = None, cutoff: float | None = None,
 ) -> dict[str, Any]:
     installed = _parse_timestamp(installed_at)
-    now = datetime.now(timezone.utc) if cutoff is None else datetime.fromtimestamp(cutoff, timezone.utc)
-    query_limit_start = now - OOM_HISTORY_RETENTION
-    history_start = now - timedelta(hours=24)
-    query_start = max(min(installed, history_start), query_limit_start) if installed is not None else history_start
-    now_epoch = now.timestamp()
+    # Keep the shared collector boundary; datetime would round its sub-microseconds.
+    now_epoch = datetime.now(timezone.utc).timestamp() if cutoff is None else cutoff
     installed_epoch = installed.timestamp() if installed is not None else None
+    query_limit_start = now_epoch - OOM_HISTORY_RETENTION.total_seconds()
+    history_start = now_epoch - 86400
+    query_start = max(min(installed_epoch, history_start), query_limit_start) if installed_epoch is not None else history_start
     snapshot = kernel_event_snapshot(
-        runner=_run, pattern="Out of memory: Killed process", query_since=query_start.timestamp(), cutoff=now_epoch,
+        runner=_run, pattern="Out of memory: Killed process", query_since=query_start, cutoff=now_epoch,
         window_starts={"5m": now_epoch - 300, "30m": now_epoch - 1800, "24h": now_epoch - 86400, "since_release": installed_epoch},
         coverage=coverage,
     )

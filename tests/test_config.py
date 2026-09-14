@@ -201,10 +201,11 @@ class ConfigTests(unittest.TestCase):
         env = config.generate_default_env("sample")
         self.assertEqual(env["RU_REALITY_ACCEPT_EMPTY_SHORT_ID"], "1")
 
-    def test_previous_local_env_drops_only_retired_unused_input(self) -> None:
+    def test_removed_input_is_not_silently_migrated(self) -> None:
         source = {"CONFIG_SCHEMA": "3", "RU_REALITY_MAX_TIME_DIFFERENCE": "30s", "CLIENT_UUID": "preserved"}
         normalized = config.normalize_deployment_env(source)
-        self.assertEqual(normalized, {"CONFIG_SCHEMA": "3", "CLIENT_UUID": "preserved"})
+        self.assertEqual(normalized, source)
+        self.assertIsNot(normalized, source)
         self.assertIn("RU_REALITY_MAX_TIME_DIFFERENCE", source)
         with self.assertRaisesRegex(ValueError, "RU_REALITY_MAX_TIME_DIFFERENCE"):
             config.merge_env_with_defaults({"RU_REALITY_MAX_TIME_DIFFERENCE": ""}, "sample")

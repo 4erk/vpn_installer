@@ -129,10 +129,7 @@ def load_env_file(path: Path) -> dict[str, str]:
 def normalize_deployment_env(source: dict[str, str]) -> dict[str, str]:
     schema = source.get("CONFIG_SCHEMA", "").strip()
     if schema == str(CONFIG_SCHEMA_VERSION):
-        normalized = source.copy()
-        # One input-boundary transition from 0.22.8; remove in 0.23.1.
-        normalized.pop("RU_REALITY_MAX_TIME_DIFFERENCE", None)
-        return normalized
+        return source.copy()
     raise ValueError(
         f"unsupported CONFIG_SCHEMA={schema or '<empty>'}; current release accepts only schema {CONFIG_SCHEMA_VERSION}"
     )

@@ -47,7 +47,7 @@ class InstallContractTests(unittest.TestCase):
                                  require_assets=False, require_binaries=False)
             self.assertFalse((root / "contract").exists())
 
-    def test_previous_tag_inventory_is_validated_without_new_modules(self) -> None:
+    def test_previous_tag_inventory_uses_the_same_validator(self) -> None:
         from vpn_installer.audit.docker import export_release_source
 
         script = """
@@ -57,7 +57,7 @@ sys.path.insert(0, sys.argv[1])
 from vpn_installer import VERSION
 from vpn_installer.config import generate_default_env
 from vpn_installer.render import write_node_rendered_files
-assert VERSION == '0.22.8'
+assert VERSION == sys.argv[3]
 root = Path(sys.argv[2])
 for topology, location, node in [('dual', 'ru', 'gateway'), ('dual', 'ru', 'exit'),
                                   ('single', 'ru', 'gateway'), ('single', 'foreign', 'gateway')]:
@@ -67,20 +67,20 @@ for topology, location, node in [('dual', 'ru', 'gateway'), ('dual', 'ru', 'exit
 """
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            source = export_release_source("0.22.8", root / "previous")
-            result = subprocess.run([sys.executable, "-c", script, str(source), str(root)],
+            source = export_release_source(COMPATIBLE_INSTALLED_MIN, root / "previous")
+            result = subprocess.run([sys.executable, "-c", script, str(source), str(root), COMPATIBLE_INSTALLED_MIN],
                                     capture_output=True, text=True, timeout=20)
             self.assertEqual(result.returncode, 0, result.stderr)
             for bundle in sorted(root.glob("*-gateway")) + [root / "dual-ru-exit"]:
                 node = bundle.name.rsplit("-", 1)[-1]
                 with self.subTest(bundle=bundle.name):
                     manifest = json.loads((bundle / "render-manifest.json").read_text(encoding="utf-8"))
-                    self.assertNotIn("server_runtime.py", manifest["artifacts"])
+                    self.assertIn("server_runtime.py", manifest["artifacts"])
                     _validate_bundle(bundle, node, root / (bundle.name + "-contract"),
-                                     expected_version="0.22.8", require_assets=False, require_binaries=False)
+                                     expected_version=COMPATIBLE_INSTALLED_MIN, require_assets=False, require_binaries=False)
                     (bundle / "vpn-stack-agent.py").write_text("corrupted\n", encoding="utf-8")
                     with self.assertRaisesRegex(InstallContractError, "artifact payload mismatch"):
-                        _validate_bundle(bundle, node, root / "rejected", expected_version="0.22.8",
+                        _validate_bundle(bundle, node, root / "rejected", expected_version=COMPATIBLE_INSTALLED_MIN,
                                          require_assets=False, require_binaries=False)
 
     def test_current_inventory_cannot_omit_new_module(self) -> None:
