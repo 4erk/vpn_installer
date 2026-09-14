@@ -10,18 +10,26 @@ import re
 import socket
 import subprocess
 import sys
-import tempfile
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 sys.dont_write_bytecode = True
+
+if not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+if __package__:
+    from . import server_lifecycle as lifecycle
+    from . import server_runtime as runtime
+    from . import journal_evidence as journal
+else:
+    import server_lifecycle as lifecycle
+    import server_runtime as runtime
+    import journal_evidence as journal
 
 try:
     from .log_classifier import (
@@ -55,103 +63,6 @@ except ImportError:  # Installed agent runs as a standalone script.
         summarize_lines,
     )
 
-try:
-    from .interserver_transport import (
-        HY2_PORT,
-        TRANSPORT_CANDIDATE_TAGS,
-        TRANSPORT_FAILURE_CONFIRMATIONS,
-        TRANSPORT_HY2_TAG,
-        TRANSPORT_PREFERRED_PROBE_INTERVAL_SECONDS,
-        TRANSPORT_PREFERRED_STABLE_RESET_SECONDS,
-        TRANSPORT_CANDIDATE_QUALITY_PROBE_ATTEMPTS,
-        TRANSPORT_CANDIDATE_QUALITY_PROBE_TIMEOUT_MS,
-        TRANSPORT_PREFERRED_TAG,
-        TRANSPORT_PROBE_INTERVAL_SECONDS,
-        TRANSPORT_QUALITY_PROBE_INTERVAL_SECONDS,
-        TRANSPORT_QUALITY_PROBE_PACKETS,
-        TRANSPORT_QUALITY_PROBE_PAYLOAD_BYTES,
-        TRANSPORT_RELAY_INBOUND_TAG,
-        TRANSPORT_RELAY_PORT,
-        TRANSPORT_SELECTOR_TAG,
-        TRANSPORT_STATE_SCHEMA_VERSION,
-        TRANSPORT_SWITCH_RETRY_BASE_SECONDS,
-        TRANSPORT_SWITCH_RETRY_MAX_SECONDS,
-        TRANSPORT_SWITCH_PROOF_ATTEMPTS,
-        TRANSPORT_SWITCH_PROOF_RETRY_DELAY_SECONDS,
-        TRANSPORT_SWITCH_PROOF_TIMEOUT_MS,
-        TRANSPORT_WG_TAG,
-        evaluate_transport_policy,
-        transport_candidate_probe,
-        transport_overlay_dns_probe,
-        transport_topology_configured,
-    )
-    TRANSPORT_MODULE_AVAILABLE = True
-except ImportError:  # Optional on nodes without an interserver capability.
-    try:
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from interserver_transport import (  # type: ignore[no-redef]
-            HY2_PORT,
-            TRANSPORT_CANDIDATE_TAGS,
-            TRANSPORT_FAILURE_CONFIRMATIONS,
-            TRANSPORT_HY2_TAG,
-            TRANSPORT_PREFERRED_PROBE_INTERVAL_SECONDS,
-            TRANSPORT_PREFERRED_STABLE_RESET_SECONDS,
-            TRANSPORT_CANDIDATE_QUALITY_PROBE_ATTEMPTS,
-            TRANSPORT_CANDIDATE_QUALITY_PROBE_TIMEOUT_MS,
-            TRANSPORT_PREFERRED_TAG,
-            TRANSPORT_PROBE_INTERVAL_SECONDS,
-            TRANSPORT_QUALITY_PROBE_INTERVAL_SECONDS,
-            TRANSPORT_QUALITY_PROBE_PACKETS,
-            TRANSPORT_QUALITY_PROBE_PAYLOAD_BYTES,
-            TRANSPORT_RELAY_INBOUND_TAG,
-            TRANSPORT_RELAY_PORT,
-            TRANSPORT_SELECTOR_TAG,
-            TRANSPORT_STATE_SCHEMA_VERSION,
-            TRANSPORT_SWITCH_RETRY_BASE_SECONDS,
-            TRANSPORT_SWITCH_RETRY_MAX_SECONDS,
-            TRANSPORT_SWITCH_PROOF_ATTEMPTS,
-            TRANSPORT_SWITCH_PROOF_RETRY_DELAY_SECONDS,
-            TRANSPORT_SWITCH_PROOF_TIMEOUT_MS,
-            TRANSPORT_WG_TAG,
-            evaluate_transport_policy,
-            transport_candidate_probe,
-            transport_overlay_dns_probe,
-            transport_topology_configured,
-        )
-        TRANSPORT_MODULE_AVAILABLE = True
-    except ImportError:
-        HY2_PORT = 18443
-        TRANSPORT_WG_TAG = "interserver-underlay-wg"
-        TRANSPORT_HY2_TAG = "interserver-underlay-hy2"
-        TRANSPORT_CANDIDATE_TAGS = (TRANSPORT_WG_TAG, TRANSPORT_HY2_TAG)
-        TRANSPORT_FAILURE_CONFIRMATIONS = 2
-        TRANSPORT_PREFERRED_PROBE_INTERVAL_SECONDS = 30
-        TRANSPORT_PREFERRED_STABLE_RESET_SECONDS = 1800
-        TRANSPORT_CANDIDATE_QUALITY_PROBE_ATTEMPTS = 8
-        TRANSPORT_CANDIDATE_QUALITY_PROBE_TIMEOUT_MS = 2400
-        TRANSPORT_PREFERRED_TAG = TRANSPORT_WG_TAG
-        TRANSPORT_PROBE_INTERVAL_SECONDS = 2
-        TRANSPORT_QUALITY_PROBE_INTERVAL_SECONDS = 15
-        TRANSPORT_QUALITY_PROBE_PACKETS = 20
-        TRANSPORT_QUALITY_PROBE_PAYLOAD_BYTES = 1200
-        TRANSPORT_RELAY_INBOUND_TAG = "interserver-overlay-in"
-        TRANSPORT_RELAY_PORT = 19091
-        TRANSPORT_SELECTOR_TAG = "interserver-underlay-select"
-        TRANSPORT_STATE_SCHEMA_VERSION = 16
-        TRANSPORT_SWITCH_RETRY_BASE_SECONDS = 30
-        TRANSPORT_SWITCH_RETRY_MAX_SECONDS = 300
-        TRANSPORT_SWITCH_PROOF_ATTEMPTS = 5
-        TRANSPORT_SWITCH_PROOF_RETRY_DELAY_SECONDS = 0.2
-        TRANSPORT_SWITCH_PROOF_TIMEOUT_MS = 1200
-        TRANSPORT_MODULE_AVAILABLE = False
-
-        def _missing_transport_module(*_args: Any, **_kwargs: Any) -> Any:
-            raise RuntimeError("interserver transport capability is not installed on this node")
-
-        evaluate_transport_policy = _missing_transport_module
-        transport_candidate_probe = _missing_transport_module
-        transport_overlay_dns_probe = _missing_transport_module
-        transport_topology_configured = _missing_transport_module
 
 try:
     from .network_profile import FQ_FLOW_LIMIT, FQ_KIND, FQ_PACKET_LIMIT, TCP_MTU_PROBE_FLOOR, wireguard_policy_spec
@@ -178,20 +89,6 @@ try:
 except ImportError:  # Installed agent runs as a standalone script.
     from platforms import PlatformSpec, apply_updates, current_platform, detect_host_facts, maintenance_snapshot as platform_maintenance_snapshot, resolve_platform  # type: ignore[no-redef]
 
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - local Windows tests only
-    class _NoopFcntl:
-        LOCK_EX = 0
-        LOCK_SH = 0
-        LOCK_NB = 0
-        LOCK_UN = 0
-
-        @staticmethod
-        def flock(_handle: Any, _operation: int) -> None:
-            return None
-
-    fcntl = _NoopFcntl()  # type: ignore[assignment]
 
 SCHEMA_VERSION = DIAGNOSTICS_SCHEMA_VERSION
 ACCEPTANCE_REQUIRED_TARGETS = ("https://github.com/", "https://www.google.com/generate_204")
@@ -209,7 +106,6 @@ OPTIONAL_TRANSPORT_REQUIREMENTS = frozenset(
 COMPLETE_LOG_RETENTION_MINUTES = 14 * 24 * 60
 PRIVATE_REJECT_CORRELATION_MAX_AGE_SECONDS = 900
 PRIVATE_REJECT_INBOUND_TAGS = ("router-in", "public-hy2-in")
-ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 FRONT_LOSS_MIN_BYTES = 1_000_000
 FRONT_LOSS_DEGRADED_PERCENT = 2.0
 FRONT_INTERVAL_LOSS_MIN_BYTES = 256 * 1024
@@ -221,14 +117,7 @@ FRONT_SMALL_FLOW_DEGRADED_PERCENT = 10.0
 FRONT_RTT_MIN_SAMPLES = 3
 FRONT_RTT_DEGRADED_MS = 250
 FRONT_RTT_INFLATION_FACTOR = 3
-FRONT_RTO_DEGRADED_MS = 1_000
-FRONT_COUNTER_MAX_INTERVAL_SECONDS = 300
 FRONT_CURRENT_ACTIVITY_MAX_IDLE_MS = 30_000
-FRONT_CACHE_REORDERING_THRESHOLD = 64
-FRONT_CACHE_STALLED_RTO_MS = 8_000
-FRONT_CACHE_RECOVERY_COOLDOWN_SECONDS = 1_800
-FRONT_CACHE_RECOVERY_MAX_ACTIONS = 2
-FRONT_CACHE_RECOVERY_HISTORY_LIMIT = 20
 REALITY_PENDING_HANDSHAKE_DEGRADED = 5
 LOG_CONTEXT_MAX_EVENT_IDS = 500
 PROBLEM_LOG_GREP = (
@@ -237,56 +126,25 @@ PROBLEM_LOG_GREP = (
 )
 XRAY_FRONT_LOG_GREP = "accepted (tcp|udp):|REALITY: processed invalid connection"
 CONNTRACK_FULL_GREP = "nf_conntrack.*table full"
-ROOT = Path("/etc/vpn-stack")
-MANIFEST_PATH = ROOT / "render-manifest.json"
-ENV_PATH = ROOT / "deployment.env"
-RELEASES_PATH = ROOT / "releases"
-CURRENT_RELEASE_PATH = ROOT / "current"
-OPERATOR_MANIFEST_PATH = ROOT / "operator-state.json"
-ADMIN_RULES_PATH = ROOT / "admin-routing-rules.json"
-STATE_DIR = Path("/var/lib/vpn-stack")
-HEALTH_STATE_PATH = STATE_DIR / "health-state.json"
-TRANSPORT_STATE_PATH = STATE_DIR / "transport-state.json"
-LOCK_PATH = Path("/run/vpn-stack-agent.lock")
-TRANSPORT_LOCK_PATH = Path("/run/vpn-stack-transport.lock")
-INSTALL_LOCK_PATH = Path("/run/lock/vpn-stack-install.lock")
-SINGBOX_CONFIG_PATH = Path("/etc/sing-box/config.json")
+RELEASES_PATH = runtime.ROOT / "releases"
+CURRENT_RELEASE_PATH = runtime.ROOT / "current"
+OPERATOR_MANIFEST_PATH = runtime.ROOT / "operator-state.json"
+ADMIN_RULES_PATH = runtime.ROOT / "admin-routing-rules.json"
 XRAY_CONFIG_PATH = Path("/etc/xray/config.json")
-NFTABLES_CONFIG_PATH = ROOT / "nftables.conf"
-NFTABLES_SERVICE = "vpn-stack-nftables.service"
-SYSCTL_PATH = Path("/etc/sysctl.d/90-vpn-stack.conf")
-DNS_CACHE_CONFIG_PATH = ROOT / "dnsmasq.conf"
+DNS_CACHE_CONFIG_PATH = runtime.ROOT / "dnsmasq.conf"
 FSTAB_PATH = Path("/etc/fstab")
 PROC_MOUNTS_PATH = Path("/proc/self/mounts")
 EXT4_SYSFS_ROOT = Path("/sys/fs/ext4")
 SYS_DEV_BLOCK_ROOT = Path("/sys/dev/block")
 
-MANIFEST_CAPABILITY_SCHEMA_VERSION = 5
-TOPOLOGY_SINGLE = "single"
-TOPOLOGY_DUAL = "dual"
-NODE_GATEWAY = "gateway"
-NODE_EXIT = "exit"
-LOCATION_RU = "ru"
-LOCATION_FOREIGN = "foreign"
-CAP_PUBLIC_FRONT = "public-front"
-CAP_ROUTER = "router"
-CAP_WEB_ADMIN = "web-admin"
-CAP_LOCAL_EGRESS = "local-egress"
-CAP_RU_SPLIT_ROUTING = "ru-split-routing"
-CAP_INTERSERVER_CLIENT = "interserver-client"
-CAP_INTERSERVER_SERVER = "interserver-server"
-CAP_NAT_EXIT = "nat-exit"
-INTERSERVER_CAPABILITIES = frozenset({CAP_INTERSERVER_CLIENT, CAP_INTERSERVER_SERVER})
-SERVICE_UNIT_DEFAULTS = {
-    "wireguard": "wg-quick@{wg_interface}.service",
-    "nftables": NFTABLES_SERVICE,
-    "sing-box": "sing-box.service",
-    "resolver": "vpn-stack-dns.service",
-    "xray": "vpn-stack-xray.service",
-    "admin": "vpn-stack-admin.service",
-    "health_timer": "vpn-stack-health.timer",
-    "transport": "vpn-stack-transport.service",
-}
+
+def load_transport():
+    """Load the optional control owner only for an interserver-capable node."""
+    if __package__:
+        from . import server_transport
+    else:
+        import server_transport
+    return server_transport
 
 
 def _string_array(value: object, field: str) -> tuple[str, ...]:
@@ -301,25 +159,25 @@ def _expected_capabilities(
     topology: str,
     node_id: str,
 ) -> frozenset[str]:
-    if node_id == NODE_GATEWAY:
-        capabilities = {CAP_PUBLIC_FRONT, CAP_ROUTER, CAP_LOCAL_EGRESS}
-        if topology == TOPOLOGY_DUAL:
-            capabilities.update({CAP_RU_SPLIT_ROUTING, CAP_INTERSERVER_CLIENT, CAP_WEB_ADMIN})
+    if node_id == runtime.NODE_GATEWAY:
+        capabilities = {runtime.CAP_PUBLIC_FRONT, runtime.CAP_ROUTER, runtime.CAP_LOCAL_EGRESS}
+        if topology == runtime.TOPOLOGY_DUAL:
+            capabilities.update({runtime.CAP_RU_SPLIT_ROUTING, runtime.CAP_INTERSERVER_CLIENT, runtime.CAP_WEB_ADMIN})
         return frozenset(capabilities)
-    if topology == TOPOLOGY_DUAL and node_id == NODE_EXIT:
-        return frozenset({CAP_INTERSERVER_SERVER, CAP_NAT_EXIT})
+    if topology == runtime.TOPOLOGY_DUAL and node_id == runtime.NODE_EXIT:
+        return frozenset({runtime.CAP_INTERSERVER_SERVER, runtime.CAP_NAT_EXIT})
     raise RuntimeError(f"node {node_id!r} is invalid for {topology!r} topology")
 
 
 def _expected_required_services(capabilities: frozenset[str]) -> tuple[str, ...]:
     services = ["nftables", "sing-box", "resolver", "health_timer"]
-    if CAP_PUBLIC_FRONT in capabilities:
+    if runtime.CAP_PUBLIC_FRONT in capabilities:
         services.append("xray")
-    if CAP_WEB_ADMIN in capabilities:
+    if runtime.CAP_WEB_ADMIN in capabilities:
         services.append("admin")
-    if capabilities & INTERSERVER_CAPABILITIES:
+    if capabilities & runtime.INTERSERVER_CAPABILITIES:
         services.append("wireguard")
-    if CAP_INTERSERVER_CLIENT in capabilities:
+    if runtime.CAP_INTERSERVER_CLIENT in capabilities:
         services.append("transport")
     return tuple(services)
 
@@ -331,21 +189,21 @@ def runtime_contract(manifest: Mapping[str, Any]) -> dict[str, Any]:
         schema = int(raw_schema)
     except (TypeError, ValueError):
         schema = 0
-    if schema != MANIFEST_CAPABILITY_SCHEMA_VERSION:
+    if schema != runtime.MANIFEST_CAPABILITY_SCHEMA_VERSION:
         raise RuntimeError(f"unsupported render manifest schema: {raw_schema!r}")
 
     topology = str(manifest.get("topology", ""))
     node_id = str(manifest.get("node_id", ""))
     location = str(manifest.get("location", ""))
-    if topology not in {TOPOLOGY_SINGLE, TOPOLOGY_DUAL}:
+    if topology not in {runtime.TOPOLOGY_SINGLE, runtime.TOPOLOGY_DUAL}:
         raise RuntimeError(f"unsupported manifest topology: {topology!r}")
-    if node_id not in {NODE_GATEWAY, NODE_EXIT}:
+    if node_id not in {runtime.NODE_GATEWAY, runtime.NODE_EXIT}:
         raise RuntimeError(f"unsupported manifest node: {node_id!r}")
-    if location not in {LOCATION_RU, LOCATION_FOREIGN}:
+    if location not in {runtime.LOCATION_RU, runtime.LOCATION_FOREIGN}:
         raise RuntimeError(f"unsupported manifest location: {location!r}")
-    if topology == TOPOLOGY_SINGLE and node_id != NODE_GATEWAY:
+    if topology == runtime.TOPOLOGY_SINGLE and node_id != runtime.NODE_GATEWAY:
         raise RuntimeError("single topology cannot install an exit node")
-    if topology == TOPOLOGY_DUAL and ((node_id == NODE_GATEWAY and location != LOCATION_RU) or (node_id == NODE_EXIT and location != LOCATION_FOREIGN)):
+    if topology == runtime.TOPOLOGY_DUAL and ((node_id == runtime.NODE_GATEWAY and location != runtime.LOCATION_RU) or (node_id == runtime.NODE_EXIT and location != runtime.LOCATION_FOREIGN)):
         raise RuntimeError("dual topology node location does not match the contract")
 
     capabilities = frozenset(_string_array(manifest.get("capabilities"), "capabilities"))
@@ -370,7 +228,7 @@ def runtime_contract(manifest: Mapping[str, Any]) -> dict[str, Any]:
     install_plan = manifest.get("install_plan")
     if not isinstance(install_plan, Mapping):
         raise RuntimeError("manifest install plan is missing")
-    if install_plan.get("schema_version") != MANIFEST_CAPABILITY_SCHEMA_VERSION:
+    if install_plan.get("schema_version") != runtime.MANIFEST_CAPABILITY_SCHEMA_VERSION:
         raise RuntimeError("manifest install plan schema is unsupported")
     for field, expected in (("topology", topology), ("node_id", node_id), ("location", location)):
         if str(install_plan.get(field, "")) != expected:
@@ -391,8 +249,11 @@ def runtime_contract(manifest: Mapping[str, Any]) -> dict[str, Any]:
         service_units[name] = unit
     if tuple(service_units) != required_services:
         raise RuntimeError("install plan service entries conflict with required services")
-    if capabilities & INTERSERVER_CAPABILITIES and not TRANSPORT_MODULE_AVAILABLE:
-        raise RuntimeError("interserver transport module is missing for an interserver-capable node")
+    if capabilities & runtime.INTERSERVER_CAPABILITIES:
+        try:
+            load_transport()
+        except ImportError as exc:
+            raise RuntimeError("interserver transport module is missing for an interserver-capable node") from exc
     try:
         platform = PlatformSpec.from_dict(manifest.get("platform"))
     except ValueError as exc:
@@ -411,67 +272,15 @@ def runtime_contract(manifest: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def contract_has(contract: Mapping[str, Any], capability: str) -> bool:
-    return capability in contract.get("capabilities", ())
-
-
 def installed_runtime_contract() -> dict[str, Any]:
-    manifest = read_json(MANIFEST_PATH, {})
+    manifest = runtime.read_json(runtime.MANIFEST_PATH, {})
     return runtime_contract(manifest if isinstance(manifest, Mapping) else {})
-
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def acquire_install_read_lock():
-    if os.name == "nt":  # Unit tests do not share the Linux installer lock.
-        return tempfile.TemporaryFile(mode="w+")
-    INSTALL_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
-    handle = INSTALL_LOCK_PATH.open("a+", encoding="utf-8")
-    try:
-        fcntl.flock(handle, fcntl.LOCK_SH | fcntl.LOCK_NB)
-    except (BlockingIOError, OSError):
-        handle.close()
-        return None
-    return handle
-
-
-def release_install_read_lock(handle: Any) -> None:
-    try:
-        fcntl.flock(handle, fcntl.LOCK_UN)
-    finally:
-        handle.close()
-
-
-def parse_iso_datetime(value: str) -> datetime | None:
-    if not value:
-        return None
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
-def _observation_age_seconds(value: str, *, now: datetime | None = None) -> float | None:
-    parsed = parse_iso_datetime(value)
-    if parsed is None:
-        return None
-    return ((now or datetime.now(timezone.utc)) - parsed).total_seconds()
-
-
-def iso_age_seconds(value: str, *, now: datetime | None = None) -> float | None:
-    # Policy timers retain their existing clamping; evidence must retain clock skew.
-    age = _observation_age_seconds(value, now=now)
-    return max(0.0, age) if age is not None else None
 
 
 def recent_observation(payload: Any, *, max_age_seconds: int) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
-    age = _observation_age_seconds(str(payload.get("observed_at", "")))
+    age = runtime._observation_age_seconds(str(payload.get("observed_at", "")))
     return payload if age is not None and 0 <= age <= max_age_seconds else {}
 
 
@@ -480,45 +289,13 @@ def release_scoped_observation(payload: dict[str, Any], installed_at: str) -> di
 
     if not payload or not installed_at:
         return payload
-    observed = parse_iso_datetime(str(payload.get("observed_at", "")))
-    release_started = parse_iso_datetime(installed_at)
+    observed = runtime.parse_iso_datetime(str(payload.get("observed_at", "")))
+    release_started = runtime.parse_iso_datetime(installed_at)
     if release_started is None:
         return payload
     if observed is None or observed < release_started:
         return {}
     return payload
-
-
-def run(args: list[str], *, timeout: int = 15, check: bool = False, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
-    try:
-        return subprocess.run(args, input=input_text, text=True, capture_output=True, timeout=timeout, check=check)
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        if check:
-            raise RuntimeError(f"command failed: {' '.join(args)}: {exc}") from exc
-        return subprocess.CompletedProcess(args, 127, "", str(exc))
-
-
-def read_json(path: Path, default: Any) -> Any:
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        return default
-
-
-def write_json_atomic(path: Path, payload: Any, mode: int = 0o600) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
-    tmp_path = Path(tmp_name)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(tmp_path, mode)
-        os.replace(tmp_path, path)
-    finally:
-        tmp_path.unlink(missing_ok=True)
 
 
 def sha256_file(path: Path) -> str:
@@ -570,31 +347,13 @@ def release_tree_snapshot(
     return result
 
 
-def parse_env(path: Path = ENV_PATH) -> dict[str, str]:
-    values: dict[str, str] = {}
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return values
-    for raw_line in lines:
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
-            value = value[1:-1]
-        values[key.strip()] = value
-    return values
-
-
 def service_state(name: str) -> str:
-    result = run(["systemctl", "is-active", name], timeout=5)
+    result = runtime.run(["systemctl", "is-active", name], timeout=5)
     return result.stdout.strip() or "unknown"
 
 
 def journal_lines_since(unit: str, since: str) -> list[str]:
-    result = run(["journalctl", "-u", unit, "--since", since, "--no-pager", "-o", "short-iso"], timeout=20)
+    result = runtime.run(["journalctl", "-u", unit, "--since", since, "--no-pager", "-o", "short-iso"], timeout=20)
     return result.stdout.splitlines() if result.returncode == 0 else []
 
 
@@ -603,109 +362,13 @@ def journal_lines(unit: str, minutes: int) -> list[str]:
 
 
 def journal_filtered_lines(unit: str, minutes: int, pattern: str) -> list[str]:
-    result = run(
+    result = runtime.run(
         ["journalctl", "-u", unit, "--since", f"{minutes} minutes ago", "--no-pager", "-o", "short-iso", f"--grep={pattern}"],
         timeout=30,
     )
     return result.stdout.splitlines() if result.returncode == 0 else []
 
 
-def journal_record_message(record: Mapping[str, Any]) -> str:
-    raw_message = record.get("MESSAGE", "")
-    if isinstance(raw_message, str):
-        message = raw_message
-    elif isinstance(raw_message, list):
-        try:
-            message = bytes(raw_message).decode("utf-8", errors="replace")
-        except (TypeError, ValueError):
-            return ""
-    else:
-        return ""
-    return ANSI_ESCAPE_RE.sub("", message)
-
-
-def journal_command_error(result: subprocess.CompletedProcess[str]) -> str:
-    if result.returncode == 0 or (result.returncode == 1 and not result.stdout.strip() and not result.stderr.strip()):
-        return ""
-    return (result.stderr.strip() or f"journalctl exited with {result.returncode}")[:240]
-
-
-def journal_retained_range(headers: str) -> dict[str, Any]:
-    """Find the contiguous system-journal sequence ending in the active file."""
-
-    records = [part for part in headers.split("File path: ")[1:] if part.strip()]
-    if not records or len(records) > 128 or len(headers) > 256_000:
-        raise ValueError("journal header inventory is empty or exceeds its bound")
-    files = []
-    try:
-        for record in records:
-            fields = dict(line.split(": ", 1) for line in record.splitlines()[1:] if ": " in line)
-            count = int(fields["Entry objects"])
-            if count == 0:
-                continue
-            head = int(fields["Head sequential number"].split()[0])
-            tail = int(fields["Tail sequential number"].split()[0])
-            since = int(fields["Head realtime timestamp"].rsplit("(", 1)[1].rstrip(")"), 16) / 1_000_000
-            until = int(fields["Tail realtime timestamp"].rsplit("(", 1)[1].rstrip(")"), 16) / 1_000_000
-            sequence = fields["Sequential number ID"]
-            if not re.fullmatch(r"[0-9a-f]{32}", sequence) or head <= 0 or count != tail - head + 1 or not 0 < since <= until:
-                raise ValueError("journal sequence or timestamps are inconsistent")
-            files.append({"head": head, "tail": tail, "since": since, "until": until, "sequence": sequence, "state": fields["State"]})
-    except (KeyError, IndexError, TypeError, ValueError) as exc:
-        raise ValueError(f"journal header inventory is incomplete: {exc}") from exc
-    active = [item for item in files if item["state"] == "ONLINE"]
-    if len(active) != 1:
-        raise ValueError("a unique active system journal is unavailable")
-    first = active[0]
-    while True:
-        previous = [item for item in files if item["sequence"] == first["sequence"] and item["tail"] + 1 == first["head"]]
-        if len(previous) != 1 or previous[0]["until"] > first["since"]:
-            break
-        first = previous[0]
-    return {"since_epoch": first["since"], "sequence_id": first["sequence"], "files": len(files)}
-
-
-def journal_coverage(*, since: float, until: float) -> dict[str, Any]:
-    coverage: dict[str, Any] = {"method": "system-journal-sequence", "since_epoch": None, "error": ""}
-    try:
-        result = run(["env", "LC_ALL=C", "journalctl", "--system", "--header", "--no-pager"], timeout=10)
-        if result.returncode or result.stderr.strip():
-            raise ValueError(journal_command_error(result) or result.stderr.strip()[:240])
-        coverage.update(journal_retained_range(result.stdout))
-        # Sequence continuity cannot recover records discarded by journald's rate limiter.
-        suppressed = run([
-            "journalctl", "-u", "systemd-journald.service", "--since", f"@{since:.6f}",
-            "--until", f"@{until:.6f}", "--no-pager", "--output=json", "--lines=257",
-            "--grep=Suppressed [0-9]+ messages|Missed [0-9]+ messages",
-        ], timeout=5)
-        suppression_error = journal_command_error(suppressed) or suppressed.stderr.strip()
-        if suppression_error:
-            raise ValueError(suppression_error)
-        discarded, malformed = _parse_journal_events(suppressed)
-        if malformed or len(discarded) > 256:
-            raise ValueError("journal loss evidence is incomplete")
-        coverage["discarded_at"] = [timestamp for timestamp, _line in discarded]
-    except (OSError, subprocess.SubprocessError, ValueError) as exc:
-        coverage["error"] = str(exc)[:240]
-    return coverage
-
-
-def _parse_journal_events(result: subprocess.CompletedProcess[str]) -> tuple[list[tuple[float, str]], int]:
-    events: list[tuple[float, str]] = []
-    malformed = 0
-    for raw_line in result.stdout.splitlines():
-        try:
-            record = json.loads(raw_line)
-            timestamp = float(record["__REALTIME_TIMESTAMP"]) / 1_000_000
-            message = journal_record_message(record)
-            unit = str(record.get("_SYSTEMD_UNIT") or record.get("SYSLOG_IDENTIFIER") or "unknown")
-            if not message:
-                raise ValueError("journal message is empty or malformed")
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-            malformed += 1
-            continue
-        events.append((timestamp, f"[unit={unit}] {message}"))
-    return events, malformed
 
 
 def _journal_window_args(minutes: int, until: float | None) -> list[str]:
@@ -725,21 +388,21 @@ def _journal_event_context(minutes: int, problem_events: list[tuple[float, str]]
     if not event_ids:
         return []
     event_pattern = "|".join(re.escape(event_id) for event_id in event_ids)
-    result = run(
+    result = runtime.run(
         [
             "journalctl",
             "-u",
             "sing-box.service",
             *_journal_window_args(minutes, until),
             "--no-pager",
-            "--output=json",
+            "--output=json", "--all",
             rf"--grep=\[(?:\x1B\[[0-9;]*m)*(?:{event_pattern})\b",
         ],
         timeout=30,
     )
-    if journal_command_error(result):
+    if journal.journal_command_error(result):
         return []
-    context, _malformed = _parse_journal_events(result)
+    context, _malformed = journal.parse_journal_events(result)
     return [
         event
         for event in context
@@ -748,7 +411,7 @@ def _journal_event_context(minutes: int, problem_events: list[tuple[float, str]]
 
 
 def journal_problem_events(minutes: int, *, until: float | None = None) -> tuple[list[tuple[float, str]], str]:
-    result = run(
+    result = runtime.run(
         [
             "journalctl",
             "-u",
@@ -757,19 +420,17 @@ def journal_problem_events(minutes: int, *, until: float | None = None) -> tuple
             "vpn-stack-xray.service",
             *_journal_window_args(minutes, until),
             "--no-pager",
-            "--output=json",
+            "--output=json", "--all",
             f"--grep={PROBLEM_LOG_GREP}",
         ],
         timeout=30,
     )
-    command_error = journal_command_error(result)
-    if command_error:
-        return [], command_error
-    events, malformed = _parse_journal_events(result)
+    command_error = journal.journal_command_error(result)
+    events, malformed = journal.parse_journal_events(result)
     events.extend(_journal_event_context(minutes, events, until=until))
     if malformed:
-        return events, f"journalctl returned {malformed} malformed JSON record(s)"
-    return events, ""
+        command_error = "; ".join(filter(None, (command_error, f"journalctl returned {malformed} malformed JSON record(s)")))
+    return events, command_error
 
 
 def _private_reject_policy(config: Any, manifest: dict[str, Any], contract: Mapping[str, Any]) -> dict[str, Any]:
@@ -797,7 +458,7 @@ def _private_reject_policy(config: Any, manifest: dict[str, Any], contract: Mapp
     ]
     drift = str(manifest.get("drift", "unknown"))
     ordered = any(index < catchall_index for index in guard_indexes)
-    has_router = contract_has(contract, CAP_ROUTER)
+    has_router = runtime.contract_has(contract, runtime.CAP_ROUTER)
     verified = has_router and drift == "none" and ordered
     reason = ""
     if not has_router:
@@ -810,7 +471,7 @@ def _private_reject_policy(config: Any, manifest: dict[str, Any], contract: Mapp
         "verified": verified,
         "reason": reason,
         "drift": drift,
-        "config_sha256": sha256_file(SINGBOX_CONFIG_PATH),
+        "config_sha256": sha256_file(runtime.SINGBOX_CONFIG_PATH),
         "guard_indexes": guard_indexes,
         "ipv4_catchall_index": catchall_index if catchall_index < len(rules) else None,
     }
@@ -819,7 +480,7 @@ def _private_reject_policy(config: Any, manifest: dict[str, Any], contract: Mapp
 def private_reject_correlations(since: str, inbound: str, targets: Iterable[str]) -> dict[str, Any]:
     if inbound not in PRIVATE_REJECT_INBOUND_TAGS:
         raise ValueError(f"unsupported private reject inbound: {inbound}")
-    marker = parse_iso_datetime(since)
+    marker = runtime.parse_iso_datetime(since)
     if marker is None:
         raise ValueError("private reject correlation marker is invalid")
     age_seconds = (datetime.now(timezone.utc) - marker).total_seconds()
@@ -847,7 +508,7 @@ def private_reject_correlations(since: str, inbound: str, targets: Iterable[str]
         contract = runtime_contract(raw_manifest if isinstance(raw_manifest, Mapping) else {})
     except RuntimeError:
         contract = {}
-    policy = _private_reject_policy(read_json(SINGBOX_CONFIG_PATH, {}), manifest, contract)
+    policy = _private_reject_policy(runtime.read_json(runtime.SINGBOX_CONFIG_PATH, {}), manifest, contract)
     evidence = {
         target: {"target": target, "correlated": False, "correlation_id": ""}
         for target in normalized_targets
@@ -865,7 +526,7 @@ def private_reject_correlations(since: str, inbound: str, targets: Iterable[str]
         response["reason"] = policy["reason"]
         return response
 
-    journal = run(
+    journal_result = runtime.run(
         [
             "journalctl",
             "-u",
@@ -873,12 +534,12 @@ def private_reject_correlations(since: str, inbound: str, targets: Iterable[str]
             "--since",
             marker.isoformat(),
             "--no-pager",
-            "--output=json",
+            "--output=json", "--all",
             "--grep=inbound connection to",
         ],
         timeout=20,
     )
-    command_error = journal_command_error(journal)
+    command_error = journal.journal_command_error(journal_result)
     if command_error:
         response["verdict"] = "failed"
         response["reason"] = command_error
@@ -886,11 +547,11 @@ def private_reject_correlations(since: str, inbound: str, targets: Iterable[str]
 
     marker_epoch = marker.timestamp()
     latest: dict[str, tuple[float, str, str]] = {}
-    for raw_line in journal.stdout.splitlines():
+    for raw_line in journal_result.stdout.splitlines():
         try:
             record = json.loads(raw_line)
             timestamp = float(record["__REALTIME_TIMESTAMP"]) / 1_000_000
-            message = journal_record_message(record)
+            message = journal.journal_record_message(record)
             if not message:
                 raise ValueError("journal message is empty or malformed")
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
@@ -942,7 +603,7 @@ def summarize_problem_windows(*, full_logs: bool, fresh_since: str) -> tuple[dic
     query_since = now - query_minutes * 60
     events, collector_error = journal_problem_events(query_minutes, until=now)
     coverage = {
-        **journal_coverage(since=query_since, until=now),
+        **journal.journal_coverage(runner=runtime.run, since=query_since, until=now),
         "query_since_epoch": query_since,
         "query_until_epoch": now,
     }
@@ -952,14 +613,10 @@ def summarize_problem_windows(*, full_logs: bool, fresh_since: str) -> tuple[dic
     observed_at = datetime.fromtimestamp(now, timezone.utc).isoformat()
 
     def window(since: float) -> dict[str, Any]:
-        coverage_error = str(coverage.get("error", ""))
-        retained_since = coverage.get("since_epoch")
-        if not coverage_error and since < query_since:
-            coverage_error = "requested start precedes collected journal interval"
-        if not coverage_error and (retained_since is None or since < retained_since):
-            coverage_error = "requested start precedes retained journal sequence"
-        if not coverage_error and any(since <= timestamp <= now for timestamp in coverage.get("discarded_at", ())):
-            coverage_error = "journald reported discarded messages in this window"
+        coverage_error = journal.journal_window_error(
+            coverage, since=since, until=now, query_since=query_since, query_until=now,
+            collector_error=collector_error,
+        )
         return {
             **summarize_classified_lines(item for timestamp, item in classified if since <= timestamp),
             "observed_at": observed_at,
@@ -991,13 +648,13 @@ def fresh_log_since() -> tuple[str, int]:
 
 def installed_at_value() -> str:
     try:
-        return (ROOT / "installed-at").read_text(encoding="utf-8").strip()
+        return (runtime.ROOT / "installed-at").read_text(encoding="utf-8").strip()
     except OSError:
         return ""
 
 
 def service_exec_path(service: str) -> str:
-    result = run(["systemctl", "show", service, "--property=MainPID", "--value"], timeout=5)
+    result = runtime.run(["systemctl", "show", service, "--property=MainPID", "--value"], timeout=5)
     if result.returncode != 0:
         return ""
     try:
@@ -1013,7 +670,7 @@ def service_exec_path(service: str) -> str:
 
 
 def manifest_snapshot() -> dict[str, Any]:
-    manifest = read_json(MANIFEST_PATH, {})
+    manifest = runtime.read_json(runtime.MANIFEST_PATH, {})
     manifest_mapping = manifest if isinstance(manifest, Mapping) else {}
     try:
         contract = runtime_contract(manifest_mapping)
@@ -1073,7 +730,7 @@ def manifest_snapshot() -> dict[str, Any]:
             "runtime_exec_path": runtime_exec_path,
             "state": state,
         }
-    installed_env_sha256 = sha256_file(ENV_PATH)
+    installed_env_sha256 = sha256_file(runtime.ENV_PATH)
     expected_env_sha256 = str(manifest.get("env_sha256", "")) if isinstance(manifest, dict) else ""
     if not installed_env_sha256 or installed_env_sha256 != expected_env_sha256:
         mismatches.append("deployment.env")
@@ -1083,14 +740,14 @@ def manifest_snapshot() -> dict[str, Any]:
         mismatches.append("release-tree")
 
     manifest_capabilities = frozenset(str(value) for value in contract.get("capabilities", ()))
-    has_operator_state = CAP_WEB_ADMIN in manifest_capabilities
+    has_operator_state = runtime.CAP_WEB_ADMIN in manifest_capabilities
     operator: dict[str, Any] = {"state": "not-applicable"}
     if has_operator_state:
-        operator_manifest = read_json(OPERATOR_MANIFEST_PATH, {})
+        operator_manifest = runtime.read_json(OPERATOR_MANIFEST_PATH, {})
         actual_hashes = {
-            "base_sha256": sha256_file(ROOT / "sing-box.base.json"),
+            "base_sha256": sha256_file(runtime.ROOT / "sing-box.base.json"),
             "rules_sha256": sha256_file(ADMIN_RULES_PATH),
-            "effective_config_sha256": sha256_file(SINGBOX_CONFIG_PATH),
+            "effective_config_sha256": sha256_file(runtime.SINGBOX_CONFIG_PATH),
         }
         operator_mismatches = [
             name
@@ -1105,9 +762,9 @@ def manifest_snapshot() -> dict[str, Any]:
         }
         if operator["state"] != "ok":
             mismatches.append("operator-state")
-    elif contract.get("node_id") == NODE_EXIT:
+    elif contract.get("node_id") == runtime.NODE_EXIT:
         expected_config = str(manifest.get("config_sha256", ""))
-        active_config = sha256_file(SINGBOX_CONFIG_PATH)
+        active_config = sha256_file(runtime.SINGBOX_CONFIG_PATH)
         operator = {
             "state": "ok" if expected_config and active_config == expected_config else "mutated",
             "effective_config_sha256": active_config,
@@ -1130,7 +787,7 @@ def manifest_snapshot() -> dict[str, Any]:
 
 
 def wireguard_snapshot(interface: str) -> dict[str, Any]:
-    result = run(["wg", "show", interface, "dump"], timeout=5)
+    result = runtime.run(["wg", "show", interface, "dump"], timeout=5)
     peers: list[dict[str, Any]] = []
     if result.returncode == 0:
         for line in result.stdout.splitlines()[1:]:
@@ -1147,16 +804,9 @@ def wireguard_snapshot(interface: str) -> dict[str, Any]:
                 "transfer_rx": int(fields[5] or 0),
                 "transfer_tx": int(fields[6] or 0),
             })
-    link = run(["ip", "-j", "link", "show", "dev", interface], timeout=5)
-    link_data = read_json_text(link.stdout, []) if link.returncode == 0 else []
+    link = runtime.run(["ip", "-j", "link", "show", "dev", interface], timeout=5)
+    link_data = runtime.read_json_text(link.stdout, []) if link.returncode == 0 else []
     return {"interface": interface, "state": "up" if link_data and "UP" in link_data[0].get("flags", []) else "down", "peers": peers}
-
-
-def read_json_text(payload: str, default: Any) -> Any:
-    try:
-        return json.loads(payload)
-    except (ValueError, TypeError):
-        return default
 
 
 def interface_counters(names: Iterable[str]) -> dict[str, dict[str, int]]:
@@ -1185,179 +835,6 @@ def interface_counters(names: Iterable[str]) -> dict[str, dict[str, int]]:
     return result
 
 
-def default_interface() -> str:
-    result = run(["ip", "-j", "route", "show", "default"], timeout=5)
-    routes = read_json_text(result.stdout, [])
-    return str(routes[0].get("dev", "")) if routes else ""
-
-
-def _wireguard_policy_rule_present(family: int, spec: Mapping[str, str | int]) -> bool:
-    result = run(
-        ["ip", f"-{family}", "rule", "show", "priority", str(spec["priority"])],
-        timeout=3,
-    )
-    mark = f"fwmark {int(spec['mark']):#x}"
-    table = f"lookup {spec['table']}"
-    return result.returncode == 0 and any(mark in line and table in line for line in result.stdout.splitlines())
-
-
-def _wireguard_policy_route_present(
-    family: int,
-    destination: str,
-    spec: Mapping[str, str | int],
-    *,
-    table: int | None = None,
-) -> bool:
-    args = ["ip", f"-{family}", "route", "show"]
-    if table is not None:
-        args.extend(("table", str(table)))
-    args.append(destination)
-    result = run(args, timeout=3)
-    interface = f"dev {spec['interface']}"
-    return result.returncode == 0 and any(interface in line for line in result.stdout.splitlines())
-
-
-def wireguard_policy_snapshot(env: Mapping[str, str], *, managed: bool) -> dict[str, Any]:
-    if not managed:
-        return {"managed": False, "ok": True, "checks": {}, "missing": []}
-    try:
-        spec = wireguard_policy_spec(env)
-    except (KeyError, ValueError) as exc:
-        return {"managed": True, "ok": False, "checks": {}, "missing": ["spec"], "error": str(exc)[:240]}
-    checks = {
-        "ipv4_peer_route": _wireguard_policy_route_present(4, f"{spec['ipv4_peer']}/32", spec),
-        "ipv6_peer_route": _wireguard_policy_route_present(6, f"{spec['ipv6_peer']}/128", spec),
-        "ipv4_default_route": _wireguard_policy_route_present(4, "default", spec, table=int(spec["table"])),
-        "ipv6_default_route": _wireguard_policy_route_present(6, "default", spec, table=int(spec["table"])),
-        "ipv4_rule": _wireguard_policy_rule_present(4, spec),
-        "ipv6_rule": _wireguard_policy_rule_present(6, spec),
-    }
-    missing = sorted(name for name, present in checks.items() if not present)
-    return {
-        "managed": True,
-        "ok": not missing,
-        "interface": spec["interface"],
-        "table": spec["table"],
-        "mark": spec["mark"],
-        "priority": spec["priority"],
-        "checks": checks,
-        "missing": missing,
-    }
-
-
-def apply_wireguard_policy(env: Mapping[str, str]) -> dict[str, Any]:
-    spec = wireguard_policy_spec(env)
-    before = wireguard_policy_snapshot(env, managed=True)
-    commands = {
-        "ipv4_peer_route": ["ip", "-4", "route", "replace", f"{spec['ipv4_peer']}/32", "dev", str(spec["interface"])],
-        "ipv6_peer_route": ["ip", "-6", "route", "replace", f"{spec['ipv6_peer']}/128", "dev", str(spec["interface"])],
-        "ipv4_default_route": ["ip", "-4", "route", "replace", "default", "dev", str(spec["interface"]), "table", str(spec["table"])],
-        "ipv6_default_route": ["ip", "-6", "route", "replace", "default", "dev", str(spec["interface"]), "table", str(spec["table"])],
-        "ipv4_rule": ["ip", "-4", "rule", "add", "fwmark", str(spec["mark"]), "table", str(spec["table"]), "priority", str(spec["priority"])],
-        "ipv6_rule": ["ip", "-6", "rule", "add", "fwmark", str(spec["mark"]), "table", str(spec["table"]), "priority", str(spec["priority"])],
-    }
-    for name in before.get("missing", []):
-        command = commands.get(str(name))
-        if command is None:
-            continue
-        result = run(command, timeout=10)
-        if result.returncode != 0:
-            raise RuntimeError(f"unable to apply WireGuard policy {name}: {result.stderr.strip()[:240]}")
-    after = wireguard_policy_snapshot(env, managed=True)
-    if not after.get("ok"):
-        raise RuntimeError(f"WireGuard policy did not converge: {','.join(after.get('missing', []))}")
-    return {**after, "changed": bool(before.get("missing"))}
-
-
-def qdisc_snapshot(interface: str) -> dict[str, Any]:
-    if not interface:
-        return {"qdisc": "", "qdisc_limit": 0, "qdisc_flow_limit": 0, "qdisc_drops": 0, "qdisc_flow_limit_drops": 0}
-    result = run(["tc", "-j", "-s", "qdisc", "show", "dev", interface], timeout=3)
-    payload = read_json_text(result.stdout, [])
-    root = next((item for item in payload if isinstance(item, dict) and item.get("root") is True), {}) if isinstance(payload, list) else {}
-    if root:
-        options = root.get("options", {}) if isinstance(root.get("options"), dict) else {}
-        return {
-            "qdisc": str(root.get("kind", "")),
-            "qdisc_limit": int(options.get("limit", 0) or 0),
-            "qdisc_flow_limit": int(options.get("flow_limit", 0) or 0),
-            "qdisc_drops": int(root.get("drops", 0) or 0),
-            "qdisc_flow_limit_drops": int(root.get("flows_plimit", 0) or 0),
-        }
-    fields = result.stdout.split()
-    return {
-        "qdisc": fields[1] if len(fields) > 1 and fields[0] == "qdisc" else "",
-        "qdisc_limit": 0,
-        "qdisc_flow_limit": 0,
-        "qdisc_drops": 0,
-        "qdisc_flow_limit_drops": 0,
-    }
-
-
-def apply_interface_qdisc(interface: str) -> dict[str, Any]:
-    before = qdisc_snapshot(interface)
-    expected = {"qdisc": FQ_KIND, "qdisc_limit": FQ_PACKET_LIMIT, "qdisc_flow_limit": FQ_FLOW_LIMIT}
-    if all(before.get(name) == value for name, value in expected.items()):
-        return {"changed": False, **before}
-    result = run(
-        ["tc", "qdisc", "replace", "dev", interface, "root", FQ_KIND, "limit", str(FQ_PACKET_LIMIT), "flow_limit", str(FQ_FLOW_LIMIT)],
-        timeout=10,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"unable to apply managed qdisc profile: {result.stderr.strip()[:240]}")
-    after = qdisc_snapshot(interface)
-    mismatches = [name for name, value in expected.items() if after.get(name) != value]
-    if mismatches:
-        raise RuntimeError(f"managed qdisc profile did not converge: {','.join(mismatches)}")
-    return {"changed": True, **after}
-
-
-def apply_qdisc_profile(*, include_overlay: bool = True) -> dict[str, Any]:
-    interface = default_interface()
-    if not interface:
-        raise RuntimeError("default interface is unavailable")
-    public = apply_interface_qdisc(interface)
-    result = {
-        "interface": interface,
-        "changed": public["changed"],
-        **{name: value for name, value in public.items() if name != "changed"},
-    }
-    if not include_overlay:
-        return result
-    overlay_interface = parse_env().get("WG_INTERFACE", "").strip() or "wg0"
-    if overlay_interface == interface:
-        overlay = public
-    elif (Path("/sys/class/net") / overlay_interface).exists():
-        overlay = apply_interface_qdisc(overlay_interface)
-    else:
-        overlay = {"changed": False, **qdisc_snapshot("")}
-    result.update(
-        {
-            "changed": public["changed"] or overlay["changed"],
-            "overlay_interface": overlay_interface,
-            **{f"overlay_{name}": value for name, value in overlay.items() if name != "changed"},
-        }
-    )
-    return result
-
-
-def apply_network_profile() -> dict[str, Any]:
-    env = parse_env()
-    manifest = read_json(MANIFEST_PATH, {})
-    contract = runtime_contract(manifest if isinstance(manifest, Mapping) else {})
-    has_interserver = bool(contract.get("capabilities", frozenset()) & INTERSERVER_CAPABILITIES)
-    qdisc = apply_qdisc_profile(include_overlay=has_interserver)
-    if contract_has(contract, CAP_INTERSERVER_CLIENT):
-        policy = apply_wireguard_policy(env)
-    else:
-        policy = {"managed": False, "ok": True, "not_applicable": True}
-    return {
-        "changed": bool(qdisc.get("changed") or policy.get("changed")),
-        "qdisc": qdisc,
-        "wireguard_policy": policy,
-    }
-
-
 def tcp_adaptation_snapshot(interface: str, overlay_interface: str = "") -> dict[str, Any]:
     values: dict[str, Any] = {}
     for field, name in (
@@ -1372,16 +849,16 @@ def tcp_adaptation_snapshot(interface: str, overlay_interface: str = "") -> dict
         ("udp_wmem_default", "net.core.wmem_default"),
         ("udp_wmem_max", "net.core.wmem_max"),
     ):
-        result = run(["sysctl", "-n", name], timeout=3)
+        result = runtime.run(["sysctl", "-n", name], timeout=3)
         value = result.stdout.strip()
         values[field] = int(value) if value.isdigit() else value
-    values.update(qdisc_snapshot(interface))
+    values.update(runtime.qdisc_snapshot(interface))
     if overlay_interface:
-        values.update({f"overlay_{name}": value for name, value in qdisc_snapshot(overlay_interface).items()})
+        values.update({f"overlay_{name}": value for name, value in runtime.qdisc_snapshot(overlay_interface).items()})
     return values
 
 
-def managed_network_profile(path: Path = SYSCTL_PATH, *, include_overlay: bool = True) -> dict[str, Any]:
+def managed_network_profile(path: Path = runtime.SYSCTL_PATH, *, include_overlay: bool = True) -> dict[str, Any]:
     field_names = {
         "net.core.rmem_default": "udp_rmem_default",
         "net.core.rmem_max": "udp_rmem_max",
@@ -1448,7 +925,7 @@ def protocol_counters_snapshot() -> dict[str, int]:
         "Udp6RcvbufErrors",
         "Udp6SndbufErrors",
     }
-    result = run(["nstat", "-az"], timeout=5)
+    result = runtime.run(["nstat", "-az"], timeout=5)
     counters: dict[str, int] = {}
     for line in result.stdout.splitlines():
         fields = line.split()
@@ -1657,7 +1134,7 @@ def render_tcp_metrics(values: dict[str, Any]) -> dict[str, Any]:
 def tcp_front_snapshot(port: int) -> dict[str, Any]:
     states = Counter()
     clients = Counter()
-    sockets = run(["ss", "-Htan", f"sport = :{port}"], timeout=8)
+    sockets = runtime.run(["ss", "-Htan", f"sport = :{port}"], timeout=8)
     for line in sockets.stdout.splitlines():
         fields = line.split()
         if len(fields) < 5:
@@ -1668,7 +1145,7 @@ def tcp_front_snapshot(port: int) -> dict[str, Any]:
             clients[host] += 1
     per_flow: dict[str, dict[str, Any]] = {}
     current_flow: dict[str, Any] | None = None
-    for raw_line in run(["ss", "-Htoein", f"sport = :{port}"], timeout=8).stdout.splitlines():
+    for raw_line in runtime.run(["ss", "-Htoein", f"sport = :{port}"], timeout=8).stdout.splitlines():
         line = raw_line.strip()
         fields = line.split()
         if len(fields) >= 5 and fields[0] in {"ESTAB", "SYN-RECV", "FIN-WAIT-1", "FIN-WAIT-2", "CLOSE-WAIT", "LAST-ACK", "CLOSING", "TIME-WAIT"}:
@@ -1765,7 +1242,7 @@ def tcp_front_snapshot(port: int) -> dict[str, Any]:
             for metrics in all_flow_metrics.values()
         )
     )
-    listener = run(["ss", "-Hltn", f"sport = :{port}"], timeout=5)
+    listener = runtime.run(["ss", "-Hltn", f"sport = :{port}"], timeout=5)
     return {
         "port": port,
         "listening": bool(listener.stdout.strip()),
@@ -1813,13 +1290,13 @@ def client_front_quality(metrics: dict[str, Any]) -> str:
         and minimum > 0
         and p95 >= FRONT_RTT_DEGRADED_MS
         and p95 >= minimum * FRONT_RTT_INFLATION_FACTOR
-        and max_rto >= FRONT_RTO_DEGRADED_MS
+        and max_rto >= lifecycle.FRONT_RTO_DEGRADED_MS
     ):
         return "degraded"
     if (
         retransmissions >= FRONT_SMALL_FLOW_MIN_RETRANSMISSIONS
         and p95 >= FRONT_RTT_DEGRADED_MS
-        and max_rto >= FRONT_RTO_DEGRADED_MS
+        and max_rto >= lifecycle.FRONT_RTO_DEGRADED_MS
     ):
         return "degraded"
     if bytes_sent >= FRONT_LOSS_MIN_BYTES and retransmit_ratio_pct >= FRONT_LOSS_DEGRADED_PERCENT:
@@ -1900,14 +1377,14 @@ def front_interval_snapshot(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     counters = front_counter_snapshot(front, observed_at)
     previous_flows = previous_counters.get("flows", {}) if isinstance(previous_counters, dict) else {}
-    previous_age = iso_age_seconds(
+    previous_age = runtime.iso_age_seconds(
         str(previous_counters.get("observed_at", "")),
-        now=parse_iso_datetime(observed_at),
+        now=runtime.parse_iso_datetime(observed_at),
     )
     baseline_reason = ""
     if not previous_flows:
         baseline_reason = "missing"
-    elif previous_age is None or previous_age > FRONT_COUNTER_MAX_INTERVAL_SECONDS:
+    elif previous_age is None or previous_age > lifecycle.FRONT_COUNTER_MAX_INTERVAL_SECONDS:
         previous_flows = {}
         baseline_reason = "stale"
     interval_flows: dict[str, dict[str, Any]] = {}
@@ -1981,7 +1458,7 @@ def xray_reality_pending_handshakes(target: str) -> int | None:
     _host, target_port = split_endpoint(target)
     if target_port is None:
         return None
-    sockets = run(["ss", "-Htanp", "state", "syn-sent"], timeout=5)
+    sockets = runtime.run(["ss", "-Htanp", "state", "syn-sent"], timeout=5)
     if sockets.returncode != 0:
         return None
     return sum(
@@ -1992,7 +1469,7 @@ def xray_reality_pending_handshakes(target: str) -> int | None:
 
 
 def xray_front_socket_policy(port: int) -> dict[str, Any]:
-    config = read_json(XRAY_CONFIG_PATH, {})
+    config = runtime.read_json(XRAY_CONFIG_PATH, {})
     for inbound in config.get("inbounds", []) if isinstance(config, dict) else []:
         if not isinstance(inbound, dict):
             continue
@@ -2034,7 +1511,7 @@ def xray_front_socket_policy(port: int) -> dict[str, Any]:
 
 
 def public_hy2_snapshot(port: int) -> dict[str, Any]:
-    config = read_json(SINGBOX_CONFIG_PATH, {})
+    config = runtime.read_json(runtime.SINGBOX_CONFIG_PATH, {})
     inbound: dict[str, Any] = {}
     for candidate in config.get("inbounds", []) if isinstance(config, dict) else []:
         if not isinstance(candidate, dict):
@@ -2046,8 +1523,8 @@ def public_hy2_snapshot(port: int) -> dict[str, Any]:
         if candidate.get("type") == "hysteria2" and candidate.get("tag") == "public-hy2-in" and candidate_port == port:
             inbound = candidate
             break
-    listener = run(["ss", "-Hlun", f"sport = :{port}"], timeout=5)
-    ruleset = run(["nft", "list", "table", "inet", "vpnstack"], timeout=8)
+    listener = runtime.run(["ss", "-Hlun", f"sport = :{port}"], timeout=5)
+    ruleset = runtime.run(["nft", "list", "table", "inet", "vpnstack"], timeout=8)
     rules = ruleset.stdout
     firewall = (
         ruleset.returncode == 0
@@ -2202,123 +1679,12 @@ def front_degradation_evidence(
     }
 
 
-def parse_tcp_destination_metrics(source: str, output: str) -> dict[str, Any]:
-    line = next((raw.strip() for raw in output.splitlines() if raw.strip()), "")
-    metrics: dict[str, Any] = {"source": source, "cached": bool(line)}
-    if match := re.search(r"\breordering\s+(\d+)", line):
-        metrics["reordering"] = int(match.group(1))
-    return metrics
-
-
-def tcp_destination_metrics(source: str) -> dict[str, Any]:
-    try:
-        address = ipaddress.ip_address(source)
-    except ValueError:
-        return {"source": source, "available": False, "error": "invalid source address"}
-    if address.is_loopback or address.is_multicast or address.is_unspecified:
-        return {"source": str(address), "available": False, "error": "source address is not recoverable"}
-    canonical = str(address)
-    result = run(["ip", "tcp_metrics", "show", canonical], timeout=5)
-    if result.returncode != 0:
-        detail = " ".join((result.stderr.strip() or result.stdout.strip() or "ip tcp_metrics failed").split())
-        return {"source": canonical, "available": False, "error": detail[:160]}
-    return {"available": True, **parse_tcp_destination_metrics(canonical, result.stdout)}
-
-
-def front_source_stall(front: Mapping[str, Any], source: str) -> dict[str, Any]:
-    max_rto_ms = 0
-    min_mss: int | None = None
-    active_flows = 0
-    for metrics in front.get("flows", {}).values():
-        if not isinstance(metrics, Mapping) or metrics.get("source") != source or metrics.get("phase") != "active":
-            continue
-        active_flows += 1
-        rto = metrics.get("rto_ms", {})
-        max_rto_ms = max(max_rto_ms, int(rto.get("max", 0) or 0) if isinstance(rto, Mapping) else 0)
-        raw_mss = metrics.get("mss")
-        if isinstance(raw_mss, int):
-            min_mss = raw_mss if min_mss is None else min(min_mss, raw_mss)
-    floor_collapse = min_mss is not None and min_mss <= TCP_MTU_PROBE_FLOOR
-    return {
-        "active_flows": active_flows,
-        "max_rto_ms": max_rto_ms,
-        "min_mss": min_mss,
-        "stalled": max_rto_ms >= FRONT_CACHE_STALLED_RTO_MS or (floor_collapse and max_rto_ms >= FRONT_RTO_DEGRADED_MS),
-    }
-
-
-def previous_front_interval_degraded(previous: Mapping[str, Any], source: str, observed_at: str) -> bool:
-    now = parse_iso_datetime(observed_at)
-    prior_interval = previous.get("front_interval", {})
-    if not isinstance(prior_interval, Mapping) or source not in prior_interval.get("degraded_sources", []):
-        return False
-    age = iso_age_seconds(str(prior_interval.get("observed_at", "")), now=now) if now else None
-    return age is not None and 0 <= age <= FRONT_COUNTER_MAX_INTERVAL_SECONDS
-
-
-def reconcile_front_tcp_metrics_cache(
-    front: Mapping[str, Any],
-    interval: Mapping[str, Any],
-    previous: Mapping[str, Any],
-    observed_at: str,
-    now_epoch: int,
-) -> dict[str, Any]:
-    prior_recovery = previous.get("front_cache_recovery", {})
-    prior_actions = prior_recovery.get("last_actions", {}) if isinstance(prior_recovery, Mapping) else {}
-    last_actions = dict(prior_actions) if isinstance(prior_actions, Mapping) else {}
-    actions: list[dict[str, Any]] = []
-    degraded_sources = interval.get("degraded_sources", []) if interval.get("baseline") is not True else []
-    for source in sorted({str(value) for value in degraded_sources})[:FRONT_CACHE_RECOVERY_HISTORY_LIMIT]:
-        stall = front_source_stall(front, source)
-        if not stall["stalled"] or not previous_front_interval_degraded(previous, source, observed_at):
-            continue
-        last = last_actions.get(source, {})
-        last_epoch = int(last.get("epoch", 0) or 0) if isinstance(last, Mapping) and last.get("status") == "ok" else 0
-        if now_epoch - last_epoch < FRONT_CACHE_RECOVERY_COOLDOWN_SECONDS:
-            continue
-        cached = tcp_destination_metrics(source)
-        reordering = int(cached.get("reordering", 0) or 0)
-        if cached.get("available") is not True or cached.get("cached") is not True or reordering < FRONT_CACHE_REORDERING_THRESHOLD:
-            continue
-        if len(actions) >= FRONT_CACHE_RECOVERY_MAX_ACTIONS:
-            break
-        source = str(cached["source"])
-        result = run(["ip", "tcp_metrics", "delete", source], timeout=5)
-        status = "ok" if result.returncode == 0 else "failed"
-        action = {
-            "source": source,
-            "status": status,
-            "observed_at": observed_at,
-            "epoch": now_epoch,
-            "cached_reordering": reordering,
-            "max_rto_ms": stall["max_rto_ms"],
-            "min_mss": stall["min_mss"],
-        }
-        if status == "failed":
-            action["error"] = " ".join((result.stderr.strip() or result.stdout.strip() or "delete failed").split())[:160]
-        actions.append(action)
-        last_actions[source] = action
-    bounded_actions = dict(
-        sorted(
-            ((str(source), dict(value)) for source, value in last_actions.items() if isinstance(value, Mapping)),
-            key=lambda item: int(item[1].get("epoch", 0) or 0),
-            reverse=True,
-        )[:FRONT_CACHE_RECOVERY_HISTORY_LIMIT]
-    )
-    return {
-        "policy": "exact-destination-metrics-v1",
-        "observed_at": observed_at,
-        "actions": actions,
-        "last_actions": bounded_actions,
-    }
-
-
 def source_in_log_line(line: str, source: str) -> bool:
     return source_from_line(line) == normalize_source(source)
 
 
 def udp_443_policy() -> str:
-    config = read_json(SINGBOX_CONFIG_PATH, {})
+    config = runtime.read_json(runtime.SINGBOX_CONFIG_PATH, {})
     rules = config.get("route", {}).get("rules", []) if isinstance(config, dict) else []
     for rule in rules if isinstance(rules, list) else []:
         if not isinstance(rule, dict):
@@ -2342,800 +1708,6 @@ def udp_443_policy() -> str:
     return "routed"
 
 
-def clash_api_json(
-    controller: str,
-    path: str,
-    *,
-    method: str = "GET",
-    payload: dict[str, Any] | None = None,
-    timeout: float = 3,
-) -> dict[str, Any]:
-    body = json.dumps(payload, separators=(",", ":")).encode("utf-8") if payload is not None else None
-    request = urllib.request.Request(
-        f"http://{controller}{path}",
-        method=method,
-        data=body,
-        headers={"Accept": "application/json", "Content-Type": "application/json"},
-    )
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    with opener.open(request, timeout=timeout) as response:
-        body = response.read()
-    if not body:
-        return {}
-    decoded = json.loads(body.decode("utf-8"))
-    if not isinstance(decoded, dict):
-        raise ValueError("local Clash API returned a non-object response")
-    return decoded
-
-
-def wireguard_overlay_relay(env: dict[str, str]) -> dict[str, Any]:
-    interface = env.get("WG_INTERFACE", "wg0")
-    peer = env.get("WG_FOREIGN_PUBLIC_KEY", "")
-    if not peer:
-        return {"available": False, "endpoint": "", "reason": "WireGuard peer is not configured"}
-    result = run(["wg", "show", interface, "endpoints"], timeout=3)
-    if result.returncode != 0:
-        return {
-            "available": False,
-            "endpoint": "",
-            "reason": (result.stderr.strip() or "WireGuard endpoint is unavailable")[:240],
-        }
-    endpoint = ""
-    for line in result.stdout.splitlines():
-        fields = line.split()
-        if len(fields) >= 2 and fields[0] == peer:
-            endpoint = fields[1]
-            break
-    host, port = split_endpoint(endpoint)
-    available = normalize_source(host) in {"127.0.0.1", "::1"} and port == TRANSPORT_RELAY_PORT
-    return {
-        "available": available,
-        "endpoint": endpoint,
-        "reason": "" if available else "WireGuard overlay endpoint is not the fixed managed relay",
-    }
-
-
-def transport_selector_selection(controller: str) -> dict[str, Any]:
-    try:
-        selector = clash_api_json(
-            controller,
-            f"/proxies/{urllib.parse.quote(TRANSPORT_SELECTOR_TAG, safe='')}",
-            timeout=2,
-        )
-    except (OSError, ValueError, urllib.error.URLError) as exc:
-        return {"available": False, "selected": "", "reason": f"selector state is unavailable: {exc}"[:240]}
-    selected = str(selector.get("now", ""))
-    available = selected in TRANSPORT_CANDIDATE_TAGS
-    return {
-        "available": available,
-        "selected": selected,
-        "reason": "" if available else "selector returned an invalid underlay",
-    }
-
-
-def transport_selection_snapshot(config: dict[str, Any], env: dict[str, str], controller: str) -> dict[str, Any]:
-    def tags(items: Any) -> set[str]:
-        if not isinstance(items, list):
-            return set()
-        return {
-            str(item.get("tag", ""))
-            for item in items
-            if isinstance(item, dict) and item.get("tag")
-        }
-
-    outbound_tags = tags(config.get("outbounds", []))
-    endpoint_tags = tags(config.get("endpoints", []))
-    candidates = {
-        TRANSPORT_WG_TAG: {"configured": TRANSPORT_WG_TAG in endpoint_tags},
-        TRANSPORT_HY2_TAG: {"configured": TRANSPORT_HY2_TAG in outbound_tags},
-    }
-    relay = wireguard_overlay_relay(env)
-    selector = transport_selector_selection(controller)
-    selected = str(selector.get("selected", ""))
-    topology_configured = transport_topology_configured(config, env)
-    available = relay.get("available") is True and selector.get("available") is True and topology_configured
-    return {
-        "available": available,
-        "selected": selected,
-        "endpoint": relay.get("endpoint", ""),
-        "selector": TRANSPORT_SELECTOR_TAG,
-        "candidates": candidates,
-        "reason": "" if available else str(
-            relay.get("reason") or selector.get("reason") or "transport topology is incomplete"
-        ),
-    }
-
-
-def preferred_transport_probe_due(previous: dict[str, Any], observed_at: str) -> bool:
-    now = parse_iso_datetime(observed_at)
-    retry = previous.get("preferred_retry", {})
-    retry_at = parse_iso_datetime(str(retry.get("retry_at", ""))) if isinstance(retry, dict) else None
-    if now is not None and retry_at is not None and now < retry_at:
-        return False
-    age = iso_age_seconds(str(previous.get("preferred_probe_at", "")), now=now) if now else None
-    return age is None or age >= TRANSPORT_PREFERRED_PROBE_INTERVAL_SECONDS
-
-
-def overlay_quality_probe_due(previous: dict[str, Any], observed_at: str) -> bool:
-    if previous.get("state") == "suspect":
-        return False
-    now = parse_iso_datetime(observed_at)
-    age = iso_age_seconds(str(previous.get("quality_probe_at", "")), now=now) if now else None
-    return age is None or age >= TRANSPORT_QUALITY_PROBE_INTERVAL_SECONDS
-
-
-def ping_failure_reason(result: subprocess.CompletedProcess[str], fallback: str) -> str:
-    detail = " ".join((result.stderr.strip() or result.stdout.strip() or fallback).split())
-    lowered = detail.lower()
-    if "100% packet loss" in lowered or "0 received" in lowered:
-        return f"{fallback} timed out"
-    return detail[:240]
-
-
-def transport_overlay_path_probe(env: dict[str, str], *, quality: bool = False) -> dict[str, Any]:
-    """Probe the managed overlay; quality sampling never decides liveness."""
-
-    started = time.monotonic()
-    interface = env.get("WG_INTERFACE", "wg0")
-    target = str(env.get("WG_FOREIGN_ADDRESS", "")).split("/", 1)[0]
-    if not target:
-        return {
-            "checked": True,
-            "ok": False,
-            "attempts": 1,
-            "delay_ms": 0,
-            "elapsed_ms": 0,
-            "scope": "overlay-icmp",
-            "target": "",
-            "error": "foreign WireGuard address is missing",
-        }
-    if not quality:
-        return transport_overlay_dns_probe(interface, target)
-
-    packet_count = TRANSPORT_QUALITY_PROBE_PACKETS
-    payload_bytes = TRANSPORT_QUALITY_PROBE_PAYLOAD_BYTES
-    command = ["ping", "-n", "-I", interface, "-c", str(packet_count)]
-    command.extend(["-i", "0.05", "-w", "2"])
-    command.extend(["-W", "1", "-s", str(payload_bytes), target])
-    result = run(command, timeout=3)
-    elapsed_ms = max(1, round((time.monotonic() - started) * 1000))
-    error = ""
-    packet_loss_pct: float | None = None
-    rtt_avg_ms: float | None = None
-    loss_match = re.search(r"([0-9]+(?:[.,][0-9]+)?)%\s+packet loss", result.stdout)
-    if loss_match:
-        packet_loss_pct = float(loss_match.group(1).replace(",", "."))
-    rtt_match = re.search(r"=\s*[0-9.]+/([0-9.]+)/[0-9.]+/[0-9.]+\s+ms", result.stdout)
-    if rtt_match:
-        rtt_avg_ms = float(rtt_match.group(1))
-    if packet_loss_pct is not None and packet_loss_pct > 0:
-        error = f"WireGuard overlay packet loss {packet_loss_pct:g}%"
-    if not error and result.returncode != 0:
-        error = ping_failure_reason(result, "WireGuard overlay liveness probe")
-    payload: dict[str, Any] = {
-        "checked": True,
-        "ok": not error,
-        "attempts": packet_count,
-        "delay_ms": 0 if error else round(rtt_avg_ms or elapsed_ms),
-        "elapsed_ms": elapsed_ms,
-        "scope": "overlay-quality",
-        "target": target,
-        "error": error,
-        "quality_checked": packet_loss_pct is not None,
-        "payload_bytes": payload_bytes,
-    }
-    if packet_loss_pct is not None:
-        payload["packet_loss_pct"] = packet_loss_pct
-    if rtt_avg_ms is not None:
-        payload["rtt_avg_ms"] = rtt_avg_ms
-    return payload
-
-
-def collect_transport_probes(
-    selected: str,
-    previous: dict[str, Any],
-    *,
-    env: dict[str, str],
-    observed_at: str,
-) -> dict[str, dict[str, Any]]:
-    probes = {tag: {"checked": False, "ok": False, "attempts": 0} for tag in TRANSPORT_CANDIDATE_TAGS}
-    if selected not in probes:
-        return probes
-    probes[selected] = transport_overlay_path_probe(env)
-    if probes[selected].get("ok") is True and overlay_quality_probe_due(previous, observed_at):
-        quality = transport_overlay_path_probe(env, quality=True)
-        probes[selected] = {
-            **probes[selected],
-            "quality_checked": quality.get("quality_checked") is True,
-            "quality_sampled": True,
-            "quality_ok": quality.get("ok") is True,
-            "quality_error": str(quality.get("error", ""))[:240],
-            **{
-                key: quality[key]
-                for key in ("packet_loss_pct", "rtt_avg_ms", "payload_bytes")
-                if key in quality
-            },
-        }
-    elif probes[selected].get("ok") is True and isinstance(previous.get("last_quality_probe"), dict):
-        prior_quality = previous["last_quality_probe"]
-        probes[selected].update(
-            {
-                key: prior_quality[key]
-                for key in (
-                    "quality_checked",
-                    "quality_ok",
-                    "quality_error",
-                    "packet_loss_pct",
-                    "rtt_avg_ms",
-                    "payload_bytes",
-                )
-                if key in prior_quality
-            }
-        )
-        probes[selected]["quality_sampled"] = False
-    fresh_selected_quality_failure = (
-        probes[selected].get("quality_sampled") is True
-        and probes[selected].get("quality_checked") is True
-        and probes[selected].get("quality_ok") is False
-    )
-    if probes[selected].get("ok") is not True or fresh_selected_quality_failure:
-        alternate = next(tag for tag in TRANSPORT_CANDIDATE_TAGS if tag != selected)
-        if transport_switch_backoff_active(previous, alternate, observed_at) is None:
-            if fresh_selected_quality_failure:
-                probes[alternate] = transport_candidate_probe(
-                    alternate,
-                    timeout_ms=TRANSPORT_CANDIDATE_QUALITY_PROBE_TIMEOUT_MS,
-                    attempts=TRANSPORT_CANDIDATE_QUALITY_PROBE_ATTEMPTS,
-                )
-            else:
-                probes[alternate] = transport_candidate_probe(alternate)
-    elif (
-        selected != TRANSPORT_PREFERRED_TAG
-        and preferred_transport_probe_due(previous, observed_at)
-        and transport_switch_backoff_active(previous, TRANSPORT_PREFERRED_TAG, observed_at) is None
-    ):
-        probes[TRANSPORT_PREFERRED_TAG] = transport_candidate_probe(
-            TRANSPORT_PREFERRED_TAG,
-            timeout_ms=TRANSPORT_CANDIDATE_QUALITY_PROBE_TIMEOUT_MS,
-            attempts=TRANSPORT_CANDIDATE_QUALITY_PROBE_ATTEMPTS,
-        )
-    return probes
-
-
-class TransportSwitchError(RuntimeError):
-    def __init__(self, message: str, evidence: dict[str, Any]):
-        super().__init__(message[:240])
-        self.evidence = evidence
-
-
-def prove_wireguard_overlay(env: dict[str, str]) -> dict[str, Any]:
-    interface = env.get("WG_INTERFACE", "wg0")
-    target = str(env.get("WG_FOREIGN_ADDRESS", "")).split("/", 1)[0]
-    if not interface or not target:
-        raise RuntimeError("foreign WireGuard overlay proof identity is missing")
-
-    started = time.monotonic()
-    budget = (
-        TRANSPORT_SWITCH_PROOF_ATTEMPTS * TRANSPORT_SWITCH_PROOF_TIMEOUT_MS / 1000
-        + (TRANSPORT_SWITCH_PROOF_ATTEMPTS - 1) * TRANSPORT_SWITCH_PROOF_RETRY_DELAY_SECONDS
-    )
-    deadline = started + budget
-    report: dict[str, Any] = {
-        "ok": False, "checked": True, "budget_ms": round(budget * 1000),
-        "started_at": datetime.now(timezone.utc).isoformat(),
-        "rounds_limit": TRANSPORT_SWITCH_PROOF_ATTEMPTS, "rounds": [],
-        "probe": {"checked": False, "ok": False},
-    }
-    last_error = "overlay DNS convergence deadline expired"
-    for attempt in range(1, TRANSPORT_SWITCH_PROOF_ATTEMPTS + 1):
-        if time.monotonic() >= deadline:
-            break
-        proof = transport_overlay_dns_probe(interface, target, deadline=deadline)
-        report["rounds"].append(proof)
-        report["probe"] = proof
-        if proof.get("ok") is True and proof.get("health_confirmed") is True and time.monotonic() < deadline:
-            report["ok"] = True
-            break
-        last_error = str(proof.get("error", "") or last_error)[:240]
-        if attempt < TRANSPORT_SWITCH_PROOF_ATTEMPTS:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            time.sleep(min(TRANSPORT_SWITCH_PROOF_RETRY_DELAY_SECONDS, remaining))
-    report.update(
-        elapsed_ms=max(0, round((time.monotonic() - started) * 1000)),
-        finished_at=datetime.now(timezone.utc).isoformat(),
-        error="" if report["ok"] else last_error,
-    )
-    if not report["ok"]:
-        raise TransportSwitchError(
-            f"WireGuard overlay DNS convergence proof failed after {len(report['rounds'])} rounds: {last_error[:160]}",
-            report,
-        )
-    return report
-
-
-def reset_transport_relay(controller: str) -> int:
-    """Close only the inner-WireGuard relay association so it follows the new selector."""
-
-    payload = clash_api_json(controller, "/connections", timeout=2)
-    connections = payload.get("connections", [])
-    expected_type = f"direct/{TRANSPORT_RELAY_INBOUND_TAG}"
-    closed = 0
-    for connection in connections if isinstance(connections, list) else []:
-        if not isinstance(connection, dict):
-            continue
-        chains = connection.get("chains", [])
-        metadata = connection.get("metadata", {})
-        connection_id = str(connection.get("id", ""))
-        if (
-            not isinstance(chains, list)
-            or TRANSPORT_SELECTOR_TAG not in chains
-            or not isinstance(metadata, dict)
-            or metadata.get("network") != "udp"
-            or metadata.get("type") != expected_type
-            or not connection_id
-        ):
-            continue
-        clash_api_json(
-            controller,
-            f"/connections/{urllib.parse.quote(connection_id, safe='')}",
-            method="DELETE",
-            timeout=2,
-        )
-        closed += 1
-    return closed
-
-
-def select_transport(
-    env: dict[str, str], controller: str, tag: str, *, cycle_id: str = "",
-) -> dict[str, Any]:
-    if tag not in TRANSPORT_CANDIDATE_TAGS:
-        raise ValueError(f"unknown transport candidate: {tag}")
-    started = time.monotonic()
-    started_at = datetime.now(timezone.utc).isoformat()
-    current = transport_selector_selection(controller)
-    old_tag = str(current.get("selected", ""))
-    if current.get("available") is not True or old_tag not in TRANSPORT_CANDIDATE_TAGS:
-        raise RuntimeError("current underlay selector state is not recoverable")
-    report: dict[str, Any] = {
-        "cycle_id": cycle_id or f"{started_at}:{time.monotonic_ns()}",
-        "phase": "after", "started_at": started_at,
-        "selector_before": old_tag, "selector_requested": tag, "selector_after": old_tag,
-        "changed": False, "ok": False, "rollback_verified": False,
-        "relay_resets": [], "activation_proof": {}, "rollback_proof": {},
-    }
-    stage = "selector_apply"
-
-    def observe_selector() -> str:
-        selected = transport_selector_selection(controller)
-        value = str(selected.get("selected", "")) if selected.get("available") is True else ""
-        report["selector_after"] = value
-        return value
-
-    def set_selector(value: str, phase: str) -> None:
-        nonlocal stage
-        stage = f"{phase}_selector"
-        clash_api_json(
-            controller,
-            f"/proxies/{urllib.parse.quote(TRANSPORT_SELECTOR_TAG, safe='')}",
-            method="PUT",
-            payload={"name": value},
-            timeout=2,
-        )
-        if observe_selector() != value:
-            raise RuntimeError("underlay selector did not apply the requested path")
-        stage = f"{phase}_relay_reset"
-        closed = reset_transport_relay(controller)
-        report["relay_resets"].append({"phase": phase, "path": value, "closed": closed})
-
-    def prove(phase: str, path: str) -> None:
-        nonlocal stage
-        stage = phase
-        proof: dict[str, Any] = {"checked": False, "ok": False}
-        try:
-            proof = prove_wireguard_overlay(env)
-        except TransportSwitchError as exc:
-            proof = exc.evidence
-            raise
-        except (OSError, RuntimeError, ValueError) as exc:
-            proof["error"] = str(exc)[:240]
-            raise
-        finally:
-            after = observe_selector()
-            evidence = {
-                **proof, "phase": phase, "path": path, "cycle_id": report["cycle_id"],
-                "selector_after": after,
-            }
-            evidence["probe"] = {
-                **proof.get("probe", {"checked": False, "ok": False}),
-                "phase": phase, "path": path, "cycle_id": report["cycle_id"],
-            }
-            if after != path:
-                evidence["ok"] = False
-                evidence["probe"] = {
-                    "checked": False, "ok": False, "phase": phase, "path": after,
-                    "cycle_id": report["cycle_id"], "error": "selector changed during overlay proof",
-                }
-            report[f"{phase}_proof"] = evidence
-        if proof.get("ok") is not True or after != path:
-            raise RuntimeError("selected path has no matching overlay proof")
-
-    def finish() -> None:
-        report.update(
-            finished_at=datetime.now(timezone.utc).isoformat(),
-            elapsed_ms=max(0, round((time.monotonic() - started) * 1000)),
-        )
-
-    try:
-        if old_tag != tag:
-            set_selector(tag, "activation")
-        prove("activation", tag)
-    except (OSError, RuntimeError, ValueError, urllib.error.URLError) as exc:
-        report.update(error=str(exc)[:180], failure_stage=stage)
-        if old_tag != tag:
-            try:
-                set_selector(old_tag, "rollback")
-                prove("rollback", old_tag)
-            except (OSError, RuntimeError, ValueError, urllib.error.URLError) as rollback_exc:
-                report.update(rollback_error=str(rollback_exc)[:240], rollback_failure_stage=stage)
-            else:
-                report["rollback_verified"] = True
-        # A failed PUT may have applied remotely even when no acknowledgement arrived.
-        observe_selector()
-        report["rollback_verified"] = report["rollback_verified"] and report["selector_after"] == old_tag
-        finish()
-        suffix = "previous selector path restored and verified" if report["rollback_verified"] else "rollback not verified"
-        raise TransportSwitchError(f"{report['error']}; {suffix}", report) from exc
-    report.update(ok=True, changed=old_tag != tag, error="")
-    finish()
-    return report
-
-
-def transport_switch_backoff_active(
-    previous: dict[str, Any],
-    target: str,
-    observed_at: str,
-) -> dict[str, Any] | None:
-    backoff = previous.get("switch_backoff", {})
-    if not isinstance(backoff, dict) or backoff.get("target") != target:
-        return None
-    retry_at = parse_iso_datetime(str(backoff.get("retry_at", "")))
-    observed = parse_iso_datetime(observed_at)
-    if retry_at is None or observed is None or observed >= retry_at:
-        return None
-    return backoff
-
-
-def next_transport_switch_failure(
-    previous: dict[str, Any],
-    target: str,
-    reason: str,
-    observed_at: str,
-) -> dict[str, Any]:
-    prior = transport_switch_failure_history(previous, target, observed_at)
-    attempts = max(0, int(prior.get("attempts", 0) or 0)) + 1 if prior else 1
-    delay = min(
-        TRANSPORT_SWITCH_RETRY_MAX_SECONDS,
-        TRANSPORT_SWITCH_RETRY_BASE_SECONDS * (2 ** min(attempts - 1, 8)),
-    )
-    observed = parse_iso_datetime(observed_at) or datetime.now(timezone.utc)
-    return {
-        "target": target,
-        "attempts": attempts,
-        "failed_at": observed_at,
-        "retry_at": (observed + timedelta(seconds=delay)).isoformat(),
-        "reason": reason[:240],
-    }
-
-
-def transport_switch_failure_history(
-    previous: dict[str, Any], target: str, observed_at: str,
-) -> dict[str, Any] | None:
-    now = parse_iso_datetime(observed_at)
-    if now is None or target not in TRANSPORT_CANDIDATE_TAGS:
-        return None
-    for key in ("switch_backoff", "last_switch_failure"):
-        failure = previous.get(key, {})
-        if not isinstance(failure, dict) or failure.get("target") != target:
-            continue
-        age = iso_age_seconds(str(failure.get("failed_at", "")), now=now)
-        if age is not None and 0 <= age < TRANSPORT_PREFERRED_STABLE_RESET_SECONDS:
-            return failure
-    return None
-
-
-def current_transport_state(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict) or value.get("schema_version") != TRANSPORT_STATE_SCHEMA_VERSION:
-        return {}
-    return value
-
-
-def reconcile_interserver_transport() -> dict[str, Any]:
-    install_lock = acquire_install_read_lock()
-    if install_lock is None:
-        previous = current_transport_state(read_json(TRANSPORT_STATE_PATH, {}))
-        payload = {
-            **(previous if isinstance(previous, dict) else {}),
-            "schema_version": TRANSPORT_STATE_SCHEMA_VERSION,
-            "updated_at": utc_now(),
-            "state": "maintenance",
-            "changed": False,
-            "would_switch": False,
-            "reason": "install transaction is active",
-        }
-        write_json_atomic(TRANSPORT_STATE_PATH, payload)
-        return payload
-    try:
-        return _reconcile_interserver_transport_unlocked()
-    finally:
-        release_install_read_lock(install_lock)
-
-
-def _reconcile_interserver_transport_unlocked() -> dict[str, Any]:
-    TRANSPORT_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with TRANSPORT_LOCK_PATH.open("w", encoding="utf-8") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        config = read_json(SINGBOX_CONFIG_PATH, {})
-        env = parse_env()
-        controller = str(config.get("experimental", {}).get("clash_api", {}).get("external_controller", "")) if isinstance(config, dict) else ""
-        previous_state = current_transport_state(read_json(TRANSPORT_STATE_PATH, {}))
-        if not isinstance(config, dict) or not transport_topology_configured(config, env) or not controller:
-            payload = {
-                "schema_version": TRANSPORT_STATE_SCHEMA_VERSION,
-                "updated_at": utc_now(),
-                "state": "failed",
-                "selected": "",
-                "recommended": "",
-                "would_switch": False,
-                "reason": "stable WireGuard overlay relays are not configured",
-            }
-            write_json_atomic(TRANSPORT_STATE_PATH, payload)
-            return payload
-
-        selection = transport_selection_snapshot(config, env, controller)
-        selected = str(selection.get("selected", ""))
-        if not selection.get("available"):
-            payload = {
-                "schema_version": TRANSPORT_STATE_SCHEMA_VERSION,
-                "updated_at": utc_now(),
-                "state": "failed",
-                "selected": selected,
-                "recommended": selected,
-                "would_switch": False,
-                "reason": str(selection.get("reason", "transport endpoint state is unavailable")),
-            }
-            write_json_atomic(TRANSPORT_STATE_PATH, payload)
-            return payload
-
-        observed_at = utc_now()
-        probes = collect_transport_probes(
-            selected,
-            previous_state,
-            env=env,
-            observed_at=observed_at,
-        )
-        cycle_id = f"{observed_at}:{time.monotonic_ns()}"
-        probes = {
-            path: {**probe, "cycle_id": cycle_id, "phase": "before", "path": path}
-            for path, probe in probes.items()
-        }
-        payload = evaluate_transport_policy(
-            selected=selected,
-            probes=probes,
-            previous=previous_state,
-            observed_at=observed_at,
-        )
-        payload.update(cycle_id=cycle_id, selector_before=selected, selector_after=selected)
-        if isinstance(previous_state.get("last_transition"), dict):
-            payload["last_transition"] = previous_state["last_transition"]
-        payload["overlay_probe"] = probes.get(selected, {})
-        if probes.get(selected, {}).get("quality_sampled") is True:
-            payload["quality_probe_at"] = observed_at
-            payload["last_quality_probe"] = probes[selected]
-        elif previous_state.get("quality_probe_at"):
-            payload["quality_probe_at"] = previous_state["quality_probe_at"]
-            if isinstance(previous_state.get("last_quality_probe"), dict):
-                payload["last_quality_probe"] = previous_state["last_quality_probe"]
-        alternate = next((tag for tag in TRANSPORT_CANDIDATE_TAGS if tag != selected), "")
-        last_switch_failure = transport_switch_failure_history(previous_state, alternate, observed_at)
-        if last_switch_failure is not None:
-            payload["last_switch_failure"] = last_switch_failure
-        switch_backoff = transport_switch_backoff_active(previous_state, alternate, observed_at)
-        if switch_backoff is not None:
-            payload["switch_backoff"] = switch_backoff
-            if payload.get("would_switch"):
-                payload.update(
-                    {
-                        "state": "degraded" if probes.get(selected, {}).get("ok") is True else "failed",
-                        "recommended": selected,
-                        "would_switch": False,
-                        "changed": False,
-                        "reason": (
-                            f"{payload.get('reason', '')}; underlay activation is paused until "
-                            f"{switch_backoff.get('retry_at', 'the next retry window')}"
-                        ),
-                    }
-                )
-        if payload.get("would_switch"):
-            target = str(payload.get("recommended", ""))
-            transition: dict[str, Any] = {}
-            try:
-                transition = select_transport(env, controller, target, cycle_id=cycle_id)
-            except (OSError, RuntimeError, ValueError) as exc:
-                failure_reason = f"underlay selector update failed: {str(exc)[:180]}"
-                if isinstance(exc, TransportSwitchError):
-                    transition = exc.evidence
-                rollback_verified = transition.get("rollback_verified") is True
-                switch_failure = next_transport_switch_failure(
-                    previous_state,
-                    target,
-                    failure_reason,
-                    observed_at,
-                )
-                payload.update(
-                    {
-                        "state": "degraded" if rollback_verified else "failed",
-                        "recommended": selected,
-                        "would_switch": False,
-                        "changed": False,
-                        "switch_backoff": switch_failure,
-                        "last_switch_failure": switch_failure,
-                        "reason": failure_reason,
-                    }
-                )
-            else:
-                payload.update(
-                    {
-                        "changed": transition["changed"],
-                        "selected": target,
-                        "would_switch": False,
-                        "state": "degraded" if payload.get("hard_failure_evidence") else "healthy",
-                        "reason": f"{payload.get('reason', '')}; underlay selector updated",
-                    }
-                )
-                payload.pop("switch_backoff", None)
-                payload.pop("last_switch_failure", None)
-                payload.pop("quality_failure", None)
-                payload.pop("last_quality_probe", None)
-            if transition:
-                payload["last_transition"] = transition
-                payload["selector_after"] = transition["selector_after"]
-                payload["selected"] = transition["selector_after"]
-                phase = "rollback" if transition.get("rollback_proof") else "activation"
-                proof = transition.get(f"{phase}_proof", {})
-                current_probe = proof.get("probe", {})
-                payload["overlay_probe"] = current_probe if current_probe.get("path") == transition["selector_after"] else {
-                    "checked": False, "ok": False, "phase": phase,
-                    "path": transition["selector_after"], "cycle_id": cycle_id,
-                }
-            else:
-                payload["selector_after"] = ""
-                payload["selected"] = ""
-                payload["overlay_probe"] = {
-                    "checked": False, "ok": False, "phase": "after", "path": "", "cycle_id": cycle_id,
-                }
-        write_json_atomic(TRANSPORT_STATE_PATH, payload)
-        return payload
-
-
-def watch_interserver_transport() -> None:
-    previous_signature: tuple[str, str, str] | None = None
-    while True:
-        started = time.monotonic()
-        try:
-            payload = reconcile_interserver_transport()
-        except Exception as exc:  # noqa: BLE001
-            payload = {
-                "schema_version": TRANSPORT_STATE_SCHEMA_VERSION,
-                "updated_at": utc_now(),
-                "state": "failed",
-                "selected": "",
-                "recommended": "",
-                "reason": str(exc)[:240],
-            }
-            write_json_atomic(TRANSPORT_STATE_PATH, payload)
-        signature = (
-            str(payload.get("state", "")),
-            str(payload.get("selected", "")),
-            str(payload.get("reason", "")),
-        )
-        transition = payload.get("last_transition", {})
-        new_transition = isinstance(transition, dict) and bool(payload.get("cycle_id")) and transition.get("cycle_id") == payload["cycle_id"]
-        if signature != previous_signature or new_transition:
-            print(json.dumps(payload, ensure_ascii=False, sort_keys=True), flush=True)
-            previous_signature = signature
-        time.sleep(max(0.1, TRANSPORT_PROBE_INTERVAL_SECONDS - (time.monotonic() - started)))
-
-
-def transport_state_snapshot(path: Path = TRANSPORT_STATE_PATH) -> dict[str, Any]:
-    state = read_json(path, {})
-    if not isinstance(state, dict) or not state:
-        return {}
-    age_seconds = _observation_age_seconds(str(state.get("updated_at", "")))
-    return {
-        **state,
-        "age_seconds": round(age_seconds, 1) if age_seconds is not None else None,
-        "fresh": age_seconds is not None and 0 <= age_seconds <= TRANSPORT_PROBE_INTERVAL_SECONDS * 6,
-    }
-
-
-def interserver_transport_snapshot(contract: Mapping[str, Any], env: dict[str, str]) -> dict[str, Any]:
-    config = read_json(SINGBOX_CONFIG_PATH, {})
-    if not isinstance(config, dict):
-        return {"configured": False, "reason": "sing-box config is unreadable"}
-    if contract_has(contract, CAP_INTERSERVER_CLIENT):
-        outbounds = {
-            str(item.get("tag", "")): item
-            for item in config.get("outbounds", [])
-            if isinstance(item, dict) and item.get("tag")
-        }
-        hysteria = outbounds.get(TRANSPORT_HY2_TAG, {})
-        server = str(hysteria.get("server", "")) if isinstance(hysteria, dict) else ""
-        try:
-            port = int(hysteria.get("server_port", 0)) if isinstance(hysteria, dict) else 0
-        except (TypeError, ValueError):
-            port = 0
-        session_active = False
-        if server and port:
-            sockets = run(["ss", "-Huan"], timeout=5)
-            for line in sockets.stdout.splitlines():
-                fields = line.split()
-                if len(fields) < 2:
-                    continue
-                host, remote_port = split_endpoint(fields[-1])
-                if normalize_source(host) == normalize_source(server) and remote_port == port:
-                    session_active = True
-                    break
-        configured = transport_topology_configured(config, env)
-        controller = str(config.get("experimental", {}).get("clash_api", {}).get("external_controller", ""))
-        selection = transport_selection_snapshot(config, env, controller)
-        adaptive_state = transport_state_snapshot()
-        if not adaptive_state:
-            adaptive_state = {"state": "failed", "fresh": False, "reason": "transport watcher has not reported"}
-        return {
-            "configured": configured,
-            "mode": "stable-wireguard-overlay",
-            "candidates": list(TRANSPORT_CANDIDATE_TAGS),
-            "server": server,
-            "port": port,
-            "relay_port": TRANSPORT_RELAY_PORT,
-            "selector": TRANSPORT_SELECTOR_TAG,
-            "hysteria_session_active": session_active,
-            "selection": selection,
-            "adaptive_state": adaptive_state,
-        }
-    if contract_has(contract, CAP_INTERSERVER_SERVER):
-        inbound = next(
-            (item for item in config.get("inbounds", []) if isinstance(item, dict) and item.get("tag") == "interserver-hy2-in"),
-            {},
-        )
-        try:
-            port = int(inbound.get("listen_port", 0))
-        except (TypeError, ValueError):
-            port = 0
-        listeners = run(["ss", "-Huln"], timeout=5)
-        listening = any(
-            len(fields := line.split()) >= 2 and split_endpoint(fields[-2])[1] == port
-            for line in listeners.stdout.splitlines()
-        ) if port else False
-        configured = (
-            inbound.get("type") == "hysteria2"
-            and inbound.get("obfs", {}).get("type") == "salamander"
-            and bool(inbound.get("users"))
-            and bool(inbound.get("tls", {}).get("certificate"))
-            and bool(inbound.get("tls", {}).get("key"))
-        )
-        return {
-            "configured": configured,
-            "mode": "hysteria2-egress",
-            "port": port,
-            "listening": listening,
-            "source_restricted_to": env.get("GATEWAY_PUBLIC_IP", ""),
-        }
-    return {"configured": False, "reason": "interserver transport is not required by node capabilities"}
-
-
 def public_front_snapshot(minutes: int, source: str | None = None, *, live_probes: bool = False) -> dict[str, Any]:
     if not 5 <= minutes <= 1440:
         raise ValueError("since must be in range 5..1440 minutes")
@@ -3145,9 +1717,9 @@ def public_front_snapshot(minutes: int, source: str | None = None, *, live_probe
             ipaddress.ip_address(source)
         except ValueError as exc:
             raise ValueError("source must be an IP address") from exc
-    env = parse_env()
+    env = runtime.parse_env()
     contract = installed_runtime_contract()
-    if not contract_has(contract, CAP_PUBLIC_FRONT):
+    if not runtime.contract_has(contract, runtime.CAP_PUBLIC_FRONT):
         raise RuntimeError("public front diagnostics are not applicable to this node")
     port = int(env.get("RU_LISTEN_PORT", "443") or 443)
     xray_lines = journal_filtered_lines("vpn-stack-xray.service", minutes, XRAY_FRONT_LOG_GREP)
@@ -3163,7 +1735,7 @@ def public_front_snapshot(minutes: int, source: str | None = None, *, live_probe
             if origin:
                 source_counts[origin] += 1
     front = tcp_front_snapshot(port)
-    services = {"xray": service_state("vpn-stack-xray.service"), "nftables": service_state(NFTABLES_SERVICE)}
+    services = {"xray": service_state("vpn-stack-xray.service"), "nftables": service_state(runtime.NFTABLES_SERVICE)}
     observation = front_observation(front)
     front_verdict = public_front_verdict(services["xray"], front)
     probes = run_probes(env, contract, "light") if live_probes else {"profile": "none", "ok": None, "requirements": {}}
@@ -3171,7 +1743,7 @@ def public_front_snapshot(minutes: int, source: str | None = None, *, live_probe
     overall = "failed" if "failed" in {front_verdict, path_verdict} else "degraded" if front_verdict == "degraded" else front_verdict
     payload = {
         "schema_version": SCHEMA_VERSION,
-        "generated_at": utc_now(),
+        "generated_at": runtime.utc_now(),
         "window_minutes": minutes,
         "services": services,
         "front": front,
@@ -3225,7 +1797,7 @@ def public_front_snapshot(minutes: int, source: str | None = None, *, live_probe
         if metrics.get("source") == source
     }
     recent_interval = recent_observation(
-        read_json(HEALTH_STATE_PATH, {}).get("front_interval", {}),
+        runtime.read_json(runtime.HEALTH_STATE_PATH, {}).get("front_interval", {}),
         max_age_seconds=300,
     )
     interval_sources = recent_interval.get("sources", {}) if recent_interval else {}
@@ -3299,43 +1871,29 @@ def percentile(values: list[float], percent: int) -> float | None:
     return ordered[index]
 
 
-def kernel_conntrack_full_windows(*, full_logs: bool) -> dict[str, int]:
+def kernel_conntrack_full_windows(
+    *, full_logs: bool, coverage: Mapping[str, Any] | None = None, cutoff: float | None = None,
+) -> dict[str, Any]:
     windows = (5, 30, 1440) if full_logs else (5,)
-    result = run(
-        [
-            "journalctl",
-            "-k",
-            "--since",
-            f"{max(windows)} minutes ago",
-            "--no-pager",
-            "-o",
-            "short-unix",
-            f"--grep={CONNTRACK_FULL_GREP}",
-        ],
-        timeout=20,
+    now = time.time() if cutoff is None else cutoff
+    return journal.kernel_event_snapshot(
+        runner=runtime.run, pattern=CONNTRACK_FULL_GREP,
+        window_starts={str(minutes): now - minutes * 60 for minutes in windows},
+        query_since=now - max(windows) * 60, cutoff=now, coverage=coverage,
     )
-    timestamps: list[float] = []
-    for raw_line in result.stdout.splitlines():
-        timestamp, separator, message = raw_line.partition(" ")
-        if not separator or "nf_conntrack" not in message or "table full" not in message:
-            continue
-        try:
-            timestamps.append(float(timestamp))
-        except ValueError:
-            continue
-    now = time.time()
-    return {str(minutes): sum(timestamp >= now - minutes * 60 for timestamp in timestamps) for minutes in windows}
 
 
 def xray_conntrack_bypass_snapshot(port: int) -> dict[str, bool]:
-    result = run(["nft", "list", "table", "inet", "vpnstack"], timeout=5)
+    result = runtime.run(["nft", "list", "table", "inet", "vpnstack"], timeout=5)
     lines = result.stdout.splitlines() if result.returncode == 0 else []
     ingress = any(f"tcp dport {port}" in line and "notrack" in line and "vpnstack-xray-in-notrack" in line for line in lines)
     egress = any(f"tcp sport {port}" in line and "notrack" in line and "vpnstack-xray-out-notrack" in line for line in lines)
     return {"active": ingress and egress, "ingress": ingress, "egress": egress}
 
 
-def conntrack_snapshot(*, full_logs: bool = True) -> dict[str, Any]:
+def conntrack_snapshot(
+    *, full_logs: bool = True, coverage: Mapping[str, Any] | None = None, cutoff: float | None = None,
+) -> dict[str, Any]:
     def number(path: str) -> int:
         try:
             return int(Path(path).read_text().strip())
@@ -3344,11 +1902,15 @@ def conntrack_snapshot(*, full_logs: bool = True) -> dict[str, Any]:
 
     count = number("/proc/sys/net/netfilter/nf_conntrack_count")
     maximum = number("/proc/sys/net/netfilter/nf_conntrack_max")
+    events = kernel_conntrack_full_windows(full_logs=full_logs, coverage=coverage, cutoff=cutoff)
+    events.pop("events", None)
     return {
         "count": count,
         "max": maximum,
         "percent": round(count * 100 / maximum, 2) if maximum else 0.0,
-        "table_full_events": kernel_conntrack_full_windows(full_logs=full_logs),
+        "table_full_events": events["counts"],
+        "table_full_observed": events["observed_counts"],
+        "journal_evidence": events,
     }
 
 
@@ -3375,7 +1937,7 @@ def probe_url(
     if proxy:
         args.extend(["--proxy", proxy])
     args.append(url)
-    result = run(args, timeout=timeout + 2)
+    result = runtime.run(args, timeout=timeout + 2)
     fields = result.stdout.strip().split("|")
     return {
         "target": url,
@@ -3411,7 +1973,7 @@ def probe_identity(*, interface: str = "", proxy: str = "", timeout: int = 8) ->
     if proxy:
         args.extend(["--proxy", proxy])
     args.append("https://1.1.1.1/cdn-cgi/trace")
-    result = run(args, timeout=timeout + 2)
+    result = runtime.run(args, timeout=timeout + 2)
     value = next((line.partition("=")[2].strip() for line in result.stdout.splitlines() if line.startswith("ip=")), "")
     try:
         valid = ipaddress.ip_address(value).version == 4
@@ -3427,7 +1989,7 @@ def probe_private_reject(proxy: str) -> dict[str, Any]:
     results: list[dict[str, Any]] = []
     for target in targets:
         started = time.monotonic()
-        result = run(
+        result = runtime.run(
             ["curl", "-4", "-sS", "-o", "/dev/null", "--proxy", proxy, "--connect-timeout", "2", "--max-time", "4", target],
             timeout=6,
         )
@@ -3443,13 +2005,6 @@ def probe_private_reject(proxy: str) -> dict[str, Any]:
     return {"ok": all(item["ok"] for item in results), "targets": results}
 
 
-def failed_requirements(probes: dict[str, Any]) -> list[str]:
-    requirements = probes.get("requirements", {})
-    if not isinstance(requirements, dict):
-        return []
-    return sorted(str(name) for name, passed in requirements.items() if passed is not True)
-
-
 def release_gate_requirements(requirements: dict[str, bool]) -> dict[str, bool]:
     return {name: passed for name, passed in requirements.items() if name not in OPTIONAL_TRANSPORT_REQUIREMENTS}
 
@@ -3461,16 +2016,16 @@ def release_gate_ok(probes: dict[str, Any]) -> bool:
 
 
 def _configured_node_ip(env: Mapping[str, str], contract: Mapping[str, Any], node_id: str) -> str:
-    if node_id == NODE_EXIT:
+    if node_id == runtime.NODE_EXIT:
         return str(env.get("EXIT_PUBLIC_IP") or "")
     return str(env.get("GATEWAY_PUBLIC_IP") or "")
 
 
 def run_probes(env: dict[str, str], contract: Mapping[str, Any], profile: str) -> dict[str, Any]:
-    topology = str(contract.get("topology", TOPOLOGY_DUAL))
+    topology = str(contract.get("topology", runtime.TOPOLOGY_DUAL))
     node_id = str(contract.get("node_id", ""))
-    has_router = contract_has(contract, CAP_ROUTER)
-    has_interserver_client = contract_has(contract, CAP_INTERSERVER_CLIENT)
+    has_router = runtime.contract_has(contract, runtime.CAP_ROUTER)
+    has_interserver_client = runtime.contract_has(contract, runtime.CAP_INTERSERVER_CLIENT)
     wg_interface = env.get("WG_INTERFACE", "wg0")
     targets = ["https://www.google.com/generate_204"]
     required_targets = tuple(targets)
@@ -3548,16 +2103,16 @@ def run_probes(env: dict[str, str], contract: Mapping[str, Any], profile: str) -
     identities: dict[str, dict[str, Any]] = {"direct": expected_identity(probe_identity(), direct_expected)}
     if has_router:
         routed_egress_ip = (
-            _configured_node_ip(env, contract, NODE_EXIT)
-            if topology == TOPOLOGY_DUAL
-            else _configured_node_ip(env, contract, NODE_GATEWAY)
+            _configured_node_ip(env, contract, runtime.NODE_EXIT)
+            if topology == runtime.TOPOLOGY_DUAL
+            else _configured_node_ip(env, contract, runtime.NODE_GATEWAY)
         )
         identities["router"] = expected_identity(probe_identity(proxy="socks5h://127.0.0.1:2080"), routed_egress_ip)
         if has_interserver_client:
             identities["via_wg"] = expected_identity(probe_identity(interface=wg_interface), routed_egress_ip)
     private_reject = probe_private_reject("socks5h://127.0.0.1:2080") if has_router else {"ok": True, "not_applicable": True}
     if has_interserver_client:
-        hysteria_candidate = transport_candidate_probe(TRANSPORT_HY2_TAG)
+        hysteria_candidate = load_transport().policy.transport_candidate_probe(load_transport().policy.TRANSPORT_HY2_TAG)
         required_paths: dict[str, list[dict[str, Any]]] = {
             "ru_direct_identity": [identities["direct"]],
             "foreign_domains_via_wg": required_domain_results(via_wg),
@@ -3622,8 +2177,8 @@ def run_confirmed_probes(env: dict[str, str], contract: Mapping[str, Any], profi
         "cycles": 2,
         "confirmed_failure": not retry_passed,
         "recovered_on_retry": retry_passed,
-        "initial_failed_requirements": failed_requirements(first),
-        "failed_requirements": failed_requirements(retry),
+        "initial_failed_requirements": runtime.failed_requirements(first),
+        "failed_requirements": runtime.failed_requirements(retry),
     }
     return retry
 
@@ -3741,7 +2296,7 @@ def root_filesystem_snapshot(
     result["errors_count"] = read_counter(sysfs / "errors_count")
     result["first_error_time"] = read_counter(sysfs / "first_error_time")
     result["last_error_time"] = read_counter(sysfs / "last_error_time")
-    tune = run(["tune2fs", "-l", device], timeout=8)
+    tune = runtime.run(["tune2fs", "-l", device], timeout=8)
     metadata: dict[str, str] = {}
     if tune.returncode == 0:
         for line in tune.stdout.splitlines():
@@ -3822,7 +2377,7 @@ def resolver_snapshot() -> dict[str, Any]:
 
 def host_snapshot(default_iface: str) -> dict[str, Any]:
     is_root = bool(getattr(os, "geteuid", lambda: 1)() == 0)
-    has_sudo = is_root or run(["sudo", "-n", "true"], timeout=2).returncode == 0
+    has_sudo = is_root or runtime.run(["sudo", "-n", "true"], timeout=2).returncode == 0
     os_release = os_release_fields()
     facts = detect_host_facts()
     try:
@@ -3846,19 +2401,10 @@ def host_snapshot(default_iface: str) -> dict[str, Any]:
     }
 
 
-def probe_requirement(probes: dict[str, Any], name: str) -> bool:
-    requirements = probes.get("requirements", {})
-    return isinstance(requirements, dict) and requirements.get(name) is True
-
-
-def probe_path_ok(probes: dict[str, Any], *requirement_names: str) -> bool:
-    return any(probe_requirement(probes, name) for name in requirement_names)
-
-
 def collect_runtime_facts(*, live_probes: bool = False, profile: str = "light", full_logs: bool = True, include_maintenance: bool = True) -> dict[str, Any]:
     # A composite collector keeps its earliest acquisition time, not the later envelope time.
-    observed_at = {"artifacts": utc_now()}
-    env = parse_env()
+    observed_at = {"artifacts": runtime.utc_now()}
+    env = runtime.parse_env()
     manifest_data = manifest_snapshot()
     manifest = manifest_data.get("manifest", {})
     contract_error = ""
@@ -3878,61 +2424,63 @@ def collect_runtime_facts(*, live_probes: bool = False, profile: str = "light", 
     node_id = str(contract.get("node_id", ""))
     location = str(contract.get("location", ""))
     capabilities = frozenset(str(value) for value in contract.get("capabilities", ()))
-    has_interserver = bool(capabilities & INTERSERVER_CAPABILITIES)
-    has_interserver_client = CAP_INTERSERVER_CLIENT in capabilities
-    has_interserver_server = CAP_INTERSERVER_SERVER in capabilities
-    has_public_front = CAP_PUBLIC_FRONT in capabilities
+    has_interserver = bool(capabilities & runtime.INTERSERVER_CAPABILITIES)
+    has_interserver_client = runtime.CAP_INTERSERVER_CLIENT in capabilities
+    has_interserver_server = runtime.CAP_INTERSERVER_SERVER in capabilities
+    has_public_front = runtime.CAP_PUBLIC_FRONT in capabilities
     wg_interface = env.get("WG_INTERFACE", "wg0")
-    public_iface = default_interface()
+    public_iface = runtime.default_interface()
     port = int(env.get("RU_LISTEN_PORT", "443") or 443)
 
-    services = {name: "not-applicable" for name in SERVICE_UNIT_DEFAULTS}
+    services = {name: "not-applicable" for name in runtime.SERVICE_UNIT_DEFAULTS}
     service_units = contract.get("service_units", {}) if isinstance(contract.get("service_units"), Mapping) else {}
-    observed_at["services"] = utc_now()
+    observed_at["services"] = runtime.utc_now()
     for name in contract.get("required_services", ()):
-        unit = str(service_units.get(name, SERVICE_UNIT_DEFAULTS.get(name, ""))).format(wg_interface=wg_interface)
+        unit = str(service_units.get(name, runtime.SERVICE_UNIT_DEFAULTS.get(name, ""))).format(wg_interface=wg_interface)
         services[str(name)] = service_state(unit) if unit else "unknown"
 
     fresh_since, fresh_window_minutes = fresh_log_since()
     if not full_logs and fresh_window_minutes > 5:
         fresh_since, fresh_window_minutes = "5 minutes ago", 5
     if include_maintenance:
-        observed_at["maintenance"] = utc_now()
+        observed_at["maintenance"] = runtime.utc_now()
     maintenance = maintenance_snapshot() if include_maintenance else {}
     release_installed_at = installed_at_value()
-    observed_at["logs"] = utc_now()
+    observed_at["logs"] = runtime.utc_now()
     logs, fresh_logs, logs_collector_error = summarize_problem_windows(full_logs=full_logs, fresh_since=fresh_since)
     if has_public_front:
-        observed_at["front"] = utc_now()
+        observed_at["front"] = runtime.utc_now()
     front = tcp_front_snapshot(port) if has_public_front else {}
     if live_probes and not contract_error:
-        observed_at["route_probes"] = utc_now()
+        observed_at["route_probes"] = runtime.utc_now()
     probes = run_confirmed_probes(env, contract, profile) if live_probes and not contract_error else {"profile": "none", "ok": None}
     transport: dict[str, Any] = {}
     if has_interserver:
-        observed_at["transport"] = utc_now()
-        transport["interserver"] = interserver_transport_snapshot(contract, env)
+        observed_at["transport"] = runtime.utc_now()
+        transport["interserver"] = load_transport().interserver_transport_snapshot(contract, env)
     if has_public_front:
         transport["udp_443_policy"] = udp_443_policy()
         transport["public_client"] = public_hy2_snapshot(port)
-    observed_at["network"] = utc_now()
+    observed_at["network"] = runtime.utc_now()
     tcp_adaptation = tcp_adaptation_snapshot(public_iface, wg_interface if has_interserver else "")
     resolver = resolver_snapshot()
-    observed_at["storage"] = utc_now()
+    observed_at["storage"] = runtime.utc_now()
     root_filesystem = root_filesystem_snapshot()
-    storage = storage_snapshot(root_filesystem, release_installed_at)
-    conntrack = conntrack_snapshot(full_logs=full_logs)
+    coverage = fresh_logs.get("coverage", {})
+    cutoff = coverage.get("query_until_epoch")
+    storage = storage_snapshot(root_filesystem, release_installed_at, coverage=coverage, cutoff=cutoff)
+    conntrack = conntrack_snapshot(full_logs=full_logs, coverage=coverage, cutoff=cutoff)
     if has_public_front:
         conntrack["front_bypass"] = xray_conntrack_bypass_snapshot(port)
     expected_network_profile = managed_network_profile(include_overlay=has_interserver)
     actual_network_profile = {**tcp_adaptation, "conntrack_max": conntrack.get("max", 0)}
     profile_mismatches = network_profile_mismatches(actual_network_profile, expected_network_profile)
     wireguard_policy = (
-        wireguard_policy_snapshot(env, managed=True)
+        runtime.wireguard_policy_snapshot(env, managed=True)
         if has_interserver_client
         else {"managed": False, "ok": True, "not_applicable": True}
     )
-    health_state = read_json(HEALTH_STATE_PATH, {})
+    health_state = runtime.read_json(runtime.HEALTH_STATE_PATH, {})
     recent_front_interval = recent_observation(health_state.get("front_interval", {}), max_age_seconds=300)
     recent_front_interval = release_scoped_observation(recent_front_interval, release_installed_at)
     if front and recent_front_interval:
@@ -3962,7 +2510,7 @@ def collect_runtime_facts(*, live_probes: bool = False, profile: str = "light", 
     if services.get("sing-box") == "active" and router_memory.get("go_memory_limit_active") is not True:
         reasons.append("sing_box_memory_budget=missing")
     if live_probes and not contract_error and not release_gate_ok(probes):
-        failed = ",".join(failed_requirements(probes))
+        failed = ",".join(runtime.failed_requirements(probes))
         reasons.append(f"live_probes_failed:{failed}" if failed else "live_probes_failed")
     if has_public_front and transport.get("udp_443_policy") != "routed":
         reasons.append(f"udp_443_policy={transport.get('udp_443_policy')}")
@@ -3986,8 +2534,8 @@ def collect_runtime_facts(*, live_probes: bool = False, profile: str = "light", 
         if adaptation_failure:
             reasons.append(adaptation_failure)
 
-    capability_failures = [name for name in failed_requirements(probes) if name in EXTERNAL_CAPABILITY_REQUIREMENTS] if live_probes else []
-    transport_failures = [name for name in failed_requirements(probes) if name in OPTIONAL_TRANSPORT_REQUIREMENTS] if live_probes else []
+    capability_failures = [name for name in runtime.failed_requirements(probes) if name in EXTERNAL_CAPABILITY_REQUIREMENTS] if live_probes else []
+    transport_failures = [name for name in runtime.failed_requirements(probes) if name in OPTIONAL_TRANSPORT_REQUIREMENTS] if live_probes else []
     server_path = "failed" if reasons else "verified" if live_probes else "inconclusive"
     host_integrity = str(root_filesystem.get("verdict", "inconclusive"))
     host_integrity_detail = str(root_filesystem.get("reason", ""))
@@ -4003,10 +2551,14 @@ def collect_runtime_facts(*, live_probes: bool = False, profile: str = "light", 
     elif capacity.get("verdict") == "degraded" and host_integrity == "verified":
         host_integrity_detail = "root_disk_near_capacity"
         host_integrity = "degraded"
-    oom_counts = storage.get("runtime_events", {}).get("oom_kills", {}).get("counts", {})
-    if int(oom_counts.get("30m", 0) or 0) > 0 and host_integrity == "verified":
+    oom = storage.get("runtime_events", {}).get("oom_kills", {})
+    recent_oom = oom.get("observed_counts", {}).get("30m") or oom.get("counts", {}).get("30m")
+    if int(recent_oom or 0) > 0 and host_integrity == "verified":
         host_integrity_detail = "kernel_oom_kill_30m"
         host_integrity = "degraded"
+    elif oom.get("collector_error") and host_integrity == "verified":
+        host_integrity_detail = "kernel_journal_unavailable"
+        host_integrity = "inconclusive"
     client_observation = front_observation(front, recent_front_interval) if front else "not-applicable"
     closing_churn = closing_churn_observation(front) if front else "not-applicable"
     public_front = public_front_verdict(services["xray"], front, recent_front_interval) if has_public_front else "not-applicable"
@@ -4024,7 +2576,7 @@ def collect_runtime_facts(*, live_probes: bool = False, profile: str = "light", 
     if host_integrity in {"degraded", "inconclusive"}:
         degradations.append(f"host_integrity={host_integrity}:{host_integrity_detail or 'unknown'}")
     selected_transport = str(interserver.get("selection", {}).get("selected", ""))
-    recent_conntrack_full = int(conntrack.get("table_full_events", {}).get("5", 0))
+    recent_conntrack_full = int(conntrack.get("table_full_observed", {}).get("5") or conntrack.get("table_full_events", {}).get("5") or 0)
     if recent_conntrack_full:
         degradations.append(f"conntrack_table_full_5m={recent_conntrack_full}")
     overall = "failed" if "failed" in {server_path, public_front, public_quic, host_integrity} else "degraded" if degradations or client_observation in {"client_specific", "degraded"} else "verified" if server_path == "verified" else "inconclusive"
@@ -4032,14 +2584,14 @@ def collect_runtime_facts(*, live_probes: bool = False, profile: str = "light", 
     interface_names = (public_iface, wg_interface) if has_interserver else (public_iface,)
     host = host_snapshot(public_iface)
     if has_interserver:
-        observed_at["wireguard"] = utc_now()
+        observed_at["wireguard"] = runtime.utc_now()
     wireguard = wireguard_snapshot(wg_interface) if has_interserver else {}
     interfaces = interface_counters(interface_names)
     protocol_counters = protocol_counters_snapshot()
     softnet_counters = softnet_counters_snapshot()
     return {
         "schema_version": SCHEMA_VERSION,
-        "generated_at": utc_now(),
+        "generated_at": runtime.utc_now(),
         "collector_observed_at": observed_at,
         "deployment": env.get("DEPLOY_NAME", ""),
         "topology": topology,
@@ -4094,7 +2646,7 @@ def collect_runtime_facts(*, live_probes: bool = False, profile: str = "light", 
             "egress": {"available": False, "healthy_exits": healthy_exits, "reason": "one egress node configured"},
             "transport": {
                 "available": bool(interserver.get("configured")) if has_interserver else False,
-                "selected": selected_transport or (TRANSPORT_HY2_TAG if interserver.get("listening") else ""),
+                "selected": selected_transport or (load_transport().policy.TRANSPORT_HY2_TAG if interserver.get("listening") else ""),
                 "not_applicable": not has_interserver,
             },
         },
@@ -4155,8 +2707,8 @@ def diagnostics_snapshot(**snapshot_options: Any) -> dict[str, Any]:
     raw_capabilities = facts.get("capabilities", ())
     capabilities = tuple(str(value) for value in raw_capabilities) if isinstance(raw_capabilities, (list, tuple, set, frozenset)) else ()
     capability_set = frozenset(capabilities)
-    has_interserver = bool(capability_set & INTERSERVER_CAPABILITIES)
-    has_public_front = CAP_PUBLIC_FRONT in capability_set
+    has_interserver = bool(capability_set & runtime.INTERSERVER_CAPABILITIES)
+    has_public_front = runtime.CAP_PUBLIC_FRONT in capability_set
     contract_error = str(facts.get("contract_error", ""))
     live_probes = bool(snapshot_options.get("live_probes", False))
     full_logs = bool(snapshot_options.get("full_logs", True))
@@ -4174,6 +2726,14 @@ def diagnostics_snapshot(**snapshot_options: Any) -> dict[str, Any]:
     front = facts.get("front", {}) if isinstance(facts.get("front"), Mapping) else {}
     transport = facts.get("transport", {}) if isinstance(facts.get("transport"), Mapping) else {}
     maintenance = facts.get("maintenance", {}) if isinstance(facts.get("maintenance"), Mapping) else {}
+    oom_evidence = storage.get("runtime_events", {}).get("oom_kills", {})
+    conntrack_evidence = network.get("conntrack", {}).get("journal_evidence", {})
+    storage_error = str(oom_evidence.get("collector_error") or "")
+    network_error = str(conntrack_evidence.get("collector_error") or "")
+    if not isinstance(oom_evidence.get("counts"), Mapping) or "5m" not in oom_evidence["counts"]:
+        storage_error = "kernel OOM evidence is missing"
+    if not isinstance(conntrack_evidence.get("counts"), Mapping) or "5" not in conntrack_evidence["counts"]:
+        network_error = "kernel conntrack evidence is missing"
     collectors = {
         "services": _collector_state(bool(services) and not contract_error and "unknown" not in services.values(), observed_at.get("services"), contract_error or "service state is unavailable"),
         "artifacts": _collector_state(
@@ -4192,11 +2752,11 @@ def diagnostics_snapshot(**snapshot_options: Any) -> dict[str, Any]:
             else CollectorState.skipped("live route probes were not requested")
         ),
         "logs": _collector_state(not log_error, observed_at.get("logs"), log_error or "journal collection failed"),
-        "storage": _collector_state(isinstance(storage.get("root_filesystem"), Mapping) and bool(storage.get("root_filesystem")), observed_at.get("storage"), "root filesystem state is unavailable"),
+        "storage": _collector_state(isinstance(storage.get("root_filesystem"), Mapping) and bool(storage.get("root_filesystem")) and not storage_error, observed_at.get("storage"), storage_error or "root filesystem state is unavailable"),
         "network": _collector_state(
-            all(isinstance(network.get(key), Mapping) and bool(network.get(key)) for key in ("tcp_adaptation", "resolver", "conntrack")),
+            not network_error and all(isinstance(network.get(key), Mapping) and bool(network.get(key)) for key in ("tcp_adaptation", "resolver", "conntrack")),
             observed_at.get("network"),
-            "network state is incomplete",
+            network_error or "network state is incomplete",
         ),
         "front": (
             _collector_state("listening" in front, observed_at.get("front"), "public front state is unavailable")
@@ -4287,334 +2847,12 @@ def diagnostics_snapshot(**snapshot_options: Any) -> dict[str, Any]:
         payload.reasons.append(INCOMPLETE_LOG_HISTORY_REASON)
         if payload.verdict == "verified":
             payload.verdict = "inconclusive"
+    for name in ("storage", "network"):
+        if collectors[name].status == "error":
+            payload.reasons.append(f"collector {name}: {collectors[name].message}")
+            if payload.verdict == "verified":
+                payload.verdict = "inconclusive"
     return payload.to_dict()
-
-
-def health() -> dict[str, Any]:
-    install_lock = acquire_install_read_lock()
-    if install_lock is None:
-        previous = read_json(HEALTH_STATE_PATH, {})
-        return {
-            **(previous if isinstance(previous, dict) else {}),
-            "schema_version": SCHEMA_VERSION,
-            "updated_at": utc_now(),
-            "state": "maintenance",
-            "last_action": "none",
-            "maintenance_reason": "install transaction is active",
-        }
-    try:
-        return _health_unlocked()
-    finally:
-        release_install_read_lock(install_lock)
-
-
-def _health_unlocked() -> dict[str, Any]:
-    LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with LOCK_PATH.open("w", encoding="utf-8") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        current = collect_runtime_facts(live_probes=True, profile="light", full_logs=False, include_maintenance=False)
-        previous = read_json(HEALTH_STATE_PATH, {})
-        observed_at = current.get("generated_at") or utc_now()
-        front_interval, front_counters = front_interval_snapshot(
-            current.get("front", {}),
-            previous.get("front_counters", {}),
-            observed_at,
-        )
-        apply_front_interval_verdict(current, front_interval)
-        now_epoch = int(time.time())
-        server_path_failure = current["verdicts"]["server_path"] == "failed"
-        host_integrity = current["verdicts"].get("host_integrity", "verified")
-        host_integrity_failure = host_integrity == "failed"
-        hard_failure = server_path_failure or host_integrity_failure
-        hard_reasons = [
-            reason
-            for reason, failed in (
-                ("server_path", server_path_failure),
-                ("host_integrity", host_integrity_failure),
-            )
-            if failed
-        ]
-        previous_hard_reasons = previous.get("hard_reasons", [])
-        same_failure = hard_failure and hard_reasons == previous_hard_reasons
-        failures = (int(previous.get("consecutive_failures", 0)) + 1 if same_failure else 1) if hard_failure else 0
-        network_counters = {
-            "interfaces": current.get("network", {}).get("interfaces", {}),
-            "protocol": current.get("network", {}).get("protocol_counters", {}),
-            "softnet": current.get("network", {}).get("softnet_counters", {}),
-            "qdisc": {
-                "drops": int(current.get("network", {}).get("tcp_adaptation", {}).get("qdisc_drops", 0) or 0),
-                "flow_limit_drops": int(current.get("network", {}).get("tcp_adaptation", {}).get("qdisc_flow_limit_drops", 0) or 0),
-            },
-        }
-        network_deltas = positive_counter_deltas(network_counters, previous.get("network_counters", {}))
-        soft_reasons = network_soft_reasons(network_deltas)
-        router_resources = current.get("storage", {}).get("memory", {}).get("router", {})
-        resource_counters = {
-            "sing_box_automatic_restarts": int(router_resources.get("automatic_restarts", 0) or 0),
-        }
-        resource_deltas = positive_counter_deltas(resource_counters, previous.get("resource_counters", {}))
-        restart_delta = int(resource_deltas.get("sing_box_automatic_restarts", 0) or 0)
-        if restart_delta:
-            soft_reasons.append(f"sing_box_automatic_restarts={restart_delta}")
-        oom_latest = current.get("storage", {}).get("runtime_events", {}).get("oom_kills", {}).get("latest_since_release", {})
-        oom_timestamp = str(oom_latest.get("timestamp", "")) if isinstance(oom_latest, Mapping) else ""
-        previous_oom_timestamp = str(previous.get("last_seen_oom_timestamp", ""))
-        if oom_timestamp and oom_timestamp != previous_oom_timestamp:
-            soft_reasons.append("kernel_oom_kill=observed")
-        runtime_evidence = (
-            {
-                "observed_at": observed_at,
-                "automatic_restart_delta": restart_delta,
-                "oom": dict(oom_latest) if isinstance(oom_latest, Mapping) else {},
-            }
-            if restart_delta or (oom_timestamp and oom_timestamp != previous_oom_timestamp)
-            else previous.get("last_runtime_degradation", {})
-        )
-        conntrack_full = int(current.get("network", {}).get("conntrack", {}).get("table_full_events", {}).get("5", 0))
-        if conntrack_full:
-            soft_reasons.append(f"conntrack_table_full_5m={conntrack_full}")
-        client_observation = current.get("verdicts", {}).get("client_observation")
-        if client_observation in {"client_specific", "degraded"}:
-            soft_reasons.append(f"public_front={client_observation}")
-        closing_churn = current.get("verdicts", {}).get("closing_churn")
-        if closing_churn in {"client_specific", "shared"}:
-            soft_reasons.append(f"public_front_closing_churn={closing_churn}")
-        if host_integrity in {"degraded", "inconclusive"}:
-            soft_reasons.append(f"host_integrity={host_integrity}")
-        front_evidence = front_degradation_evidence(
-            current.get("front", {}),
-            observed_at,
-            front_interval,
-        )
-        last_front_degradation = front_evidence or previous.get("last_front_degradation", {})
-        front_cache_recovery = reconcile_front_tcp_metrics_cache(
-            current.get("front", {}),
-            front_interval,
-            previous,
-            observed_at,
-            now_epoch,
-        )
-        failed_cache_actions = [
-            action for action in front_cache_recovery["actions"] if action.get("status") != "ok"
-        ]
-        if failed_cache_actions:
-            soft_reasons.append(f"front_tcp_metrics_cache_recovery_failed={len(failed_cache_actions)}")
-        state = "degraded" if soft_reasons else "healthy"
-        action = "none"
-        recovery_succeeded = False
-        postcheck: dict[str, Any] | None = None
-        last_actions = previous.get("last_actions", {})
-        if not isinstance(last_actions, dict):
-            last_actions = {}
-        if hard_failure and failures == 1:
-            state = "suspect"
-        elif hard_failure:
-            state = "failed"
-            failure_key = ",".join(hard_reasons)
-            last_action = int((last_actions.get(failure_key, {}) or {}).get("epoch", previous.get("last_action_epoch", 0)) or 0)
-            if server_path_failure and not host_integrity_failure and now_epoch - last_action >= 900:
-                action = recover(current)
-                recovery_succeeded = recovery_action_succeeded(action)
-                if recovery_succeeded:
-                    time.sleep(2)
-                    postcheck = collect_runtime_facts(live_probes=True, profile="light", full_logs=False, include_maintenance=False)
-                    postcheck_hard_reasons = hard_failure_reasons(postcheck)
-                    if not postcheck_hard_reasons:
-                        state = "healthy"
-                        failures = 0
-                    else:
-                        state = "recovering"
-                    last_actions = dict(last_actions)
-                    last_actions[failure_key] = {"epoch": now_epoch, "action": action}
-                elif action != "none":
-                    state = "failed"
-        if postcheck is not None:
-            current["post_recovery"] = postcheck["verdicts"]
-        payload = {
-            "schema_version": SCHEMA_VERSION,
-            "updated_at": utc_now(),
-            "state": state,
-            "consecutive_failures": failures,
-            "last_action": action,
-            "last_action_epoch": now_epoch if recovery_succeeded else int(previous.get("last_action_epoch", 0)),
-            "last_actions": last_actions,
-            "hard_reasons": hard_reasons,
-            "probe_failures": failed_requirements((postcheck or current).get("probes", {})),
-            "probes": (postcheck or current).get("probes", {}),
-            "network_counters": network_counters,
-            "network_deltas": network_deltas,
-            "resource_counters": resource_counters,
-            "resource_deltas": resource_deltas,
-            "last_seen_oom_timestamp": oom_timestamp or previous_oom_timestamp,
-            "last_runtime_degradation": runtime_evidence,
-            "front_counters": front_counters,
-            "front_interval": front_interval,
-            "soft_reasons": soft_reasons,
-            "last_front_degradation": last_front_degradation,
-            "front_cache_recovery": front_cache_recovery,
-            "verdicts": (postcheck or current)["verdicts"],
-        }
-        if postcheck is not None:
-            payload["post_recovery_verdicts"] = postcheck["verdicts"]
-        write_json_atomic(HEALTH_STATE_PATH, payload)
-        return payload
-
-
-def health_log_summary(payload: dict[str, Any]) -> dict[str, Any]:
-    interval = payload.get("front_interval", {})
-    if not isinstance(interval, dict):
-        interval = {}
-    return {
-        "schema_version": payload.get("schema_version"),
-        "updated_at": payload.get("updated_at"),
-        "state": payload.get("state"),
-        "consecutive_failures": payload.get("consecutive_failures", 0),
-        "last_action": payload.get("last_action", "none"),
-        "maintenance_reason": payload.get("maintenance_reason", ""),
-        "hard_reasons": payload.get("hard_reasons", []),
-        "probe_failures": payload.get("probe_failures", []),
-        "soft_reasons": payload.get("soft_reasons", []),
-        "verdicts": payload.get("verdicts", {}),
-        "front_interval": {
-            "observation": interval.get("observation", "observed"),
-            "degraded_sources": interval.get("degraded_sources", []),
-            "aggregate": interval.get("aggregate", {}),
-        },
-        "front_cache_recovery": {
-            "actions": payload.get("front_cache_recovery", {}).get("actions", []),
-        },
-    }
-
-
-def positive_counter_deltas(current: Any, previous: Any) -> Any:
-    if not isinstance(current, dict) or not isinstance(previous, dict):
-        return {}
-    deltas: dict[str, Any] = {}
-    for key, value in current.items():
-        old = previous.get(key)
-        if isinstance(value, dict):
-            nested = positive_counter_deltas(value, old)
-            if nested:
-                deltas[key] = nested
-        elif isinstance(value, int) and isinstance(old, int) and value >= old and value > old:
-            deltas[key] = value - old
-    return deltas
-
-
-def network_soft_reasons(deltas: dict[str, Any]) -> list[str]:
-    reasons: list[str] = []
-    protocol = deltas.get("protocol", {})
-    softnet = deltas.get("softnet", {})
-    receive_errors = int(protocol.get("UdpRcvbufErrors", 0)) + int(protocol.get("Udp6RcvbufErrors", 0))
-    if receive_errors:
-        reasons.append(f"udp_receive_buffer_drops={receive_errors}")
-    qdisc = deltas.get("qdisc", {})
-    qdisc_drops = int(qdisc.get("drops", 0))
-    flow_limit_drops = int(qdisc.get("flow_limit_drops", 0))
-    if qdisc_drops:
-        reasons.append(f"qdisc_drops={qdisc_drops}")
-    if flow_limit_drops:
-        reasons.append(f"qdisc_flow_limit_drops={flow_limit_drops}")
-    send_errors = int(protocol.get("UdpSndbufErrors", 0)) + int(protocol.get("Udp6SndbufErrors", 0))
-    qdisc_explains_send_errors = send_errors > 0 and send_errors == qdisc_drops == flow_limit_drops
-    if send_errors and not qdisc_explains_send_errors:
-        reasons.append(f"udp_send_buffer_drops={send_errors}")
-    if int(softnet.get("dropped", 0)):
-        reasons.append(f"softnet_drops={softnet['dropped']}")
-    missed = sum(int(values.get("rx_missed_errors", 0)) for values in deltas.get("interfaces", {}).values())
-    if missed:
-        reasons.append(f"interface_rx_missed={missed}")
-    return reasons
-
-
-def hard_failure_reasons(current: dict[str, Any]) -> list[str]:
-    verdicts = current.get("verdicts", {})
-    return [
-        reason
-        for reason, failed in (
-            ("server_path", verdicts.get("server_path") == "failed"),
-            ("host_integrity", verdicts.get("host_integrity") == "failed"),
-        )
-        if failed
-    ]
-
-
-def recovery_action_succeeded(action: str) -> bool:
-    if not action or action == "none":
-        return False
-    results = action.split(";")
-    return all(not result.endswith((":failed", ":invalid-config")) for result in results)
-
-
-def recover(current: dict[str, Any]) -> str:
-    services = current.get("services", {})
-    interface = str(current.get("wireguard", {}).get("interface", "wg0"))
-    raw_capabilities = current.get("capabilities", ())
-    capabilities = frozenset(str(value) for value in raw_capabilities) if isinstance(raw_capabilities, (list, tuple, set, frozenset)) else frozenset()
-    required_services = current.get("required_services")
-    if not isinstance(required_services, list):
-        required_services = []
-    required = {str(name) for name in required_services}
-    configured_units = current.get("service_units", {}) if isinstance(current.get("service_units"), Mapping) else {}
-    actions: list[str] = []
-    service_order = ("wireguard", "nftables", "resolver", "sing-box", "xray", "admin", "health_timer", "transport")
-    for key in service_order:
-        if key not in required or key not in services:
-            continue
-        unit = str(configured_units.get(key, SERVICE_UNIT_DEFAULTS[key])).format(wg_interface=interface)
-        if services.get(key) != "active":
-            result = run(["systemctl", "restart", unit], timeout=30)
-            actions.append(f"restart:{unit}:{'ok' if result.returncode == 0 else 'failed'}")
-    if actions:
-        return ";".join(actions)
-    artifacts_clean = current.get("artifacts", {}).get("drift") == "none"
-    network = current.get("network", {})
-    wireguard_policy = network.get("wireguard_policy", {})
-    if (
-        artifacts_clean
-        and CAP_INTERSERVER_CLIENT in capabilities
-        and wireguard_policy.get("managed") is True
-        and wireguard_policy.get("ok") is not True
-    ):
-        try:
-            applied = apply_wireguard_policy(parse_env())
-            return f"apply:wireguard-policy:{'changed' if applied.get('changed') else 'ok'}"
-        except (KeyError, RuntimeError, ValueError):
-            return "apply:wireguard-policy:failed"
-    profile_mismatches = set(network.get("profile_mismatches", []))
-    qdisc_mismatches = profile_mismatches & {"qdisc", "qdisc_limit", "qdisc_flow_limit"}
-    qdisc_mismatches.update(name for name in profile_mismatches if name.startswith("overlay_qdisc"))
-    if artifacts_clean and qdisc_mismatches:
-        try:
-            applied = (
-                apply_qdisc_profile()
-                if capabilities & INTERSERVER_CAPABILITIES
-                else apply_qdisc_profile(include_overlay=False)
-            )
-            return f"apply:qdisc:{'changed' if applied.get('changed') else 'ok'}"
-        except RuntimeError:
-            return "apply:qdisc:failed"
-    if artifacts_clean and profile_mismatches:
-        result = run(["sysctl", "--load", str(SYSCTL_PATH)], timeout=30)
-        return f"reload:sysctl:{'ok' if result.returncode == 0 else 'failed'}"
-    bypass = network.get("conntrack", {}).get("front_bypass", {})
-    if artifacts_clean and CAP_PUBLIC_FRONT in capabilities and not bypass.get("active"):
-        if not NFTABLES_CONFIG_PATH.is_file():
-            return "reload:vpn-stack-nftables.service:invalid-config"
-        result = run(["systemctl", "reload", NFTABLES_SERVICE], timeout=30)
-        return f"reload:{NFTABLES_SERVICE}:{'ok' if result.returncode == 0 else 'failed'}"
-    if CAP_ROUTER in capabilities:
-        probes = current.get("probes", {})
-        router_path_ok = probe_path_ok(probes, "foreign_domains_via_router", "domains_via_router")
-        if CAP_INTERSERVER_CLIENT in capabilities:
-            independent_path_ok = probe_path_ok(probes, "via_wg", "foreign_domains_via_wg")
-        else:
-            direct = probes.get("direct", [])
-            independent_path_ok = bool(direct) and all(isinstance(item, Mapping) and item.get("ok") is True for item in direct)
-        if independent_path_ok and not router_path_ok:
-            result = run(["systemctl", "restart", "sing-box.service"], timeout=30)
-            return f"restart:sing-box.service:{'ok' if result.returncode == 0 else 'failed'}"
-    return "none"
 
 
 def routes_command(args: argparse.Namespace) -> dict[str, Any]:
@@ -4665,7 +2903,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("transport-reconcile")
     sub.add_parser("transport-watch")
     transport_select = sub.add_parser("transport-select")
-    transport_select.add_argument("--tag", choices=TRANSPORT_CANDIDATE_TAGS, required=True)
+    transport_select.add_argument("--tag", choices=("interserver-underlay-wg", "interserver-underlay-hy2"), required=True)
     sub.add_parser("network-apply")
     sub.add_parser("memory-prepare")
     exec_router_parser = sub.add_parser("exec-router")
@@ -4698,8 +2936,8 @@ def main(argv: list[str] | None = None) -> int:
             include_maintenance=not args.compact,
         )
     elif args.command == "probe":
-        env = parse_env()
-        manifest = read_json(MANIFEST_PATH, {})
+        env = runtime.parse_env()
+        manifest = runtime.read_json(runtime.MANIFEST_PATH, {})
         payload = run_confirmed_probes(env, runtime_contract(manifest if isinstance(manifest, Mapping) else {}), args.profile)
     elif args.command == "client":
         payload = front_client_snapshot(args.source, args.since)
@@ -4708,35 +2946,40 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "private-reject-correlate":
         payload = private_reject_correlations(args.since, args.inbound, args.target)
     elif args.command == "health":
-        payload = health()
+        payload = lifecycle.health(
+            collect_runtime_facts=collect_runtime_facts,
+            front_interval_snapshot=front_interval_snapshot,
+            apply_front_interval_verdict=apply_front_interval_verdict,
+            front_degradation_evidence=front_degradation_evidence,
+        )
     elif args.command == "transport-reconcile":
-        if not contract_has(installed_runtime_contract(), CAP_INTERSERVER_CLIENT):
+        if not runtime.contract_has(installed_runtime_contract(), runtime.CAP_INTERSERVER_CLIENT):
             raise RuntimeError("interserver transport control is not applicable to this node")
-        payload = reconcile_interserver_transport()
+        payload = load_transport().reconcile_interserver_transport()
     elif args.command == "transport-watch":
-        if not contract_has(installed_runtime_contract(), CAP_INTERSERVER_CLIENT):
+        if not runtime.contract_has(installed_runtime_contract(), runtime.CAP_INTERSERVER_CLIENT):
             raise RuntimeError("interserver transport control is not applicable to this node")
-        watch_interserver_transport()
+        load_transport().watch_interserver_transport()
         return 0
     elif args.command == "transport-select":
-        if not contract_has(installed_runtime_contract(), CAP_INTERSERVER_CLIENT):
+        if not runtime.contract_has(installed_runtime_contract(), runtime.CAP_INTERSERVER_CLIENT):
             raise RuntimeError("interserver transport control is not applicable to this node")
-        env = parse_env()
-        config = read_json(SINGBOX_CONFIG_PATH, {})
+        env = runtime.parse_env()
+        config = runtime.read_json(runtime.SINGBOX_CONFIG_PATH, {})
         controller = str(config.get("experimental", {}).get("clash_api", {}).get("external_controller", ""))
         if not controller:
             raise RuntimeError("transport controller is unavailable")
-        select_transport(env, controller, args.tag)
+        load_transport().select_transport(env, controller, args.tag)
         payload = {"selected": args.tag, "changed": True}
     elif args.command == "network-apply":
-        payload = apply_network_profile()
+        payload = lifecycle.apply_network_profile(installed_runtime_contract())
     elif args.command == "memory-prepare":
         payload = prepare_memory_reserve()
     elif args.command == "exec-router":
         exec_router(args.router_command)
         return 0
     elif args.command == "storage-maintain":
-        payload = storage_maintenance(parse_env(), deep=args.deep)
+        payload = storage_maintenance(runtime.parse_env(), deep=args.deep)
     elif args.command == "maintain":
         platform = current_platform()
         if args.apply:
@@ -4746,7 +2989,7 @@ def main(argv: list[str] | None = None) -> int:
         payload = routes_command(args)
     else:
         payload = assets_snapshot()
-    output = health_log_summary(payload) if args.command == "health" else payload
+    output = lifecycle.health_log_summary(payload) if args.command == "health" else payload
     print(json.dumps(output, ensure_ascii=False, sort_keys=True))
     if args.command == "health" and payload.get("state") in {"failed", "recovering"}:
         return 1

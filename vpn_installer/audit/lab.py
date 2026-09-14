@@ -178,13 +178,14 @@ def build_lab_dnsmasq() -> str:
 def _lab_overlay_probe(runner: AuditRunner, container: str, env: dict[str, str], *, convergence: bool = False) -> dict[str, object]:
     identity = {key: env[key] for key in ("WG_INTERFACE", "WG_FOREIGN_ADDRESS")}
     script = textwrap.dedent(f"""\
-        import json, runpy, sys
+        import json, sys
+        sys.dont_write_bytecode = True
         sys.path.insert(0, '/opt/agent')
-        agent = runpy.run_path('/opt/agent/vpn-stack-agent.py', run_name='lab_probe')
+        import server_transport
         env = {identity!r}
         try:
-            result = agent[{'prove_wireguard_overlay' if convergence else 'transport_overlay_path_probe'!r}](env)
-        except agent['TransportSwitchError'] as exc:
+            result = server_transport.{'prove_wireguard_overlay' if convergence else 'transport_overlay_path_probe'}(env)
+        except server_transport.TransportSwitchError as exc:
             result = exc.evidence
         print(json.dumps(result))
         """)

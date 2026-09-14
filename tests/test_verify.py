@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from vpn_installer import server_agent
+from vpn_installer import server_agent, server_runtime
 from vpn_installer.diagnostics import COLLECTOR_NAMES, LOG_WINDOW_KEYS, CollectorState, DiagnosticsSnapshot, LogWindowSnapshot
 from vpn_installer.log_classifier import BUCKETS
 from vpn_installer.models import RemoteTarget
@@ -1150,15 +1150,15 @@ class VerifyTests(unittest.TestCase):
         now = datetime.now(timezone.utc)
         snapshots = []
         with (
-            patch.object(server_agent, "parse_env", return_value={"RU_LISTEN_PORT": "443"}),
+            patch.object(server_runtime, "parse_env", return_value={"RU_LISTEN_PORT": "443"}),
             patch.object(server_agent, "installed_runtime_contract", return_value={"capabilities": [CAP_PUBLIC_FRONT]}),
             patch.object(server_agent, "journal_filtered_lines") as logs,
             patch.object(server_agent, "tcp_front_snapshot") as front,
             patch.object(server_agent, "service_state", return_value="active"),
             patch.object(server_agent, "udp_443_policy", return_value="routed"),
             patch.object(server_agent, "public_hy2_snapshot", return_value={}),
-            patch.object(server_agent, "read_json", return_value={}),
-            patch.object(server_agent, "utc_now") as clock,
+            patch.object(server_runtime, "read_json", return_value={}),
+            patch.object(server_runtime, "utc_now") as clock,
         ):
             for index, phase in enumerate((None, "active", "closing", None)):
                 logs.return_value = [] if index == 0 else [f"from {flow} accepted tcp:example.com:443"]

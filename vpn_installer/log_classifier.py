@@ -252,8 +252,8 @@ def _classify_bucket(line: str, destination: str, *, phase: str, dns_failure: bo
     proxy_failure = "using outbound/vless[" in line
     if proxy_failure and phase == "connect" and not dns_failure:
         return "client_front_connect_failed"
-    if "quic: transport closed" in lower_line or (
-        "interserver-underlay-" in line
+    if (
+        re.search(r"(?:outbound|endpoint)/[^\[]+\[interserver-underlay-[^\]]+\]", line)
         and any(
             token in lower_line
             for token in (
@@ -267,13 +267,11 @@ def _classify_bucket(line: str, destination: str, *, phase: str, dns_failure: bo
         )
     ):
         return "transport_unavailable"
-    if dns_failure and any(token in lower_line for token in _TRANSPORT_PATH_ERROR_TOKENS):
-        return "transport_unavailable"
     if dns_failure and any(token in lower_line for token in ("context deadline exceeded", "i/o timeout")):
         return "dns_timeout"
     if dns_failure and "nxdomain" in lower_line:
         return "dns_nxdomain"
-    if dns_failure and ("refused" in lower_line or "rcode 5" in lower_line):
+    if dns_failure and (("refused" in lower_line and "connection refused" not in lower_line) or "rcode 5" in lower_line):
         return "dns_refused"
     if dns_failure and ("servfail" in lower_line or "server failure" in lower_line or "rcode 2" in lower_line):
         return "dns_servfail"
@@ -283,10 +281,9 @@ def _classify_bucket(line: str, destination: str, *, phase: str, dns_failure: bo
         return "unclassified_error"
     if any(token in line for token in ("outbound/block[blocked]", "using outbound/block[blocked]", "connection rejected")):
         return "blocked_private_fake"
+    # A destination's ICMP unreachable does not identify a failed underlay.
     if any(token in lower_line for token in _TRANSPORT_PATH_ERROR_TOKENS):
-        outbound = _outbound_tag(line)
-        if outbound.startswith("to-foreign"):
-            return "transport_unavailable"
+        return "unclassified_error"
     if "i/o timeout" in line or "context deadline exceeded" in line:
         if proxy_failure:
             return "unclassified_error"

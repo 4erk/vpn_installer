@@ -4,6 +4,8 @@ import json
 import tempfile
 import unittest
 import copy
+import subprocess
+import sys
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -19,6 +21,7 @@ from vpn_installer.install_contract import (
     normalize_acceptance_snapshot,
     validate_bundle,
     validate_installed_bundle,
+    _validate_bundle,
 )
 from vpn_installer.install_support import main as install_support_main
 from vpn_installer.render import copy_python_package, write_node_rendered_files
@@ -36,6 +39,58 @@ CONTRACT_FILES = (
 
 
 class InstallContractTests(unittest.TestCase):
+    def test_unpublished_intermediate_version_has_no_inventory(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            with self.assertRaisesRegex(InstallContractError, "no validated artifact inventory"):
+                _validate_bundle(root / "unknown", "gateway", root / "contract", expected_version="0.22.99",
+                                 require_assets=False, require_binaries=False)
+            self.assertFalse((root / "contract").exists())
+
+    def test_previous_tag_inventory_is_validated_without_new_modules(self) -> None:
+        from vpn_installer.audit.docker import export_release_source
+
+        script = """
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from vpn_installer import VERSION
+from vpn_installer.config import generate_default_env
+from vpn_installer.render import write_node_rendered_files
+assert VERSION == '0.22.8'
+root = Path(sys.argv[2])
+for topology, location, node in [('dual', 'ru', 'gateway'), ('dual', 'ru', 'exit'),
+                                  ('single', 'ru', 'gateway'), ('single', 'foreign', 'gateway')]:
+    env = generate_default_env('previous-contract', topology=topology, gateway_location=location)
+    env.update(GATEWAY_PUBLIC_IP='203.0.113.10', EXIT_PUBLIC_IP='203.0.113.20' if topology == 'dual' else '')
+    write_node_rendered_files(env, node, root / f'{topology}-{location}-{node}')
+"""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = export_release_source("0.22.8", root / "previous")
+            result = subprocess.run([sys.executable, "-c", script, str(source), str(root)],
+                                    capture_output=True, text=True, timeout=20)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            for bundle in sorted(root.glob("*-gateway")) + [root / "dual-ru-exit"]:
+                node = bundle.name.rsplit("-", 1)[-1]
+                with self.subTest(bundle=bundle.name):
+                    manifest = json.loads((bundle / "render-manifest.json").read_text(encoding="utf-8"))
+                    self.assertNotIn("server_runtime.py", manifest["artifacts"])
+                    _validate_bundle(bundle, node, root / (bundle.name + "-contract"),
+                                     expected_version="0.22.8", require_assets=False, require_binaries=False)
+                    (bundle / "vpn-stack-agent.py").write_text("corrupted\n", encoding="utf-8")
+                    with self.assertRaisesRegex(InstallContractError, "artifact payload mismatch"):
+                        _validate_bundle(bundle, node, root / "rejected", expected_version="0.22.8",
+                                         require_assets=False, require_binaries=False)
+
+    def test_current_inventory_cannot_omit_new_module(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            bundle = self.render_single_gateway(root)
+            (bundle / "server_runtime.py").unlink()
+            with self.assertRaisesRegex(InstallContractError, "artifact payload mismatch: server_runtime.py"):
+                validate_bundle(bundle, "gateway", root / "contract")
+
     def test_runtime_acceptance_preserves_history_and_requires_fresh_release_logs(self) -> None:
         from vpn_installer.audit.docker import acceptance_snapshot_fixture
         from vpn_installer.diagnostics import INCOMPLETE_LOG_HISTORY_REASON, LogWindowSnapshot

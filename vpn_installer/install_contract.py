@@ -8,7 +8,7 @@ from typing import Any, Mapping
 
 from . import VERSION
 from .common import parse_env_value
-from .compatibility import CompatibilityWindow, require_compatible_installed
+from .compatibility import COMPATIBLE_INSTALLED_MIN, CompatibilityWindow, require_compatible_installed
 from .manifest import (
     INSTALL_PLAN_SCHEMA_VERSION,
     MANIFEST_SCHEMA_VERSION,
@@ -231,6 +231,8 @@ def _validate_bundle(
     expected_platform: PlatformSpec | None = None,
 ) -> None:
 
+    if expected_version not in {COMPATIBLE_INSTALLED_MIN, VERSION}:
+        _fail(f"no validated artifact inventory for release {expected_version}")
     bundle = Path(bundle)
     contract_dir = Path(contract_dir)
     external_assets = Path(external_assets) if external_assets is not None else None
@@ -327,6 +329,10 @@ def _validate_bundle(
         _fail("install plan binaries do not match the manifest")
 
     expected_specs = artifact_specs(node_plan, env=env)
+    if expected_version == "0.22.8":
+        # Install boundary only; remove with the 0.23.1 minimum-version advance.
+        for name in ("server_runtime.py", "server_lifecycle.py", "server_transport.py", "journal_evidence.py"):
+            expected_specs.pop(name, None)
     if set(artifacts) != set(expected_specs):
         unknown = sorted(set(artifacts) - set(expected_specs))
         missing = sorted(set(expected_specs) - set(artifacts))

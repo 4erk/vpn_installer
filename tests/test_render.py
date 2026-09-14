@@ -325,9 +325,8 @@ class RenderTests(unittest.TestCase):
         reality = payload["inbounds"][0]["streamSettings"]["realitySettings"]
         self.assertEqual(reality["shortIds"], [env["RU_REALITY_SHORT_ID"]])
 
-    def test_ru_server_reality_can_render_explicit_time_tolerance(self) -> None:
+    def test_ru_server_reality_does_not_limit_client_clock_difference(self) -> None:
         env = self.make_env()
-        env["RU_REALITY_MAX_TIME_DIFFERENCE"] = "30s"
         payload = json.loads(render.render_gateway_xray(env))
         reality = payload["inbounds"][0]["streamSettings"]["realitySettings"]
         self.assertNotIn("maxTimeDiff", reality)

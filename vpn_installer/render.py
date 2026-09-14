@@ -64,6 +64,7 @@ SERVER_RENDER_MODULES = (
     "dns_policy.py",
     "install_contract.py",
     "install_support.py",
+    "journal_evidence.py",
     "interserver_transport.py",
     "log_classifier.py",
     "manifest.py",
@@ -76,11 +77,17 @@ SERVER_RENDER_MODULES = (
     "render.py",
     "routing_policy.py",
     "server_agent.py",
+    "server_runtime.py",
+    "server_lifecycle.py",
+    "server_transport.py",
     "specs.py",
     "topology.py",
 )
 
 SERVER_AGENT_BASE_MODULES = (
+    "journal_evidence.py",
+    "server_runtime.py",
+    "server_lifecycle.py",
     "diagnostics.py",
     "log_classifier.py",
     "network_profile.py",
@@ -89,6 +96,7 @@ SERVER_AGENT_BASE_MODULES = (
     "resource_control.py",
 )
 SERVER_AGENT_INTERSERVER_MODULES = (
+    "server_transport.py",
     "interserver_transport.py",
     "topology.py",
 )

@@ -34,7 +34,7 @@ Paramiko exec/stream и SFTP используют общий monotonic deadline,
 - `HostFacts` и `PlatformSpec` являются единственным каталогом поддерживаемых серверных платформ. Логические package requirements преобразуются в имена пакетов только выбранным package provider.
 - `/etc/vpn-stack/render-manifest.json` schema 5 хранит topology, node capabilities, platform descriptor, install plan schema 5, policy, hashes, pinned binaries, runtime facts и окно совместимых установленных версий. Каждый node получает только собственный `node.env` и принадлежащие ему secrets/artifacts.
 
-Target-side render не объединяет `node.env` с общими defaults и не генерирует ключи. Он принимает только точную `CONFIG_SCHEMA=3` проекцию capability, отклоняет неизвестные поля и cross-node secrets, затем сверяет payload с manifest/install-plan. Установленный `0.22.6` имеет те же schemas и проходит общий текущий validator без отдельного adapter.
+Target-side render не объединяет `node.env` с общими defaults и не генерирует ключи. Он принимает только точную `CONFIG_SCHEMA=3` проекцию capability, отклоняет неизвестные поля и cross-node secrets, затем сверяет payload с manifest/install-plan. На границе установки для предыдущего тега `0.22.8` проверяется его точный состав файлов; в runtime старые реализации не загружаются.
 
 `single` не компилирует и не устанавливает WireGuard, interserver transport, web-admin, их пакеты, сервисы, credentials, secrets, firewall rules или probes. `dual` устанавливает interserver capability на оба участвующих узла, а web-admin только на gateway. Отсутствующая capability имеет состояние `not_applicable`, а не ложное `healthy`.
 
@@ -56,7 +56,7 @@ DNS-кеш — отдельный app-owned сервис с собственно
 
 ## Совместимость релиза
 
-`0.22.8` поддерживает fresh install, обновление с `0.22.6` или `0.22.7` и повторную установку `0.22.8`. Manifest объявляет `installed_min=0.22.6`, `installed_max=0.22.8`. Временное окно позволяет обновиться после автоматического отката .7; следующая граница поднимет минимум до .8. Неподдерживаемый установленный релиз отклоняется до managed transaction; удалить его нужно `.\vpn.cmd` на Windows или `./vpn.sh` на Linux из совпадающего Git-тега, после чего выполняется fresh install.
+`0.23.0` поддерживает новую установку, обновление с `0.22.8` и повторную установку `0.23.0`. Manifest объявляет `installed_min=0.22.8`, `installed_max=0.23.0`. Неподдерживаемый установленный релиз отклоняется до managed transaction: нужен последовательный переход через совместимый установщик либо удаление установщиком совпадающего Git-тега и новая установка.
 
 Публичный CLI использует только `--node gateway|exit|all`. Role aliases, migration chains и readers старых schemas отсутствуют. Политика окна описана в [DEPRECATIONS.md](./DEPRECATIONS.md).
 
@@ -117,6 +117,8 @@ Snapshot diagnostics schema 6 содержит:
 
 ## Health и восстановление
 
+Серверные обязанности разделены: `server_agent.py` собирает и выдаёт диагностику, `server_transport.py` управляет межсерверным selector, `server_lifecycle.py` выполняет health/recovery и применение network profile, `server_runtime.py` содержит общий системный I/O. Транспортный модуль загружается только при соответствующей capability; обратных импортов общего агента и вторых реализаций команд нет.
+
 Health выполняется раз в две минуты и имеет состояния `healthy|degraded -> suspect -> failed -> recovering`.
 
 - Soft degradation (новые UDP-buffer/softnet/missed drops, измеренная потеря Xray flow или socket churn) не вызывает restart.
@@ -126,6 +128,8 @@ Health выполняется раз в две минуты и имеет сос
 - Throughput tests не входят в периодический health. Они запускаются только явно через live verification или диагностику.
 
 ## Установка и обслуживание
+
+Клиентский каталог с 0.23.0 выбирает завершённое поколение артефактов; основной путь URI сохранён. `NEXT-STEPS.txt` внутри поколения содержит инструкции именно для него. Многофайловые читатели используют `client_artifact_snapshot`, mutable route state вынесен в `.client-state`. Первый переход старого обычного каталога восстановим после прерывания, но не является атомарной заменой. Подробные границы Windows/Linux, проверки и лимиты хранения: [CLIENT-PUBLICATION.md](./CLIENT-PUBLICATION.md).
 
 Install/reinstall собирает release во временном каталоге внутри `/etc/vpn-stack/releases`, проверяет capability-owned sing-box, Xray, DNS cache, nftables, systemd и assets, а в `dual` также WireGuard/interserver и web-admin artifacts. Затем installer публикует immutable content-addressed tree и атомарно переключает `current`. Target-side acceptance требует доступный для записи root filesystem и проверяет host integrity средствами платформы. Revision snapshot охватывает manifest, configs, rules/assets, app-owned DNS config, runtime health state, `current`/`previous`, состояния всех затрагиваемых сервисов и только в `dual` admin auth; host resolver остаётся вне transaction ownership. Неудачные service start, drift или core route acceptance возвращают весь управляемый набор; уже опубликованный release не перезаписывается повторной установкой. Внешние capability probes выводятся отдельно: временный отказ raw IPv6 при исправном core path даёт `degraded` и проваливает полный live verify, но не откатывает тот же конфиг, который не может изменить состояние внешнего endpoint.
 
@@ -148,6 +152,10 @@ Identity exit сравнивается с известным IPv4 deployment ч�
 Свежесть проверяется по времени получения каждого обязательного collector и каждого log window, а не только по времени сборки JSON. Неизвестное или устаревшее измерение не подтверждает текущую работоспособность: для snapshot действует возраст не более 180s и допустимое опережение часов не более 30s. Исторические окна сохраняют свой период; журнал запрашивается с фиксированными `--since` и `--until`, ошибки классифицируются один раз с доступным контекстом до разделения на окна.
 
 С `0.22.7` полнота истории проверяется по непрерывной последовательности system-journal до активного файла и сообщениям journald о потерях. Удаление ранних файлов или разрыв дают unavailable, а наблюдаемые ошибки остаются отдельными нижними границами счётчиков. Ошибка чтения метаданных также не означает пустой журнал. Эта проверка не обнаруживает события, которые приложение вообще не записало; лимит диска не увеличивается. Общий `verify live` не объявляет неполную историю успешной. Install gate отдельно требует полное окно после установки и публичный путь, сохраняя исторические ограничения в отчёте.
+
+С `0.23.0` общий `journal_evidence.py` применяется также к OOM и conntrack: `counts` содержит число либо `null`, `observed_counts` хранит нижние границы, `windows` объясняет недоступность периода. Для событий ядра используется `_TRANSPORT=kernel`, а не `-k`, который подразумевает текущую загрузку. JSON читается с `--all`, иначе длинное поле может стать `null`. Оба ограничения описаны в [journalctl systemd 255](https://github.com/systemd/systemd/blob/v255/man/journalctl.xml). Метаданные и фиксированная граница времени переиспользуются в одном snapshot. Ошибка запроса обязательного kernel collector запрещает успешную приёмку; историческая утрата не вызывает restart.
+
+Наличие `no route to host` у внешнего назначения не указывает, на каком участке отсутствует маршрут. `transport_unavailable` требует явного тега `interserver-underlay-*`; неизвестная причина сохраняется в `unclassified_error` вместе с адресом, фазой и доступным контекстом. Счётчик неизвестных ошибок не скрывается ради зелёного статуса.
 
 IP в строке неудачного dial может быть результатом разрешения домена. Без исходного request trace такая ошибка сохраняется в `unclassified_error` вместе с адресом и образцом строки, а не объявляется доказанным literal-запросом. Число ошибок не исчезает из отчёта; ограниченное окно или недоступный контекст не заменяются догадкой.
 

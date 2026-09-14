@@ -1,16 +1,14 @@
 from __future__ import annotations
 
 import json
-import os
-import shutil
-import tempfile
 import textwrap
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 from urllib.parse import quote, urlencode, urlparse
 
-from .common import OUT_DIR, cli_command, write_private_text
+from .common import OUT_DIR, cli_command
+from . import client_publication
 from .config import require_env
 from .interserver_transport import HY2_SERVER_NAME
 from .models import AppError, REQUIRED_ENV_VARS
@@ -219,7 +217,14 @@ def render_windows_route_bypass_script(env: dict[str, str]) -> str:
         })
         $TunnelInterfacePattern = "(?i)(singbox|hiddify|wintun|v2ray|nekobox|clash|tun|vpn)"
         $RouteFields = @('DestinationPrefix', 'InterfaceIndex', 'InterfaceAlias', 'NextHop', 'RouteMetric', 'Protocol', 'Publish')
-        $StatePath = Join-Path $PSScriptRoot 'windows-route-bypass.state.json'
+        $StateRoot = $PSScriptRoot
+        if ((Split-Path -Leaf (Split-Path -Parent $StateRoot)) -eq '.client-generations') {
+          $StateRoot = Split-Path -Parent (Split-Path -Parent $StateRoot)
+        } elseif ((Split-Path -Leaf $StateRoot) -eq 'client') {
+          $StateRoot = Split-Path -Parent $StateRoot
+        }
+        $StateDirectory = Join-Path $StateRoot '.client-state'
+        $StatePath = Join-Path $StateDirectory 'windows-route-bypass.state.json'
 
         function Test-Admin {
           $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -272,6 +277,7 @@ def render_windows_route_bypass_script(env: dict[str, str]) -> str:
         if (-not (Test-Admin)) {
           throw "Run this script from elevated PowerShell."
         }
+        [IO.Directory]::CreateDirectory($StateDirectory) | Out-Null
         $lock = [IO.File]::Open("$StatePath.lock", 'OpenOrCreate', 'ReadWrite', 'None')
         try {
           $boot = (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime.ToUniversalTime().ToString('o')
@@ -355,8 +361,19 @@ def client_artifact_paths(env: dict[str, str], *, out_dir: Path | None = None) -
         "windows_xray_json": client_dir / "windows-xray.json",
         "android_xray_json": client_dir / "android-v2rayng-xray.json",
         "windows_route_bypass": client_dir / "windows-route-bypass.ps1",
-        "next_steps": deployment_dir / "NEXT-STEPS.txt",
+        "next_steps": client_dir / "NEXT-STEPS.txt",
     }
+
+
+@contextmanager
+def client_artifact_snapshot(env: dict[str, str], *, out_dir: Path | None = None) -> Iterator[dict[str, Path]]:
+    """Pin one generation; finish local reads before starting network I/O."""
+    paths = client_artifact_paths(env, out_dir=out_dir)
+    with client_publication.snapshot(paths["client_dir"]) as selected:
+        pinned = {key: selected if key == "client_dir" else selected / path.name for key, path in paths.items()}
+        if not pinned["next_steps"].exists():
+            pinned["next_steps"] = paths["client_dir"].parent / "NEXT-STEPS.txt"
+        yield pinned
 
 
 STALE_CLIENT_ARTIFACT_NAMES = (
@@ -382,97 +399,34 @@ GENERATED_CLIENT_FILE_NAMES = (
 )
 
 
-@contextmanager
-def _client_artifact_lock(client_dir: Path) -> Iterator[None]:
-    with (client_dir.parent / ".client-artifacts.lock").open("a+b") as lock:
-        if lock.tell() == 0:
-            lock.write(b"\0")
-            lock.flush()
-        lock.seek(0)
-        try:
-            if os.name == "nt":
-                import msvcrt
-
-                msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
-            else:
-                import fcntl
-
-                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as exc:
-            raise AppError("Client artifacts are being published by another process; retry later.") from exc
-        try:
-            yield
-        finally:
-            if os.name == "nt":
-                lock.seek(0)
-                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+def _publish_client_artifacts(client_dir: Path, payloads: dict[Path, str], *,
+                              render_instructions: Callable[[Path], str] | None = None) -> None:
+    client_dir.parent.mkdir(parents=True, exist_ok=True)
+    with client_publication.publication_lock(client_dir):
+        _publish_locked_client_artifacts(client_dir, payloads, render_instructions=render_instructions)
 
 
-def _publish_client_artifacts(client_dir: Path, payloads: dict[Path, str]) -> None:
-    if client_dir.is_symlink() or getattr(client_dir, "is_junction", lambda: False)():
-        raise AppError(f"Client output directory must not be a link: {client_dir}")
-    client_dir.mkdir(parents=True, exist_ok=True)
-    with _client_artifact_lock(client_dir):
-        _publish_locked_client_artifacts(client_dir, payloads)
+def _publish_locked_client_artifacts(client_dir: Path, payloads: dict[Path, str], *,
+                                     render_instructions: Callable[[Path], str] | None = None) -> None:
+    for destination, payload in payloads.items():
+        if destination.parent != client_dir or not payload.strip():
+            raise AppError(f"Client artifact is empty or outside its generation: {destination.name}")
+        if destination.suffix == ".json" and not isinstance(json.loads(payload), dict):
+            raise AppError(f"Client profile must be a JSON object: {destination.name}")
+        if destination.name in {"vless-uri.txt", "hiddify-uri.txt", "v2rayn-uri.txt"}:
+            parse_vless_uri(payload)
+        if destination.name == "hysteria2-uri.txt":
+            uri = urlparse(payload.strip())
+            if uri.scheme != "hysteria2" or not uri.username or not uri.hostname or not uri.port:
+                raise AppError("Invalid Hysteria2 client URI")
+    client_publication.publish_locked(client_dir, {path.name: content for path, content in payloads.items()},
+                                      STALE_CLIENT_ARTIFACT_NAMES, render_instructions=render_instructions)
 
 
-def _publish_locked_client_artifacts(client_dir: Path, payloads: dict[Path, str]) -> None:
-    stage = Path(tempfile.mkdtemp(prefix=".client-stage-", dir=client_dir.parent))
-    changes: list[tuple[Path, Path]] = []
-    keep_backup = False
-    try:
-        for destination, payload in payloads.items():
-            staged = stage / "new" / destination.relative_to(client_dir.parent)
-            write_private_text(staged, payload)
-            if not payload.strip() or staged.read_text(encoding="utf-8") != payload:
-                raise AppError(f"Client artifact is empty or incomplete: {destination.name}")
-            if destination.suffix == ".json" and not isinstance(json.loads(payload), dict):
-                raise AppError(f"Client profile must be a JSON object: {destination.name}")
-            if destination.name in {"vless-uri.txt", "hiddify-uri.txt", "v2rayn-uri.txt"}:
-                parse_vless_uri(payload)
-            if destination.name == "hysteria2-uri.txt":
-                uri = urlparse(payload.strip())
-                if uri.scheme != "hysteria2" or not uri.username or not uri.hostname or not uri.port:
-                    raise AppError("Invalid Hysteria2 client URI")
-        # Nothing in the previous set is removed until every new file is rendered and validated.
-        for destination in [*payloads, *(client_dir / name for name in STALE_CLIENT_ARTIFACT_NAMES)]:
-            relative = destination.relative_to(client_dir.parent)
-            backup = stage / "previous" / relative
-            if destination.exists() or destination.is_symlink():
-                backup.parent.mkdir(parents=True, exist_ok=True)
-                if destination not in payloads or (destination.is_dir() and not destination.is_symlink()):
-                    destination.replace(backup)
-                else:
-                    shutil.copy2(destination, backup, follow_symlinks=False)
-            changes.append((destination, backup))
-            if destination in payloads:
-                (stage / "new" / relative).replace(destination)
-    except BaseException:
-        keep_backup = True
-        rollback_failed = False
-        for destination, backup in reversed(changes):
-            try:
-                if backup.exists() or backup.is_symlink():
-                    if backup.is_dir() and not backup.is_symlink():
-                        destination.unlink(missing_ok=True)
-                    backup.replace(destination)
-                else:
-                    destination.unlink(missing_ok=True)
-            except OSError:
-                rollback_failed = True
-        if rollback_failed:
-            raise AppError(f"Client publication rollback incomplete; previous artifacts retained in {stage}")
-        keep_backup = False
-        raise
-    finally:
-        if not keep_backup:
-            shutil.rmtree(stage, ignore_errors=True)
-
-
-def render_next_steps(env: dict[str, str], *, out_dir: Path | None = None) -> str:
+def render_next_steps(env: dict[str, str], *, out_dir: Path | None = None, generation_dir: Path | None = None) -> str:
     paths = client_artifact_paths(env, out_dir=out_dir)
+    if generation_dir is not None:
+        paths = {key: generation_dir if key == "client_dir" else generation_dir / path.name for key, path in paths.items()}
     status_command = cli_command(f"status --deployment {env['DEPLOY_NAME']} --node gateway")
     verify_command = cli_command(f"verify live --deployment {env['DEPLOY_NAME']}")
     client_diagnose_command = cli_command(
@@ -527,5 +481,7 @@ def render_client_profiles(env: dict[str, str], *, out_dir: Path | None = None) 
         paths["hysteria2_uri"]: render_hysteria2_uri(env),
         paths["next_steps"]: render_next_steps(env, out_dir=out_dir),
     }
-    _publish_client_artifacts(paths["client_dir"], payloads)
+    _publish_client_artifacts(paths["client_dir"], payloads, render_instructions=(
+        lambda selected: render_next_steps(env, out_dir=out_dir, generation_dir=selected)
+    ))
     return paths["client_dir"]

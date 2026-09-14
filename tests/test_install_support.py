@@ -106,7 +106,6 @@ class InstallSupportTests(unittest.TestCase):
     def test_render_node_preserves_explicit_gateway_port(self) -> None:
         env = self.make_env()
         env["RU_LISTEN_PORT"] = "8443"
-        env["RU_REALITY_MAX_TIME_DIFFERENCE"] = "24h"
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             env_path = tmp_path / "demo.env"

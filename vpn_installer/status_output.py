@@ -34,6 +34,12 @@ def _format_size(value: object) -> str:
     return "unknown"
 
 
+def _event_count(total: object, observed: object) -> str:
+    if total is not None:
+        return str(total)
+    return f"unavailable (observed>={observed})" if observed is not None else "unavailable"
+
+
 def _format_log_window(name: str, window: LogWindowSnapshot) -> list[str]:
     boundaries = []
     if window.since:
@@ -170,13 +176,11 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
     oom = snapshot.storage.get("runtime_events", {}).get("oom_kills", {})
     if oom:
         counts = oom.get("counts", {})
-        since_release = counts.get("since_release")
-        since_release_label = str(since_release) if since_release is not None else str(oom.get("since_release_scope", "unknown"))
-        lines.append(
-            "OOM kills: "
-            f"5m={counts.get('5m', 'unknown')}, 30m={counts.get('30m', 'unknown')}, "
-            f"24h={counts.get('24h', 'unknown')}, since_release={since_release_label}"
-        )
+        observed = oom.get("observed_counts", {})
+        lines.append("OOM kills: " + ", ".join(
+            f"{name}={_event_count(counts.get(name), observed.get(name))}"
+            for name in ("5m", "30m", "24h", "since_release")
+        ))
     if has_public_front and snapshot.front:
         lines.append(
             "Reality target: "
@@ -245,7 +249,11 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
         events = conntrack.get("table_full_events", {})
         labels = {"5": "5m", "30": "30m", "1440": "24h"}
         if events:
-            details.append("table_full=" + ",".join(f"{labels.get(str(window), str(window))}:{count}" for window, count in events.items()))
+            observed = conntrack.get("table_full_observed", {})
+            details.append("table_full=" + ",".join(
+                f"{labels.get(str(window), str(window))}:{_event_count(count, observed.get(window))}"
+                for window, count in events.items()
+            ))
         lines.append("conntrack: " + ", ".join(details))
     resolver = snapshot.network.get("resolver", {})
     if resolver:

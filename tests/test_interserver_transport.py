@@ -11,7 +11,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 
 from vpn_installer.config import generate_default_env
-from vpn_installer import interserver_transport, server_agent
+from vpn_installer import interserver_transport, server_transport
 from vpn_installer.interserver_transport import (
     TRANSPORT_CANDIDATE_TAGS,
     TRANSPORT_HY2_TAG,
@@ -919,7 +919,7 @@ class OverlayDeadlineTests(unittest.TestCase):
         ):
             if activation:
                 try:
-                    result = server_agent.prove_wireguard_overlay(
+                    result = server_transport.prove_wireguard_overlay(
                         {"WG_INTERFACE": "wg0", "WG_FOREIGN_ADDRESS": "10.74.0.2/24"}
                     )
                 except RuntimeError as exc:

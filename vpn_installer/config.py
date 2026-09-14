@@ -129,7 +129,10 @@ def load_env_file(path: Path) -> dict[str, str]:
 def normalize_deployment_env(source: dict[str, str]) -> dict[str, str]:
     schema = source.get("CONFIG_SCHEMA", "").strip()
     if schema == str(CONFIG_SCHEMA_VERSION):
-        return source.copy()
+        normalized = source.copy()
+        # One input-boundary transition from 0.22.8; remove in 0.23.1.
+        normalized.pop("RU_REALITY_MAX_TIME_DIFFERENCE", None)
+        return normalized
     raise ValueError(
         f"unsupported CONFIG_SCHEMA={schema or '<empty>'}; current release accepts only schema {CONFIG_SCHEMA_VERSION}"
     )
@@ -203,7 +206,6 @@ def generate_default_env(
         "RU_REALITY_PUBLIC_KEY": base64_url_nopad(reality_public),
         "RU_REALITY_SHORT_ID": "0123456789abcdef",
         "RU_REALITY_ACCEPT_EMPTY_SHORT_ID": "1",
-        "RU_REALITY_MAX_TIME_DIFFERENCE": "24h",
         "UTLS_FINGERPRINT": "chrome",
         "SING_BOX_LOG_LEVEL": "warn",
         "RU_SNIFF_TIMEOUT": "250ms",

@@ -189,9 +189,9 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "CLIENT_COMPAT_UUID"):
             config.merge_env_with_defaults({"CLIENT_COMPAT_UUID": "unused"}, "sample")
 
-    def test_default_reality_time_tolerance_is_explicit(self) -> None:
+    def test_removed_reality_time_tolerance_is_not_generated(self) -> None:
         env = config.generate_default_env("sample")
-        self.assertEqual(env["RU_REALITY_MAX_TIME_DIFFERENCE"], "24h")
+        self.assertNotIn("RU_REALITY_MAX_TIME_DIFFERENCE", env)
 
     def test_reality_handshake_target_override_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "RU_REALITY_HANDSHAKE"):
@@ -201,9 +201,13 @@ class ConfigTests(unittest.TestCase):
         env = config.generate_default_env("sample")
         self.assertEqual(env["RU_REALITY_ACCEPT_EMPTY_SHORT_ID"], "1")
 
-    def test_merge_env_with_defaults_restores_empty_reality_time_tolerance_to_default(self) -> None:
-        env = config.merge_env_with_defaults({"RU_REALITY_MAX_TIME_DIFFERENCE": ""}, "sample")
-        self.assertEqual(env["RU_REALITY_MAX_TIME_DIFFERENCE"], "24h")
+    def test_previous_local_env_drops_only_retired_unused_input(self) -> None:
+        source = {"CONFIG_SCHEMA": "3", "RU_REALITY_MAX_TIME_DIFFERENCE": "30s", "CLIENT_UUID": "preserved"}
+        normalized = config.normalize_deployment_env(source)
+        self.assertEqual(normalized, {"CONFIG_SCHEMA": "3", "CLIENT_UUID": "preserved"})
+        self.assertIn("RU_REALITY_MAX_TIME_DIFFERENCE", source)
+        with self.assertRaisesRegex(ValueError, "RU_REALITY_MAX_TIME_DIFFERENCE"):
+            config.merge_env_with_defaults({"RU_REALITY_MAX_TIME_DIFFERENCE": ""}, "sample")
 
     def test_default_subscription_settings_are_not_generated_anymore(self) -> None:
         env = config.generate_default_env("sample")
@@ -352,7 +356,7 @@ class ConfigTests(unittest.TestCase):
         self.assertNotIn("RU_PUBLIC_IP", env)
         self.assertNotIn("FOREIGN_PUBLIC_IP", env)
         self.assertEqual(env["RU_LISTEN_PORT"], "443")
-        self.assertEqual(env["RU_REALITY_MAX_TIME_DIFFERENCE"], "24h")
+        self.assertNotIn("RU_REALITY_MAX_TIME_DIFFERENCE", env)
         self.assertEqual(env["FOREIGN_BLOCK_RU"], "0")
         self.assertIn("ADMIN_WEB_PORT", env)
         self.assertNotIn("ADMIN_WEB_ENABLED", env)

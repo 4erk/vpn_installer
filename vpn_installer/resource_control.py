@@ -1,12 +1,16 @@
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping
+
+try:
+    from .journal_evidence import kernel_event_snapshot
+except ImportError:
+    from journal_evidence import kernel_event_snapshot  # type: ignore[no-redef]
 
 
 MIB = 1024 * 1024
@@ -44,7 +48,10 @@ def _run(args: list[str], *, timeout: int = 30) -> subprocess.CompletedProcess[s
     try:
         return subprocess.run(args, text=True, capture_output=True, timeout=timeout, check=False)
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        return subprocess.CompletedProcess(args, 127, "", str(exc))
+        output = getattr(exc, "stdout", "") or ""
+        if isinstance(output, bytes):
+            output = output.decode("utf-8", errors="replace")
+        return subprocess.CompletedProcess(args, 127, output, str(exc))
 
 
 def _require_command(args: list[str], *, timeout: int = 30) -> None:
@@ -281,58 +288,41 @@ def _disk_capacity_snapshot() -> dict[str, Any]:
     }
 
 
-def _kernel_oom_snapshot(installed_at: str) -> dict[str, Any]:
+def _kernel_oom_snapshot(
+    installed_at: str, *, coverage: Mapping[str, Any] | None = None, cutoff: float | None = None,
+) -> dict[str, Any]:
     installed = _parse_timestamp(installed_at)
-    now = datetime.now(timezone.utc)
-    retention_start = now - OOM_HISTORY_RETENTION
+    now = datetime.now(timezone.utc) if cutoff is None else datetime.fromtimestamp(cutoff, timezone.utc)
+    query_limit_start = now - OOM_HISTORY_RETENTION
     history_start = now - timedelta(hours=24)
-    query_start = max(min(installed, history_start), retention_start) if installed is not None else history_start
-    result = _run(
-        ["journalctl", "-k", "--since", query_start.isoformat(), "--no-pager", "-o", "json", "--grep=Out of memory: Killed process"],
-        timeout=20,
-    )
-    events: list[dict[str, Any]] = []
-    if result.returncode == 0:
-        for line in result.stdout.splitlines():
-            try:
-                record = json.loads(line)
-                epoch = int(record.get("__REALTIME_TIMESTAMP", 0)) / 1_000_000
-            except (TypeError, ValueError, json.JSONDecodeError):
-                continue
-            events.append({"timestamp": datetime.fromtimestamp(epoch, timezone.utc).isoformat(), "message": str(record.get("MESSAGE", ""))[:500], "epoch": epoch})
+    query_start = max(min(installed, history_start), query_limit_start) if installed is not None else history_start
     now_epoch = now.timestamp()
     installed_epoch = installed.timestamp() if installed is not None else None
-    since_release_events = [event for event in events if installed_epoch is not None and event["epoch"] >= installed_epoch]
-    since_release_scope = (
-        "complete"
-        if installed is not None and installed >= retention_start
-        else "retention_limited"
-        if installed is not None
-        else "unknown"
+    snapshot = kernel_event_snapshot(
+        runner=_run, pattern="Out of memory: Killed process", query_since=query_start.timestamp(), cutoff=now_epoch,
+        window_starts={"5m": now_epoch - 300, "30m": now_epoch - 1800, "24h": now_epoch - 86400, "since_release": installed_epoch},
+        coverage=coverage,
     )
-    counts = {
-        "5m": sum(now_epoch - event["epoch"] <= 300 for event in events),
-        "30m": sum(now_epoch - event["epoch"] <= 1800 for event in events),
-        "24h": sum(now_epoch - event["epoch"] <= 86400 for event in events),
-        "since_release": len(since_release_events) if since_release_scope == "complete" else None,
-    }
+    events = snapshot.pop("events")
+    since_release_events = [event for event in events if installed_epoch is not None and event["epoch"] >= installed_epoch]
+
     def public_event(event: Mapping[str, Any]) -> dict[str, Any]:
-        return {key: value for key, value in event.items() if key != "epoch"}
+        return {"timestamp": event["timestamp"], "message": event["message"][:500]} if event else {}
 
     latest = public_event(max(events, key=lambda event: event["epoch"], default={}))
     latest_since_release = public_event(max(since_release_events, key=lambda event: event["epoch"], default={}))
-    error = "" if result.returncode in {0, 1} else result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
     return {
-        "counts": counts,
+        **snapshot,
         "latest": latest,
         "latest_since_release": latest_since_release,
-        "since_release_scope": since_release_scope,
-        "query_since": query_start.isoformat(),
-        "collector_error": error,
+        "since_release_scope": snapshot["windows"]["since_release"]["scope"],
     }
 
 
-def storage_snapshot(root_filesystem: Mapping[str, Any], installed_at: str) -> dict[str, Any]:
+def storage_snapshot(
+    root_filesystem: Mapping[str, Any], installed_at: str, *,
+    coverage: Mapping[str, Any] | None = None, cutoff: float | None = None,
+) -> dict[str, Any]:
     security_paths = [
         BTMP_PATH,
         *Path("/var/log").glob("btmp.*"),
@@ -357,7 +347,7 @@ def storage_snapshot(root_filesystem: Mapping[str, Any], installed_at: str) -> d
             "total_bytes": apt_archives_bytes + apt_lists_bytes + dnf_cache_bytes,
         },
         "memory": memory_runtime_snapshot(),
-        "runtime_events": {"oom_kills": _kernel_oom_snapshot(installed_at)},
+        "runtime_events": {"oom_kills": _kernel_oom_snapshot(installed_at, coverage=coverage, cutoff=cutoff)},
     }
 
 

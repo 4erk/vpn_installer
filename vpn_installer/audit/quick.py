@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 from .. import VERSION
 from ..common import OUT_DIR, ROOT_DIR, RUNTIME_SITE_PACKAGES, cli_command
-from ..client_artifacts import PUBLIC_VLESS_OUTBOUND_TAG
+from ..client_artifacts import PUBLIC_VLESS_OUTBOUND_TAG, client_artifact_snapshot
 from ..compatibility import CompatibilityWindow
 from ..config import load_env_file
 from ..dns_policy import GLOBAL_FOREIGN_DOMAINS, GLOBAL_FOREIGN_DOMAIN_SUFFIXES
@@ -487,15 +487,20 @@ def test_validate_json(out_dir: Path, env: dict[str, str]) -> dict[str, str]:
 
 
 def test_user_artifacts(out_dir: Path) -> dict[str, str]:
-    vless_uri_path = out_dir / "client" / "vless-uri.txt"
-    hiddify_uri_alias_path = out_dir / "client" / "hiddify-uri.txt"
-    v2rayn_uri_alias_path = out_dir / "client" / "v2rayn-uri.txt"
-    hiddify_json_path = out_dir / "client" / "hiddify-cross-platform.json"
-    hysteria2_uri_path = out_dir / "client" / "hysteria2-uri.txt"
-    linux_json_path = out_dir / "client" / "linux-sing-box.json"
-    android_hiddify_json_path = out_dir / "client" / "hiddify-android.json"
-    android_xray_json_path = out_dir / "client" / "android-v2rayng-xray.json"
-    next_steps = out_dir / "NEXT-STEPS.txt"
+    with client_artifact_snapshot({"DEPLOY_NAME": out_dir.name}, out_dir=out_dir.parent) as paths:
+        return _validate_user_artifacts(paths)
+
+
+def _validate_user_artifacts(paths: dict[str, Path]) -> dict[str, str]:
+    vless_uri_path = paths["vless_uri"]
+    hiddify_uri_alias_path = paths["hiddify_uri_compat"]
+    v2rayn_uri_alias_path = paths["v2rayn_uri"]
+    hiddify_json_path = paths["hiddify_json"]
+    hysteria2_uri_path = paths["hysteria2_uri"]
+    linux_json_path = paths["linux_json"]
+    android_hiddify_json_path = paths["android_hiddify_json"]
+    android_xray_json_path = paths["android_xray_json"]
+    next_steps = paths["next_steps"]
     if not vless_uri_path.is_file():
         raise AuditFailure(f"Не найден VLESS URI fallback файл: {vless_uri_path}")
     if not hiddify_uri_alias_path.is_file():
@@ -751,8 +756,6 @@ def test_interserver_hysteria_runtime(runner: AuditRunner, out_dir: Path) -> dic
     network = f"audit-hysteria-{runner.run_id}"
     server = f"audit-hysteria-server-{runner.run_id}"
     client = f"audit-hysteria-client-{runner.run_id}"
-    server_ip = "172.31.249.10"
-    client_ip = "172.31.249.11"
     work_dir = runner.work_dir / "interserver-hysteria-runtime"
     work_dir.mkdir(parents=True, exist_ok=True)
     client_config_path = work_dir / "client.json"
@@ -769,7 +772,6 @@ def test_interserver_hysteria_runtime(runner: AuditRunner, out_dir: Path) -> dic
     if hysteria_candidate.get("obfs", {}).get("type") != "salamander":
         raise AuditFailure("Interserver Hysteria2 candidate не содержит Salamander obfs")
     hysteria_candidate = dict(hysteria_candidate)
-    hysteria_candidate["server"] = server_ip
     rendered_server_config = json.loads(rendered_server_config_path.read_text(encoding="utf-8"))
     hysteria_inbound = next(
         (item for item in rendered_server_config.get("inbounds", []) if item.get("tag") == "interserver-hy2-in"),
@@ -791,11 +793,14 @@ def test_interserver_hysteria_runtime(runner: AuditRunner, out_dir: Path) -> dic
         "route": {"final": "interserver-underlay-hy2"},
         "experimental": ru_config["experimental"],
     }
-    write_bytes(client_config_path, json.dumps(client_config, ensure_ascii=False, indent=2).encode("utf-8") + b"\n")
-
-    with runner.docker_network(network, subnet="172.31.249.0/24"):
-        with runner.docker_container(server, AUDIT_IMAGE, network=network, ip=server_ip):
-            with runner.docker_container(client, AUDIT_IMAGE, network=network, ip=client_ip):
+    with runner.docker_network(network):
+        with runner.docker_container(server, AUDIT_IMAGE, network=network):
+            attached = json.loads(runner.docker(
+                "hysteria-server-address", ["inspect", server, "--format", "{{json .NetworkSettings.Networks}}"],
+            ).stdout)
+            hysteria_candidate["server"] = attached[network]["IPAddress"]
+            write_bytes(client_config_path, json.dumps(client_config, ensure_ascii=False, indent=2).encode("utf-8") + b"\n")
+            with runner.docker_container(client, AUDIT_IMAGE, network=network):
                 runner.docker_exec(server, "mkdir -p /work /srv/probe && printf 'hysteria transport ok\\n' >/srv/probe/index.html")
                 runner.docker_exec(client, "mkdir -p /work /var/lib/vpn-stack")
                 runner.docker_copy(server, server_config_path, "/work/server.json")

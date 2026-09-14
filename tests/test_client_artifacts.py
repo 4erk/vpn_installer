@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from vpn_installer import client_artifacts
+from vpn_installer import client_artifacts, client_publication
 from vpn_installer.config import generate_default_env
 from vpn_installer.models import AppError
 
@@ -56,7 +56,7 @@ class ClientArtifactTests(unittest.TestCase):
         self.assertEqual(paths["v2rayn_uri"].name, "v2rayn-uri.txt")
         self.assertEqual(paths["android_xray_json"].name, "android-v2rayng-xray.json")
         self.assertEqual(paths["hysteria2_uri"].name, "hysteria2-uri.txt")
-        self.assertEqual(paths["next_steps"], Path(tmp) / "demo" / "NEXT-STEPS.txt")
+        self.assertEqual(paths["next_steps"], Path(tmp) / "demo" / "client" / "NEXT-STEPS.txt")
 
     def test_next_steps_use_canonical_node_selector(self) -> None:
         rendered = client_artifacts.render_next_steps(self.make_env())
@@ -119,14 +119,15 @@ class ClientArtifactTests(unittest.TestCase):
         return {
             str(path.relative_to(client_dir.parent)): path.read_bytes() if path.is_file() else None
             for path in [*client_dir.rglob("*"), client_dir.parent / "NEXT-STEPS.txt"]
-            if path.exists()
+            if path.exists() and path.name != client_publication.MANIFEST
         }
 
     def seed_artifacts(self, env: dict[str, str], root: Path) -> Path:
         client_dir = client_artifacts.render_client_profiles(env, out_dir=root)
         (client_dir / "operator-notes.txt").write_bytes(b"keep operator notes")
-        (client_dir / "windows-route-bypass.state.json").write_bytes(b'{"owned":"keep"}')
-        (client_dir / "windows-route-bypass.state.json.lock").touch()
+        state_dir = client_dir.parent / client_publication.STATE_DIRECTORY
+        (state_dir / "windows-route-bypass.state.json").write_bytes(b'{"owned":"keep"}')
+        (state_dir / "windows-route-bypass.state.json.lock").touch()
         return client_dir
 
     def test_render_failure_preserves_previous_set(self) -> None:
@@ -143,7 +144,7 @@ class ClientArtifactTests(unittest.TestCase):
 
     def test_every_staging_write_failure_preserves_previous_set(self) -> None:
         env = self.make_env()
-        writer = client_artifacts.write_private_text
+        writer = client_publication.write_private_text
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             client_dir = self.seed_artifacts(env, root)
@@ -155,9 +156,9 @@ class ClientArtifactTests(unittest.TestCase):
                             raise OSError("disk full")
                         writer(path, content)
 
-                    with patch.object(client_artifacts, "write_private_text", side_effect=fail_write):
+                    with patch.object(client_publication, "write_private_text", side_effect=fail_write):
                         with self.assertRaisesRegex(OSError, "disk full"):
-                            client_artifacts.render_client_profiles(env, out_dir=root)
+                            client_artifacts.render_client_profiles(dict(env, RU_REALITY_SHORT_ID="0102030405060708"), out_dir=root)
                     self.assertEqual(self.snapshot(client_dir), before)
                     self.assertEqual(list(client_dir.parent.glob(".client-stage-*")), [])
 
@@ -183,32 +184,32 @@ class ClientArtifactTests(unittest.TestCase):
 
     def test_incomplete_staged_write_is_rejected(self) -> None:
         env = self.make_env()
-        writer = client_artifacts.write_private_text
+        writer = client_publication.write_private_text
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             client_dir = self.seed_artifacts(env, root)
             before = self.snapshot(client_dir)
-            with patch.object(client_artifacts, "write_private_text", side_effect=lambda path, payload: writer(path, payload[:7])):
+            with patch.object(client_publication, "write_private_text", side_effect=lambda path, payload: writer(path, payload[:7])):
                 with self.assertRaisesRegex(AppError, "incomplete"):
-                    client_artifacts.render_client_profiles(env, out_dir=root)
+                    client_artifacts.render_client_profiles(dict(env, RU_REALITY_SHORT_ID="0102030405060708"), out_dir=root)
             self.assertEqual(self.snapshot(client_dir), before)
 
     def test_each_publication_failure_rolls_back_entire_set_and_uri(self) -> None:
         env = self.make_env()
-        replace = Path.replace
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             client_dir = self.seed_artifacts(env, root)
             before = self.snapshot(client_dir)
             changed_env = dict(env, RU_REALITY_SHORT_ID="0102030405060708")
-            for name in (*client_artifacts.GENERATED_CLIENT_FILE_NAMES, "NEXT-STEPS.txt"):
+            points = [*("staged:" + name for name in (*client_artifacts.GENERATED_CLIENT_FILE_NAMES, "NEXT-STEPS.txt")),
+                      "generation-ready", "journal-ready", "before-switch"]
+            for name in points:
                 with self.subTest(name=name):
-                    def fail_publish(path: Path, target: Path) -> Path:
-                        if "new" in path.parts and path.name == name:
+                    def fail_publish(point: str) -> None:
+                        if point == name:
                             raise OSError("replace failed")
-                        return replace(path, target)
 
-                    with patch.object(Path, "replace", fail_publish):
+                    with patch.object(client_publication, "_checkpoint", fail_publish):
                         with self.assertRaisesRegex(OSError, "replace failed"):
                             client_artifacts.render_client_profiles(changed_env, out_dir=root)
                     self.assertEqual(self.snapshot(client_dir), before)
@@ -216,35 +217,38 @@ class ClientArtifactTests(unittest.TestCase):
 
     def test_primary_uri_remains_present_until_atomic_replace(self) -> None:
         env = self.make_env()
-        replace = Path.replace
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             client_dir = self.seed_artifacts(env, root)
             uri_path = client_dir / "vless-uri.txt"
             uri = uri_path.read_bytes()
+            changed_env = dict(env, RU_REALITY_SHORT_ID="0102030405060708")
+            next_uri = client_artifacts.render_vless_uri(changed_env).encode("utf-8")
+            points = []
 
-            def check_replace(path: Path, target: Path) -> Path:
-                self.assertEqual(uri_path.read_bytes(), uri)
-                return replace(path, target)
+            def check_replace(point: str) -> None:
+                points.append(point)
+                committed = point in {"pointer-set", "after-switch", "before-journal-clear"}
+                self.assertEqual(uri_path.read_bytes(), next_uri if committed else uri)
 
-            with patch.object(Path, "replace", check_replace):
-                client_artifacts.render_client_profiles(env, out_dir=root)
-            self.assertEqual(uri_path.read_bytes(), uri)
+            with patch.object(client_publication, "_checkpoint", check_replace):
+                client_artifacts.render_client_profiles(changed_env, out_dir=root)
+            self.assertIn("before-switch", points)
+            self.assertIn("after-switch", points)
+            self.assertEqual(uri_path.read_bytes(), next_uri)
 
     def test_interrupted_publication_restores_previous_set(self) -> None:
         env = self.make_env()
-        replace = Path.replace
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             client_dir = self.seed_artifacts(env, root)
             before = self.snapshot(client_dir)
 
-            def interrupt(path: Path, target: Path) -> Path:
-                if "new" in path.parts and path.name == "NEXT-STEPS.txt":
+            def interrupt(point: str) -> None:
+                if point == "before-switch":
                     raise KeyboardInterrupt("interrupted publication")
-                return replace(path, target)
 
-            with patch.object(Path, "replace", interrupt):
+            with patch.object(client_publication, "_checkpoint", interrupt):
                 with self.assertRaises(KeyboardInterrupt):
                     client_artifacts.render_client_profiles(dict(env, RU_REALITY_SHORT_ID="0102030405060708"), out_dir=root)
             self.assertEqual(self.snapshot(client_dir), before)
@@ -252,66 +256,60 @@ class ClientArtifactTests(unittest.TestCase):
 
     def test_failed_fresh_publication_does_not_leave_partial_profiles(self) -> None:
         env = self.make_env()
-        replace = Path.replace
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
 
-            def fail_publish(path: Path, target: Path) -> Path:
-                if "new" in path.parts and path.name == "NEXT-STEPS.txt":
+            def fail_publish(point: str) -> None:
+                if point == "before-switch":
                     raise OSError("publish failed")
-                return replace(path, target)
 
-            with patch.object(Path, "replace", fail_publish):
+            with patch.object(client_publication, "_checkpoint", fail_publish):
                 with self.assertRaisesRegex(OSError, "publish failed"):
                     client_artifacts.render_client_profiles(env, out_dir=root)
             self.assertEqual(self.snapshot(root / "demo" / "client"), {})
 
     def test_stale_cleanup_failure_restores_files_and_generated_directories(self) -> None:
         env = self.make_env()
-        replace = Path.replace
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            client_dir = self.seed_artifacts(env, root)
+            client_dir = root / "demo" / "client"
+            client_dir.mkdir(parents=True)
             directory = client_dir / "android-v2rayng-xray.json"
-            directory.unlink()
             directory.mkdir()
             (directory / "keep.txt").write_bytes(b"previous directory")
             for name in client_artifacts.STALE_CLIENT_ARTIFACT_NAMES:
                 (client_dir / name).write_bytes(b"previous stale file")
             before = self.snapshot(client_dir)
 
-            def fail_stale(path: Path, target: Path) -> Path:
-                if path == client_dir / client_artifacts.STALE_CLIENT_ARTIFACT_NAMES[-1]:
+            def fail_stale(point: str) -> None:
+                if point == "legacy-moved":
                     raise OSError("cleanup failed")
-                return replace(path, target)
 
-            with patch.object(Path, "replace", fail_stale):
+            with patch.object(client_publication, "_checkpoint", fail_stale):
                 with self.assertRaisesRegex(OSError, "cleanup failed"):
                     client_artifacts.render_client_profiles(env, out_dir=root)
             self.assertEqual(self.snapshot(client_dir), before)
 
-    def test_rollback_failure_retains_backup_and_reports_its_path(self) -> None:
+    def test_interruption_after_switch_keeps_complete_new_generation(self) -> None:
         env = self.make_env()
-        replace = Path.replace
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             client_dir = self.seed_artifacts(env, root)
             old_uri = (client_dir / "vless-uri.txt").read_bytes()
+            old_generation = client_dir.resolve()
 
-            def fail_replace(path: Path, target: Path) -> Path:
-                if path.name == "NEXT-STEPS.txt" and "new" in path.parts:
-                    raise OSError("publish failed")
-                if path.name == "vless-uri.txt" and "previous" in path.parts:
-                    raise OSError("rollback failed")
-                return replace(path, target)
+            def fail_replace(point: str) -> None:
+                if point == "after-switch":
+                    raise KeyboardInterrupt("after commit")
 
-            with patch.object(Path, "replace", fail_replace):
-                with self.assertRaisesRegex(AppError, "rollback incomplete") as raised:
-                    client_artifacts.render_client_profiles(env, out_dir=root)
-            backups = list(client_dir.parent.glob(".client-stage-*"))
-            self.assertEqual(len(backups), 1)
-            self.assertIn(str(backups[0]), str(raised.exception))
-            self.assertEqual((backups[0] / "previous" / "client" / "vless-uri.txt").read_bytes(), old_uri)
+            with patch.object(client_publication, "_checkpoint", fail_replace):
+                with self.assertRaisesRegex(KeyboardInterrupt, "after commit"):
+                    client_artifacts.render_client_profiles(dict(env, RU_REALITY_SHORT_ID="0102030405060708"), out_dir=root)
+            self.assertNotEqual((client_dir / "vless-uri.txt").read_bytes(), old_uri)
+            self.assertEqual((old_generation / "vless-uri.txt").read_bytes(), old_uri)
+            with client_artifacts.client_artifact_snapshot(env, out_dir=root) as paths:
+                self.assertEqual(paths["vless_uri"].read_bytes(), paths["v2rayn_uri"].read_bytes())
+                self.assertTrue(paths["next_steps"].is_file())
 
     def test_concurrent_publication_is_rejected_without_touching_artifacts(self) -> None:
         env = self.make_env()
@@ -319,7 +317,7 @@ class ClientArtifactTests(unittest.TestCase):
             root = Path(tmp)
             client_dir = self.seed_artifacts(env, root)
             before = self.snapshot(client_dir)
-            with client_artifacts._client_artifact_lock(client_dir):
+            with client_publication.publication_lock(client_dir):
                 with self.assertRaisesRegex(AppError, "another process"):
                     client_artifacts.render_client_profiles(env, out_dir=root)
             self.assertEqual(self.snapshot(client_dir), before)
@@ -332,7 +330,12 @@ class ClientArtifactTests(unittest.TestCase):
             client_dir = self.seed_artifacts(env, root)
             before = self.snapshot(client_dir)
             client_artifacts.render_client_profiles(env, out_dir=root)
-            self.assertEqual(self.snapshot(client_dir), before)
+            after = self.snapshot(client_dir)
+            instructions = str(Path("client") / "NEXT-STEPS.txt")
+            before.pop(instructions)
+            after.pop(instructions)
+            self.assertEqual(after, before)
+            self.assertEqual((client_dir.parent / client_publication.STATE_DIRECTORY / client_publication.ROUTE_STATE).read_bytes(), b'{"owned":"keep"}')
 
     def test_route_helper_only_targets_server_endpoints_not_cidr_excludes(self) -> None:
         env = self.make_env()

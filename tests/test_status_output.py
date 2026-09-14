@@ -29,6 +29,22 @@ def collected_windows() -> dict[str, LogWindowSnapshot]:
 
 
 class StatusOutputTests(unittest.TestCase):
+    def test_missing_kernel_history_is_not_rendered_as_zero_or_none(self) -> None:
+        snapshot = DiagnosticsSnapshot(
+            storage={"runtime_events": {"oom_kills": {
+                "counts": {"5m": 0, "30m": 0, "24h": None, "since_release": None},
+                "observed_counts": {"24h": 1, "since_release": 2},
+            }}},
+            network={"conntrack": {
+                "table_full_events": {"5": 0, "30": None},
+                "table_full_observed": {"30": 3},
+            }},
+        )
+        text = "\n".join(format_snapshot_summary(snapshot))
+        self.assertIn("OOM kills: 5m=0, 30m=0, 24h=unavailable (observed>=1), since_release=unavailable (observed>=2)", text)
+        self.assertIn("table_full=5m:0,30m:unavailable (observed>=3)", text)
+        self.assertNotIn("None", text)
+
     def test_partial_journal_counts_are_lower_bounds_not_complete_totals(self) -> None:
         snapshot = DiagnosticsSnapshot(storage={"journal_coverage": {"partial_windows": {
             "24h": {"counts": {"unclassified_error": 3}, "top_destinations": {"unclassified_error": {"203.0.113.1:443": 3}}},

@@ -122,12 +122,15 @@ BASE_ARTIFACTS = {
     "vpn-stack-dns.service": ArtifactSpec("/etc/systemd/system/vpn-stack-dns.service", "base"),
     "btmp-vpn-stack.conf": ArtifactSpec("/usr/local/lib/vpn-stack/btmp-logrotate.conf", "base"),
     "vpn-stack-agent.py": ArtifactSpec("/usr/local/lib/vpn-stack/vpn-stack-agent.py", "base"),
+    "server_runtime.py": ArtifactSpec("/usr/local/lib/vpn-stack/server_runtime.py", "base"),
+    "server_lifecycle.py": ArtifactSpec("/usr/local/lib/vpn-stack/server_lifecycle.py", "base"),
     "diagnostics.py": ArtifactSpec("/usr/local/lib/vpn-stack/diagnostics.py", "base"),
     "log_classifier.py": ArtifactSpec("/usr/local/lib/vpn-stack/log_classifier.py", "base"),
     "network_profile.py": ArtifactSpec("/usr/local/lib/vpn-stack/network_profile.py", "base"),
     "platforms.py": ArtifactSpec("/usr/local/lib/vpn-stack/platforms.py", "base"),
     "release_integrity.py": ArtifactSpec("/usr/local/lib/vpn-stack/release_integrity.py", "base"),
     "resource_control.py": ArtifactSpec("/usr/local/lib/vpn-stack/resource_control.py", "base"),
+    "journal_evidence.py": ArtifactSpec("/usr/local/lib/vpn-stack/journal_evidence.py", "base"),
     "vpn-stack-health.service": ArtifactSpec("/etc/systemd/system/vpn-stack-health.service", "base"),
     "vpn-stack-health.timer": ArtifactSpec("/etc/systemd/system/vpn-stack-health.timer", "base"),
     "node.env": ArtifactSpec("/etc/vpn-stack/deployment.env", "base"),
@@ -148,6 +151,7 @@ WEB_ADMIN_ARTIFACTS = {
     "vpn-stack-admin.service": ArtifactSpec("/etc/systemd/system/vpn-stack-admin.service", CAP_WEB_ADMIN),
 }
 INTERSERVER_ARTIFACTS = {
+    "server_transport.py": ArtifactSpec("/usr/local/lib/vpn-stack/server_transport.py", "interserver"),
     "interserver_transport.py": ArtifactSpec("/usr/local/lib/vpn-stack/interserver_transport.py", "interserver"),
     "topology.py": ArtifactSpec("/usr/local/lib/vpn-stack/topology.py", "interserver"),
 }

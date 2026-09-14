@@ -10,7 +10,8 @@ from pathlib import Path
 from typing import Callable
 from . import workflows
 from .common import OUT_DIR, print_header
-from .client_artifacts import render_vless_uri
+from .client_artifacts import client_artifact_snapshot, render_vless_uri
+from .models import AppError
 from .diagnostics import DiagnosticsSnapshot, classify_interserver_adaptation
 from .log_classifier import normalize_source, split_endpoint
 from .network_profile import (
@@ -1189,10 +1190,13 @@ def _verify_public_vless_uri(
                 }
             },
         }
-    if not uri_path.is_file():
-        return _public_vless_failure(topology, "failed", f"primary VLESS URI is missing: {uri_path}")
     try:
-        raw_uri = uri_path.read_bytes()
+        if uri_path.name == "vless-uri.txt" and uri_path.parent.name == "client":
+            deployment_dir = uri_path.parent.parent
+            with client_artifact_snapshot({"DEPLOY_NAME": deployment_dir.name}, out_dir=deployment_dir.parent) as paths:
+                raw_uri = paths["vless_uri"].read_bytes()
+        else:
+            raw_uri = uri_path.read_bytes()
         expected_uri = render_vless_uri(env).encode("utf-8")
         if raw_uri != expected_uri:
             return _public_vless_failure(
@@ -1201,7 +1205,7 @@ def _verify_public_vless_uri(
                 "primary VLESS URI differs from the canonical deployment contract",
             )
         uri = parse_vless_uri(raw_uri.decode("utf-8").strip())
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, AppError) as exc:
         return _public_vless_failure(topology, "failed", f"primary VLESS URI is invalid: {exc}")
     reject_marker = _capture_private_reject_marker(reject_target) if reject_target is not None else ""
     run_result = _run_public_profile(

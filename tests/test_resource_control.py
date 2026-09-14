@@ -5,6 +5,7 @@ import os
 import subprocess
 import tempfile
 import unittest
+from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +15,14 @@ from vpn_installer import resource_control
 
 
 class ResourceControlTests(unittest.TestCase):
+    @staticmethod
+    def oom_coverage(now: datetime, **changes: object) -> dict[str, object]:
+        return {
+            "since_epoch": (now - timedelta(days=14)).timestamp(),
+            "query_since_epoch": (now - timedelta(days=14)).timestamp(),
+            "query_until_epoch": now.timestamp(), "discarded_at": [], "error": "", **changes,
+        }
+
     def test_disk_usage_uses_allocated_blocks_for_sparse_files(self) -> None:
         sparse = SimpleNamespace(st_blocks=8, st_size=128 * resource_control.MIB)
         portable = SimpleNamespace(st_size=4096)
@@ -167,7 +176,9 @@ class ResourceControlTests(unittest.TestCase):
         }
         completed = subprocess.CompletedProcess(["journalctl"], 0, json.dumps(record) + "\n", "")
         with patch.object(resource_control, "_run", return_value=completed):
-            snapshot = resource_control._kernel_oom_snapshot((now - timedelta(seconds=1)).isoformat())
+            snapshot = resource_control._kernel_oom_snapshot(
+                (now - timedelta(seconds=1)).isoformat(), coverage=self.oom_coverage(now), cutoff=now.timestamp(),
+            )
 
         self.assertEqual(snapshot["counts"]["5m"], 1)
         self.assertEqual(snapshot["counts"]["since_release"], 1)
@@ -183,7 +194,7 @@ class ResourceControlTests(unittest.TestCase):
         }
         completed = subprocess.CompletedProcess(["journalctl"], 0, json.dumps(record) + "\n", "")
         with patch.object(resource_control, "_run", return_value=completed) as runner:
-            snapshot = resource_control._kernel_oom_snapshot(now.isoformat())
+            snapshot = resource_control._kernel_oom_snapshot(now.isoformat(), coverage=self.oom_coverage(now), cutoff=now.timestamp())
 
         self.assertEqual(snapshot["counts"]["24h"], 1)
         self.assertEqual(snapshot["counts"]["since_release"], 0)
@@ -191,15 +202,138 @@ class ResourceControlTests(unittest.TestCase):
         self.assertEqual(snapshot["latest_since_release"], {})
         query_since = datetime.fromisoformat(snapshot["query_since"])
         self.assertLessEqual(query_since, now - timedelta(hours=23, minutes=59))
-        self.assertEqual(runner.call_args.args[0][0:3], ["journalctl", "-k", "--since"])
+        runner.assert_called_once()
+        self.assertIn("_TRANSPORT=kernel", runner.call_args.args[0])
+        self.assertNotIn("-k", runner.call_args.args[0])
 
     def test_oom_snapshot_treats_no_journal_matches_as_an_empty_result(self) -> None:
+        now = datetime.now(timezone.utc)
         completed = subprocess.CompletedProcess(["journalctl"], 1, "", "")
         with patch.object(resource_control, "_run", return_value=completed):
-            snapshot = resource_control._kernel_oom_snapshot(datetime.now(timezone.utc).isoformat())
+            snapshot = resource_control._kernel_oom_snapshot(now.isoformat(), coverage=self.oom_coverage(now), cutoff=now.timestamp())
 
         self.assertEqual(snapshot["counts"]["30m"], 0)
         self.assertEqual(snapshot["collector_error"], "")
+
+    def test_oom_release_before_retained_start_has_unknown_total_not_zero(self) -> None:
+        now = datetime(2026, 9, 14, 12, tzinfo=timezone.utc)
+        retained = datetime(2026, 9, 11, tzinfo=timezone.utc).timestamp()
+        installed = datetime(2026, 9, 9, tzinfo=timezone.utc)
+        with patch.object(resource_control, "_run", return_value=subprocess.CompletedProcess([], 1, "", "")):
+            snapshot = resource_control._kernel_oom_snapshot(
+                installed.isoformat(), coverage=self.oom_coverage(now, since_epoch=retained), cutoff=now.timestamp(),
+            )
+        self.assertIsNone(snapshot["counts"]["since_release"])
+        self.assertEqual(snapshot["observed_counts"]["since_release"], 0)
+        self.assertEqual(snapshot["since_release_scope"], "unavailable")
+        self.assertIn("retained", snapshot["windows"]["since_release"]["coverage_error"])
+        self.assertEqual(snapshot["counts"]["24h"], 0)
+
+    def test_partial_oom_history_preserves_latest_since_release(self) -> None:
+        now = datetime(2026, 9, 14, 12, tzinfo=timezone.utc)
+        event_at = now - timedelta(seconds=10)
+        record = {"__REALTIME_TIMESTAMP": str(int(event_at.timestamp() * 1e6)), "MESSAGE": "Out of memory: Killed process 42 (sing-box)"}
+        evidence = self.oom_coverage(now, since_epoch=(now - timedelta(minutes=1)).timestamp())
+        with patch.object(resource_control, "_run", return_value=subprocess.CompletedProcess([], 0, json.dumps(record), "")):
+            snapshot = resource_control._kernel_oom_snapshot((now - timedelta(days=5)).isoformat(), coverage=evidence, cutoff=now.timestamp())
+        self.assertTrue(all(value is None for value in snapshot["counts"].values()))
+        self.assertTrue(all(value == 1 for value in snapshot["observed_counts"].values()))
+        self.assertEqual(snapshot["latest_since_release"]["timestamp"], event_at.isoformat())
+        self.assertEqual(snapshot["latest_since_release"], snapshot["latest"])
+        self.assertNotIn("epoch", snapshot["latest"])
+
+    def test_oom_query_errors_are_unavailable_and_keep_valid_evidence(self) -> None:
+        now = datetime(2026, 9, 14, 12, tzinfo=timezone.utc)
+        record = json.dumps({"__REALTIME_TIMESTAMP": str(int((now.timestamp() - 10) * 1e6)), "MESSAGE": "Out of memory: Killed process 42"})
+        for response in (
+            subprocess.CompletedProcess([], 2, "", "denied"),
+            subprocess.CompletedProcess([], 1, "", "denied"),
+            subprocess.CompletedProcess([], 0, record, "truncated journal"),
+            subprocess.CompletedProcess([], 2, record, "partial failure"),
+            subprocess.CompletedProcess([], 0, record + "\nbad JSON", ""),
+        ):
+            with self.subTest(response=response), patch.object(resource_control, "_run", return_value=response):
+                snapshot = resource_control._kernel_oom_snapshot((now - timedelta(hours=1)).isoformat(), coverage=self.oom_coverage(now), cutoff=now.timestamp())
+            self.assertTrue(all(value is None for value in snapshot["counts"].values()))
+            self.assertTrue(snapshot["collector_error"])
+            self.assertEqual(snapshot["observed_counts"]["30m"], int(bool(response.stdout)))
+            self.assertEqual(bool(snapshot["latest_since_release"]), bool(response.stdout))
+
+    def test_oom_fixed_cutoff_excludes_future_events(self) -> None:
+        now = datetime(2026, 9, 14, 12, tzinfo=timezone.utc)
+        records = [json.dumps({"__REALTIME_TIMESTAMP": str(int((now.timestamp() + offset) * 1e6)), "MESSAGE": "Out of memory: Killed process 42"}) for offset in (-300, 0, 1)]
+        with patch.object(resource_control, "_run", return_value=subprocess.CompletedProcess([], 0, "\n".join(records), "")) as runner:
+            snapshot = resource_control._kernel_oom_snapshot((now - timedelta(minutes=10)).isoformat(), coverage=self.oom_coverage(now), cutoff=now.timestamp())
+        self.assertEqual(snapshot["counts"]["5m"], 2)
+        self.assertEqual(snapshot["latest"]["timestamp"], now.isoformat())
+        self.assertEqual(snapshot["query_until"], now.isoformat())
+        args = runner.call_args.args[0]
+        self.assertEqual(args[args.index("--until") + 1], f"@{now.timestamp():.6f}")
+
+    def test_oom_timeout_retains_positive_records_through_resource_runner(self) -> None:
+        now = datetime(2026, 9, 14, 12, tzinfo=timezone.utc)
+        record = json.dumps({"__REALTIME_TIMESTAMP": str(int((now.timestamp() - 10) * 1e6)), "MESSAGE": "Out of memory: Killed process 42"})
+        for output in (record, record.encode()):
+            with self.subTest(output_type=type(output)), patch.object(
+                resource_control.subprocess, "run", side_effect=subprocess.TimeoutExpired("journalctl", 20, output=output),
+            ):
+                snapshot = resource_control._kernel_oom_snapshot(
+                    (now - timedelta(hours=1)).isoformat(), coverage=self.oom_coverage(now), cutoff=now.timestamp(),
+                )
+            self.assertIsNone(snapshot["counts"]["30m"])
+            self.assertEqual(snapshot["observed_counts"]["30m"], 1)
+            self.assertTrue(snapshot["latest_since_release"])
+            self.assertIn("timed out", snapshot["collector_error"])
+
+    def test_oom_default_cutoff_is_acquired_once(self) -> None:
+        now = datetime(2026, 9, 14, 12, tzinfo=timezone.utc)
+        with patch.object(resource_control, "datetime", wraps=datetime) as clock, patch.object(
+            resource_control, "_run", return_value=subprocess.CompletedProcess([], 1, "", ""),
+        ):
+            clock.now.return_value = now
+            snapshot = resource_control._kernel_oom_snapshot(now.isoformat(), coverage=self.oom_coverage(now))
+        clock.now.assert_called_once_with(timezone.utc)
+        self.assertEqual(snapshot["query_until"], now.isoformat())
+
+    def test_oom_old_release_is_query_limited_even_when_history_is_retained(self) -> None:
+        now = datetime(2026, 9, 14, 12, tzinfo=timezone.utc)
+        evidence = self.oom_coverage(now, since_epoch=0, query_since_epoch=0)
+        with patch.object(resource_control, "_run", return_value=subprocess.CompletedProcess([], 1, "", "")):
+            snapshot = resource_control._kernel_oom_snapshot((now - timedelta(days=15)).isoformat(), coverage=evidence, cutoff=now.timestamp())
+        self.assertIsNone(snapshot["counts"]["since_release"])
+        self.assertIn("collected journal interval", snapshot["windows"]["since_release"]["coverage_error"])
+        self.assertEqual(datetime.fromisoformat(snapshot["query_since"]), now - timedelta(days=14))
+
+    def test_oom_invalid_or_future_release_does_not_claim_complete_zero(self) -> None:
+        now = datetime(2026, 9, 14, 12, tzinfo=timezone.utc)
+        for installed in ("", "invalid", (now + timedelta(seconds=1)).isoformat()):
+            with self.subTest(installed=installed), patch.object(resource_control, "_run", return_value=subprocess.CompletedProcess([], 1, "", "")):
+                snapshot = resource_control._kernel_oom_snapshot(installed, coverage=self.oom_coverage(now), cutoff=now.timestamp())
+            self.assertIsNone(snapshot["counts"]["since_release"])
+            self.assertIsNone(snapshot["observed_counts"]["since_release"])
+            self.assertEqual(snapshot["latest_since_release"], {})
+            self.assertEqual(snapshot["counts"]["30m"], 0)
+
+    def test_oom_missing_or_narrow_coverage_cannot_certify_counts(self) -> None:
+        now = datetime(2026, 9, 14, 12, tzinfo=timezone.utc)
+        for evidence in ({}, self.oom_coverage(now, query_since_epoch=now.timestamp() - 300)):
+            with self.subTest(evidence=evidence), patch.object(resource_control, "_run", return_value=subprocess.CompletedProcess([], 1, "", "")):
+                snapshot = resource_control._kernel_oom_snapshot((now - timedelta(days=1)).isoformat(), coverage=evidence, cutoff=now.timestamp())
+            self.assertIsNone(snapshot["counts"]["30m"])
+            self.assertEqual(snapshot["observed_counts"]["30m"], 0)
+
+    def test_storage_snapshot_forwards_acquired_coverage_and_cutoff(self) -> None:
+        now = datetime(2026, 9, 14, 12, tzinfo=timezone.utc)
+        evidence = self.oom_coverage(now)
+        with ExitStack() as stack:
+            for name in ("_disk_capacity_snapshot", "_managed_releases_snapshot", "_transaction_backups_snapshot", "memory_runtime_snapshot"):
+                stack.enter_context(patch.object(resource_control, name, return_value={}))
+            stack.enter_context(patch.object(resource_control, "path_tree_disk_usage", return_value=0))
+            stack.enter_context(patch.object(Path, "glob", return_value=[]))
+            oom = stack.enter_context(patch.object(resource_control, "_kernel_oom_snapshot", return_value={"counts": {"30m": None}}))
+            snapshot = resource_control.storage_snapshot({}, now.isoformat(), coverage=evidence, cutoff=now.timestamp())
+        oom.assert_called_once_with(now.isoformat(), coverage=evidence, cutoff=now.timestamp())
+        self.assertEqual(snapshot["runtime_events"]["oom_kills"], oom.return_value)
 
 
 if __name__ == "__main__":

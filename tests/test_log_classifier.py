@@ -215,15 +215,41 @@ class LogClassifierTests(unittest.TestCase):
         self.assertEqual(domain.bucket, "domain_to_foreign_timeout")
         self.assertEqual(literal.bucket, "ipv4_literal_timeout")
 
-    def test_transport_failure_is_not_misreported_as_dns_or_unclassified(self) -> None:
+    def test_dns_quic_failure_without_underlay_identity_remains_unknown(self) -> None:
         line = (
             "ERROR [722003726 25ms] dns: lookup failed for gateway.example.com: "
             "quic: transport closed: read udp 94.232.248.35:54968->132.243.21.108:18443: read: connection refused"
         )
         classified = classify_line(line)
         self.assertIsNotNone(classified)
-        self.assertEqual(classified.bucket, "transport_unavailable")
+        self.assertEqual(classified.bucket, "unclassified_error")
         self.assertEqual(classified.destination, "gateway.example.com")
+
+    def test_explicit_underlay_quic_failure_identifies_transport(self) -> None:
+        item = classify_line(
+            "ERROR outbound/hysteria2[interserver-underlay-hy2]: "
+            "quic: transport closed: read udp 192.0.2.1:54968->192.0.2.2:18443: read: connection refused"
+        )
+        self.assertEqual(item.bucket, "transport_unavailable")
+
+    def test_public_hysteria_failure_does_not_implicate_interserver_transport(self) -> None:
+        item = classify_line("ERROR inbound/hysteria2[public-hy2]: quic: transport closed")
+        self.assertEqual(item.bucket, "unclassified_error")
+
+    def test_destination_no_route_preserves_observation_without_underlay_diagnosis(self) -> None:
+        line = (
+            "ERROR [42 3ms] connection: open connection to 136.29.3.186:443 "
+            "using outbound/direct[to-foreign]: dial tcp 136.29.3.186:443: connect: no route to host"
+        )
+        item = classify_line(line, requested_destination="media.example:443")
+        self.assertEqual(item.bucket, "unclassified_error")
+        self.assertEqual(item.phase, "connect")
+        self.assertEqual(item.failed_endpoint, "136.29.3.186:443")
+        self.assertEqual(item.requested_destination, "media.example:443")
+        summary = summarize_lines([line])
+        self.assertEqual(summary["counts"]["transport_unavailable"], 0)
+        self.assertEqual(sum(summary["counts"].values()), 1)
+        self.assertEqual(summary["samples"]["unclassified_error"], line)
 
     def test_underlay_wireguard_send_failure_is_a_transport_event(self) -> None:
         classified = classify_line(
@@ -274,14 +300,14 @@ class LogClassifierTests(unittest.TestCase):
         self.assertIsNotNone(classified)
         self.assertEqual(classified.bucket, "unclassified_error")
 
-    def test_dns_failure_caused_by_missing_route_is_transport_unavailable(self) -> None:
+    def test_dns_missing_route_does_not_identify_the_failed_segment(self) -> None:
         classified = classify_line(
             "+0300 2026-08-07 12:25:02 ERROR [449403960 8ms] dns: lookup failed for "
             "api.example.com: exchange4: dial TCP connection: dial tcp 10.74.0.2:1053: "
             "connect: no such device"
         )
         self.assertIsNotNone(classified)
-        self.assertEqual(classified.bucket, "transport_unavailable")
+        self.assertEqual(classified.bucket, "unclassified_error")
         self.assertEqual(classified.destination, "api.example.com")
 
     def test_dns_context_cancelled_is_client_noise_not_dns_failure(self) -> None:
@@ -353,13 +379,13 @@ class LogClassifierTests(unittest.TestCase):
         self.assertEqual(disabled.bucket, "disabled_invalid")
         self.assertEqual(invalid.bucket, "invalid_reality")
 
-    def test_foreign_ipv6_route_failure_is_transport_unavailable(self) -> None:
+    def test_foreign_ipv6_route_failure_does_not_identify_the_failed_segment(self) -> None:
         classified = classify_line(
             "ERROR [42 2ms] connection: open connection to [2001:67c:4e8:f002::a]:443 "
             "using outbound/direct[to-foreign]: dial tcp [2001:67c:4e8:f002::a]:443: connect: network is unreachable"
         )
         self.assertIsNotNone(classified)
-        self.assertEqual(classified.bucket, "transport_unavailable")
+        self.assertEqual(classified.bucket, "unclassified_error")
         self.assertEqual(classified.destination, "[2001:67c:4e8:f002::a]:443")
 
     def test_summary_counts_and_top_destinations(self) -> None:
