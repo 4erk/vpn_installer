@@ -352,23 +352,13 @@ def service_state(name: str) -> str:
     return result.stdout.strip() or "unknown"
 
 
-def journal_lines_since(unit: str, since: str) -> list[str]:
-    result = runtime.run(["journalctl", "-u", unit, "--since", since, "--no-pager", "-o", "short-iso"], timeout=20)
-    return result.stdout.splitlines() if result.returncode == 0 else []
-
-
-def journal_lines(unit: str, minutes: int) -> list[str]:
-    return journal_lines_since(unit, f"{minutes} minutes ago")
-
-
-def journal_filtered_lines(unit: str, minutes: int, pattern: str) -> list[str]:
-    result = runtime.run(
-        ["journalctl", "-u", unit, "--since", f"{minutes} minutes ago", "--no-pager", "-o", "short-iso", f"--grep={pattern}"],
-        timeout=30,
+def journal_filtered_events(unit: str, minutes: int, pattern: str) -> dict[str, Any]:
+    cutoff = time.time()
+    since = cutoff - minutes * 60
+    return journal.journal_event_snapshot(
+        runner=runtime.run, matches=("-u", unit), pattern=pattern,
+        window_starts={"front": since}, query_since=since, cutoff=cutoff, timeout=30,
     )
-    return result.stdout.splitlines() if result.returncode == 0 else []
-
-
 
 
 def _journal_window_args(minutes: int, until: float | None) -> list[str]:
@@ -1722,7 +1712,9 @@ def public_front_snapshot(minutes: int, source: str | None = None, *, live_probe
     if not runtime.contract_has(contract, runtime.CAP_PUBLIC_FRONT):
         raise RuntimeError("public front diagnostics are not applicable to this node")
     port = int(env.get("RU_LISTEN_PORT", "443") or 443)
-    xray_lines = journal_filtered_lines("vpn-stack-xray.service", minutes, XRAY_FRONT_LOG_GREP)
+    evidence = journal_filtered_events("vpn-stack-xray.service", minutes, XRAY_FRONT_LOG_GREP)
+    xray_lines = [event["message"] for event in evidence["events"]]
+    journal_error = journal.journal_snapshot_error(evidence, window="front")
     accepted_tcp = sum("accepted tcp:" in line for line in xray_lines)
     accepted_udp = sum("accepted udp:" in line for line in xray_lines)
     udp_443 = sum("accepted udp:" in line and (":443 " in line or ":443[" in line) for line in xray_lines)
@@ -1741,6 +1733,8 @@ def public_front_snapshot(minutes: int, source: str | None = None, *, live_probe
     probes = run_probes(env, contract, "light") if live_probes else {"profile": "none", "ok": None, "requirements": {}}
     path_verdict = "verified" if probes.get("ok") is True else "failed" if probes.get("ok") is False else "inconclusive"
     overall = "failed" if "failed" in {front_verdict, path_verdict} else "degraded" if front_verdict == "degraded" else front_verdict
+    if journal_error and overall != "failed":
+        overall = "inconclusive"
     payload = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": runtime.utc_now(),
@@ -1762,6 +1756,10 @@ def public_front_snapshot(minutes: int, source: str | None = None, *, live_probe
         "verdicts": {"public_front": front_verdict, "server_path": path_verdict, "overall": overall},
         "verdict": overall,
     }
+    payload["journal_evidence"] = {key: value for key, value in evidence.items() if key != "events"}
+    payload["observed_events"] = dict(payload["events"])
+    if journal_error:
+        payload["events"] = dict.fromkeys(payload["events"])
     if source is None:
         return payload
     source_events = {
@@ -1791,6 +1789,8 @@ def public_front_snapshot(minutes: int, source: str | None = None, *, live_probe
             if "accepted tcp:" in line:
                 tcp_flow_events.setdefault(key, Counter())[destination] += 1
     client_transport = client_transport_observation(tcp_flow_events, active_outer_flows=len(active_flow_keys))
+    if journal_error:
+        client_transport["status"] = "inconclusive"
     source_flows = {
         key: {**metrics, "accepted_destinations": dict(flow_events.get(key, Counter()).most_common(10))}
         for key, metrics in front.get("flows", {}).items()
@@ -1813,7 +1813,11 @@ def public_front_snapshot(minutes: int, source: str | None = None, *, live_probe
     source_loss_observed = client.get("quality") == "loss_observed" or any(
         metrics.get("quality") == "loss_observed" for metrics in source_flows.values()
     )
-    if source_events["accepted"] and source_degraded:
+    if front_verdict == "failed":
+        source_verdict = "failed"
+    elif journal_error:
+        source_verdict = "inconclusive"
+    elif source_events["accepted"] and source_degraded:
         source_verdict = "degraded"
     elif source_events["accepted"] and source_loss_observed:
         source_verdict = "loss_observed"
@@ -1828,7 +1832,8 @@ def public_front_snapshot(minutes: int, source: str | None = None, *, live_probe
     payload.update(
         {
             "source": source,
-            "source_events": source_events,
+            "source_events": dict.fromkeys(source_events) if journal_error else source_events,
+            "source_observed_events": source_events,
             "source_client": client,
             "source_flows": source_flows,
             "source_interval": source_interval,
@@ -1856,6 +1861,8 @@ def front_client_snapshot(source: str, minutes: int) -> dict[str, Any]:
             "recent_interval": payload["source_interval"],
         },
         "events": payload["source_events"],
+        "observed_events": payload["source_observed_events"],
+        "journal_evidence": payload["journal_evidence"],
         "flow_events": payload["source_flow_events"],
         "client_transport": payload["source_client_transport"],
         "transport": payload["transport"],

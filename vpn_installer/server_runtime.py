@@ -128,7 +128,10 @@ def run(args: list[str], *, timeout: int = 15, check: bool = False, input_text: 
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
         if check:
             raise RuntimeError(f"command failed: {' '.join(args)}: {exc}") from exc
-        return subprocess.CompletedProcess(args, 127, "", str(exc))
+        output = getattr(exc, "stdout", "") or ""
+        if isinstance(output, bytes):
+            output = output.decode("utf-8", errors="replace")
+        return subprocess.CompletedProcess(args, 127, output, str(exc))
 
 
 def read_json(path: Path, default: Any) -> Any:

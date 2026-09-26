@@ -3,12 +3,15 @@ from __future__ import annotations
 import copy
 import json
 import tempfile
+import subprocess
 import unittest
+import zipfile
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from vpn_installer import server_agent, server_runtime
+from vpn_installer import server_agent, server_runtime, verify
 from vpn_installer.diagnostics import COLLECTOR_NAMES, LOG_WINDOW_KEYS, CollectorState, DiagnosticsSnapshot, LogWindowSnapshot
 from vpn_installer.log_classifier import BUCKETS
 from vpn_installer.models import RemoteTarget
@@ -39,6 +42,8 @@ from vpn_installer.verify import (
     verify_live_workflow,
 )
 from vpn_installer.vless_verify import RELIABILITY_PROBE_URLS, parse_vless_uri
+from tests.test_journal_evidence import front_evidence
+from tests.test_server_agent import front_snapshot
 
 
 FIRST_LOAD_OK = {
@@ -730,17 +735,27 @@ class VerifyTests(unittest.TestCase):
 
     def test_verify_live_workflow_rollback_scope_checks_primary_vless_only(self) -> None:
         env = deployment_env()
+        observations, source, ownership = self._front_pair()
+        env["EXIT_PUBLIC_IP"] = source
         topology = TopologySpec.from_env(env)
         targets = [
             remote_target(topology, NODE_GATEWAY, ssh_host="gateway.example"),
             remote_target(topology, NODE_EXIT, ssh_host="exit.example"),
         ]
+        remote_dir = "/tmp/vpn-stack-front-verify.aBc123"
+
+        def public_vless(*args, **kwargs):
+            correlation = _validate_front_correlation(kwargs["on_running"](), source=source, runner_sockets=ownership)
+            self.assertEqual(correlation["verdict"], "verified")
+            return {**verified_public_vless_evidence(topology), "front_correlation": correlation}
+
         with (
             patch("vpn_installer.verify.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), env, {}, targets, {})),
             patch("vpn_installer.verify.workflows.print_summary"),
-            patch("vpn_installer.verify._capture_client_front", return_value={"events": {"accepted_tcp": 1}, "front": {"flows": {}}}),
+            patch("vpn_installer.verify.ssh_capture", side_effect=[remote_dir, "", json.dumps(observations["baseline"]), json.dumps(observations["during"]), ""]) as ssh,
+            patch("vpn_installer.verify.scp_upload") as upload,
             patch("vpn_installer.verify._collect_agent_snapshot") as collect_snapshot,
-            patch("vpn_installer.verify._verify_public_vless_uri", return_value=verified_public_vless_evidence(topology)),
+            patch("vpn_installer.verify._verify_public_vless_uri", side_effect=public_vless),
             patch("vpn_installer.verify._verify_public_hysteria2") as verify_hysteria2,
         ):
             self.assertEqual(
@@ -749,6 +764,90 @@ class VerifyTests(unittest.TestCase):
             )
         collect_snapshot.assert_not_called()
         verify_hysteria2.assert_not_called()
+        upload.assert_called_once()
+        commands = [call.args[1] for call in ssh.call_args_list]
+        self.assertEqual(sum(f"{remote_dir}/vpn-stack-agent.py client" in command for command in commands), 2)
+        self.assertEqual(commands[-1], f"rm -rf -- {remote_dir}")
+        self.assertFalse(any("/usr/local/lib/vpn-stack/vpn-stack-agent.py" in command for command in commands))
+
+    def test_transient_collector_cleans_up_setup_collection_and_cleanup_failures(self) -> None:
+        remote_dir = "/tmp/vpn-stack-front-verify.aBc123"
+        sources = {"vpn-stack-agent.py": "# canonical collector\n" * 10000, "journal_evidence.py": "# canonical parser\n"}
+        for failure in (None, "upload", "extract", "collect", "cleanup"):
+            with self.subTest(failure=failure):
+                commands = []
+                archives = []
+
+                def capture(target, command, **kwargs):
+                    commands.append(command)
+                    self.assertLess(len(command), 1024)
+                    self.assertLessEqual(kwargs["command_timeout"], 20)
+                    if command.startswith("mktemp"):
+                        return remote_dir
+                    if (failure == "extract" and "zipfile -e" in command) or (failure == "cleanup" and command.startswith("rm")):
+                        raise RuntimeError(failure)
+                    return ""
+
+                def upload(target, local, remote):
+                    archives.append(local)
+                    with zipfile.ZipFile(local) as bundle:
+                        self.assertEqual({name: bundle.read(name).decode() for name in bundle.namelist()}, sources)
+                    self.assertEqual(remote, f"{remote_dir}/collector.zip")
+                    if failure == "upload":
+                        raise RuntimeError(failure)
+
+                with (
+                    patch.object(verify, "server_agent_artifacts", return_value=sources),
+                    patch.object(verify, "ssh_capture", side_effect=capture),
+                    patch.object(verify, "scp_upload", side_effect=upload),
+                ):
+                    def run():
+                        with verify._transient_front_collector(object()) as script:
+                            self.assertEqual(script, f"{remote_dir}/vpn-stack-agent.py")
+                            if failure == "collect":
+                                raise RuntimeError(failure)
+                    if failure:
+                        with self.assertRaisesRegex(RuntimeError, failure):
+                            run()
+                    else:
+                        run()
+                self.assertEqual(commands[-1], f"rm -rf -- {remote_dir}")
+                self.assertTrue(archives)
+                self.assertFalse(any(path.exists() for path in archives))
+
+    def test_transient_collector_rejects_unowned_directory_without_removal(self) -> None:
+        with patch.object(verify, "ssh_capture", return_value="/tmp/unrelated") as ssh, patch.object(verify, "scp_upload") as upload:
+            with self.assertRaisesRegex(Exception, "allocate"):
+                with verify._transient_front_collector(object()):
+                    self.fail("unowned path was accepted")
+        ssh.assert_called_once()
+        upload.assert_not_called()
+
+    def test_rollback_verification_cannot_hide_collector_setup_or_cleanup_error(self) -> None:
+        env = deployment_env()
+        topology = TopologySpec.from_env(env)
+        targets = [remote_target(topology, node) for node in (NODE_GATEWAY, NODE_EXIT)]
+        for stage in ("setup", "cleanup"):
+            @contextmanager
+            def collector(_target):
+                if stage == "setup":
+                    raise RuntimeError(stage)
+                yield "/tmp/vpn-stack-front-verify.aBc123/vpn-stack-agent.py"
+                raise RuntimeError(stage)
+
+            with (
+                self.subTest(stage=stage),
+                patch.object(verify.workflows, "prepare_remote_session", return_value=("demo", Path("demo.env"), env, {}, targets, {})),
+                patch.object(verify.workflows, "print_summary"),
+                patch.object(verify, "_transient_front_collector", collector),
+                patch.object(verify, "_capture_client_front", return_value={}),
+                patch.object(verify, "_verify_public_vless_uri", return_value=verified_public_vless_evidence(topology)),
+            ):
+                self.assertEqual(verify_live_workflow("demo", non_interactive=True, throughput_seconds=0, require_native_agent=False), 1)
+                report = sorted((Path(self.temp_out.name) / "diagnostics").glob("*/live-verify.json"))[-1]
+                payload = json.loads(report.read_text(encoding="utf-8"))
+                self.assertEqual(payload["verdict"], "inconclusive")
+                self.assertEqual(payload["public_vless"]["collector_error"], stage)
 
     def test_verify_live_workflow_requests_post_vless_agent_acceptance_per_node(self) -> None:
         env = deployment_env()
@@ -778,6 +877,7 @@ class VerifyTests(unittest.TestCase):
             patch("vpn_installer.verify._collect_agent_snapshot", side_effect=collect) as collect_mock,
             patch("vpn_installer.verify._verify_public_vless_uri", side_effect=public_vless),
             patch("vpn_installer.verify._verify_public_hysteria2", side_effect=public_hysteria2),
+            patch("vpn_installer.verify._transient_front_collector", side_effect=AssertionError("native verification must use installed agent")),
         ):
             self.assertEqual(verify_live_workflow("demo", non_interactive=True), 0)
         self.assertEqual(collect_mock.call_count, 2)
@@ -1133,6 +1233,8 @@ class VerifyTests(unittest.TestCase):
         source = "198.51.100.20"
         now = datetime.now(timezone.utc)
         baseline = {"generated_at": (now - timedelta(seconds=2)).isoformat(), "source": source, "events": {"accepted_tcp": 4}, "front": {"flows": {}}}
+        baseline["journal_evidence"] = front_evidence()
+        baseline["flow_events"] = {}
         correlation = _validate_front_correlation(
             [
                 {"baseline": baseline, "during": {**baseline, "generated_at": now.isoformat(), "events": {"accepted_tcp": 4}}},
@@ -1144,6 +1246,64 @@ class VerifyTests(unittest.TestCase):
 
         self.assertEqual(correlation["verdict"], "inconclusive")
 
+    def _front_pair(self, *, failed_baseline=False, new_accept=True):
+        source = "203.0.113.20"
+        now = datetime.now(timezone.utc)
+        message = f"from {source}:50123 accepted tcp:example.org:443"
+        record = json.dumps({"__REALTIME_TIMESTAMP": str(int((now.timestamp() - 20) * 1e6)), "MESSAGE": message})
+        replies = (
+            subprocess.CompletedProcess([], 2 if failed_baseline else 0, record, "partial baseline" if failed_baseline else ""),
+            subprocess.CompletedProcess([], 0, record + ("\n" + record if new_accept else ""), ""),
+        )
+        snapshots = []
+        for index, reply in enumerate(replies):
+            acquired = now - timedelta(seconds=2 - index)
+            snapshot = front_snapshot(reply, source=source, cutoff=acquired.timestamp())
+            snapshot["generated_at"] = acquired.isoformat()
+            snapshots.append(snapshot)
+        return {"baseline": snapshots[0], "during": snapshots[1]}, source, {"status": "ok", "flows": [f"{source}:50123"]}
+
+    def test_front_correlation_cannot_turn_failed_baseline_into_new_accept(self) -> None:
+        observations, source, ownership = self._front_pair(failed_baseline=True, new_accept=False)
+        result = _validate_front_correlation(observations, source=source, runner_sockets=ownership)
+        self.assertEqual(result["verdict"], "inconclusive")
+        self.assertIn("partial baseline", result["reason"])
+        self.assertEqual(observations["baseline"]["observed_events"]["accepted_tcp"], 1)
+        self.assertEqual(observations["during"]["events"]["accepted_tcp"], 1)
+
+    def test_front_correlation_requires_complete_evidence_and_counters_in_both_snapshots(self) -> None:
+        observations, source, ownership = self._front_pair()
+        self.assertEqual(_validate_front_correlation(observations, source=source, runner_sockets=ownership)["verdict"], "verified")
+        for side in ("baseline", "during"):
+            for field, value in (("journal_evidence", None), ("journal_evidence", {}),
+                                 ("journal_evidence", {**observations[side]["journal_evidence"], "collector_error": "partial"}),
+                                 ("events", {}), ("events", {"accepted_tcp": None}), ("events", {"accepted_tcp": True}),
+                                 ("flow_events", None), ("flow_events", {f"{source}:50123": {"example.org:443": -1}})):
+                with self.subTest(side=side, field=field, value=value):
+                    incomplete = copy.deepcopy(observations)
+                    incomplete[side][field] = value
+                    result = _validate_front_correlation(incomplete, source=source, runner_sockets=ownership)
+                    self.assertEqual(result["verdict"], "inconclusive")
+            missing = copy.deepcopy(observations)
+            del missing[side]["journal_evidence"]
+            self.assertEqual(_validate_front_correlation(missing, source=source, runner_sockets=ownership)["verdict"], "inconclusive")
+
+    def test_fresh_front_envelope_does_not_refresh_journal_acquisition(self) -> None:
+        observations, source, ownership = self._front_pair()
+        now = datetime.now(timezone.utc).timestamp()
+        for side in ("baseline", "during"):
+            for cutoff in (now - 600, now + 600, datetime.fromisoformat(observations[side]["generated_at"]).timestamp() + 0.5):
+                with self.subTest(side=side, cutoff=cutoff):
+                    stale = copy.deepcopy(observations)
+                    stale[side]["journal_evidence"] = front_evidence(cutoff=cutoff)
+                    result = _validate_front_correlation(stale, source=source, runner_sockets=ownership)
+                    self.assertEqual(result["verdict"], "inconclusive")
+                    self.assertIn("journal", result["reason"])
+        for delta in (0, -1):
+            unordered = copy.deepcopy(observations)
+            unordered["during"]["journal_evidence"] = front_evidence(cutoff=observations["baseline"]["journal_evidence"]["query_until_epoch"] + delta)
+            self.assertEqual(_validate_front_correlation(unordered, source=source, runner_sockets=ownership)["verdict"], "inconclusive")
+
     def test_front_correlation_matches_agent_active_and_closed_flow_output(self) -> None:
         source = "198.51.100.20"
         flow = f"{source}:37166"
@@ -1152,7 +1312,7 @@ class VerifyTests(unittest.TestCase):
         with (
             patch.object(server_runtime, "parse_env", return_value={"RU_LISTEN_PORT": "443"}),
             patch.object(server_agent, "installed_runtime_contract", return_value={"capabilities": [CAP_PUBLIC_FRONT]}),
-            patch.object(server_agent, "journal_filtered_lines") as logs,
+            patch.object(server_agent, "journal_filtered_events") as logs,
             patch.object(server_agent, "tcp_front_snapshot") as front,
             patch.object(server_agent, "service_state", return_value="active"),
             patch.object(server_agent, "udp_443_policy", return_value="routed"),
@@ -1161,7 +1321,7 @@ class VerifyTests(unittest.TestCase):
             patch.object(server_runtime, "utc_now") as clock,
         ):
             for index, phase in enumerate((None, "active", "closing", None)):
-                logs.return_value = [] if index == 0 else [f"from {flow} accepted tcp:example.com:443"]
+                logs.return_value = front_evidence([] if index == 0 else [f"from {flow} accepted tcp:example.com:443"])
                 front.return_value = {"listening": True, "flows": {flow: {"source": source, "source_port": 37166, "phase": phase, "quality": "observed"}} if phase else {}}
                 clock.return_value = (now - timedelta(seconds=4 - index)).isoformat()
                 snapshots.append(server_agent.front_client_snapshot(source, 5))
@@ -1182,6 +1342,8 @@ class VerifyTests(unittest.TestCase):
         now = datetime.now(timezone.utc)
         baseline = {"generated_at": (now - timedelta(seconds=2)).isoformat(), "source": source, "events": {"accepted_tcp": 0}, "flow_events": {}}
         during = {"generated_at": (now - timedelta(seconds=1)).isoformat(), "source": source, "events": {"accepted_tcp": 1}, "flow_events": {flow: {"example.com:443": 1}}, "front": {"flows": {flow: {"quality": "observed", "phase": "active"}}}}
+        baseline["journal_evidence"] = front_evidence()
+        during["journal_evidence"] = front_evidence()
         for name in ("baseline", "during"):
             for value in (None, "", "invalid", 123, now.replace(tzinfo=None).isoformat(), (now - timedelta(minutes=10)).isoformat(), (now + timedelta(minutes=10)).isoformat()):
                 with self.subTest(snapshot=name, timestamp=value):
@@ -1198,9 +1360,10 @@ class VerifyTests(unittest.TestCase):
         now = datetime.now(timezone.utc)
         correlation = _validate_front_correlation(
             {
-                "baseline": {"generated_at": (now - timedelta(seconds=2)).isoformat(), "source": "198.51.100.20", "events": {"accepted_tcp": 40}, "front": {"flows": {}}},
+                "baseline": {"generated_at": (now - timedelta(seconds=2)).isoformat(), "source": "198.51.100.20", "events": {"accepted_tcp": 40}, "front": {"flows": {}}, "flow_events": {}, "journal_evidence": front_evidence()},
                 "during": {
                     "generated_at": now.isoformat(),
+                    "journal_evidence": front_evidence(),
                     "source": "198.51.100.20",
                     "events": {"accepted_tcp": 37},
                     "flow_events": {"198.51.100.20:37166": {"1.1.1.1:53": 1}},
@@ -1226,6 +1389,7 @@ class VerifyTests(unittest.TestCase):
     def test_front_correlation_rejects_unchanged_flow_events_with_no_accept_delta(self) -> None:
         now = datetime.now(timezone.utc)
         baseline = {
+            "journal_evidence": front_evidence(),
             "generated_at": (now - timedelta(seconds=2)).isoformat(),
             "source": "198.51.100.20",
             "events": {"accepted_tcp": 4},
@@ -1244,12 +1408,14 @@ class VerifyTests(unittest.TestCase):
         source = "198.51.100.20"
         now = datetime.now(timezone.utc)
         baseline = {
+            "journal_evidence": front_evidence(),
             "generated_at": (now - timedelta(seconds=2)).isoformat(),
             "source": source,
             "events": {"accepted_tcp": 4},
             "flow_events": {f"{source}:37166": {"example.com:443": 2, "old.example:443": 10}},
         }
         during = {
+            "journal_evidence": front_evidence(),
             "generated_at": now.isoformat(),
             "source": source,
             "events": {"accepted_tcp": 4},
@@ -1274,7 +1440,9 @@ class VerifyTests(unittest.TestCase):
         unrelated = "192.0.2.99"
         now = datetime.now(timezone.utc)
         baseline = {"generated_at": (now - timedelta(seconds=2)).isoformat(), "source": source, "events": {"accepted_tcp": 4}}
+        baseline["journal_evidence"] = front_evidence()
         during = {
+            "journal_evidence": front_evidence(),
             "generated_at": now.isoformat(),
             "source": source,
             "events": {"accepted_tcp": 4},
@@ -1299,8 +1467,9 @@ class VerifyTests(unittest.TestCase):
         source = "198.51.100.20"
         now = datetime.now(timezone.utc)
         observation = {
-            "baseline": {"generated_at": (now - timedelta(seconds=2)).isoformat(), "source": source, "events": {"accepted_tcp": 0}},
+            "baseline": {"generated_at": (now - timedelta(seconds=2)).isoformat(), "source": source, "events": {"accepted_tcp": 0}, "journal_evidence": front_evidence()},
             "during": {"generated_at": now.isoformat(), "source": source, "events": {"accepted_tcp": 10},
+                       "journal_evidence": front_evidence(),
                        "front": {"flows": {f"{source}:50000": {"quality": "observed"}}},
                        "flow_events": {f"{source}:50000": {"example.com:443": 10}}},
         }
@@ -1371,8 +1540,9 @@ class VerifyTests(unittest.TestCase):
                     env,
                     runner,
                     on_running=lambda: {
-                        "baseline": {"generated_at": (datetime.now(timezone.utc) - timedelta(seconds=2)).isoformat(), "source": "198.51.100.20", "events": {"accepted_tcp": 0}, "front": {"flows": {}}},
+                        "baseline": {"generated_at": (datetime.now(timezone.utc) - timedelta(seconds=2)).isoformat(), "source": "198.51.100.20", "events": {"accepted_tcp": 0}, "front": {"flows": {}}, "flow_events": {}, "journal_evidence": front_evidence()},
                         "during": {
+                            "journal_evidence": front_evidence(),
                             "generated_at": datetime.now(timezone.utc).isoformat(),
                             "source": "198.51.100.20",
                             "events": {"accepted_tcp": 1},

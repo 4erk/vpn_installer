@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -142,7 +143,7 @@ class ServerLifecycleTests(AgentFixtures, unittest.TestCase):
             with (
                 patch.object(server_runtime, "HEALTH_STATE_PATH", Path(tmp) / "health.json"),
                 patch.object(server_runtime, "LOCK_PATH", Path(tmp) / "lock"),
-                patch.object(server_agent, "collect_runtime_facts", return_value=failed),
+                patch.object(server_agent, "collect_runtime_facts", side_effect=[failed, {**failed, "generated_at": "2026-08-01T20:02:00+00:00"}]),
                 patch.object(server_lifecycle, "recover") as recover,
             ):
                 first = server_lifecycle.health(**self.health_collectors())
@@ -153,6 +154,64 @@ class ServerLifecycleTests(AgentFixtures, unittest.TestCase):
         self.assertEqual(second["hard_reasons"], ["host_integrity"])
         self.assertEqual(second["last_action"], "none")
         recover.assert_not_called()
+
+    def test_health_requires_fresh_distinct_confirmation(self) -> None:
+        now = datetime(2026, 9, 26, 20, 0, tzinfo=timezone.utc)
+        failed = {
+            **self.gateway_contract(), "generated_at": now.isoformat(),
+            "verdicts": {"server_path": "failed", "host_integrity": "verified"}, "services": {},
+        }
+        for age in (None, -1, 0, 301, 172800):
+            with self.subTest(age=age), tempfile.TemporaryDirectory() as tmp:
+                previous = {"consecutive_failures": 1, "hard_reasons": ["server_path"]}
+                if age is not None:
+                    previous["observed_at"] = (now - timedelta(seconds=age)).isoformat()
+                with (
+                    patch.object(server_runtime, "LOCK_PATH", Path(tmp) / "lock"),
+                    patch.object(server_runtime, "read_json", return_value=previous),
+                    patch.object(server_runtime, "write_json_atomic"),
+                    patch.object(server_agent, "collect_runtime_facts", return_value=failed),
+                    patch.object(server_lifecycle, "recover") as recover,
+                ):
+                    result = server_lifecycle.health(**self.health_collectors())
+                self.assertEqual(result["state"], "suspect")
+                self.assertEqual(result["consecutive_failures"], 1)
+                recover.assert_not_called()
+
+    def test_recovery_preserves_original_failure_and_requires_complete_postcheck(self) -> None:
+        failed = {
+            **self.gateway_contract(), "generated_at": "2026-09-26T20:00:00+00:00",
+            "verdicts": {"server_path": "failed", "host_integrity": "verified"},
+            "probes": {"requirements": {"foreign_direct": False}}, "services": {},
+        }
+        for verdicts, timestamp, expected in (
+            ({"server_path": "verified", "host_integrity": "verified"}, "2026-09-26T20:00:02+00:00", "healthy"),
+            ({"server_path": "verified", "host_integrity": "verified", "client_observation": "client_specific", "overall": "degraded"}, "2026-09-26T20:00:02+00:00", "degraded"),
+            ({"server_path": "verified", "host_integrity": "verified"}, failed["generated_at"], "recovering"),
+            ({"server_path": "verified", "host_integrity": "verified"}, "", "recovering"),
+            ({"server_path": "inconclusive", "host_integrity": "verified"}, "2026-09-26T20:00:02+00:00", "recovering"),
+            ({"server_path": "verified"}, "2026-09-26T20:00:02+00:00", "recovering"),
+            ({"server_path": "failed", "host_integrity": "verified"}, "2026-09-26T20:00:02+00:00", "recovering"),
+        ):
+            with self.subTest(verdicts=verdicts), tempfile.TemporaryDirectory() as tmp:
+                previous = {"observed_at": "2026-09-26T19:58:00+00:00", "consecutive_failures": 1, "hard_reasons": ["server_path"]}
+                after = {**failed, "generated_at": timestamp, "verdicts": verdicts, "probes": {"requirements": {"foreign_direct": True}}}
+                with (
+                    patch.object(server_runtime, "LOCK_PATH", Path(tmp) / "lock"),
+                    patch.object(server_runtime, "read_json", return_value=previous),
+                    patch.object(server_runtime, "write_json_atomic"),
+                    patch.object(server_agent, "collect_runtime_facts", side_effect=[failed, after]),
+                    patch.object(server_lifecycle, "recover", return_value="restart:sing-box.service:ok") as recover,
+                    patch.object(server_lifecycle.time, "sleep"),
+                ):
+                    result = server_lifecycle.health(**self.health_collectors())
+                self.assertEqual(result["state"], expected)
+                if expected == "degraded":
+                    self.assertIn("post_recovery.client_observation=client_specific", result["soft_reasons"])
+                self.assertEqual(result["pre_recovery"]["probe_failures"], ["foreign_direct"])
+                self.assertEqual(result["pre_recovery"]["probes"], failed["probes"])
+                self.assertEqual(server_lifecycle.health_log_summary(result)["pre_recovery"], result["pre_recovery"])
+                recover.assert_called_once()
 
     def test_health_reports_udp_buffer_drops_as_degraded_without_recovery(self) -> None:
         def healthy(udp_drops: int) -> dict[str, object]:

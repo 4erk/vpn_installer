@@ -164,26 +164,27 @@ def journal_window_error(
     return ""
 
 
-def kernel_event_snapshot(
+def journal_event_snapshot(
     *, runner: JournalRunner, pattern: str, window_starts: Mapping[str, float | None],
     query_since: float, cutoff: float, coverage: Mapping[str, Any] | None = None,
+    matches: tuple[str, ...], timeout: int = 20, include_unit: bool = True,
 ) -> dict[str, Any]:
-    """Count bounded all-boot kernel records; unknown totals retain observed lower bounds."""
+    """Collect bounded journal records; unknown totals retain observed lower bounds."""
     if not _valid_epoch(query_since) or not _valid_epoch(cutoff) or query_since > cutoff:
-        raise ValueError("kernel journal query interval is invalid")
+        raise ValueError("journal query interval is invalid")
     args = [
-        "journalctl", "--system", "_TRANSPORT=kernel", "--since", f"@{query_since:.6f}",
+        "journalctl", "--system", *matches, "--since", f"@{query_since:.6f}",
         "--until", f"@{cutoff:.6f}", "--no-pager", "--all", "--output=json", f"--grep={pattern}",
     ]
     try:
-        result = runner(args, timeout=20)
+        result = runner(args, timeout=timeout)
     except (OSError, subprocess.SubprocessError) as exc:
         output = getattr(exc, "stdout", "") or ""
         if isinstance(output, bytes):
             output = output.decode("utf-8", errors="replace")
         result = subprocess.CompletedProcess(args, 127, output, str(exc))
     error = journal_command_error(result)
-    parsed, malformed = parse_journal_events(result, include_unit=False)
+    parsed, malformed = parse_journal_events(result, include_unit=include_unit)
     if malformed:
         error = "; ".join(filter(None, (error, f"journalctl returned {malformed} malformed JSON record(s)")))
     events = [
@@ -210,5 +211,40 @@ def kernel_event_snapshot(
     return {
         "counts": counts, "observed_counts": observed, "windows": windows, "coverage": evidence,
         "query_since": datetime.fromtimestamp(query_since, timezone.utc).isoformat(), "query_until": until_iso,
+        "query_since_epoch": query_since, "query_until_epoch": cutoff,
         "observed_at": until_iso, "collector_error": error, "events": events,
     }
+
+
+def kernel_event_snapshot(
+    *, runner: JournalRunner, pattern: str, window_starts: Mapping[str, float | None],
+    query_since: float, cutoff: float, coverage: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    return journal_event_snapshot(
+        runner=runner, pattern=pattern, window_starts=window_starts, query_since=query_since,
+        cutoff=cutoff, coverage=coverage, matches=("_TRANSPORT=kernel",), include_unit=False,
+    )
+
+
+def journal_snapshot_error(value: object, *, window: str) -> str:
+    """Require complete evidence before consuming a full-query window's counters."""
+    if not isinstance(value, Mapping):
+        return "journal evidence was not collected"
+    error = value.get("collector_error")
+    coverage = value.get("coverage")
+    windows = value.get("windows")
+    counts = value.get("counts")
+    if not isinstance(error, str) or not isinstance(coverage, Mapping) or not isinstance(windows, Mapping) or not isinstance(counts, Mapping):
+        return "journal evidence is incomplete"
+    if error:
+        return error
+    state = windows.get(window)
+    if not isinstance(state, Mapping):
+        return "journal window was not collected"
+    if state.get("scope") != "complete" or state.get("coverage_error") != "":
+        return str(state.get("coverage_error") or "journal window is incomplete")
+    count = counts.get(window)
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        return "journal window count is unavailable"
+    since, until = value.get("query_since_epoch"), value.get("query_until_epoch")
+    return journal_window_error(coverage, since=since, until=until, query_since=since, query_until=until)

@@ -1,19 +1,23 @@
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import tempfile
 import time
+import zipfile
+from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterator
 from . import workflows
 from .common import OUT_DIR, print_header
 from .client_artifacts import client_artifact_snapshot, render_vless_uri
 from .models import AppError
 from .diagnostics import DiagnosticsSnapshot, classify_interserver_adaptation
 from .log_classifier import normalize_source, split_endpoint
+from .journal_evidence import journal_snapshot_error
 from .network_profile import (
     FQ_FLOW_LIMIT,
     FQ_KIND,
@@ -28,6 +32,7 @@ from .network_profile import (
 )
 from .public_transport import PUBLIC_HY2_OUTBOUND_TAG, render_public_hy2_outbound
 from .remote import remote_agent_snapshot, scp_upload, ssh_capture
+from .render import server_agent_artifacts
 from .topology import (
     CAP_INTERSERVER_CLIENT,
     CAP_INTERSERVER_SERVER,
@@ -1248,11 +1253,38 @@ def _verify_public_vless_uri(
     return _annotate_public_vless_evidence(topology, validated)
 
 
-def _capture_client_front(target, source: str) -> dict[str, object]:
+@contextmanager
+def _transient_front_collector(target) -> Iterator[str]:
+    # Use the current collector without replacing the restored release's agent.
+    with tempfile.TemporaryDirectory(prefix="vpn-stack-front-") as temp_dir:
+        archive = Path(temp_dir) / "collector.zip"
+        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+            for name, source in server_agent_artifacts(interserver=True).items():
+                bundle.writestr(name, source.encode("utf-8"))
+        remote_dir = ssh_capture(
+            target, "mktemp -d /tmp/vpn-stack-front-verify.XXXXXX", command_timeout=15,
+        ).strip()
+        if not re.fullmatch(r"/tmp/vpn-stack-front-verify\.[A-Za-z0-9]{6}", remote_dir):
+            raise AppError("could not allocate transient front collector")
+        try:
+            remote_archive = f"{remote_dir}/collector.zip"
+            scp_upload(target, archive, remote_archive)
+            ssh_capture(
+                target,
+                f"python3 -B -m zipfile -e {shlex.quote(remote_archive)} {shlex.quote(remote_dir)}",
+                command_timeout=20,
+            )
+            yield f"{remote_dir}/vpn-stack-agent.py"
+        finally:
+            ssh_capture(target, f"rm -rf -- {shlex.quote(remote_dir)}", command_timeout=15)
+
+
+def _capture_client_front(target, source: str, *, agent_path: str | None = None) -> dict[str, object]:
     try:
+        script = agent_path or "/usr/local/lib/vpn-stack/vpn-stack-agent.py"
         payload = ssh_capture(
             target,
-            f"python3 /usr/local/lib/vpn-stack/vpn-stack-agent.py client --source {shlex.quote(source)} --since 5",
+            f"python3 -B {shlex.quote(script)} client --source {shlex.quote(source)} --since 5",
             command_timeout=20,
         )
         parsed = json.loads(payload)
@@ -1290,6 +1322,10 @@ def _validate_front_correlation(observation: object, *, source: str, runner_sock
         if baseline.get("error") or during.get("error"):
             errors.append(str(during.get("error") or baseline.get("error")))
             continue
+        journal_errors = [journal_snapshot_error(snapshot.get("journal_evidence"), window="front") for snapshot in (baseline, during)]
+        if any(journal_errors):
+            errors.append("; ".join(error for error in journal_errors if error))
+            continue
         if not source or any(normalize_source(str(snapshot.get("source") or "")) != source for snapshot in (baseline, during)):
             errors.append("client-front snapshot source does not match the VLESS runner")
             continue
@@ -1301,15 +1337,24 @@ def _validate_front_correlation(observation: object, *, source: str, runner_sock
                 raise ValueError("timestamp is stale or from the future")
             if timestamps[1] <= timestamps[0]:
                 raise ValueError("during snapshot does not follow baseline")
+            cutoffs = [snapshot["journal_evidence"]["query_until_epoch"] for snapshot in (baseline, during)]
+            if any(not 0 <= now.timestamp() - cutoff <= SNAPSHOT_MAX_AGE_SECONDS for cutoff in cutoffs):
+                raise ValueError("journal evidence is stale or from the future")
+            if any(cutoff > stamp.timestamp() for cutoff, stamp in zip(cutoffs, timestamps)):
+                raise ValueError("journal evidence follows its snapshot envelope")
+            if cutoffs[1] <= cutoffs[0]:
+                raise ValueError("during journal query does not follow baseline")
         except (AttributeError, KeyError, TypeError, ValueError) as exc:
             errors.append(f"client-front snapshot timestamp is invalid: {exc}")
             continue
         baseline_events = baseline.get("events", {})
         during_events = during.get("events", {})
-        try:
-            accepted_delta = int(during_events.get("accepted_tcp", 0)) - int(baseline_events.get("accepted_tcp", 0))
-        except (AttributeError, TypeError, ValueError):
-            return _probe_component("failed", "public VLESS front correlation counters are malformed")
+        if any(not isinstance(events, dict) or isinstance(events.get("accepted_tcp"), bool)
+               or not isinstance(events.get("accepted_tcp"), int) or events["accepted_tcp"] < 0
+               for events in (baseline_events, during_events)):
+            errors.append("public VLESS front correlation counters are incomplete")
+            continue
+        accepted_delta = during_events["accepted_tcp"] - baseline_events["accepted_tcp"]
         flows = during.get("front", {}).get("flows", {}) if isinstance(during.get("front"), dict) else {}
         if not isinstance(flows, dict):
             flows = {}
@@ -1317,25 +1362,24 @@ def _validate_front_correlation(observation: object, *, source: str, runner_sock
             key: metrics for key, metrics in flows.items()
             if key in owned_flows and isinstance(metrics, dict) and metrics.get("phase", "active") == "active"
         }
-        baseline_flow_events = baseline.get("flow_events", {})
-        flow_events = during.get("flow_events", {})
-        if not isinstance(baseline_flow_events, dict) or not isinstance(flow_events, dict):
-            return _probe_component("failed", "public VLESS flow correlation counters are malformed")
+        baseline_flow_events = baseline.get("flow_events")
+        flow_events = during.get("flow_events")
+        if any(not isinstance(events, dict) or any(
+            not isinstance(destinations, dict) or any(
+                isinstance(count, bool) or not isinstance(count, int) or count < 0
+                for count in destinations.values()
+            ) for destinations in events.values()
+        ) for events in (baseline_flow_events, flow_events)):
+            errors.append("public VLESS flow correlation counters are incomplete")
+            continue
         correlated_events = 0
         for flow, destinations in flow_events.items():
             # The agent emits per-endpoint accepts only for active sockets.
             if flow not in flows:
                 continue
-            if not isinstance(destinations, dict):
-                continue
             baseline_destinations = baseline_flow_events.get(flow, {})
-            if not isinstance(baseline_destinations, dict):
-                return _probe_component("failed", "public VLESS flow correlation counters are malformed")
             for destination, count in destinations.items():
-                try:
-                    correlated_events += max(0, int(count) - int(baseline_destinations.get(destination, 0)))
-                except (TypeError, ValueError):
-                    return _probe_component("failed", "public VLESS flow correlation counters are malformed")
+                correlated_events += max(0, count - baseline_destinations.get(destination, 0))
         candidate = (correlated_events, accepted_delta, flows)
         if best is None or (correlated_events > 0, accepted_delta, len(flows)) > (
             best[0] > 0,
@@ -1501,24 +1545,34 @@ def verify_live_workflow(
     if runner_target is not None and gateway_target is not None:
         runner_spec = topology.node(runner_node)
         verifier_source = runner_spec.public_ip or runner_target.public_ip or runner_target.ssh_host
-        if not verifier_source:
-            baseline_front = {"error": "external verifier source address is unavailable"}
-        else:
-            baseline_front = _capture_client_front(gateway_target, verifier_source)
-        public_vless = _verify_public_vless_uri(
-            OUT_DIR / deployment_name / "client" / "vless-uri.txt",
-            env,
-            runner_target,
-            throughput_seconds=throughput_seconds,
-            on_running=lambda: {
-                "baseline": baseline_front,
-                "during": _capture_client_front(gateway_target, verifier_source)
-                if verifier_source
-                else {"error": "gateway target or verifier source is unavailable"},
-            },
-            reject_target=gateway_target if require_native_agent else None,
-            require_private_reject=require_native_agent,
-        )
+        collector = nullcontext(None) if require_native_agent else _transient_front_collector(gateway_target)
+        try:
+            with collector as agent_path:
+                if not verifier_source:
+                    baseline_front = {"error": "external verifier source address is unavailable"}
+                else:
+                    baseline_front = _capture_client_front(gateway_target, verifier_source, agent_path=agent_path)
+                public_vless = _verify_public_vless_uri(
+                    OUT_DIR / deployment_name / "client" / "vless-uri.txt",
+                    env,
+                    runner_target,
+                    throughput_seconds=throughput_seconds,
+                    on_running=lambda: {
+                        "baseline": baseline_front,
+                        "during": _capture_client_front(gateway_target, verifier_source, agent_path=agent_path)
+                        if verifier_source
+                        else {"error": "gateway target or verifier source is unavailable"},
+                    },
+                    reject_target=gateway_target if require_native_agent else None,
+                    require_private_reject=require_native_agent,
+                )
+        except Exception as exc:  # Keep transient setup/cleanup failures in the verification report.
+            if require_native_agent:
+                raise
+            public_vless["collector_error"] = str(exc)[:240]
+            public_vless["reason"] = f"transient front collector failed: {str(exc)[:240]}"
+            if public_vless.get("verdict") != "failed":
+                public_vless["verdict"] = "inconclusive"
         if require_native_agent and topology.is_dual:
             public_hysteria2 = _verify_public_hysteria2(
                 env,

@@ -875,14 +875,17 @@ def _quality_switch_evidence(
         prior.get("sampled_at"), observed_at,
         max_gap_seconds=TRANSPORT_QUALITY_PROBE_INTERVAL_SECONDS * 3,
     )
-    if selected_probe.get("quality_sampled") is not True:
-        return (dict(prior) if relation != "reset" else {}), False
-    if not (
+    alternate_healthy = (
         alternate_probe.get("ok") is True
         and alternate_probe.get("health_confirmed") is True
         and alternate_probe.get("quality_checked") is True
         and alternate_probe.get("quality_ok") is True
-    ):
+    )
+    if alternate_probe.get("checked") is True and not alternate_healthy:
+        return {}, False
+    if selected_probe.get("quality_sampled") is not True:
+        return (dict(prior) if relation != "reset" else {}), False
+    if not alternate_healthy:
         return {}, False
     sampled = _parse_timestamp(prior.get("sampled_at"))
     observed = _parse_timestamp(observed_at)
@@ -998,7 +1001,11 @@ def evaluate_transport_policy(
     selected_probe = normalized[selected]
     alternate_probe = normalized[alternate]
     failed_switch = previous.get("state") == "failed" and previous.get("would_switch") is True
-    prior = previous if previous.get("selected") == selected and not failed_switch else {}
+    # A missing selector breaks confirmation continuity, not path-specific retry history.
+    prior = (
+        previous if previous.get("selected") == selected and not failed_switch
+        else _preferred_recovery_details(previous, observed_at)
+    )
     cycle_relation = _cycle_relation(prior.get("updated_at"), observed_at)
 
     # Missing observations are not path failures. The selected observation covers
@@ -1068,9 +1075,23 @@ def evaluate_transport_policy(
     if state == "degraded":
         evidence, confirmed = _quality_switch_evidence(selected, selected_probe, alternate_probe, prior, observed_at)
         details = _preferred_recovery_details(prior, observed_at)
+        if selected != TRANSPORT_PREFERRED_TAG:
+            if alternate_probe["checked"]:
+                details["preferred_probe_at"] = observed_at
+                preferred_failure = ""
+                if not alternate_probe["ok"]:
+                    preferred_failure = _probe_failure_reason(alternate_probe)
+                elif alternate_probe.get("quality_checked") is True and alternate_probe.get("quality_ok") is False:
+                    preferred_failure = _probe_failure_reason({
+                        "error": alternate_probe.get("quality_error") or "preferred underlay quality probe failed",
+                    })
+                if preferred_failure:
+                    details["preferred_retry"] = _next_preferred_retry(prior, preferred_failure, observed_at)
+            elif prior.get("preferred_probe_at"):
+                details["preferred_probe_at"] = prior["preferred_probe_at"]
         if evidence:
             details["quality_failure"] = evidence
-        retry_active = selected != TRANSPORT_PREFERRED_TAG and _preferred_retry_active(prior, observed_at)
+        retry_active = selected != TRANSPORT_PREFERRED_TAG and _preferred_retry_active(details, observed_at)
         if confirmed and not retry_active:
             if selected == TRANSPORT_PREFERRED_TAG:
                 details["preferred_retry"] = _next_preferred_retry(prior, evidence["reason"], observed_at)
@@ -1082,7 +1103,7 @@ def evaluate_transport_policy(
                 recommended=alternate, **details,
             )
         if retry_active:
-            quality_reason += f"; preferred retry is deferred until {prior['preferred_retry'].get('retry_at')}"
+            quality_reason += f"; preferred retry is deferred until {details['preferred_retry'].get('retry_at')}"
         return _policy_state(selected, normalized, observed_at, state, quality_reason, **details)
 
     if selected == TRANSPORT_PREFERRED_TAG:

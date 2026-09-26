@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import unittest
+from copy import deepcopy
 from unittest.mock import Mock, patch
 from datetime import datetime, timedelta, timezone
 
@@ -761,6 +762,144 @@ class InterserverTransportIdentityTests(unittest.TestCase):
         self.assertEqual(result["recommended"], TRANSPORT_WG_TAG)
         self.assertEqual(result["quality_failure"]["path"], TRANSPORT_HY2_TAG)
         self.assertEqual(result["preferred_retry"]["recovered_at"], "2026-08-06T12:01:00+00:00")
+
+    def test_cached_quality_cannot_hide_a_fresh_failed_preferred_probe(self) -> None:
+        loss = {
+            "checked": True, "ok": True, "quality_checked": True, "quality_sampled": True,
+            "quality_ok": False, "quality_error": "overlay packet loss 5%", "packet_loss_pct": 5.0,
+        }
+        clean = {
+            "checked": True, "ok": True, "health_confirmed": True,
+            "quality_checked": True, "quality_ok": True,
+        }
+        failures = (
+            ({"checked": True, "ok": False, "error": "timed out", "attempts": 8}, "timeout"),
+            ({**clean, "quality_ok": False, "quality_error": "underlay probe packet loss 12.5%"}, "packet_loss"),
+        )
+        for failed, reason in failures:
+            with self.subTest(reason=reason):
+                baseline = evaluate_transport_policy(
+                    selected=TRANSPORT_HY2_TAG,
+                    probes={TRANSPORT_HY2_TAG: loss, TRANSPORT_WG_TAG: clean},
+                    observed_at="2026-09-26T12:00:00+00:00",
+                )
+                original = deepcopy(baseline)
+                interrupted = evaluate_transport_policy(
+                    selected=TRANSPORT_HY2_TAG,
+                    probes={TRANSPORT_HY2_TAG: {**loss, "quality_sampled": False}, TRANSPORT_WG_TAG: failed},
+                    previous=baseline, observed_at="2026-09-26T12:00:02+00:00",
+                )
+                self.assertEqual(baseline, original)
+                self.assertNotIn("quality_failure", interrupted)
+                self.assertEqual(interrupted["preferred_probe_at"], "2026-09-26T12:00:02+00:00")
+                self.assertEqual(interrupted["preferred_retry"]["reason"], reason)
+                self.assertEqual(interrupted["preferred_retry"]["attempts"], 1)
+                self.assertEqual(interrupted["preferred_retry"]["retry_at"], "2026-09-26T12:01:02+00:00")
+                self.assertEqual(interrupted["probes"][TRANSPORT_WG_TAG]["ok"], failed["ok"])
+
+                state = interrupted
+                now = datetime(2026, 9, 26, 12, tzinfo=timezone.utc)
+                for second in (4, 14, 16, 32, 48, 61, 62, 64):
+                    fresh = second in (16, 32, 48, 64)
+                    prior = deepcopy(state)
+                    state = evaluate_transport_policy(
+                        selected=TRANSPORT_HY2_TAG,
+                        probes={
+                            TRANSPORT_HY2_TAG: {**loss, "quality_sampled": fresh},
+                            TRANSPORT_WG_TAG: clean if fresh else {"checked": False},
+                        },
+                        previous=prior, observed_at=(now + timedelta(seconds=second)).isoformat(),
+                    )
+                    self.assertEqual(state["would_switch"], second == 64)
+                    self.assertEqual(state["preferred_retry"]["retry_at"], "2026-09-26T12:01:02+00:00")
+                    if second == 16:
+                        self.assertEqual(state["quality_failure"]["confirmations"], 1)
+                    if second == 61:
+                        self.assertFalse(server_transport.preferred_transport_probe_due(state, state["updated_at"]))
+                self.assertEqual(state["recommended"], TRANSPORT_WG_TAG)
+                self.assertEqual(state["preferred_retry"]["recovered_at"], "2026-09-26T12:01:04+00:00")
+
+                repeated = evaluate_transport_policy(
+                    selected=TRANSPORT_HY2_TAG,
+                    probes={TRANSPORT_HY2_TAG: {**loss, "quality_sampled": False}, TRANSPORT_WG_TAG: failed},
+                    previous=interrupted, observed_at="2026-09-26T12:00:04+00:00",
+                )
+                self.assertEqual(repeated["preferred_retry"]["attempts"], 2)
+                self.assertEqual(repeated["preferred_retry"]["retry_at"], "2026-09-26T12:02:04+00:00")
+                deferred = evaluate_transport_policy(
+                    selected=TRANSPORT_HY2_TAG,
+                    probes={TRANSPORT_HY2_TAG: {**loss, "quality_sampled": False}},
+                    previous=repeated, observed_at="2026-09-26T12:00:06+00:00",
+                )
+                self.assertEqual(deferred["preferred_retry"], repeated["preferred_retry"])
+                self.assertNotIn("quality_failure", deferred)
+
+    def test_live_cached_quality_snapshot_does_not_erase_preferred_probe_time(self) -> None:
+        # Reduced policy inputs from 20260926T200852Z-1/gateway-history.json.
+        previous = {
+            "schema_version": 16, "state": "degraded", "selected": TRANSPORT_HY2_TAG,
+            "updated_at": "2026-09-26T13:21:54.548344+00:00",
+            "preferred_retry": {
+                "attempts": 2, "path": TRANSPORT_WG_TAG, "reason": "packet_loss",
+                "failed_at": "2026-09-26T13:20:02.442023+00:00",
+                "retry_at": "2026-09-26T13:22:02.442023+00:00",
+            },
+            "quality_failure": {
+                "confirmations": 1, "path": TRANSPORT_HY2_TAG, "reason": "packet_loss",
+                "sampled_at": "2026-09-26T13:21:54.548344+00:00", "packet_loss_pct": 4.7619,
+            },
+        }
+        probes = {
+            TRANSPORT_HY2_TAG: {
+                "checked": True, "ok": True, "health_confirmed": True, "attempts": 1,
+                "quality_checked": True, "quality_ok": False, "quality_sampled": False,
+                "quality_error": "WireGuard overlay packet loss 4.7619%", "packet_loss_pct": 4.7619,
+            },
+            TRANSPORT_WG_TAG: {
+                "checked": True, "ok": True, "health_confirmed": True, "attempts": 8,
+                "quality_checked": True, "quality_ok": True, "quality_error": "", "packet_loss_pct": 0.0,
+            },
+        }
+        original = deepcopy((previous, probes))
+        state = evaluate_transport_policy(
+            selected=TRANSPORT_HY2_TAG, probes=probes, previous=previous,
+            observed_at="2026-09-26T13:22:02.552026+00:00",
+        )
+        self.assertEqual((previous, probes), original)
+        self.assertEqual(state["preferred_probe_at"], "2026-09-26T13:22:02.552026+00:00")
+        self.assertEqual(state["quality_failure"], previous["quality_failure"])
+        self.assertFalse(state["would_switch"])
+        deferred = evaluate_transport_policy(
+            selected=TRANSPORT_HY2_TAG, probes={TRANSPORT_HY2_TAG: probes[TRANSPORT_HY2_TAG]}, previous=state,
+            observed_at="2026-09-26T13:22:04.552026+00:00",
+        )
+        self.assertEqual(deferred["preferred_probe_at"], state["preferred_probe_at"])
+        self.assertFalse(server_transport.preferred_transport_probe_due(deferred, "2026-09-26T13:22:31.552026+00:00"))
+        self.assertTrue(server_transport.preferred_transport_probe_due(deferred, "2026-09-26T13:22:32.552026+00:00"))
+
+    def test_observation_gap_keeps_retry_without_reusing_positive_evidence(self) -> None:
+        retry = {
+            "path": TRANSPORT_WG_TAG, "attempts": 3, "reason": "timeout",
+            "failed_at": "2026-09-26T12:00:00+00:00", "retry_at": "2026-09-26T12:04:00+00:00",
+        }
+        previous = {
+            "schema_version": TRANSPORT_STATE_SCHEMA_VERSION,
+            "state": "failed", "selected": "", "updated_at": "2026-09-26T12:00:02+00:00",
+            "preferred_retry": retry,
+        }
+        original = deepcopy(previous)
+        state = evaluate_transport_policy(
+            selected=TRANSPORT_HY2_TAG,
+            probes={TRANSPORT_HY2_TAG: {"checked": True, "ok": True}},
+            previous=previous, observed_at="2026-09-26T12:00:04+00:00",
+        )
+        self.assertEqual(previous, original)
+        self.assertEqual(state["preferred_retry"], retry)
+        self.assertNotIn("preferred_recovery", state)
+        self.assertNotIn("quality_failure", state)
+        self.assertFalse(state["would_switch"])
+        self.assertFalse(server_transport.preferred_transport_probe_due(state, "2026-09-26T12:03:59+00:00"))
+        self.assertTrue(server_transport.preferred_transport_probe_due(state, "2026-09-26T12:04:00+00:00"))
 
     def test_deferred_cycle_preserves_but_does_not_increment_recovery_evidence(self) -> None:
         first = evaluate_transport_policy(

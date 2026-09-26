@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
@@ -712,6 +713,7 @@ print('ok')
         selected: str = "interserver-underlay-wg",
         previous: dict[str, object] | None = None,
         liveness_ok: bool = True,
+        unavailable_seconds: tuple[int, ...] = (),
     ) -> tuple[list[dict[str, object]], Mock, Mock]:
         config = {"experimental": {"clash_api": {"external_controller": "127.0.0.1:19090"}}}
         env = {"WG_INTERFACE": "wg0", "WG_FOREIGN_ADDRESS": "10.74.0.2/24"}
@@ -727,6 +729,12 @@ print('ok')
             "checked": True, "ok": True, "health_confirmed": True,
             "quality_checked": True, "quality_ok": True, "packet_loss_pct": 0.0,
         }
+        selection_seconds = iter(seconds)
+
+        def selection_snapshot(*_args: object) -> dict[str, object]:
+            if next(selection_seconds) in unavailable_seconds:
+                return {"available": False, "selected": "", "reason": "selector API timed out"}
+            return dict(selector)
 
         def read(path: Path, _default: object) -> dict[str, object]:
             return config if path == server_runtime.SINGBOX_CONFIG_PATH else dict(state)
@@ -757,7 +765,7 @@ print('ok')
             patch.object(server_runtime, "write_json_atomic", side_effect=write),
             patch.object(server_runtime, "parse_env", return_value=env),
             patch.object(interserver_transport, "transport_topology_configured", return_value=True),
-            patch.object(server_transport, "transport_selection_snapshot", side_effect=lambda *_args: dict(selector)),
+            patch.object(server_transport, "transport_selection_snapshot", side_effect=selection_snapshot),
             patch.object(server_transport, "transport_selector_selection", side_effect=lambda *_args: dict(selector)),
             patch.object(server_transport, "transport_overlay_path_probe", side_effect=overlay),
             patch.object(interserver_transport, "transport_candidate_probe", return_value=candidate),
@@ -775,6 +783,114 @@ print('ok')
         ):
             trace = [server_transport._reconcile_interserver_transport_unlocked() for _ in seconds]
         return trace, select, proof
+
+    def test_observation_error_preserves_switch_deadline_and_failure_attempts(self) -> None:
+        failure = server_transport.next_transport_switch_failure(
+            {}, "interserver-underlay-hy2", "activation failed", "2026-09-05T12:00:00+00:00",
+        )
+        previous = {
+            "schema_version": interserver_transport.TRANSPORT_STATE_SCHEMA_VERSION,
+            "updated_at": "2026-09-05T12:00:00+00:00",
+            "selected": "interserver-underlay-wg", "state": "degraded",
+            "switch_backoff": failure, "last_switch_failure": failure,
+            "last_transition": {"cycle_id": "failed-activation", "ok": False},
+            "probes": {"interserver-underlay-wg": {"checked": True, "ok": True}},
+            "overlay_probe": {"checked": True, "ok": True},
+            "quality_failure": {"path": "interserver-underlay-wg", "confirmations": 2},
+        }
+        original = deepcopy(previous)
+        trace, select, proof = self.run_transport_cycles(
+            [2, 4, 28, 30, 32], previous=previous, liveness_ok=False,
+            fail_switch=True, unavailable_seconds=(2,),
+        )
+
+        self.assertEqual(previous, original)
+        self.assertEqual(trace[0]["selected"], "")
+        self.assertFalse(trace[0]["would_switch"])
+        for key in ("probes", "overlay_probe", "quality_failure", "cycle_id"):
+            self.assertNotIn(key, trace[0])
+        for state in trace[:3]:
+            self.assertEqual(state["switch_backoff"], failure)
+            self.assertEqual(state["last_switch_failure"], failure)
+            self.assertEqual(state["last_transition"], original["last_transition"])
+        self.assertEqual(trace[3]["switch_backoff"]["attempts"], 2)
+        self.assertEqual(trace[3]["switch_backoff"]["failed_at"], "2026-09-05T12:00:30+00:00")
+        self.assertEqual(trace[3]["switch_backoff"]["retry_at"], "2026-09-05T12:01:30+00:00")
+        self.assertEqual(trace[4]["switch_backoff"], trace[3]["switch_backoff"])
+        select.assert_called_once()
+        proof.assert_not_called()
+
+    def test_cached_fallback_quality_does_not_repeat_preferred_probe_every_cycle(self) -> None:
+        previous = {
+            "schema_version": interserver_transport.TRANSPORT_STATE_SCHEMA_VERSION,
+            "selected": "interserver-underlay-hy2", "state": "healthy",
+            "preferred_probe_at": "2026-09-05T11:59:30+00:00",
+        }
+        original = deepcopy(previous)
+        trace, select, proof = self.run_transport_cycles(
+            [0, 2, 4, 6, 14], selected="interserver-underlay-hy2", previous=previous,
+        )
+
+        self.assertEqual(previous, original)
+        self.assertEqual(
+            [state["probes"]["interserver-underlay-wg"]["checked"] for state in trace],
+            [True, False, False, False, False],
+        )
+        for state in trace:
+            self.assertEqual(state["preferred_probe_at"], "2026-09-05T12:00:00+00:00")
+            self.assertEqual(state["quality_failure"]["confirmations"], 1)
+        self.assertFalse(server_transport.preferred_transport_probe_due(trace[-1], "2026-09-05T12:00:29+00:00"))
+        self.assertTrue(server_transport.preferred_transport_probe_due(trace[-1], "2026-09-05T12:00:30+00:00"))
+        select.assert_not_called()
+        proof.assert_not_called()
+
+    def test_config_and_watcher_errors_retain_history_without_refreshing_evidence(self) -> None:
+        failure = server_transport.next_transport_switch_failure(
+            {}, "interserver-underlay-hy2", "activation failed", "2026-09-05T12:00:00+00:00",
+        )
+        previous = {
+            "schema_version": interserver_transport.TRANSPORT_STATE_SCHEMA_VERSION,
+            "updated_at": "2026-09-05T12:00:00+00:00", "selected": "interserver-underlay-wg",
+            "cycle_id": "before-error", "changed": True,
+            "switch_backoff": failure, "last_switch_failure": failure,
+            "last_transition": {"cycle_id": "before-error", "finished_at": "2026-09-05T12:00:00+00:00"},
+            "preferred_retry": {"path": "interserver-underlay-wg", "retry_at": "2026-09-05T12:01:00+00:00"},
+            "overlay_probe": {"checked": True, "ok": True},
+            "preferred_recovery": {"confirmations": 11},
+        }
+        original = deepcopy(previous)
+        for source in ("config", "watcher"):
+            with (
+                self.subTest(source=source),
+                patch.object(server_runtime, "TRANSPORT_LOCK_PATH", MagicMock()),
+                patch.object(server_runtime.fcntl, "flock"),
+                patch.object(server_runtime, "read_json", side_effect=lambda path, default: {} if path == server_runtime.SINGBOX_CONFIG_PATH else deepcopy(previous)),
+                patch.object(server_runtime, "write_json_atomic") as write,
+                patch.object(server_runtime, "parse_env", return_value={}),
+                patch.object(server_runtime, "utc_now", return_value="2026-09-05T12:00:02+00:00"),
+                patch.object(server_runtime, "run", side_effect=AssertionError("unexpected subprocess")),
+                patch.object(interserver_transport, "transport_topology_configured", return_value=False),
+                patch.object(server_transport, "reconcile_interserver_transport", side_effect=RuntimeError("collector failed")),
+                patch.object(server_transport.time, "sleep", side_effect=KeyboardInterrupt),
+                patch("builtins.print") as output,
+            ):
+                if source == "config":
+                    server_transport._reconcile_interserver_transport_unlocked()
+                else:
+                    with self.assertRaises(KeyboardInterrupt):
+                        server_transport.watch_interserver_transport()
+                    self.assertEqual(json.loads(output.call_args.args[0]), write.call_args.args[1])
+                write.assert_called_once()
+                payload = write.call_args.args[1]
+                self.assertEqual(payload["updated_at"], "2026-09-05T12:00:02+00:00")
+                self.assertEqual(payload["state"], "failed")
+                self.assertEqual(payload["selected"], "")
+                self.assertFalse(payload["changed"])
+                for key in ("last_transition", "switch_backoff", "last_switch_failure", "preferred_retry"):
+                    self.assertEqual(payload[key], original[key])
+                for key in ("cycle_id", "overlay_probe", "preferred_recovery"):
+                    self.assertNotIn(key, payload)
+                self.assertEqual(previous, original)
 
     def test_quality_switches_do_not_ping_pong_after_successful_dns_proof(self) -> None:
         seconds = list(range(0, 85, 2))

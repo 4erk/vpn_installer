@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import io
 import tempfile
+import subprocess
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -21,6 +22,8 @@ from vpn_installer.topology import (
     TOPOLOGY_SINGLE,
     TopologySpec,
 )
+from tests.test_journal_evidence import front_evidence
+from tests.test_server_agent import front_snapshot
 
 
 def topology_env(mode: str, gateway_location: str) -> dict[str, str]:
@@ -69,6 +72,34 @@ def telegram_report(*probes: dict) -> dict:
 
 
 class DiagnoseTests(unittest.TestCase):
+    def test_front_and_client_incomplete_collection_returns_two_and_preserves_evidence(self) -> None:
+        source = "203.0.113.20"
+        record = json.dumps({"__REALTIME_TIMESTAMP": "900000000", "MESSAGE": f"from {source}:50123 accepted tcp:example.org:443"})
+        partial = subprocess.CompletedProcess([], 2, record, "partial journal query failed")
+        env = topology_env(TOPOLOGY_SINGLE, LOCATION_RU)
+        for mode in ("front", "client"):
+            snapshot = front_snapshot(partial, source=source if mode == "client" else None)
+            for reply in (json.dumps(snapshot), "{}", "[]", "not-json", json.dumps({"verdict": "inconclusive"}), RuntimeError("SSH timeout")):
+                with (
+                    self.subTest(mode=mode, reply=str(reply)[:80]),
+                    tempfile.TemporaryDirectory() as tmp,
+                    patch.object(diagnose, "OUT_DIR", Path(tmp)),
+                    patch.object(diagnose, "prepare_remote_session", return_value=("demo", Path("unused"), env, {}, [target(NODE_GATEWAY, LOCATION_RU)], {})),
+                    patch.object(diagnose, "ssh_capture", **({"side_effect": reply} if isinstance(reply, Exception) else {"return_value": reply})),
+                    patch("sys.stdout", new_callable=io.StringIO) as output,
+                ):
+                    code = diagnose.diagnose_front_workflow("demo") if mode == "front" else diagnose.diagnose_server_client_workflow("demo", source_ip=source)
+                    report = json.loads(next(Path(tmp).glob("diagnostics/*/*.json")).read_text(encoding="utf-8"))
+                    self.assertEqual(code, 2)
+                    self.assertEqual(report["verdict"], "inconclusive")
+                    self.assertTrue(report["error"])
+                    self.assertIn("events: unavailable", output.getvalue())
+                    self.assertNotIn("accepted=0", output.getvalue())
+                    if reply == json.dumps(snapshot):
+                        self.assertEqual(report["observed_events"]["accepted"], 1)
+                        self.assertIsNone(report["events"]["accepted"])
+                        self.assertIn("observed events (partial)", output.getvalue())
+
     def _run_telegram_report(self, reply: dict, *, router: bool = True, destinations=None):
         env = topology_env(TOPOLOGY_DUAL, LOCATION_RU)
         targets = [target(NODE_GATEWAY, LOCATION_RU), target(NODE_EXIT, LOCATION_FOREIGN)]
@@ -399,7 +430,8 @@ class DiagnoseTests(unittest.TestCase):
             "source": "203.0.113.44",
             "window_minutes": 15,
             "services": {"xray": "active", "nftables": "active"},
-            "events": {"accepted": 0, "invalid_reality": 0, "disabled_invalid": 0},
+            "events": {"accepted": 0, "accepted_tcp": 0, "accepted_udp": 0, "udp_443": 0, "invalid_reality": 0, "disabled_invalid": 0},
+            "journal_evidence": front_evidence(),
             "front": {"client": {}},
             "verdict": "not_seen_on_server",
         }
@@ -421,7 +453,8 @@ class DiagnoseTests(unittest.TestCase):
             "source": "203.0.113.44",
             "window_minutes": 15,
             "services": {"xray": "active", "nftables": "active"},
-            "events": {"accepted": 2, "invalid_reality": 0, "disabled_invalid": 0},
+            "events": {"accepted": 2, "accepted_tcp": 2, "accepted_udp": 0, "udp_443": 0, "invalid_reality": 0, "disabled_invalid": 0},
+            "journal_evidence": front_evidence(),
             "front": {"client": {"quality": "loss_observed", "pmtu": 1480, "mss": 1408}, "flows": {}},
             "client_transport": {"status": "detected", "multiplex_detected": True, "active_outer_flows": 1, "multiplexed_flow_count": 1, "risk": "tcp_head_of_line"},
             "verdict": "loss_observed",
@@ -447,7 +480,8 @@ class DiagnoseTests(unittest.TestCase):
         payload = {
             "window_minutes": 120,
             "services": {"xray": "active", "nftables": "active"},
-            "events": {"accepted": 10, "invalid_reality": 0, "disabled_invalid": 0},
+            "events": {"accepted": 10, "accepted_tcp": 10, "accepted_udp": 0, "udp_443": 0, "invalid_reality": 0, "disabled_invalid": 0},
+            "journal_evidence": front_evidence(),
             "front": {"listening": True, "connections": 2, "rtt_ms": {"p95": 40}, "socket_retransmissions": 0},
             "verdict": "verified",
         }

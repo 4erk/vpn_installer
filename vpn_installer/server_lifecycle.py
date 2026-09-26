@@ -18,6 +18,7 @@ else:
 
 FRONT_RTO_DEGRADED_MS = 1_000
 FRONT_COUNTER_MAX_INTERVAL_SECONDS = 300
+HEALTH_CONFIRMATION_MAX_GAP_SECONDS = 300
 FRONT_CACHE_REORDERING_THRESHOLD = 64
 FRONT_CACHE_STALLED_RTO_MS = 8_000
 FRONT_CACHE_RECOVERY_COOLDOWN_SECONDS = 1_800
@@ -286,7 +287,13 @@ def _health_unlocked(
             if failed
         ]
         previous_hard_reasons = previous.get("hard_reasons", [])
-        same_failure = hard_failure and hard_reasons == previous_hard_reasons
+        observed_time = runtime.parse_iso_datetime(observed_at)
+        previous_time = runtime.parse_iso_datetime(str(previous.get("observed_at", "")))
+        confirmation_gap = (observed_time - previous_time).total_seconds() if observed_time and previous_time else None
+        same_failure = (
+            hard_failure and hard_reasons == previous_hard_reasons
+            and confirmation_gap is not None and 0 < confirmation_gap <= HEALTH_CONFIRMATION_MAX_GAP_SECONDS
+        )
         failures = (int(previous.get("consecutive_failures", 0)) + 1 if same_failure else 1) if hard_failure else 0
         network_counters = {
             "interfaces": current.get("network", {}).get("interfaces", {}),
@@ -370,9 +377,18 @@ def _health_unlocked(
                 if recovery_succeeded:
                     time.sleep(2)
                     postcheck = collect_runtime_facts(live_probes=True, profile="light", full_logs=False, include_maintenance=False)
-                    postcheck_hard_reasons = hard_failure_reasons(postcheck)
-                    if not postcheck_hard_reasons:
-                        state = "healthy"
+                    postcheck_time = runtime.parse_iso_datetime(str(postcheck.get("generated_at", "")))
+                    postcheck_fresh = (
+                        observed_time is not None and postcheck_time is not None
+                        and 0 < (postcheck_time - observed_time).total_seconds() <= HEALTH_CONFIRMATION_MAX_GAP_SECONDS
+                    )
+                    soft_reasons.extend(
+                        f"post_recovery.{name}={value}"
+                        for name, value in postcheck.get("verdicts", {}).items()
+                        if isinstance(value, str) and value in {"degraded", "client_specific", "shared", "inconclusive", "failed"}
+                    )
+                    if postcheck_fresh and all(postcheck.get("verdicts", {}).get(name) == "verified" for name in ("server_path", "host_integrity")):
+                        state = "degraded" if soft_reasons else "healthy"
                         failures = 0
                     else:
                         state = "recovering"
@@ -380,11 +396,10 @@ def _health_unlocked(
                     last_actions[failure_key] = {"epoch": now_epoch, "action": action}
                 elif action != "none":
                     state = "failed"
-        if postcheck is not None:
-            current["post_recovery"] = postcheck["verdicts"]
         payload = {
             "schema_version": diagnostics.SCHEMA_VERSION,
             "updated_at": runtime.utc_now(),
+            "observed_at": observed_at,
             "state": state,
             "consecutive_failures": failures,
             "last_action": action,
@@ -407,6 +422,14 @@ def _health_unlocked(
             "verdicts": (postcheck or current)["verdicts"],
         }
         if postcheck is not None:
+            payload["pre_recovery"] = {
+                "observed_at": observed_at,
+                "hard_reasons": hard_reasons,
+                "probe_failures": runtime.failed_requirements(current.get("probes", {})),
+                "probes": current.get("probes", {}),
+                "verdicts": current["verdicts"],
+            }
+            payload["post_recovery_at"] = postcheck.get("generated_at")
             payload["post_recovery_verdicts"] = postcheck["verdicts"]
         runtime.write_json_atomic(runtime.HEALTH_STATE_PATH, payload)
         return payload
@@ -425,6 +448,7 @@ def health_log_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "maintenance_reason": payload.get("maintenance_reason", ""),
         "hard_reasons": payload.get("hard_reasons", []),
         "probe_failures": payload.get("probe_failures", []),
+        "pre_recovery": payload.get("pre_recovery", {}),
         "soft_reasons": payload.get("soft_reasons", []),
         "verdicts": payload.get("verdicts", {}),
         "front_interval": {
@@ -477,18 +501,6 @@ def network_soft_reasons(deltas: dict[str, Any]) -> list[str]:
     if missed:
         reasons.append(f"interface_rx_missed={missed}")
     return reasons
-
-
-def hard_failure_reasons(current: dict[str, Any]) -> list[str]:
-    verdicts = current.get("verdicts", {})
-    return [
-        reason
-        for reason, failed in (
-            ("server_path", verdicts.get("server_path") == "failed"),
-            ("host_integrity", verdicts.get("host_integrity") == "failed"),
-        )
-        if failed
-    ]
 
 
 def recovery_action_succeeded(action: str) -> bool:

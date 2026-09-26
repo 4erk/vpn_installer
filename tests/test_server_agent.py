@@ -17,6 +17,69 @@ from vpn_installer.render import server_agent_artifacts
 
 
 from tests.server_agent_fixtures import AgentFixtures
+from tests.test_journal_evidence import front_evidence
+
+
+def front_snapshot(result, *, source=None, active=True, cutoff=1000, coverage_changes=None, failed_path=False, failed_front=False):
+    client_source = source or "203.0.113.20"
+    flow = f"{client_source}:50123"
+    front = {"listening": True, "clients": {client_source: {"connections": 1}} if active else {},
+             "flows": {flow: {"source": client_source, "phase": "active", "quality": "observed"}} if active else {}}
+    coverage = {"since_epoch": 0, "discarded_at": [], "error": "", "query_since_epoch": 0,
+                "query_until_epoch": cutoff, **(coverage_changes or {})}
+    with (
+        patch.object(server_runtime, "run", return_value=result),
+        patch.object(server_runtime, "parse_env", return_value={}),
+        patch.object(server_runtime, "read_json", return_value={}),
+        patch.object(server_agent, "installed_runtime_contract", return_value={"capabilities": [server_runtime.CAP_PUBLIC_FRONT]}),
+        patch.object(server_agent, "tcp_front_snapshot", return_value=front),
+        patch.object(server_agent, "service_state", return_value="inactive" if failed_front else "active"),
+        patch.object(server_agent, "udp_443_policy", return_value="routed"),
+        patch.object(server_agent, "public_hy2_snapshot", return_value={}),
+        patch.object(server_agent, "run_probes", return_value={"ok": not failed_path, "requirements": {}}),
+        patch.object(server_agent.time, "time", return_value=cutoff),
+        patch.object(journal_evidence, "journal_coverage", return_value=coverage),
+    ):
+        return server_agent.front_client_snapshot(source, 5) if source else server_agent.public_front_snapshot(5, live_probes=True)
+
+
+class FrontJournalTests(unittest.TestCase):
+    def test_query_failures_and_partial_records_propagate_to_front_and_client(self) -> None:
+        message = "from 203.0.113.20:50123 accepted tcp:example.org:443"
+        record = json.dumps({"__REALTIME_TIMESTAMP": "900000000", "MESSAGE": message, "_SYSTEMD_UNIT": "vpn-stack-xray.service"})
+        for result in (subprocess.CompletedProcess([], 2, "", "denied"),
+                       subprocess.CompletedProcess([], 2, record, "partial"),
+                       subprocess.CompletedProcess([], 0, record, "corrupt"),
+                       subprocess.CompletedProcess([], 0, record + "\nbroken", "")):
+            for source in (None, "203.0.113.20"):
+                for active in (False, True):
+                    with self.subTest(result=result, source=source, active=active):
+                        snapshot = front_snapshot(result, source=source, active=active)
+                        self.assertEqual(snapshot["verdict"], "inconclusive")
+                        self.assertTrue(all(count is None for count in snapshot["events"].values()))
+                        self.assertEqual(snapshot["observed_events"]["accepted"], int(bool(result.stdout)))
+                        self.assertTrue(journal_evidence.journal_snapshot_error(snapshot["journal_evidence"], window="front"))
+                        if source and active and result.stdout:
+                            self.assertEqual(snapshot["flow_events"]["203.0.113.20:50123"], {"example.org:443": 1})
+                            self.assertEqual(snapshot["client_transport"]["status"], "inconclusive")
+
+    def test_no_matches_requires_complete_retention_and_preserves_independent_failure(self) -> None:
+        empty = subprocess.CompletedProcess([], 1, "", "")
+        self.assertEqual(front_snapshot(empty)["verdict"], "verified")
+        self.assertEqual(front_snapshot(empty, source="203.0.113.20", active=False)["verdict"], "not_seen_on_server")
+        for changes in ({"since_epoch": 800}, {"discarded_at": [900]}, {"error": "header failed"}):
+            for source in (None, "203.0.113.20"):
+                with self.subTest(changes=changes, source=source):
+                    snapshot = front_snapshot(empty, source=source, coverage_changes=changes)
+                    self.assertEqual(snapshot["verdict"], "inconclusive")
+                    self.assertIsNone(snapshot["events"]["accepted"])
+                    self.assertEqual(snapshot["observed_events"]["accepted"], 0)
+        failed = front_snapshot(empty, coverage_changes={"error": "header failed"}, failed_path=True)
+        self.assertEqual(failed["verdict"], "failed")
+        self.assertEqual(failed["verdicts"]["server_path"], "failed")
+        for result in (empty, subprocess.CompletedProcess([], 2, "", "denied")):
+            failed = front_snapshot(result, source="203.0.113.20", failed_front=True)
+            self.assertEqual(failed["verdict"], "failed")
 
 
 class ServerAgentTests(AgentFixtures, unittest.TestCase):
@@ -1103,8 +1166,6 @@ class ServerAgentTests(AgentFixtures, unittest.TestCase):
             patch.object(server_agent, "service_state", return_value="active"),
             patch.object(server_agent, "fresh_log_since", return_value=("5 minutes ago", 5)),
             patch.object(server_agent, "maintenance_snapshot", return_value={"upgradable": 0}),
-            patch.object(server_agent, "journal_lines", return_value=[]),
-            patch.object(server_agent, "journal_lines_since", return_value=[]),
             patch.object(server_agent, "tcp_front_snapshot", return_value={"listening": True, "state_counts": {}, "socket_retransmissions": 0}),
             patch.object(server_agent, "public_hy2_snapshot", return_value={"configured": True, "listening": True, "firewall": True}),
             patch.object(server_agent, "wireguard_snapshot", return_value={"peers": []}),
@@ -1863,7 +1924,7 @@ class ServerAgentTests(AgentFixtures, unittest.TestCase):
         with (
             patch.object(server_runtime, "parse_env", return_value={"RU_LISTEN_PORT": "443"}),
             patch.object(server_agent, "installed_runtime_contract", return_value=self.gateway_contract()),
-            patch.object(server_agent, "journal_filtered_lines", return_value=["from [::ffff:203.0.113.20]:50123 accepted tcp:example.org:443"]),
+            patch.object(server_agent, "journal_filtered_events", return_value=front_evidence(["from [::ffff:203.0.113.20]:50123 accepted tcp:example.org:443"])),
             patch.object(server_agent, "tcp_front_snapshot", return_value=front),
             patch.object(server_agent, "service_state", return_value="active"),
             patch.object(server_runtime, "run", return_value=completed),
@@ -2032,7 +2093,7 @@ class ServerAgentTests(AgentFixtures, unittest.TestCase):
         with (
             patch.object(server_runtime, "parse_env", return_value={"RU_LISTEN_PORT": "443"}),
             patch.object(server_agent, "installed_runtime_contract", return_value=self.gateway_contract()),
-            patch.object(server_agent, "journal_filtered_lines", return_value=[]),
+            patch.object(server_agent, "journal_filtered_events", return_value=front_evidence()),
             patch.object(server_agent, "tcp_front_snapshot", return_value={"listening": True, "clients": {}, "flows": {}}),
             patch.object(server_agent, "service_state", return_value="active"),
             patch.object(server_agent, "udp_443_policy", return_value="routed"),
@@ -2095,7 +2156,7 @@ class ServerAgentTests(AgentFixtures, unittest.TestCase):
         with (
             patch.object(server_runtime, "parse_env", return_value={"RU_LISTEN_PORT": "443"}),
             patch.object(server_agent, "installed_runtime_contract", return_value=self.gateway_contract()),
-            patch.object(server_agent, "journal_filtered_lines", return_value=["from 203.0.113.20:50123 accepted tcp:example.org:443"]),
+            patch.object(server_agent, "journal_filtered_events", return_value=front_evidence(["from 203.0.113.20:50123 accepted tcp:example.org:443"])),
             patch.object(server_agent, "tcp_front_snapshot", return_value=front),
             patch.object(server_agent, "service_state", return_value="active"),
             patch.object(server_runtime, "run", return_value=completed),
@@ -2123,7 +2184,7 @@ class ServerAgentTests(AgentFixtures, unittest.TestCase):
         with (
             patch.object(server_runtime, "parse_env", return_value={"RU_LISTEN_PORT": "443"}),
             patch.object(server_agent, "installed_runtime_contract", return_value=self.gateway_contract()),
-            patch.object(server_agent, "journal_filtered_lines", return_value=lines),
+            patch.object(server_agent, "journal_filtered_events", return_value=front_evidence(lines)),
             patch.object(server_agent, "tcp_front_snapshot", return_value=front),
             patch.object(server_agent, "service_state", return_value="active"),
             patch.object(server_agent, "udp_443_policy", return_value="routed"),
@@ -2157,7 +2218,7 @@ class ServerAgentTests(AgentFixtures, unittest.TestCase):
         with (
             patch.object(server_runtime, "parse_env", return_value={"RU_LISTEN_PORT": "443"}),
             patch.object(server_agent, "installed_runtime_contract", return_value=self.gateway_contract()),
-            patch.object(server_agent, "journal_filtered_lines", return_value=lines),
+            patch.object(server_agent, "journal_filtered_events", return_value=front_evidence(lines)),
             patch.object(server_agent, "tcp_front_snapshot", return_value=front),
             patch.object(server_agent, "service_state", return_value="active"),
             patch.object(server_agent, "udp_443_policy", return_value="routed"),
@@ -2229,7 +2290,7 @@ class ServerAgentTests(AgentFixtures, unittest.TestCase):
         with (
             patch.object(server_runtime, "parse_env", return_value={"RU_LISTEN_PORT": "443"}),
             patch.object(server_agent, "installed_runtime_contract", return_value=self.gateway_contract()),
-            patch.object(server_agent, "journal_filtered_lines", return_value=["from 203.0.113.20:50123 accepted tcp:example.org:443"]),
+            patch.object(server_agent, "journal_filtered_events", return_value=front_evidence(["from 203.0.113.20:50123 accepted tcp:example.org:443"])),
             patch.object(server_agent, "tcp_front_snapshot", return_value=front),
             patch.object(server_agent, "service_state", return_value="active"),
             patch.object(server_runtime, "run", return_value=completed),

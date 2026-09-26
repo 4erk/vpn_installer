@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 import unittest
 from unittest.mock import Mock
 
@@ -31,7 +32,67 @@ def coverage(**changes: object) -> dict[str, object]:
     return {"since_epoch": 0, "query_since_epoch": 0, "query_until_epoch": 1000, "discarded_at": [], "error": "", **changes}
 
 
+def front_evidence(lines=(), *, cutoff: float | None = None) -> dict:
+    cutoff = time.time() - 10 if cutoff is None else cutoff
+    return journal.journal_event_snapshot(
+        runner=Mock(return_value=result("\n".join(record(cutoff - 1, line, _SYSTEMD_UNIT="vpn-stack-xray.service") for line in lines))),
+        pattern="accepted", matches=("-u", "vpn-stack-xray.service"), window_starts={"front": cutoff - 300},
+        query_since=cutoff - 300, cutoff=cutoff, coverage=coverage(query_until_epoch=cutoff),
+    )
+
+
 class JournalEvidenceTests(unittest.TestCase):
+    def test_unit_and_kernel_queries_share_failure_and_partial_record_handling(self) -> None:
+        for completed in (result(code=1), result(code=2, stderr="denied"),
+                          result(record(900), code=2, stderr="partial"),
+                          result(record(900), stderr="corrupt"), result(record(900) + "\nbroken"),
+                          subprocess.TimeoutExpired("journalctl", 30, output=record(900).encode()),
+                          FileNotFoundError("journalctl missing")):
+            with self.subTest(completed=completed):
+                runner = Mock(side_effect=completed) if isinstance(completed, Exception) else Mock(return_value=completed)
+                snapshot = journal.journal_event_snapshot(
+                    runner=runner, pattern="accepted", matches=("-u", "vpn-stack-xray.service"),
+                    window_starts={"front": 700}, query_since=700, cutoff=1000, coverage=coverage(), timeout=30,
+                )
+                no_match = not isinstance(completed, Exception) and completed.returncode == 1
+                self.assertEqual(snapshot["counts"]["front"], 0 if no_match else None)
+                self.assertEqual(bool(journal.journal_snapshot_error(snapshot, window="front")), not no_match)
+                expected_observed = int(isinstance(completed, subprocess.TimeoutExpired) or (
+                    not isinstance(completed, Exception) and bool(completed.stdout)))
+                self.assertEqual(snapshot["observed_counts"]["front"], expected_observed)
+                args = runner.call_args.args[0]
+                self.assertIn("--all", args)
+                self.assertIn("--output=json", args)
+                self.assertEqual(args[args.index("--since") + 1], "@700.000000")
+                self.assertEqual(args[args.index("--until") + 1], "@1000.000000")
+                self.assertEqual(runner.call_args.kwargs["timeout"], 30)
+
+    def test_consumer_rejects_missing_partial_or_contradictory_journal_evidence(self) -> None:
+        complete = front_evidence(cutoff=1000)
+        self.assertEqual(journal.journal_snapshot_error(complete, window="front"), "")
+        for key in ("collector_error", "coverage", "windows", "counts", "query_since_epoch", "query_until_epoch"):
+            incomplete = dict(complete)
+            del incomplete[key]
+            self.assertTrue(journal.journal_snapshot_error(incomplete, window="front"), key)
+        for incomplete in (None, {}, {**complete, "collector_error": "partial"},
+                           {**complete, "counts": {"front": None}}, {**complete, "counts": {"front": True}},
+                           {**complete, "coverage": coverage(since_epoch=800)},
+                           {**complete, "coverage": coverage(discarded_at=[900])}):
+            self.assertTrue(journal.journal_snapshot_error(incomplete, window="front"))
+
+    def test_unit_query_preserves_float_cutoff_and_bounds(self) -> None:
+        cutoff = 1789366998.4848592
+        since = cutoff - 300
+        runner = Mock(return_value=result("\n".join(record(stamp) for stamp in (since - 1, since + 1, cutoff - 1, cutoff + 1))))
+        snapshot = journal.journal_event_snapshot(
+            runner=runner, pattern="accepted", matches=("-u", "vpn-stack-xray.service"),
+            window_starts={"front": since}, query_since=since, cutoff=cutoff,
+            coverage=coverage(query_until_epoch=cutoff),
+        )
+        self.assertEqual(snapshot["counts"]["front"], 2)
+        self.assertEqual(snapshot["query_until_epoch"], cutoff)
+        self.assertEqual(journal.journal_snapshot_error(snapshot, window="front"), "")
+
     def test_retained_range_stops_at_missing_file(self) -> None:
         old = header(10, 19, 100, 200)
         active = header(30, 39, 300, 400, state="ONLINE")

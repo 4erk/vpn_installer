@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import json
 import subprocess
 import unittest
 from pathlib import Path
@@ -15,6 +16,28 @@ from tests.server_agent_fixtures import AgentFixtures
 
 
 class ServerRuntimeTests(AgentFixtures, unittest.TestCase):
+    def test_timeout_preserves_partial_stdout_without_changing_checked_failures(self) -> None:
+        for output in ("partial\n", b"partial\n", b"invalid\xff", None):
+            with self.subTest(output=output), patch.object(
+                server_runtime.subprocess, "run", side_effect=subprocess.TimeoutExpired("journalctl", 20, output=output),
+            ):
+                result = server_runtime.run(["journalctl"])
+                expected = output.decode("utf-8", errors="replace") if isinstance(output, bytes) else output or ""
+                self.assertEqual(result.stdout, expected)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("timed out", result.stderr)
+                with self.assertRaises(RuntimeError):
+                    server_runtime.run(["journalctl"], check=True)
+
+    def test_conntrack_timeout_through_runtime_retains_positive_evidence(self) -> None:
+        output = json.dumps({"__REALTIME_TIMESTAMP": "900000000", "MESSAGE": "nf_conntrack: table full"}).encode()
+        coverage = {"since_epoch": 0, "discarded_at": [], "error": "", "query_since_epoch": 0, "query_until_epoch": 1000}
+        with patch.object(server_runtime.subprocess, "run", side_effect=subprocess.TimeoutExpired("journalctl", 20, output=output)):
+            snapshot = server_agent.kernel_conntrack_full_windows(full_logs=False, coverage=coverage, cutoff=1000)
+        self.assertIsNone(snapshot["counts"]["5"])
+        self.assertEqual(snapshot["observed_counts"]["5"], 1)
+        self.assertEqual(len(snapshot["events"]), 1)
+
     def test_extracted_functions_have_one_owner_without_agent_exports(self) -> None:
         for module, names in (
             (server_runtime, ("run", "read_json", "acquire_install_read_lock", "wireguard_policy_snapshot")),

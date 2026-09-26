@@ -530,6 +530,29 @@ def current_transport_state(value: Any) -> dict[str, Any]:
     return value
 
 
+def failed_transport_observation(
+    previous: dict[str, Any], reason: str, *, selected: str = "",
+) -> dict[str, Any]:
+    previous = current_transport_state(previous)
+    # Keep historical transitions and retry deadlines, not stale positive probes.
+    history = {
+        key: previous[key]
+        for key in ("last_transition", "switch_backoff", "last_switch_failure", "preferred_retry")
+        if isinstance(previous.get(key), dict)
+    }
+    return {
+        **history,
+        "schema_version": policy.TRANSPORT_STATE_SCHEMA_VERSION,
+        "updated_at": runtime.utc_now(),
+        "state": "failed",
+        "selected": selected,
+        "recommended": selected,
+        "changed": False,
+        "would_switch": False,
+        "reason": reason[:240],
+    }
+
+
 def reconcile_interserver_transport() -> dict[str, Any]:
     install_lock = runtime.acquire_install_read_lock()
     if install_lock is None:
@@ -560,30 +583,20 @@ def _reconcile_interserver_transport_unlocked() -> dict[str, Any]:
         controller = str(config.get("experimental", {}).get("clash_api", {}).get("external_controller", "")) if isinstance(config, dict) else ""
         previous_state = current_transport_state(runtime.read_json(runtime.TRANSPORT_STATE_PATH, {}))
         if not isinstance(config, dict) or not policy.transport_topology_configured(config, env) or not controller:
-            payload = {
-                "schema_version": policy.TRANSPORT_STATE_SCHEMA_VERSION,
-                "updated_at": runtime.utc_now(),
-                "state": "failed",
-                "selected": "",
-                "recommended": "",
-                "would_switch": False,
-                "reason": "stable WireGuard overlay relays are not configured",
-            }
+            payload = failed_transport_observation(
+                previous_state, "stable WireGuard overlay relays are not configured",
+            )
             runtime.write_json_atomic(runtime.TRANSPORT_STATE_PATH, payload)
             return payload
 
         selection = transport_selection_snapshot(config, env, controller)
         selected = str(selection.get("selected", ""))
         if not selection.get("available"):
-            payload = {
-                "schema_version": policy.TRANSPORT_STATE_SCHEMA_VERSION,
-                "updated_at": runtime.utc_now(),
-                "state": "failed",
-                "selected": selected,
-                "recommended": selected,
-                "would_switch": False,
-                "reason": str(selection.get("reason", "transport endpoint state is unavailable")),
-            }
+            payload = failed_transport_observation(
+                previous_state,
+                str(selection.get("reason", "transport endpoint state is unavailable")),
+                selected=selected,
+            )
             runtime.write_json_atomic(runtime.TRANSPORT_STATE_PATH, payload)
             return payload
 
@@ -705,14 +718,8 @@ def watch_interserver_transport() -> None:
         try:
             payload = reconcile_interserver_transport()
         except Exception as exc:  # noqa: BLE001
-            payload = {
-                "schema_version": policy.TRANSPORT_STATE_SCHEMA_VERSION,
-                "updated_at": runtime.utc_now(),
-                "state": "failed",
-                "selected": "",
-                "recommended": "",
-                "reason": str(exc)[:240],
-            }
+            previous = current_transport_state(runtime.read_json(runtime.TRANSPORT_STATE_PATH, {}))
+            payload = failed_transport_observation(previous, str(exc))
             runtime.write_json_atomic(runtime.TRANSPORT_STATE_PATH, payload)
         signature = (
             str(payload.get("state", "")),

@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from .common import OUT_DIR, error_summary, print_header, warn, write_text
 from .config import load_existing_deployment_env
 from .log_classifier import BUCKETS, summarize_lines
+from .journal_evidence import journal_snapshot_error
 from .localnet import local_route_to_server, route_uses_self_tunnel
 from .models import AppError, RemoteTarget
 from .prompts import select_existing_deployment
@@ -72,7 +73,40 @@ def _decode_agent_snapshot(report: str, name: str) -> dict[str, object]:
         raise AppError(f"Агент вернул некорректный {name} snapshot: {report[:240]}") from exc
     if not isinstance(payload, dict):
         raise AppError(f"Агент вернул некорректный {name} snapshot type.")
+    if name not in {"front", "client"}:
+        return payload
+    error = journal_snapshot_error(payload.get("journal_evidence"), window="front")
+    events = payload.get("events")
+    if not error and (not isinstance(events, dict) or any(
+        isinstance(events.get(key), bool) or not isinstance(events.get(key), int) or events[key] < 0
+        for key in ("accepted", "accepted_tcp", "accepted_udp", "udp_443", "invalid_reality", "disabled_invalid")
+    )):
+        error = "front event counters are incomplete"
+    verdicts = {"verified", "degraded", "failed"} if name == "front" else {
+        "failed", "degraded", "loss_observed", "reached_xray", "rejected_by_front", "tcp_reached_no_xray_accept", "not_seen_on_server",
+    }
+    if not error and payload.get("verdict") not in verdicts:
+        error = "front verdict is inconclusive or missing"
+    if error or payload.get("error"):
+        payload["error"] = str(payload.get("error") or error)
+        if payload.get("verdict") != "failed":
+            payload["verdict"] = "inconclusive"
     return payload
+
+
+def _capture_front_snapshot(target: RemoteTarget, command: str, name: str) -> dict[str, object]:
+    try:
+        return _decode_agent_snapshot(ssh_capture(target, command, as_root=True), name)
+    except Exception as exc:  # Preserve incomplete collection in the diagnostic report.
+        return {"verdict": "inconclusive", "error": str(exc)[:240]}
+
+
+def _print_front_collection_error(payload: dict[str, object], report_path: Path) -> None:
+    print(f"events: unavailable; {payload['error']}")
+    if isinstance(payload.get("observed_events"), dict):
+        print(f"observed events (partial): {json.dumps(payload['observed_events'], sort_keys=True)}")
+    print(f"verdict: {payload['verdict']}")
+    print(f"report: {report_path}")
 
 
 def diagnose_front_workflow(deployment: str | None, *, source_ip: str | None = None, minutes: int = 120, non_interactive: bool = False) -> int:
@@ -93,16 +127,18 @@ def diagnose_front_workflow(deployment: str | None, *, source_ip: str | None = N
     )
     gateway_plan = _topology_from_env(env).plan(NODE_GATEWAY)
     gateway = _target_for_plan(gateway_plan, targets)
-    report = ssh_capture(
+    payload = _capture_front_snapshot(
         gateway,
         f"/usr/bin/python3 /usr/local/lib/vpn-stack/vpn-stack-agent.py front --since {minutes} --live-probes",
-        as_root=True,
+        "front",
     )
-    payload = _decode_agent_snapshot(report, "front")
     output_dir = _diagnostic_run_dir(deployment_name)
     output_dir.mkdir(parents=True, exist_ok=True)
     report_path = output_dir / f"front-{gateway_plan.node_id}.json"
     write_text(report_path, json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+    if payload.get("error"):
+        _print_front_collection_error(payload, report_path)
+        return 2
     front = payload.get("front", {})
     events = payload.get("events", {})
     print_header("Front diagnostics")
@@ -166,17 +202,19 @@ def diagnose_server_client_workflow(deployment: str | None, *, source_ip: str, m
     )
     gateway_plan = _topology_from_env(env).plan(NODE_GATEWAY)
     gateway = _target_for_plan(gateway_plan, targets)
-    report = ssh_capture(
+    payload = _capture_front_snapshot(
         gateway,
         "/usr/bin/python3 /usr/local/lib/vpn-stack/vpn-stack-agent.py client "
         f"--source {shlex.quote(source_ip)} --since {minutes}",
-        as_root=True,
+        "client",
     )
-    payload = _decode_agent_snapshot(report, "client")
     output_dir = _diagnostic_run_dir(deployment_name)
     output_dir.mkdir(parents=True, exist_ok=True)
     report_path = output_dir / f"client-front-{gateway_plan.node_id}.json"
     write_text(report_path, json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+    if payload.get("error"):
+        _print_front_collection_error(payload, report_path)
+        return 2
     events = payload.get("events", {})
     client = payload.get("front", {}).get("client", {})
     print_header("Client front diagnostics")
@@ -223,6 +261,7 @@ def diagnose_server_client_workflow(deployment: str | None, *, source_ip: str, m
         )
     verdict = payload.get("verdict", "inconclusive")
     verdict_basis = {
+        "failed": "the public Xray service or listener is unavailable",
         "degraded": "Xray accepted the client; aggregate outer TCP quality is degraded",
         "loss_observed": "Xray accepted the client; open-socket lifetime counters contain loss, but no fresh degraded interval is available",
         "reached_xray": "Xray accepted the client; no active aggregate degradation was measured",
@@ -233,7 +272,7 @@ def diagnose_server_client_workflow(deployment: str | None, *, source_ip: str, m
     print(f"verdict: {verdict}{f'; basis: {verdict_basis}' if verdict_basis else ''}")
     print(f"udp/443 policy: {payload.get('transport', {}).get('udp_443_policy', '-')}")
     print(f"report: {report_path}")
-    return 1 if payload.get("verdict") in {"degraded", "rejected_by_front", "tcp_reached_no_xray_accept", "not_seen_on_server"} else 0
+    return 1 if payload.get("verdict") in {"failed", "degraded", "rejected_by_front", "tcp_reached_no_xray_accept", "not_seen_on_server"} else 0
 
 def _cleanup_iperf_rules(exit_target: RemoteTarget) -> None:
     ssh_capture(
