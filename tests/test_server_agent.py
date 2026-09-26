@@ -1876,6 +1876,42 @@ class ServerAgentTests(AgentFixtures, unittest.TestCase):
         self.assertNotIn("timer", front["clients"])
         self.assertEqual(server_agent.front_observation(front), "observed")
 
+    def test_targeted_front_keeps_client_flows_outside_overview_limits(self) -> None:
+        source = "203.0.113.200"
+        others = [f"198.51.100.{host}:{port}" for host in range(1, 22) for port in range(40000, 40006)]
+        for count in (0, 1, 105):
+            with self.subTest(target_flows=count):
+                owned = [f"{source}:{port}" for port in range(50000, 50000 + count)]
+                headers = [f"ESTAB 0 0 94.232.248.35:443 {peer}" for peer in others + owned]
+
+                def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+                    if "-Htan" in args:
+                        output = "\n".join(headers)
+                    elif "-Htoein" in args:
+                        output = "\n".join(f"{line}\n\t cubic rtt:20/1 bytes_sent:10000" for line in headers)
+                    elif "-Hltn" in args:
+                        output = "LISTEN 0 4096 94.232.248.35:443 0.0.0.0:*\n"
+                    else:
+                        output = ""
+                    return subprocess.CompletedProcess(args, 0, output, "")
+
+                lines = [f"from {peer} accepted tcp:example.org:443" for peer in others + owned]
+                with (
+                    patch.object(server_runtime, "run", side_effect=fake_run),
+                    patch.object(server_runtime, "parse_env", return_value={"RU_LISTEN_PORT": "443"}),
+                    patch.object(server_agent, "installed_runtime_contract", return_value=self.gateway_contract()),
+                    patch.object(server_agent, "journal_filtered_events", return_value=front_evidence(lines)),
+                    patch.object(server_agent, "service_state", return_value="active"),
+                ):
+                    overview = server_agent.tcp_front_snapshot(443)
+                    targeted = server_agent.front_client_snapshot(source, 5)
+                self.assertEqual(len(overview["clients"]), 20)
+                self.assertEqual(len(overview["flows"]), 100)
+                self.assertTrue(set(owned).isdisjoint(overview["flows"]))
+                self.assertEqual(set(targeted["front"]["flows"]), set(owned))
+                self.assertEqual(targeted["flow_events"], {peer: {"example.org:443": 1} for peer in owned})
+                self.assertEqual(targeted["client_transport"]["active_outer_flows"], count)
+
     def test_front_snapshot_keeps_idle_lifetime_loss_out_of_current_sources(self) -> None:
         def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
             if "-Htan" in args:

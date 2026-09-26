@@ -1121,7 +1121,7 @@ def render_tcp_metrics(values: dict[str, Any]) -> dict[str, Any]:
     return rendered
 
 
-def tcp_front_snapshot(port: int) -> dict[str, Any]:
+def tcp_front_snapshot(port: int, *, source: str | None = None) -> dict[str, Any]:
     states = Counter()
     clients = Counter()
     sockets = runtime.run(["ss", "-Htan", f"sport = :{port}"], timeout=8)
@@ -1139,15 +1139,15 @@ def tcp_front_snapshot(port: int) -> dict[str, Any]:
         line = raw_line.strip()
         fields = line.split()
         if len(fields) >= 5 and fields[0] in {"ESTAB", "SYN-RECV", "FIN-WAIT-1", "FIN-WAIT-2", "CLOSE-WAIT", "LAST-ACK", "CLOSING", "TIME-WAIT"}:
-            source, source_port = tcp_socket_peer(fields, port)
-            if not source:
+            peer, source_port = tcp_socket_peer(fields, port)
+            if not peer:
                 current_flow = None
                 continue
             current_flow = empty_tcp_metrics()
             socket_id_match = re.search(r"\bsk:([0-9a-fA-F]+)\b", line)
             current_flow.update(
                 {
-                    "source": source,
+                    "source": peer,
                     "source_port": source_port,
                     "socket_id": socket_id_match.group(1).lower() if socket_id_match else "",
                 }
@@ -1155,7 +1155,7 @@ def tcp_front_snapshot(port: int) -> dict[str, Any]:
             current_flow["connections"] = 1
             current_flow["states"][fields[0]] = 1
             current_flow["keepalive_timers"] = int("timer:(keepalive" in line)
-            per_flow[endpoint_key(source, source_port)] = current_flow
+            per_flow[endpoint_key(peer, source_port)] = current_flow
             continue
         if current_flow is None:
             continue
@@ -1180,16 +1180,18 @@ def tcp_front_snapshot(port: int) -> dict[str, Any]:
         }
         for key, values in per_flow.items()
     }
-    client_metrics = {
-        source: all_client_metrics[source]
-        for source, _metrics in sorted(all_client_metrics.items(), key=lambda item: (-item[1]["connections"], item[0]))[:20]
-    }
-    flow_metrics = dict(
-        sorted(
-            all_flow_metrics.items(),
-            key=lambda item: (item[1]["quality"] != "degraded", -int(item[1]["bytes_retrans"]), item[0]),
-        )[:100]
-    )
+    # Overview display limits must not discard evidence for a requested client.
+    if source is not None:
+        client_metrics = {source: all_client_metrics[source]} if source in all_client_metrics else {}
+        flow_metrics = {key: metrics for key, metrics in all_flow_metrics.items() if metrics["source"] == source}
+    else:
+        client_metrics = dict(sorted(all_client_metrics.items(), key=lambda item: (-item[1]["connections"], item[0]))[:20])
+        flow_metrics = dict(
+            sorted(
+                all_flow_metrics.items(),
+                key=lambda item: (item[1]["quality"] != "degraded", -int(item[1]["bytes_retrans"]), item[0]),
+            )[:100]
+        )
     active_flows = [metrics for metrics in all_flow_metrics.values() if metrics["phase"] == "active"]
     closing_flows = [metrics for metrics in all_flow_metrics.values() if metrics["phase"] == "closing"]
     rtts = [
@@ -1726,7 +1728,7 @@ def public_front_snapshot(minutes: int, source: str | None = None, *, live_probe
             origin = source_from_line(line)
             if origin:
                 source_counts[origin] += 1
-    front = tcp_front_snapshot(port)
+    front = tcp_front_snapshot(port, source=source)
     services = {"xray": service_state("vpn-stack-xray.service"), "nftables": service_state(runtime.NFTABLES_SERVICE)}
     observation = front_observation(front)
     front_verdict = public_front_verdict(services["xray"], front)
