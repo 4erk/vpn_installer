@@ -40,8 +40,8 @@ class VersionTests(unittest.TestCase):
     def test_manifest_declares_exact_adapter_free_transition(self) -> None:
         contract = CompatibilityWindow.current().to_manifest()
         self.assertEqual(contract["installed_min"], "0.23.4")
-        self.assertEqual(contract["installed_max"], "0.23.5")
-        self.assertEqual(contract["transitions"], [{"from": "0.23.4", "to": "0.23.5"}])
+        self.assertEqual(contract["installed_max"], "0.23.6")
+        self.assertEqual(contract["transitions"], [{"from": "0.23.4", "to": "0.23.6"}])
 
     def test_previous_release_manifest_needs_no_adapter(self) -> None:
         contract = {"installed_min": "0.22.6", "installed_max": "0.22.8",
@@ -65,7 +65,7 @@ class VersionTests(unittest.TestCase):
             CompatibilityWindow.from_manifest({"installed_min": "0.20.1", "installed_max": "0.20.1"})
 
     def test_out_of_window_release_has_removal_guidance(self) -> None:
-        for version in ("0.22.8", "0.23.0", "0.23.1", "0.23.2", "0.23.3", "0.23.6"):
+        for version in ("0.22.8", "0.23.0", "0.23.1", "0.23.2", "0.23.3", "0.23.7"):
             with self.subTest(version=version), self.assertRaisesRegex(
                 CompatibilityError,
                 rf"installed release {re.escape(version)}.*{re.escape(cli_entrypoint())} from tag {re.escape(version)}.*remove or purge",

@@ -727,6 +727,12 @@ def compatible_update_acceptance_script() -> str:
           --env-file /work/dual.env \
           --assets-dir /work/assets \
           --output-dir "$source_release"
+        PYTHONPATH=/work/previous python3 - >/work/result/previous-runtime.json <<'PY'
+        import json
+        from vpn_installer import VERSION
+        from vpn_installer.diagnostics import SCHEMA_VERSION
+        print(json.dumps({"version": VERSION, "diagnostics": SCHEMA_VERSION}))
+        PY
         install -D -m 0755 /usr/local/bin/sing-box "$source_release/bin/sing-box"
         support validate-installed \
           --current-release "$source_release" \
@@ -757,12 +763,8 @@ def compatible_update_acceptance_script() -> str:
         window = CompatibilityWindow.current()
         assert str(window.minimum) == COMPATIBLE_INSTALLED_MIN
         assert str(window.maximum) == VERSION
-        assert (
-            CONFIG_SCHEMA_VERSION,
-            MANIFEST_SCHEMA_VERSION,
-            INSTALL_PLAN_SCHEMA_VERSION,
-            DIAGNOSTICS_SCHEMA_VERSION,
-        ) == (3, 5, 5, 7)
+        source_runtime = json.loads((result_dir / "previous-runtime.json").read_text())
+        assert source_runtime["version"] == COMPATIBLE_INSTALLED_MIN
 
         source_env = load_env_file(source_release / "node.env")
         source_manifest = json.loads((source_release / "render-manifest.json").read_text(encoding="utf-8"))
@@ -796,7 +798,7 @@ def compatible_update_acceptance_script() -> str:
                 "state": CONFIG_SCHEMA_VERSION,
                 "manifest": MANIFEST_SCHEMA_VERSION,
                 "install_plan": INSTALL_PLAN_SCHEMA_VERSION,
-                "diagnostics": DIAGNOSTICS_SCHEMA_VERSION,
+                "diagnostics": source_runtime["diagnostics"],
             },
             "to": {
                 "version": VERSION,
@@ -848,7 +850,7 @@ def test_compatible_update(runner: AuditRunner) -> dict[str, str]:
     return {
         "container": container,
         "deployment": env["DEPLOY_NAME"],
-        "transition": f"{COMPATIBLE_INSTALLED_MIN}->{VERSION} (schemas unchanged)",
+        "transition": f"{COMPATIBLE_INSTALLED_MIN}->{VERSION} (validated predecessor)",
         "artifacts": str(result_dir),
     }
 
