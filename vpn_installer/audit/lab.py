@@ -352,6 +352,17 @@ def _lab_require_stream_active(runner: AuditRunner, client: str) -> None:
                        f"test $(stat -c %s /opt/stream.out) -lt {LAB_STREAM_BYTES}")
 
 
+def _lab_start_stream(runner: AuditRunner, client: str) -> None:
+    runner.docker_exec(
+        client,
+        "rm -f /opt/stream.out /opt/stream.rc /opt/stream.time; "
+        "(curl --silent --show-error --fail --noproxy '' --socks5-hostname 127.0.0.1:1080 "
+        f"--max-time {LAB_STREAM_MAX_SECONDS} "
+        "--write-out '%{time_total}' --output /opt/stream.out http://example.com/stream "
+        ">/opt/stream.time; echo $? >/opt/stream.rc) </dev/null >/opt/stream.log 2>&1 &",
+    )
+
+
 @contextmanager
 def _lab_logs(runner: AuditRunner):
     try:
@@ -361,9 +372,11 @@ def _lab_logs(runner: AuditRunner):
         destination.mkdir(parents=True, exist_ok=True)
         errors = []
         for role, path in (("gateway", "/opt/ru-singbox.log"), ("exit", "/opt/foreign-singbox.log"),
-                           ("client", "/opt/client-singbox.log"), ("dns", "/opt/dns.log")):
+                           ("client", "/opt/client-singbox.log"), ("dns", "/opt/dns.log"),
+                           ("client", "/opt/stream.log")):
             try:
-                runner.docker_cp_from(f"{role}-{runner.run_id}", path, destination / f"{role}.log")
+                name = "stream.log" if path == "/opt/stream.log" else f"{role}.log"
+                runner.docker_cp_from(f"{role}-{runner.run_id}", path, destination / name)
             except AuditFailure as exc:
                 errors.append(f"{role}: {exc}")
         if errors:
@@ -522,14 +535,7 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
                 raise AuditFailure(f"Raw global IP ушёл не через foreign:\n{raw_global_resp}")
 
             deadline_report = _lab_overlay_deadlines(runner, ru_container, dns_container, env)
-            runner.docker_exec(
-                client_container,
-                "rm -f /opt/stream.out /opt/stream.rc /opt/stream.time; "
-                "(curl --silent --show-error --fail --noproxy '' --socks5-hostname 127.0.0.1:1080 "
-                f"--max-time {LAB_STREAM_MAX_SECONDS} "
-                "--write-out '%{time_total}' --output /opt/stream.out http://example.com/stream "
-                ">/opt/stream.time; echo $? >/opt/stream.rc) &",
-            )
+            _lab_start_stream(runner, client_container)
             runner.docker_exec(client_container,
                                "for i in $(seq 1 100); do test ! -e /opt/stream.rc || exit 1; "
                                f"test -s /opt/stream.out && test $(stat -c %s /opt/stream.out) -ge {LAB_STREAM_CHUNK_BYTES} "

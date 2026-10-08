@@ -50,13 +50,24 @@ class AuditModuleTests(unittest.TestCase):
     def test_lab_logs_survive_failure_without_masking_the_original_error(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             runner = Mock(work_dir=Path(temporary), run_id="fixture")
-            runner.docker_cp_from.side_effect = [None, AuditFailure("missing log"), None, None]
+            runner.docker_cp_from.side_effect = [None, AuditFailure("missing log"), None, None, None]
             with self.assertRaisesRegex(RuntimeError, "original probe failure"):
                 with audit_lab._lab_logs(runner):
                     raise RuntimeError("original probe failure")
-            self.assertEqual(runner.docker_cp_from.call_count, 4)
+            self.assertEqual(runner.docker_cp_from.call_count, 5)
             errors = (Path(temporary) / "lab/runtime-logs/collection-errors.txt").read_text(encoding="utf-8")
             self.assertIn("exit: missing log", errors)
+
+    def test_lab_stream_is_detached_without_retrying_or_bypassing_socks(self) -> None:
+        runner = Mock()
+        audit_lab._lab_start_stream(runner, "client")
+        node, command = runner.docker_exec.call_args.args
+        self.assertEqual(node, "client")
+        self.assertIn("--noproxy '' --socks5-hostname 127.0.0.1:1080", command)
+        self.assertIn(f"--max-time {audit_lab.LAB_STREAM_MAX_SECONDS}", command)
+        self.assertIn("echo $? >/opt/stream.rc", command)
+        self.assertTrue(command.endswith("</dev/null >/opt/stream.log 2>&1 &"))
+        self.assertNotIn("--retry", command)
 
     @staticmethod
     def canonical_dual_env() -> dict[str, str]:
