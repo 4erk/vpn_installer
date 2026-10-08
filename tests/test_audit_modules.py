@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import io
 import json
@@ -538,6 +539,42 @@ class AuditModuleTests(unittest.TestCase):
             runner.docker_exec.return_value.stdout = json.dumps(processes)
             with self.subTest(processes=processes), self.assertRaisesRegex(AuditFailure, "one live"):
                 audit_lab._lab_processes(runner, {"gateway": "gateway"})
+
+    def test_lab_stream_covers_one_reverse_failover_before_both_paths_fail(self) -> None:
+        source = (Path(__file__).parents[1] / "vpn_installer/audit/lab.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        scenario = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "test_lab_dataplane")
+
+        def calls(node, name):
+            return sorted((item for item in ast.walk(node) if isinstance(item, ast.Call)
+                           and isinstance(item.func, ast.Name) and item.func.id == name), key=lambda item: item.lineno)
+
+        faults = sorted((node for node in ast.walk(scenario) if isinstance(node, ast.With)
+                         and any(isinstance(item.context_expr, ast.Call)
+                                 and isinstance(item.context_expr.func, ast.Name)
+                                 and item.context_expr.func.id == "_lab_underlay_loss" for item in node.items)),
+                        key=lambda node: node.lineno)
+        self.assertEqual(len(faults), 3)
+        starts = calls(scenario, "_lab_start_stream")
+        active = calls(scenario, "_lab_require_stream_active")
+        self.assertEqual(len(starts), 1)
+        self.assertEqual(len(active), 1)
+        recovery_guard = next(node for node in ast.walk(scenario) if isinstance(node, ast.Raise)
+                              and "Transport agent did not return" in (ast.get_source_segment(source, node) or ""))
+        self.assertLess(faults[1].end_lineno, recovery_guard.lineno)
+        self.assertLess(recovery_guard.lineno, starts[0].lineno)
+        self.assertLess(starts[0].lineno, faults[2].lineno)
+        self.assertLess(faults[2].lineno, active[0].lineno)
+        self.assertLess(active[0].lineno, calls(faults[2], "_lab_confirmed_loss")[0].lineno)
+        add_loss = calls(faults[2], "add_loss")[0]
+        checks = [node for node in faults[2].body if isinstance(node, ast.If)
+                  and any(isinstance(item, ast.Name) and item.id in {
+                      "stream_result", "stream_sha256", "stream_seconds", "request_count"
+                  } for item in ast.walk(node.test))]
+        self.assertEqual(len(checks), 4)
+        self.assertTrue(all(node.end_lineno < add_loss.lineno for node in checks))
+        self.assertEqual(audit_lab.LAB_STREAM_BYTES, 20 * 1024 * 1024)
+        self.assertEqual(audit_lab.LAB_STREAM_MAX_SECONDS, 30)
 
     def test_lab_stream_fixture_sends_one_bounded_checksummed_response(self) -> None:
         with patch("socketserver.ThreadingTCPServer") as server:

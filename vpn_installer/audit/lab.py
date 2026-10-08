@@ -535,16 +535,10 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
                 raise AuditFailure(f"Raw global IP ушёл не через foreign:\n{raw_global_resp}")
 
             deadline_report = _lab_overlay_deadlines(runner, ru_container, dns_container, env)
-            _lab_start_stream(runner, client_container)
-            runner.docker_exec(client_container,
-                               "for i in $(seq 1 100); do test ! -e /opt/stream.rc || exit 1; "
-                               f"test -s /opt/stream.out && test $(stat -c %s /opt/stream.out) -ge {LAB_STREAM_CHUNK_BYTES} "
-                               "&& exit 0; sleep 0.05; done; exit 1")
             fallback_tag = next(tag for tag in TRANSPORT_CANDIDATE_TAGS if tag != TRANSPORT_PREFERRED_TAG)
             fault_port = HY2_PORT if TRANSPORT_PREFERRED_TAG == TRANSPORT_HY2_TAG else int(env["WG_PORT"])
             fallback_port = int(env["WG_PORT"]) if fallback_tag != TRANSPORT_HY2_TAG else HY2_PORT
             with _lab_underlay_loss(runner, ru_container, foreign_container, (fault_port,)):
-                _lab_require_stream_active(runner, client_container)
                 switch_started = time.monotonic()
                 forward_loss = _lab_confirmed_loss(runner, ru_container, TRANSPORT_PREFERRED_TAG, fallback_tag)
                 switch_seconds = time.monotonic() - switch_started
@@ -553,7 +547,6 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
                 raise AuditFailure(f"Two-cycle failover exceeded {LAB_FAILOVER_MAX_SECONDS:g}s: {switch_seconds:.3f}s")
             # The first observation after activation must not inherit the old path's failure count.
             with _lab_underlay_loss(runner, ru_container, foreign_container, (fallback_port,), reverse=True):
-                _lab_require_stream_active(runner, client_container)
                 activation_transient = _lab_transport_cycle(runner, ru_container, next_cycle=True)
                 _lab_require_suspect(activation_transient, fallback_tag)
             fallback_stability = _lab_transport_cycle(runner, ru_container, next_cycle=True)
@@ -564,28 +557,6 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
                 and not fallback_stability.get("failure")
             ):
                 raise AuditFailure(f"A brief post-activation loss did not recover on the same path: {fallback_stability}")
-            runner.docker_exec(
-                client_container,
-                f"for i in $(seq 1 {LAB_STREAM_MAX_SECONDS * 10}); do test -s /opt/stream.rc && exit 0; sleep 0.1; done; exit 1",
-            )
-            stream_result = runner.docker_exec(
-                client_container,
-                f'test "$(cat /opt/stream.rc)" = 0 && test "$(stat -c %s /opt/stream.out)" = {LAB_STREAM_BYTES}',
-            )
-            if stream_result.returncode != 0:
-                raise AuditFailure("Existing TCP stream did not survive the underlay switch")
-            digest = hashlib.sha256()
-            for index in range(LAB_STREAM_CHUNKS):
-                digest.update(bytes([index % 256]) * LAB_STREAM_CHUNK_BYTES)
-            stream_sha256 = runner.docker_exec(client_container, "sha256sum /opt/stream.out").stdout.split()[0]
-            if stream_sha256 != digest.hexdigest():
-                raise AuditFailure("Existing TCP stream checksum changed across the underlay switch")
-            stream_seconds = float(runner.docker_exec(client_container, "cat /opt/stream.time").stdout.strip())
-            if stream_seconds > LAB_STREAM_MAX_SECONDS:
-                raise AuditFailure(f"Underlay switch stalled an existing TCP stream for too long: {stream_seconds:.3f}s")
-            request_count = runner.docker_exec(global_web_container, "grep -Fxc /stream /opt/requests.log")
-            if request_count.stdout.strip() != "1":
-                raise AuditFailure("Continuity check retried HTTP instead of preserving one TCP stream")
             runner.docker_exec(
                 ru_container,
                 "python3 -c \"import json; p='/var/lib/vpn-stack/transport-state.json'; "
@@ -618,8 +589,41 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
                 and recovery[-1].get("selected") == TRANSPORT_PREFERRED_TAG
             ):
                 raise AuditFailure(f"Transport agent did not return to the recovered preferred underlay: {recovery}")
+            # Measure one hard failover separately from the immediate post-activation transient.
+            _lab_start_stream(runner, client_container)
+            runner.docker_exec(client_container,
+                               "for i in $(seq 1 100); do test ! -e /opt/stream.rc || exit 1; "
+                               f"test -s /opt/stream.out && test $(stat -c %s /opt/stream.out) -ge {LAB_STREAM_CHUNK_BYTES} "
+                               "&& exit 0; sleep 0.05; done; exit 1")
             with _lab_underlay_loss(runner, ru_container, foreign_container, (fault_port,), reverse=True) as add_loss:
+                _lab_require_stream_active(runner, client_container)
+                stream_switch_started = time.monotonic()
                 reverse_loss = _lab_confirmed_loss(runner, ru_container, TRANSPORT_PREFERRED_TAG, fallback_tag)
+                stream_switch_seconds = time.monotonic() - stream_switch_started
+                if stream_switch_seconds > LAB_FAILOVER_MAX_SECONDS:
+                    raise AuditFailure(f"Stream failover exceeded {LAB_FAILOVER_MAX_SECONDS:g}s: {stream_switch_seconds:.3f}s")
+                runner.docker_exec(
+                    client_container,
+                    f"for i in $(seq 1 {LAB_STREAM_MAX_SECONDS * 10}); do test -s /opt/stream.rc && exit 0; sleep 0.1; done; exit 1",
+                )
+                stream_result = runner.docker_exec(
+                    client_container,
+                    f'test "$(cat /opt/stream.rc)" = 0 && test "$(stat -c %s /opt/stream.out)" = {LAB_STREAM_BYTES}',
+                )
+                if stream_result.returncode != 0:
+                    raise AuditFailure("Existing TCP stream did not survive the underlay switch")
+                digest = hashlib.sha256()
+                for index in range(LAB_STREAM_CHUNKS):
+                    digest.update(bytes([index % 256]) * LAB_STREAM_CHUNK_BYTES)
+                stream_sha256 = runner.docker_exec(client_container, "sha256sum /opt/stream.out").stdout.split()[0]
+                if stream_sha256 != digest.hexdigest():
+                    raise AuditFailure("Existing TCP stream checksum changed across the underlay switch")
+                stream_seconds = float(runner.docker_exec(client_container, "cat /opt/stream.time").stdout.strip())
+                if stream_seconds > LAB_STREAM_MAX_SECONDS:
+                    raise AuditFailure(f"Underlay switch stalled an existing TCP stream for too long: {stream_seconds:.3f}s")
+                request_count = runner.docker_exec(global_web_container, "grep -Fxc /stream /opt/requests.log")
+                if request_count.stdout.strip() != "1":
+                    raise AuditFailure("Continuity check retried HTTP instead of preserving one TCP stream")
                 add_loss(fallback_port)
                 both_loss = _lab_confirmed_loss(runner, ru_container, fallback_tag, None)
                 failed_both = runner.lab_curl(client_container, "http://example.com/", expect_codes={7, 22, 28, 52, 56, 97})
@@ -649,6 +653,7 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
                         "post_activation_transient": activation_transient,
                         "fallback_stability": fallback_stability,
                         "switch_seconds": switch_seconds,
+                        "stream_switch_seconds": stream_switch_seconds,
                         "stream_bytes": LAB_STREAM_BYTES,
                         "stream_sha256": stream_sha256,
                         "stream_seconds": stream_seconds,
