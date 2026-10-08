@@ -470,11 +470,33 @@ class AuditModuleTests(unittest.TestCase):
         with self.assertRaisesRegex(AuditFailure, "fresh selected"):
             audit_lab._lab_require_udp_quality({"probes": {selected: {"quality_sampled": False}, target: quality}}, selected)
 
+    def test_lab_one_way_faults_drop_at_receiver_without_local_send_errors(self) -> None:
+        for reverse, receiver, peer, port_field in (
+            (False, "exit", audit_lab.LAB_IPS["gateway"], "dport"),
+            (True, "gateway", audit_lab.LAB_IPS["exit"], "sport"),
+        ):
+            with self.subTest(reverse=reverse):
+                runner = Mock()
+                with audit_lab._lab_underlay_loss(runner, "gateway", "exit", (51820,), reverse=reverse) as add_loss:
+                    self.assertEqual(runner.docker_exec.call_count, 3)
+                    add_loss(audit_lab.HY2_PORT)
+                    self.assertEqual(runner.docker_exec.call_count, 4)
+                calls = [call.args for call in runner.docker_exec.call_args_list]
+                for _, command in calls:
+                    self.assertNotIn("output", command.lower())
+                self.assertEqual(calls, [
+                    (receiver, "nft add table inet underlay_fault"),
+                    (receiver, "nft 'add chain inet underlay_fault input { type filter hook input priority -10; policy accept; }'"),
+                    (receiver, f"nft add rule inet underlay_fault input ip saddr {peer} udp {port_field} 51820 drop"),
+                    (receiver, f"nft add rule inet underlay_fault input ip saddr {peer} udp {port_field} {audit_lab.HY2_PORT} drop"),
+                    (receiver, "nft delete table inet underlay_fault"),
+                ])
+
     def test_lab_one_way_faults_clean_up_on_error_in_body_or_setup(self) -> None:
         for reverse in (False, True):
             runner = Mock()
             with self.subTest(reverse=reverse), self.assertRaisesRegex(RuntimeError, "probe failed"):
-                with audit_lab._lab_underlay_loss(runner, "node", "198.18.0.20", (51820,), reverse=reverse):
+                with audit_lab._lab_underlay_loss(runner, "gateway", "exit", (51820,), reverse=reverse):
                     raise RuntimeError("probe failed")
             commands = [call.args[1] for call in runner.docker_exec.call_args_list]
             self.assertIn(f"udp {'sport' if reverse else 'dport'} 51820 drop", commands[2])
@@ -482,9 +504,17 @@ class AuditModuleTests(unittest.TestCase):
         runner = Mock()
         runner.docker_exec.side_effect = [None, AuditFailure("chain failed"), None]
         with self.assertRaisesRegex(AuditFailure, "chain failed"):
-            with audit_lab._lab_underlay_loss(runner, "node", "198.18.0.20", (51820,)):
+            with audit_lab._lab_underlay_loss(runner, "gateway", "exit", (51820,)):
                 self.fail("Invalid fault setup entered the scenario")
         self.assertEqual(runner.docker_exec.call_args.args[1], "nft delete table inet underlay_fault")
+
+    def test_lab_added_loss_rule_failure_cleans_up_both_path_fixture(self) -> None:
+        runner = Mock()
+        runner.docker_exec.side_effect = [None, None, None, AuditFailure("second rule failed"), None]
+        with self.assertRaisesRegex(AuditFailure, "second rule failed"):
+            with audit_lab._lab_underlay_loss(runner, "gateway", "exit", (51820,), reverse=True) as add_loss:
+                add_loss(audit_lab.HY2_PORT)
+        self.assertEqual(runner.docker_exec.call_args.args, ("gateway", "nft delete table inet underlay_fault"))
 
     def test_lab_process_identity_detects_restart_even_with_reused_pid(self) -> None:
         before = {"gateway": {"42": "100"}, "exit": {"52": "200"}, "client": {"62": "300"}}

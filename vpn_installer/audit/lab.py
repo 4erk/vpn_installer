@@ -300,14 +300,21 @@ def _lab_require_udp_quality(state: dict[str, object], selected: str) -> None:
 
 
 @contextmanager
-def _lab_underlay_loss(runner: AuditRunner, container: str, peer: str, ports: tuple[int, ...], *, reverse: bool = False):
+def _lab_underlay_loss(runner: AuditRunner, gateway: str, exit_node: str, ports: tuple[int, ...], *, reverse: bool = False):
+    # Drop at the receiver: local OUTPUT drops return EPERM to the sending socket.
+    container = gateway if reverse else exit_node
+    peer = LAB_IPS["exit"] if reverse else LAB_IPS["gateway"]
+
+    def add_port(port: int) -> None:
+        runner.docker_exec(container, f"nft add rule inet underlay_fault input ip saddr {peer} "
+                           f"udp {'sport' if reverse else 'dport'} {port} drop")
+
     runner.docker_exec(container, "nft add table inet underlay_fault")
     try:
-        runner.docker_exec(container, "nft 'add chain inet underlay_fault output { type filter hook output priority -10; policy accept; }'")
+        runner.docker_exec(container, "nft 'add chain inet underlay_fault input { type filter hook input priority -10; policy accept; }'")
         for port in ports:
-            runner.docker_exec(container, f"nft add rule inet underlay_fault output ip daddr {peer} "
-                               f"udp {'sport' if reverse else 'dport'} {port} drop")
-        yield
+            add_port(port)
+        yield add_port
     finally:
         runner.docker_exec(container, "nft delete table inet underlay_fault")
 
@@ -530,7 +537,7 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
             fallback_tag = next(tag for tag in TRANSPORT_CANDIDATE_TAGS if tag != TRANSPORT_PREFERRED_TAG)
             fault_port = HY2_PORT if TRANSPORT_PREFERRED_TAG == TRANSPORT_HY2_TAG else int(env["WG_PORT"])
             fallback_port = int(env["WG_PORT"]) if fallback_tag != TRANSPORT_HY2_TAG else HY2_PORT
-            with _lab_underlay_loss(runner, ru_container, LAB_IPS["exit"], (fault_port,)):
+            with _lab_underlay_loss(runner, ru_container, foreign_container, (fault_port,)):
                 _lab_require_stream_active(runner, client_container)
                 switch_started = time.monotonic()
                 forward_loss = _lab_confirmed_loss(runner, ru_container, TRANSPORT_PREFERRED_TAG, fallback_tag)
@@ -539,7 +546,7 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
             if switch_seconds > LAB_FAILOVER_MAX_SECONDS:
                 raise AuditFailure(f"Two-cycle failover exceeded {LAB_FAILOVER_MAX_SECONDS:g}s: {switch_seconds:.3f}s")
             # The first observation after activation must not inherit the old path's failure count.
-            with _lab_underlay_loss(runner, foreign_container, LAB_IPS["gateway"], (fallback_port,), reverse=True):
+            with _lab_underlay_loss(runner, ru_container, foreign_container, (fallback_port,), reverse=True):
                 _lab_require_stream_active(runner, client_container)
                 activation_transient = _lab_transport_cycle(runner, ru_container, next_cycle=True)
                 _lab_require_suspect(activation_transient, fallback_tag)
@@ -605,10 +612,9 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
                 and recovery[-1].get("selected") == TRANSPORT_PREFERRED_TAG
             ):
                 raise AuditFailure(f"Transport agent did not return to the recovered preferred underlay: {recovery}")
-            with _lab_underlay_loss(runner, foreign_container, LAB_IPS["gateway"], (fault_port,), reverse=True):
+            with _lab_underlay_loss(runner, ru_container, foreign_container, (fault_port,), reverse=True) as add_loss:
                 reverse_loss = _lab_confirmed_loss(runner, ru_container, TRANSPORT_PREFERRED_TAG, fallback_tag)
-                runner.docker_exec(foreign_container, f"nft add rule inet underlay_fault output "
-                                   f"ip daddr {LAB_IPS['gateway']} udp sport {fallback_port} drop")
+                add_loss(fallback_port)
                 both_loss = _lab_confirmed_loss(runner, ru_container, fallback_tag, None)
                 failed_both = runner.lab_curl(client_container, "http://example.com/", expect_codes={7, 22, 28, 52, 56, 97})
                 if failed_both.returncode == 0:
