@@ -254,13 +254,13 @@ class ServerAgentTests(AgentFixtures, unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "install plan capabilities conflict"):
             server_agent.runtime_contract(manifest)
 
-    def test_agent_emits_native_diagnostics_v7_end_to_end(self) -> None:
+    def test_agent_emits_native_diagnostics_v8_end_to_end(self) -> None:
         facts = self.diagnostics_facts()
         with patch.object(server_agent, "collect_runtime_facts", return_value=facts):
             payload = server_agent.diagnostics_snapshot(live_probes=True, full_logs=True, include_maintenance=True)
 
         snapshot = DiagnosticsSnapshot.from_agent(payload)
-        self.assertEqual(snapshot.schema_version, 7)
+        self.assertEqual(snapshot.schema_version, 8)
         self.assertEqual(snapshot.collector_status, "ok")
         self.assertEqual(snapshot.host["login_user"], "root")
         self.assertEqual(snapshot.log_windows["since_release"].counts["dns_timeout"], 0)
@@ -625,7 +625,7 @@ class ServerAgentTests(AgentFixtures, unittest.TestCase):
         self.assertEqual(snapshot.reasons, ["interserver_adaptation=stale"])
         self.assertFalse(snapshot.transport["interserver"]["adaptive_state"]["fresh"])
         self.assertEqual(snapshot.transport["interserver"]["adaptive_state"]["updated_at"], state["updated_at"])
-        self.assertEqual(snapshot.schema_version, 7)
+        self.assertEqual(snapshot.schema_version, 8)
 
     def test_journal_problem_and_context_queries_use_the_same_fixed_window(self) -> None:
         now = 1_786_040_000.0
@@ -2236,10 +2236,10 @@ class ServerAgentTests(AgentFixtures, unittest.TestCase):
 
         self.assertEqual(payload["verdict"], "degraded")
         self.assertEqual(payload["flow_events"], {"203.0.113.20:50123": {"current.example:443": 1}})
-        self.assertFalse(payload["client_transport"]["multiplex_detected"])
-        self.assertEqual(payload["client_transport"]["status"], "not_observed")
+        self.assertIsNone(payload["client_transport"]["multiplex_detected"])
+        self.assertEqual(payload["client_transport"]["status"], "inconclusive")
 
-    def test_client_snapshot_detects_tcp_multiplex_on_active_outer_flow(self) -> None:
+    def test_client_snapshot_does_not_infer_multiplex_from_reused_source_port(self) -> None:
         front = {
             "listening": True,
             "clients": {"203.0.113.20": {"connections": 1, "quality": "observed"}},
@@ -2269,12 +2269,13 @@ class ServerAgentTests(AgentFixtures, unittest.TestCase):
             payload = server_agent.front_client_snapshot("203.0.113.20", 15)
 
         transport = payload["client_transport"]
-        self.assertTrue(transport["multiplex_detected"])
-        self.assertEqual(transport["status"], "detected")
-        self.assertEqual(transport["multiplexed_flow_count"], 1)
-        self.assertEqual(transport["risk"], "tcp_head_of_line")
+        self.assertIsNone(transport["multiplex_detected"])
+        self.assertEqual(transport["status"], "inconclusive")
+        self.assertEqual(transport["repeated_endpoint_count"], 1)
+        self.assertEqual(transport["basis"], "socket_lifetime_not_correlated")
+        self.assertNotIn("risk", transport)
         self.assertEqual(
-            transport["flows"]["203.0.113.20:50123"],
+            transport["repeated_endpoints"]["203.0.113.20:50123"],
             {
                 "accepted_tcp_requests": 2,
                 "destinations": {"first.example:443": 1, "second.example:443": 1},
@@ -2285,8 +2286,8 @@ class ServerAgentTests(AgentFixtures, unittest.TestCase):
         observation = server_agent.client_transport_observation({}, active_outer_flows=0)
 
         self.assertEqual(observation["status"], "inconclusive")
-        self.assertFalse(observation["multiplex_detected"])
-        self.assertEqual(observation["risk"], "unknown")
+        self.assertIsNone(observation["multiplex_detected"])
+        self.assertEqual(observation["repeated_endpoint_count"], 0)
 
     def test_udp_443_policy_rejects_only_global_transport_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

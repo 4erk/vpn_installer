@@ -53,6 +53,7 @@ from .runner import (
     write_bytes,
     write_text,
 )
+from .xray_dns import test_xray_dns_port
 
 COMPATIBLE_UPDATE_TIMEOUT_SECONDS = 45
 TRANSACTION_ACCEPTANCE_TIMEOUT_SECONDS = 45
@@ -568,6 +569,7 @@ def acceptance_snapshot_fixture(
 def run(runner: AuditRunner) -> None:
     runner.record("docker-platform-contract-matrix", lambda: test_platform_contract_matrix(runner))
     runner.ensure_audit_image()
+    runner.record("docker-xray-dns-port", lambda: test_xray_dns_port(runner))
     runner.record("docker-unmanaged-remove-purge-render-only", lambda: test_unmanaged_remove_purge_render_only(runner))
     runner.record("docker-asset-fail-fast", lambda: test_asset_fail_fast(runner))
     runner.record("docker-compatible-update", lambda: test_compatible_update(runner))

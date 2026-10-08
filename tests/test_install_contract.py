@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from vpn_installer.compatibility import COMPATIBLE_INSTALLED_MIN
+from vpn_installer.common import RUNTIME_SITE_PACKAGES
 from vpn_installer.config import generate_default_env
 from vpn_installer.diagnostics import SCHEMA_VERSION as DIAGNOSTICS_SCHEMA_VERSION
 from vpn_installer.install_contract import (
@@ -53,7 +54,7 @@ class InstallContractTests(unittest.TestCase):
         script = """
 import sys
 from pathlib import Path
-sys.path.insert(0, sys.argv[1])
+sys.path[:0] = [sys.argv[1], sys.argv[4]]
 from vpn_installer import VERSION
 from vpn_installer.config import generate_default_env
 from vpn_installer.render import write_node_rendered_files
@@ -68,7 +69,8 @@ for topology, location, node in [('dual', 'ru', 'gateway'), ('dual', 'ru', 'exit
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             source = export_release_source(COMPATIBLE_INSTALLED_MIN, root / "previous")
-            result = subprocess.run([sys.executable, "-c", script, str(source), str(root), COMPATIBLE_INSTALLED_MIN],
+            result = subprocess.run([sys.executable, "-c", script, str(source), str(root), COMPATIBLE_INSTALLED_MIN,
+                                     str(RUNTIME_SITE_PACKAGES)],
                                     capture_output=True, text=True, timeout=20)
             self.assertEqual(result.returncode, 0, result.stderr)
             for bundle in sorted(root.glob("*-gateway")) + [root / "dual-ru-exit"]:

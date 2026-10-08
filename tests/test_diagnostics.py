@@ -59,7 +59,7 @@ class DiagnosticsTests(unittest.TestCase):
                     observed_at=OBSERVED_AT, since=since, until=OBSERVED_AT,
                 )
                 restored = DiagnosticsSnapshot.from_json(snapshot.to_json())
-                self.assertEqual(restored.schema_version, 7)
+                self.assertEqual(restored.schema_version, 8)
                 self.assertEqual(restored.log_windows["5m"].since, since)
                 self.assertEqual(restored.freshness_issues(now=datetime.fromisoformat(OBSERVED_AT)), [])
 
@@ -167,7 +167,7 @@ class DiagnosticsTests(unittest.TestCase):
     def test_native_parser_rejects_bad_timestamp_without_changing_wire_fields(self) -> None:
         snapshot = DiagnosticsSnapshot(generated_at=OBSERVED_AT, collectors=ok_collectors(), log_windows=empty_windows())
         before = snapshot.to_dict()
-        self.assertEqual(snapshot.schema_version, 7)
+        self.assertEqual(snapshot.schema_version, 8)
         snapshot.freshness_issues(now=datetime.fromisoformat(OBSERVED_AT))
         self.assertEqual(snapshot.to_dict(), before)
         for timestamp in ("2026-08-06T18:00:00Z", "2026-08-06T21:00:00+03:00"):
@@ -223,7 +223,7 @@ class DiagnosticsTests(unittest.TestCase):
 
         restored = DiagnosticsSnapshot.from_json(snapshot.to_json())
 
-        self.assertEqual(restored.schema_version, 7)
+        self.assertEqual(restored.schema_version, 8)
         self.assertEqual(restored.deployment, "demo")
         self.assertEqual(restored.topology, "dual")
         self.assertEqual(restored.node_id, "gateway")

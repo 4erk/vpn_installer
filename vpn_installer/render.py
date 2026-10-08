@@ -327,8 +327,7 @@ def render_gateway_xray(env: dict[str, str]) -> str:
         dns = {
             "servers": [
                 {
-                    "address": f"tcp://{wg_host_address(env['WG_FOREIGN_ADDRESS'])}",
-                    "port": FOREIGN_DNS_RELAY_PORT,
+                    "address": f"tcp://{wg_host_address(env['WG_FOREIGN_ADDRESS'])}:{FOREIGN_DNS_RELAY_PORT}",
                     "tag": "xray-global-dns",
                     "queryStrategy": "UseIP",
                     "skipFallback": True,

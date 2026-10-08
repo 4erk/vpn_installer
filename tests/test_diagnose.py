@@ -456,7 +456,7 @@ class DiagnoseTests(unittest.TestCase):
             "events": {"accepted": 2, "accepted_tcp": 2, "accepted_udp": 0, "udp_443": 0, "invalid_reality": 0, "disabled_invalid": 0},
             "journal_evidence": front_evidence(),
             "front": {"client": {"quality": "loss_observed", "pmtu": 1480, "mss": 1408}, "flows": {}},
-            "client_transport": {"status": "detected", "multiplex_detected": True, "active_outer_flows": 1, "multiplexed_flow_count": 1, "risk": "tcp_head_of_line"},
+            "client_transport": {"status": "inconclusive", "multiplex_detected": None, "active_outer_flows": 1, "repeated_endpoint_count": 1, "basis": "socket_lifetime_not_correlated"},
             "verdict": "loss_observed",
         }
         with tempfile.TemporaryDirectory() as tmp:
@@ -471,7 +471,7 @@ class DiagnoseTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertIn("verdict: loss_observed", stream.getvalue())
         self.assertIn("pmtu=1480, mss=1408", stream.getvalue())
-        self.assertIn("client transport: multiplex=detected, active_outer_flows=1, multiplexed_flows=1, risk=tcp_head_of_line", stream.getvalue())
+        self.assertIn("client transport: multiplex=inconclusive, active_outer_flows=1, repeated_endpoints=1, basis=socket_lifetime_not_correlated", stream.getvalue())
         self.assertIn("no fresh degraded interval is available", stream.getvalue())
 
     def test_diagnose_front_uses_structured_agent_snapshot(self) -> None:

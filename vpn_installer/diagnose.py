@@ -248,8 +248,8 @@ def diagnose_server_client_workflow(deployment: str | None, *, source_ip: str, m
             "client transport: "
             f"multiplex={client_transport.get('status', 'inconclusive')}, "
             f"active_outer_flows={client_transport.get('active_outer_flows', 0)}, "
-            f"multiplexed_flows={client_transport.get('multiplexed_flow_count', 0)}, "
-            f"risk={client_transport.get('risk', 'none')}"
+            f"repeated_endpoints={client_transport.get('repeated_endpoint_count', 0)}, "
+            f"basis={client_transport.get('basis', 'unknown')}"
         )
     recent_interval = payload.get("front", {}).get("recent_interval", {})
     if recent_interval:

@@ -348,7 +348,7 @@ class StatusOutputTests(unittest.TestCase):
         rendered = "\n".join(lines)
         self.assertIn("node: gateway", rendered)
         self.assertIn("drift: none", rendered)
-        self.assertIn("snapshot schema: 7", rendered)
+        self.assertIn("snapshot schema: 8", rendered)
         self.assertIn("collector status: ok", rendered)
         self.assertIn(
             "log window 5m: status=ok (observed=2026-07-20T08:00:00Z), "

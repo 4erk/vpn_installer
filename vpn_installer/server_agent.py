@@ -1056,7 +1056,7 @@ def endpoint_key(source: str, port: int | None) -> str:
 
 
 def client_transport_observation(tcp_events: dict[str, Counter[str]], *, active_outer_flows: int) -> dict[str, Any]:
-    multiplexed_flows = {
+    repeated_endpoints = {
         key: {
             "accepted_tcp_requests": sum(destinations.values()),
             "destinations": dict(destinations.most_common(10)),
@@ -1064,23 +1064,16 @@ def client_transport_observation(tcp_events: dict[str, Counter[str]], *, active_
         for key, destinations in tcp_events.items()
         if sum(destinations.values()) > 1
     }
-    detected = bool(multiplexed_flows)
-    observed_tcp_requests = sum(sum(destinations.values()) for destinations in tcp_events.values())
-    if detected:
-        status = "detected"
-    elif active_outer_flows and observed_tcp_requests:
-        status = "not_observed"
-    else:
-        status = "inconclusive"
+    # Access logs identify an endpoint, not the lifetime of the current socket.
+    # A reused NAT/source port is indistinguishable from multiplexing here.
     return {
-        "status": status,
-        "multiplex_detected": detected,
-        "multiplexed_flow_count": len(multiplexed_flows),
+        "status": "inconclusive",
+        "multiplex_detected": None,
         "active_outer_flows": active_outer_flows,
-        "observed_tcp_requests": observed_tcp_requests,
-        "risk": "tcp_head_of_line" if detected else "unknown" if status == "inconclusive" else "none_observed",
-        "basis": "multiple_xray_tcp_accepts_on_one_active_outer_socket" if detected else "active_flow_window" if status == "not_observed" else "no_active_flow_evidence",
-        "flows": multiplexed_flows,
+        "observed_tcp_requests": sum(sum(destinations.values()) for destinations in tcp_events.values()),
+        "basis": "socket_lifetime_not_correlated",
+        "repeated_endpoint_count": len(repeated_endpoints),
+        "repeated_endpoints": repeated_endpoints,
     }
 
 
@@ -1862,7 +1855,7 @@ def public_front_snapshot(minutes: int, source: str | None = None, *, live_probe
         if metrics.get("source") == source and metrics.get("phase", "active") == "active"
     }
     flow_events: dict[str, Counter[str]] = {}
-    tcp_flow_events: dict[str, Counter[str]] = {}
+    tcp_endpoint_events: dict[str, Counter[str]] = {}
     for line in xray_lines:
         event_source, event_port = source_endpoint_from_line(line)
         destination = accepted_destination_from_line(line)
@@ -1872,10 +1865,8 @@ def public_front_snapshot(minutes: int, source: str | None = None, *, live_probe
         if key in active_flow_keys:
             flow_events.setdefault(key, Counter())[destination] += 1
             if "accepted tcp:" in line:
-                tcp_flow_events.setdefault(key, Counter())[destination] += 1
-    client_transport = client_transport_observation(tcp_flow_events, active_outer_flows=len(active_flow_keys))
-    if journal_error:
-        client_transport["status"] = "inconclusive"
+                tcp_endpoint_events.setdefault(key, Counter())[destination] += 1
+    client_transport = client_transport_observation(tcp_endpoint_events, active_outer_flows=len(active_flow_keys))
     source_flows = {
         key: {**metrics, "accepted_destinations": dict(flow_events.get(key, Counter()).most_common(10))}
         for key, metrics in front.get("flows", {}).items()

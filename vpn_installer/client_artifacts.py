@@ -453,7 +453,7 @@ def render_next_steps(env: dict[str, str], *, out_dir: Path | None = None, gener
             f"2. Для v2rayN скопируй строку из {paths['v2rayn_uri'].name} и выбери импорт share link из буфера; это тот же канонический VLESS URI без custom-config слоя.",
             f"3. Если клиенту нужен JSON-импорт, используй {paths['hiddify_json'].name}, {paths['windows_xray_json'].name} или {paths['android_xray_json'].name}. В них multiplex явно выключен: большие загрузки не делят один outer TCP stream.",
             f"4. Если клиентский JSON/TUN начинает отправлять на сервер private/fake IP вместо домена, `{cli_command('status')}` покажет это в отдельном bucket `blocked_private_fake`.",
-            f"5. Если импортированный URI переиспользует один TCP socket для разных сайтов, `{client_diagnose_command}` покажет multiplex. Для VLESS используй mux-free JSON; не включай Mux в глобальных настройках клиента.",
+            f"5. При обрывах `{client_diagnose_command}` показывает состояние соединений и повторные передачи. Повтор одного IP:порта в журнале не доказывает multiplex: порт может использоваться новым соединением. Диагностика не требует менять основной URI или профиль клиента.",
             f"6. Для импорта QUIC как обычного узла в Hiddify/v2rayN используй {paths['hysteria2_uri'].name}; VLESS URI остаётся основным вариантом для сетей без UDP.",
             f"7. Ручная смена клиентского VLESS/Hysteria2 узла действует только на новые соединения. Серверный underlay failover сохраняет открытые потоки внутри WireGuard overlay, но не может восстановить уже оборванный участок клиент -> RU.",
             f"8. Если сайты висят, сначала смотри серверные группы ошибок: {status_command}",

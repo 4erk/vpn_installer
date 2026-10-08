@@ -284,7 +284,9 @@ class RenderTests(unittest.TestCase):
             ],
         )
         self.assertEqual(xray_payload["outbounds"][2], {"protocol": "blackhole", "tag": "blocked"})
-        self.assertEqual(xray_payload["dns"]["servers"][0]["address"], f"tcp://{env['WG_FOREIGN_ADDRESS'].split('/', 1)[0]}")
+        dns_server = xray_payload["dns"]["servers"][0]
+        self.assertEqual(dns_server["address"], f"tcp://{env['WG_FOREIGN_ADDRESS'].split('/', 1)[0]}:1053")
+        self.assertNotIn("port", dns_server)
         self.assertIn(
             {
                 "inbound": ["public-hy2-in"],

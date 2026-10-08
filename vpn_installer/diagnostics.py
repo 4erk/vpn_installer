@@ -13,7 +13,7 @@ except ImportError:  # Installed beside vpn-stack-agent.py as a standalone modul
     from log_classifier import BUCKETS  # type: ignore[no-redef]
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 COLLECTOR_STATUSES = frozenset({"ok", "error", "stale", "skipped", "not_applicable"})
 TOPOLOGIES = frozenset({"single", "dual"})
 NODE_IDS = frozenset({"gateway", "exit"})

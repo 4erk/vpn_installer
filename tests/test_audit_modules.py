@@ -295,7 +295,7 @@ class AuditModuleTests(unittest.TestCase):
                 INSTALL_PLAN_SCHEMA_VERSION,
                 DIAGNOSTICS_SCHEMA_VERSION,
             ),
-            (3, 5, 5, 7),
+            (3, 5, 5, 8),
         )
 
         script = audit_docker.compatible_update_acceptance_script()
