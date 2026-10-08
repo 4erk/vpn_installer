@@ -58,7 +58,7 @@ class DiagnosticsTests(unittest.TestCase):
                     observed_at=OBSERVED_AT, since=since, until=OBSERVED_AT,
                 )
                 restored = DiagnosticsSnapshot.from_json(snapshot.to_json())
-                self.assertEqual(restored.schema_version, 6)
+                self.assertEqual(restored.schema_version, 7)
                 self.assertEqual(restored.log_windows["5m"].since, since)
                 self.assertEqual(restored.freshness_issues(now=datetime.fromisoformat(OBSERVED_AT)), [])
 
@@ -150,7 +150,7 @@ class DiagnosticsTests(unittest.TestCase):
     def test_native_parser_rejects_bad_timestamp_without_changing_wire_fields(self) -> None:
         snapshot = DiagnosticsSnapshot(generated_at=OBSERVED_AT, collectors=ok_collectors(), log_windows=empty_windows())
         before = snapshot.to_dict()
-        self.assertEqual(snapshot.schema_version, 6)
+        self.assertEqual(snapshot.schema_version, 7)
         snapshot.freshness_issues(now=datetime.fromisoformat(OBSERVED_AT))
         self.assertEqual(snapshot.to_dict(), before)
         for timestamp in ("2026-08-06T18:00:00Z", "2026-08-06T21:00:00+03:00"):
@@ -179,7 +179,7 @@ class DiagnosticsTests(unittest.TestCase):
         )
         self.assertEqual(classify_interserver_adaptation({"state": "healthy", "fresh": True}), ("", ""))
 
-    def test_snapshot_v5_roundtrips_without_shell_parsing(self) -> None:
+    def test_snapshot_v7_roundtrips_without_shell_parsing(self) -> None:
         windows = empty_windows()
         windows["5m"] = LogWindowSnapshot.collected(
             {bucket: 2 if bucket == "ipv4_literal_timeout" else 0 for bucket in BUCKETS},
@@ -187,6 +187,8 @@ class DiagnosticsTests(unittest.TestCase):
             since="2026-08-06T17:55:00+00:00",
             until=OBSERVED_AT,
             top_destinations={"ipv4_literal_timeout": {"91.108.56.103:443": 2}},
+            failure_details={"ipv4_literal_timeout": [{"phase": "connect", "outbound": "to-foreign",
+                "failed_endpoint": "91.108.56.103:443", "request_kind": "ipv4_literal", "count": 2}]},
         )
         snapshot = DiagnosticsSnapshot(
             deployment="demo",
@@ -204,7 +206,7 @@ class DiagnosticsTests(unittest.TestCase):
 
         restored = DiagnosticsSnapshot.from_json(snapshot.to_json())
 
-        self.assertEqual(restored.schema_version, 6)
+        self.assertEqual(restored.schema_version, 7)
         self.assertEqual(restored.deployment, "demo")
         self.assertEqual(restored.topology, "dual")
         self.assertEqual(restored.node_id, "gateway")
@@ -212,6 +214,7 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual(restored.capabilities, ("interserver-client", "local-egress", "public-front", "router"))
         self.assertEqual(restored.collector_status, "ok")
         self.assertEqual(restored.log_windows["5m"].counts["ipv4_literal_timeout"], 2)
+        self.assertEqual(restored.log_windows["5m"].failure_details, windows["5m"].failure_details)
         self.assertEqual(restored.log_windows["30m"].counts["ipv4_literal_timeout"], 0)
         self.assertEqual(restored.drift, "none")
         self.assertEqual(restored.storage["root_filesystem"]["verdict"], "verified")

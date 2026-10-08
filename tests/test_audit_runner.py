@@ -286,6 +286,17 @@ print('EXITED', flush=True)
             with self.assertRaises(audit_runner.AuditFailure):
                 runner.run_command("demo", ["echo", "ok"])
 
+    def test_followup_diagnostics_do_not_overwrite_failed_command_logs(self) -> None:
+        runner = self.make_runner()
+        with patch.object(audit_runner.subprocess, "run", side_effect=[completed(7, stderr="original failure"), completed(0, stdout="diagnostic trace")]):
+            with self.assertRaises(audit_runner.AuditFailure):
+                runner.run_command("same-name", ["curl"])
+            runner.run_command("same-name", ["cat", "service.log"])
+        self.assertEqual((runner.logs_dir / "same-name" / "stderr.log").read_text(), "original failure")
+        followups = list(runner.logs_dir.glob("same-name-*/stdout.log"))
+        self.assertEqual(len(followups), 1)
+        self.assertEqual(followups[0].read_text(), "diagnostic trace")
+
     def test_run_command_bounds_external_process_and_saves_partial_output(self) -> None:
         runner = self.make_runner()
         expired = subprocess.TimeoutExpired(["docker", "exec"], 7, output="partial-out", stderr="partial-error")
@@ -564,6 +575,7 @@ print('EXITED', flush=True)
             runner.docker_network_connect("net", "container", "203.0.113.2")
             runner.lab_curl("demo", "http://example.com/")
         self.assertGreaterEqual(run_command.call_count, 5)
+        self.assertIn("--noproxy '' --socks5-hostname", run_command.call_args.args[1][-1])
         self.assertTrue(all(call.kwargs["timeout_seconds"] == audit_runner.AUDIT_DOCKER_TIMEOUT_SECONDS for call in run_command.call_args_list))
 
     def test_docker_container_and_network_cleanup_respects_keep_flag(self) -> None:

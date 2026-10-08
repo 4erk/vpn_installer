@@ -29,6 +29,106 @@ def collected_windows() -> dict[str, LogWindowSnapshot]:
 
 
 class StatusOutputTests(unittest.TestCase):
+    def test_unknown_requests_show_bounded_failure_details_without_literal_claim(self) -> None:
+        unknown = [dict(phase="connect", outbound="to-foreign", failed_endpoint=f"203.0.113.{n}:443",
+                        request_kind="unknown", count=n) for n in range(1, 5)]
+        known = dict(unknown[0], request_kind="ipv4_literal", failed_endpoint="192.0.2.1:443", count=100)
+        windows = collected_windows()
+        windows["5m"] = LogWindowSnapshot.collected(
+            {bucket: 10 if bucket == "unclassified_error" else 0 for bucket in BUCKETS},
+            observed_at=OBSERVED_AT, failure_details={"unclassified_error": [known, *unknown]},
+        )
+        lines = format_snapshot_summary(DiagnosticsSnapshot(log_windows=windows))
+        detail = [line for line in lines if line.startswith("unknown requests")]
+        self.assertEqual(detail, [
+            "unknown requests [5m]: count=4 phase=connect outbound=to-foreign endpoint=203.0.113.4:443; "
+            "count=3 phase=connect outbound=to-foreign endpoint=203.0.113.3:443; +2 more groups"
+        ])
+        self.assertNotIn("literal", detail[0])
+        self.assertNotIn("192.0.2.1", detail[0])
+
+    def test_partial_unknown_requests_keep_lower_bound_and_missing_fields(self) -> None:
+        partial = {"counts": {"unclassified_error": 3}, "failure_details": {"unclassified_error": [
+            {"request_kind": "unknown", "phase": "read", "outbound": "to-foreign",
+             "failed_endpoint": "[2001:db8::1]:443", "count": 2},
+            {"request_kind": "unknown", "count": 1}, None,
+            {"request_kind": "unknown", "count": True}, {"request_kind": "unknown", "count": -1},
+        ]}}
+        lines = format_snapshot_summary(DiagnosticsSnapshot(storage={"journal_coverage": {"partial_windows": {"24h": partial}}}))
+        self.assertIn(
+            "partial unknown requests [24h]: count>=2 phase=read outbound=to-foreign endpoint=[2001:db8::1]:443; "
+            "count>=1 phase=unknown outbound=unknown endpoint=unknown", lines,
+        )
+
+    def transport_lines(self, adaptive: dict) -> list[str]:
+        return format_snapshot_summary(DiagnosticsSnapshot(
+            topology="dual", node_id="gateway", location="ru", capabilities=("interserver-client",),
+            transport={"interserver": {"adaptive_state": adaptive}},
+        ))
+
+    def test_probe_counts_use_raw_sample_not_overlay_attempts_or_percentages(self) -> None:
+        adaptive = {
+            "last_quality_probe": {
+                "quality_checked": True, "quality_ok": False, "quality_error": "loss",
+                "transmitted": 999, "received": 999, "valid_responses": 999,
+                "quality_probe": {"scope": "raw-underlay-udp", "checked": True, "transmitted": 3,
+                    "received": 2, "valid_responses": 1, "attempts": 8, "attempts_limit": 8,
+                    "packet_loss_pct": 87.5, "delay_ms": 29},
+            },
+            "probes": {"interserver-underlay-hy2": {"checked": True, "ok": False, "scope": "raw-underlay-udp",
+                "error": "timeout", "attempts": 8, "transmitted": 2, "received": 0, "valid_responses": 0}},
+        }
+        text = "\n".join(self.transport_lines(adaptive))
+        self.assertIn("quality_probe=degraded(loss)(probe_loss=87.5%,delay=29ms,tx=3,rx=2,valid=1)", text)
+        self.assertIn("cold_probe=interserver-underlay-hy2:failed(timeout)(tx=2,rx=0,valid=0)", text)
+        self.assertNotIn("999", text)
+        self.assertNotIn("tx=8", text)
+
+    def test_absent_probe_counts_are_unknown_not_zero_or_attempt_count(self) -> None:
+        adaptive = {"last_quality_probe": {"quality_checked": True, "quality_ok": True, "quality_probe": None},
+                    "probes": {"interserver-underlay-hy2": {"checked": True, "scope": "raw-underlay-udp", "attempts": 8,
+                        "transmitted": True, "received": -1, "valid_responses": "8"}}}
+        text = "\n".join(self.transport_lines(adaptive))
+        self.assertEqual(text.count("tx=?,rx=?,valid=?"), 2)
+        self.assertNotIn("tx=0", text)
+        self.assertNotIn("tx=8", text)
+
+    def test_unchecked_or_wrong_scope_sample_cannot_supply_quality_counts(self) -> None:
+        for changes in ({"checked": False}, {"scope": "stable-overlay"}):
+            sample = {"checked": True, "scope": "raw-underlay-udp", "transmitted": 8, "received": 8,
+                      "valid_responses": 8, **changes}
+            with self.subTest(changes=changes):
+                text = "\n".join(self.transport_lines({"last_quality_probe": {
+                    "quality_checked": True, "quality_ok": True, "quality_probe": sample,
+                }}))
+                self.assertIn("tx=?,rx=?,valid=?", text)
+                self.assertNotIn("tx=8", text)
+
+    def test_current_cycle_confirmations_report_distinct_recorded_cycles(self) -> None:
+        evidence = {"path": "interserver-underlay-wg", "confirmations": 5,
+                    "cycle_ids": ["cycle-a", "cycle-b", "cycle-b"], "observed_at": OBSERVED_AT}
+        lines = self.transport_lines({"failure": evidence, "alternate_health": {"confirmations": 1},
+                                      "last_transition": {"decision_evidence": {"failure": {"confirmations": 99}}}})
+        self.assertIn(
+            f"transport confirmations: failure[interserver-underlay-wg]: confirmations=5, cycles_recorded=2, observed={OBSERVED_AT}; "
+            "alternate_health[?]: confirmations=1, cycles_recorded=?, observed=?", lines,
+        )
+        self.assertFalse(any("confirmations=99" in line for line in lines))
+        self.assertFalse(any("cycle-a" in line for line in lines))
+
+    def test_last_switch_evidence_is_explicitly_historical(self) -> None:
+        evidence = {"failure": {"path": "interserver-underlay-wg", "confirmations": 2,
+                               "cycle_ids": ["a", "b"], "observed_at": OBSERVED_AT}}
+        lines = self.transport_lines({"last_transition": {"decision_evidence": evidence}})
+        self.assertIn(
+            "last switch confirmations (historical): failure[interserver-underlay-wg]: "
+            f"confirmations=2, cycles_recorded=2, observed={OBSERVED_AT}", lines,
+        )
+        for value in ({}, {"last_transition": None}, {"failure": None},
+                      {"last_transition": {"decision_evidence": None}}):
+            with self.subTest(value=value):
+                self.assertFalse(any("confirmations:" in line for line in self.transport_lines(value)))
+
     def test_missing_kernel_history_is_not_rendered_as_zero_or_none(self) -> None:
         snapshot = DiagnosticsSnapshot(
             storage={"runtime_events": {"oom_kills": {
@@ -213,8 +313,10 @@ class StatusOutputTests(unittest.TestCase):
                                 "checked": True,
                                 "ok": True,
                                 "quality_checked": True,
-                                "packet_loss_pct": 0.0,
-                                "rtt_avg_ms": 22.5,
+                                "quality_ok": True,
+                                "quality_probe": {"scope": "raw-underlay-udp", "checked": True,
+                                    "packet_loss_pct": 0.0, "delay_ms": 23,
+                                    "transmitted": 8, "received": 8, "valid_responses": 8},
                             },
                             "preferred_retry": {
                                 "path": "interserver-underlay-wg",
@@ -227,6 +329,7 @@ class StatusOutputTests(unittest.TestCase):
                                     "ok": True,
                                     "delay_ms": 23,
                                     "scope": "raw-underlay-udp",
+                                    "transmitted": 1, "received": 1, "valid_responses": 1,
                                 }
                             },
                         },
@@ -245,7 +348,7 @@ class StatusOutputTests(unittest.TestCase):
         rendered = "\n".join(lines)
         self.assertIn("node: gateway", rendered)
         self.assertIn("drift: none", rendered)
-        self.assertIn("snapshot schema: 6", rendered)
+        self.assertIn("snapshot schema: 7", rendered)
         self.assertIn("collector status: ok", rendered)
         self.assertIn(
             "log window 5m: status=ok (observed=2026-07-20T08:00:00Z), "
@@ -289,9 +392,9 @@ class StatusOutputTests(unittest.TestCase):
             "interserver transport: mode=stable-wireguard-overlay, selected=interserver-underlay-wg, "
             "configured_candidates=interserver-underlay-hy2,interserver-underlay-wg, "
             "overlay_probe=ok(18ms,target=10.74.0.2:1053), "
-            "quality_probe=ok(loss=0.0%,rtt=22.5ms), "
+            "quality_probe=ok(probe_loss=0.0%,delay=23ms,tx=8,rx=8,valid=8), "
             "preferred_recovered=2026-08-07T04:25:30+00:00, "
-            "cold_probe=interserver-underlay-hy2:ok(23ms), adaptation=healthy, "
+            "cold_probe=interserver-underlay-hy2:ok(23ms)(tx=1,rx=1,valid=1), adaptation=healthy, "
             "hy2_session=active, reason=selected underlay is healthy",
             rendered,
         )

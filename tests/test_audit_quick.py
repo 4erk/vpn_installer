@@ -14,6 +14,12 @@ from vpn_installer.audit.quick import coverage_command, coverage_driver_text
 
 
 class AuditQuickTests(unittest.TestCase):
+    def test_explicit_socks_probes_cannot_be_bypassed_by_no_proxy(self) -> None:
+        for function in (quick.test_ru_singbox_runtime_smoke, quick.test_interserver_hysteria_runtime):
+            commands = [line for line in inspect.getsource(function).splitlines() if "--socks5-hostname" in line]
+            self.assertTrue(commands)
+            self.assertTrue(all("--noproxy ''" in line for line in commands))
+
     def test_coverage_command_uses_embedded_coverage_runner(self) -> None:
         command = coverage_command("report", "--fail-under=90")
         self.assertGreaterEqual(len(command), 4)

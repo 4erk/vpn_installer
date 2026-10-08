@@ -6,16 +6,19 @@ import hashlib
 import json
 import os
 import queue
+import re
 import shlex
 import socket
 import sys
 import tempfile
 import threading
 import time
-from contextlib import suppress
+import zipfile
+from contextlib import contextmanager, suppress
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
+from . import VERSION
 from .common import STATE_DIR, command_exists, fail, print_header, run_command
 from .compatibility import require_compatible_installed
 from .diagnostics import SCHEMA_VERSION as DIAGNOSTICS_SCHEMA_VERSION, DiagnosticsSnapshot
@@ -802,6 +805,16 @@ def remote_preflight(
 ) -> dict[str, str]:
     try:
         payload = _remote_agent_payload(target, live_probes=run_live_probes, compact=not run_live_probes)
+        if isinstance(payload, dict) and int(payload.get("schema_version", 0)) != DIAGNOSTICS_SCHEMA_VERSION:
+            release = payload.get("release")
+            if isinstance(release, dict) and release.get("version") != VERSION:
+                try:
+                    require_compatible_installed(release)
+                except ValueError as exc:
+                    raise AppError(str(exc)) from exc
+                with transient_agent_collector(target) as script:
+                    payload = _remote_agent_payload(target, live_probes=run_live_probes,
+                                                    compact=not run_live_probes, agent_path=script)
         if int(payload.get("schema_version", 0)) == DIAGNOSTICS_SCHEMA_VERSION:
             return bootstrap_from_snapshot(payload)
         raise AppError("vpn-stack-agent returned an unsupported snapshot schema")
@@ -822,8 +835,32 @@ def remote_preflight(
     )
 
 
-def _remote_agent_payload(target: RemoteTarget, *, live_probes: bool = False, profile: str = "light", compact: bool = False) -> dict[str, Any]:
-    command = "test -r /usr/local/lib/vpn-stack/vpn-stack-agent.py && /usr/bin/python3 /usr/local/lib/vpn-stack/vpn-stack-agent.py snapshot"
+@contextmanager
+def transient_agent_collector(target: RemoteTarget) -> Iterator[str]:
+    """Collect current evidence without changing the installed release."""
+    from .render import server_agent_artifacts
+
+    with tempfile.TemporaryDirectory(prefix="vpn-stack-front-") as temp_dir:
+        archive = Path(temp_dir) / "collector.zip"
+        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+            for name, source in server_agent_artifacts(interserver=True).items():
+                bundle.writestr(name, source.encode("utf-8"))
+        remote_dir = ssh_capture(target, "mktemp -d /tmp/vpn-stack-front-verify.XXXXXX", command_timeout=15).strip()
+        if not re.fullmatch(r"/tmp/vpn-stack-front-verify\.[A-Za-z0-9]{6}", remote_dir):
+            raise AppError("could not allocate transient agent collector")
+        try:
+            remote_archive = f"{remote_dir}/collector.zip"
+            scp_upload(target, archive, remote_archive)
+            ssh_capture(target, f"python3 -B -m zipfile -e {shlex.quote(remote_archive)} {shlex.quote(remote_dir)}",
+                        command_timeout=20)
+            yield f"{remote_dir}/vpn-stack-agent.py"
+        finally:
+            ssh_capture(target, f"rm -rf -- {shlex.quote(remote_dir)}", command_timeout=15)
+
+
+def _remote_agent_payload(target: RemoteTarget, *, live_probes: bool = False, profile: str = "light", compact: bool = False, agent_path: str | None = None) -> dict[str, Any]:
+    script = shlex.quote(agent_path or "/usr/local/lib/vpn-stack/vpn-stack-agent.py")
+    command = f"test -r {script} && /usr/bin/python3 -B {script} snapshot"
     if live_probes:
         command += f" --live-probes --profile {shlex.quote(profile)}"
     if compact:

@@ -571,6 +571,33 @@ class RemoteTests(unittest.TestCase):
                 remote_preflight(RemoteTarget(node_id=NODE_GATEWAY), "wgx")
         self.assertEqual(mocked.call_count, 2)
 
+    def test_preflight_previous_release_uses_current_collector_without_old_schema_reader(self) -> None:
+        old = {"schema_version": 6, "release": {"version": COMPATIBLE_INSTALLED_MIN}}
+        current = DiagnosticsSnapshot(generated_at="2026-10-08T12:00:00+00:00",
+                                      deployment="demo", topology="dual", node_id=NODE_GATEWAY,
+                                      location="ru", capabilities=("interserver-client", "local-egress", "public-front", "router", "ru-split-routing", "web-admin")).to_dict()
+        with (
+            patch("vpn_installer.remote._remote_agent_payload", side_effect=[old, current]) as capture,
+            patch("vpn_installer.remote.transient_agent_collector") as collector,
+        ):
+            collector.return_value.__enter__.return_value = "/tmp/current/vpn-stack-agent.py"
+            result = remote_preflight(RemoteTarget(node_id=NODE_GATEWAY), "wg0")
+        self.assertEqual(result["node"], NODE_GATEWAY)
+        self.assertEqual(capture.call_args.kwargs["agent_path"], "/tmp/current/vpn-stack-agent.py")
+        collector.return_value.__exit__.assert_called_once()
+
+    def test_preflight_does_not_replace_broken_current_schema(self) -> None:
+        for version in (VERSION, "0.23.2"):
+            with (
+                self.subTest(version=version),
+                patch("vpn_installer.remote._remote_agent_payload", return_value={"schema_version": 6, "release": {"version": version}}),
+                patch("vpn_installer.remote.ssh_capture", return_value="1"),
+                patch("vpn_installer.remote.transient_agent_collector") as collector,
+            ):
+                with self.assertRaises(AppError):
+                    remote_preflight(RemoteTarget(node_id=NODE_GATEWAY), "wg0")
+                collector.assert_not_called()
+
     def test_fetch_remote_deployment_env_uses_root_capture(self) -> None:
         with patch("vpn_installer.remote.ssh_capture", return_value='DEPLOY_NAME="demo"\n') as mocked:
             payload = fetch_remote_deployment_env(RemoteTarget(node_id=NODE_GATEWAY))

@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 import tempfile
 import unittest
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -41,6 +42,221 @@ class ServerLifecycleTests(AgentFixtures, unittest.TestCase):
             "front_degradation_evidence": server_agent.front_degradation_evidence,
         }
 
+    def health_sample(self, seconds: int, **requirements: bool) -> dict[str, object]:
+        contract = self.gateway_contract()
+        return {
+            **contract,
+            "generated_at": (datetime(2026, 10, 8, tzinfo=timezone.utc) + timedelta(seconds=seconds)).isoformat(),
+            "verdicts": {"server_path": "failed", "host_integrity": "verified"},
+            "services": {name: "active" for name in contract["required_services"]},
+            "artifacts": {"drift": "none"},
+            "network": {"profile_mismatches": [], "conntrack": {"front_bypass": {"active": True}}},
+            "probes": {"requirements": requirements},
+        }
+
+    @contextmanager
+    def health_sandbox(self, samples):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "health.json"
+            with (
+                patch.object(server_runtime, "HEALTH_STATE_PATH", state),
+                patch.object(server_runtime, "LOCK_PATH", Path(tmp) / "lock"),
+                patch.object(server_agent, "collect_runtime_facts", side_effect=samples) as collect,
+                patch.object(server_runtime, "run", return_value=subprocess.CompletedProcess([], 0, "", "")) as run,
+                patch.object(server_lifecycle.time, "sleep"),
+                patch.object(server_lifecycle.time, "time", return_value=10_000),
+            ):
+                yield state, collect, run
+
+    def test_health_requires_same_failed_requirement_for_same_recovery_action(self) -> None:
+        samples = [
+            self.health_sample(0, via_wg=True, foreign_domains_via_router=False),
+            self.health_sample(120, via_wg=True, domains_via_router=False),
+            self.health_sample(240, via_wg=True, domains_via_router=False),
+            self.health_sample(242, via_wg=True, domains_via_router=False),
+        ]
+        with self.health_sandbox(samples) as (_, _, run):
+            first = server_lifecycle.health(**self.health_collectors())
+            second = server_lifecycle.health(**self.health_collectors())
+            run.assert_not_called()
+            self.assertEqual(first["failure_evidence"]["actions"], second["failure_evidence"]["actions"])
+            self.assertEqual(second["consecutive_failures"], 1)
+            self.assertEqual(second["state"], "suspect")
+            third = server_lifecycle.health(**self.health_collectors())
+            self.assertEqual(third["last_action"], "restart:sing-box.service:ok")
+            run.assert_called_once_with(["systemctl", "restart", "sing-box.service"], timeout=30)
+
+    def test_health_does_not_treat_wg_then_router_failure_as_confirmation(self) -> None:
+        samples = [
+            self.health_sample(0, via_wg=False, foreign_domains_via_router=False),
+            self.health_sample(120, via_wg=True, foreign_domains_via_router=False),
+            self.health_sample(240, via_wg=True, foreign_domains_via_router=False),
+            self.health_sample(242, via_wg=True, foreign_domains_via_router=False),
+        ]
+        with self.health_sandbox(samples) as (_, _, run):
+            server_lifecycle.health(**self.health_collectors())
+            second = server_lifecycle.health(**self.health_collectors())
+            run.assert_not_called()
+            self.assertEqual(second["consecutive_failures"], 1)
+            server_lifecycle.health(**self.health_collectors())
+            run.assert_called_once_with(["systemctl", "restart", "sing-box.service"], timeout=30)
+
+    def test_health_does_not_combine_failed_components_or_changed_action_targets(self) -> None:
+        for changed in ("component", "unit"):
+            with self.subTest(changed=changed):
+                first = self.health_sample(0)
+                first["services"]["sing-box"] = "failed"
+                second = self.health_sample(120)
+                if changed == "component":
+                    second["services"]["xray"] = "failed"
+                else:
+                    second["services"]["sing-box"] = "failed"
+                    second["service_units"]["sing-box"] = "other-router.service"
+                with self.health_sandbox([first, second]) as (_, _, run):
+                    server_lifecycle.health(**self.health_collectors())
+                    result = server_lifecycle.health(**self.health_collectors())
+                    run.assert_not_called()
+                    self.assertEqual(result["state"], "suspect")
+
+    def test_success_receipt_precedes_postcheck_and_blocks_repeat_after_exception(self) -> None:
+        samples = [self.health_sample(t, via_wg=True, foreign_domains_via_router=False) for t in (0, 120)]
+        with self.health_sandbox(samples) as (state, collect, run):
+            server_lifecycle.health(**self.health_collectors())
+
+            def postcheck(**_kwargs):
+                receipt = server_runtime.read_json(state, {})
+                self.assertEqual(receipt["state"], "recovering")
+                self.assertEqual(receipt["last_action"], "restart:sing-box.service:ok")
+                self.assertEqual(receipt["last_actions"]["restart:sing-box.service"]["epoch"], 10_042)
+                self.assertEqual(receipt["verdicts"]["overall"], "inconclusive")
+                raise RuntimeError("post-check unavailable")
+
+            def collect_second(**_kwargs):
+                collect.side_effect = postcheck
+                return samples[1]
+
+            collect.side_effect = collect_second
+            with patch.object(server_lifecycle.time, "time", side_effect=[10_000, 10_042]):
+                result = server_lifecycle.health(**self.health_collectors())
+            persisted = server_runtime.read_json(state, {})
+            self.assertEqual(result, persisted)
+            self.assertEqual(result["state"], "recovering")
+            self.assertEqual(result["post_recovery_verdicts"]["server_path"], "inconclusive")
+            self.assertIn("post-check unavailable", result["post_recovery_error"])
+            self.assertEqual(result["pre_recovery"]["verdicts"]["server_path"], "failed")
+            self.assertEqual(server_lifecycle.health_log_summary(result)["post_recovery_error"], result["post_recovery_error"])
+            collect.side_effect = None
+            collect.return_value = self.health_sample(240, via_wg=True, foreign_domains_via_router=False)
+            with patch.object(server_lifecycle.time, "time", return_value=10_044):
+                next_cycle = server_lifecycle.health(**self.health_collectors())
+            self.assertEqual(next_cycle["last_action"], "none")
+            self.assertEqual(next_cycle["last_actions"], persisted["last_actions"])
+            run.assert_called_once_with(["systemctl", "restart", "sing-box.service"], timeout=30)
+
+    def test_success_receipt_survives_interruption_before_postcheck(self) -> None:
+        samples = [self.health_sample(t, via_wg=True, foreign_domains_via_router=False) for t in (0, 120, 240)]
+        with self.health_sandbox(samples) as (state, collect, run):
+            server_lifecycle.health(**self.health_collectors())
+            with patch.object(server_lifecycle.time, "sleep", side_effect=KeyboardInterrupt):
+                with self.assertRaises(KeyboardInterrupt):
+                    server_lifecycle.health(**self.health_collectors())
+            self.assertEqual(collect.call_count, 2)
+            self.assertEqual(server_runtime.read_json(state, {})["last_action_epoch"], 10_000)
+            result = server_lifecycle.health(**self.health_collectors())
+            self.assertEqual(result["last_action"], "none")
+            run.assert_called_once()
+
+    def test_partial_recovery_keeps_success_receipt_and_retries_only_failed_action(self) -> None:
+        actions = ["restart:sing-box.service", "restart:vpn-stack-xray.service"]
+        for successful_index in (0, 1):
+            with self.subTest(successful_index=successful_index):
+                samples = [self.health_sample(t) for t in (0, 120, 240, 360, 480)]
+                for sample in samples:
+                    sample["services"].update({"sing-box": "failed", "xray": "failed"})
+                samples.insert(2, RuntimeError("partial post-check failed"))
+                samples.insert(5, RuntimeError("retry post-check failed"))
+                successful_action = actions[successful_index]
+                failed_action = actions[1 - successful_index]
+                with self.health_sandbox(samples) as (state, collect, run):
+                    run.side_effect = [
+                        subprocess.CompletedProcess([], code, "", "")
+                        for code in ([0, 1] if successful_index == 0 else [1, 0]) + [1, 0]
+                    ]
+                    server_lifecycle.health(**self.health_collectors())
+                    receipts = []
+                    with patch.object(server_lifecycle.time, "sleep", side_effect=lambda _: receipts.append(server_runtime.read_json(state, {}))):
+                        partial = server_lifecycle.health(**self.health_collectors())
+                    self.assertEqual(len(receipts), 1)
+                    self.assertEqual(receipts[0]["last_actions"], {
+                        successful_action: {"epoch": 10_000, "action": f"{successful_action}:ok"},
+                    })
+                    self.assertEqual(receipts[0]["verdicts"]["overall"], "inconclusive")
+                    self.assertEqual(partial["state"], "recovering")
+                    self.assertIn("partial post-check failed", partial["post_recovery_error"])
+                    self.assertEqual(partial["last_actions"], receipts[0]["last_actions"])
+                    retry_failed = server_lifecycle.health(**self.health_collectors())
+                    self.assertEqual(retry_failed["last_action"], f"{failed_action}:failed")
+                    self.assertEqual(retry_failed["last_actions"], partial["last_actions"])
+                    retried = server_lifecycle.health(**self.health_collectors())
+                    self.assertEqual(retried["last_action"], f"{failed_action}:ok")
+                    self.assertEqual(retried["last_actions"], {
+                        action: {"epoch": 10_000, "action": f"{action}:ok"} for action in actions
+                    })
+                    blocked = server_lifecycle.health(**self.health_collectors())
+                    self.assertEqual(blocked["last_action"], "none")
+                    self.assertEqual(blocked["last_actions"], retried["last_actions"])
+                    self.assertEqual(collect.call_count, 7)
+                    self.assertEqual(
+                        [call.args[0] for call in run.call_args_list],
+                        [["systemctl", *action.split(":", 1)] for action in [*actions, failed_action, failed_action]],
+                    )
+
+    def test_recovery_cooldown_is_tied_to_action_not_changed_failure(self) -> None:
+        samples = [
+            self.health_sample(0, via_wg=True, foreign_domains_via_router=False),
+            self.health_sample(120, via_wg=True, foreign_domains_via_router=False),
+            RuntimeError("post-check failed"),
+            self.health_sample(240, via_wg=True, domains_via_router=False),
+            self.health_sample(360, via_wg=True, domains_via_router=False),
+        ]
+        with self.health_sandbox(samples) as (_, _, run):
+            for _ in range(4):
+                result = server_lifecycle.health(**self.health_collectors())
+            self.assertEqual(result["consecutive_failures"], 2)
+            self.assertEqual(result["last_action"], "none")
+            run.assert_called_once()
+
+    def test_cooldown_does_not_block_different_confirmed_recovery_action(self) -> None:
+        samples = [self.health_sample(t) for t in (0, 120, 240, 360, 362)]
+        for sample in samples[:2]:
+            sample["services"]["sing-box"] = "failed"
+        for sample in samples[2:]:
+            sample["services"]["xray"] = "failed"
+        samples.insert(2, RuntimeError("post-check failed"))
+        with self.health_sandbox(samples) as (_, _, run):
+            for _ in range(4):
+                result = server_lifecycle.health(**self.health_collectors())
+            self.assertEqual(result["last_action"], "restart:vpn-stack-xray.service:ok")
+            self.assertEqual(
+                [call.args[0] for call in run.call_args_list],
+                [["systemctl", "restart", "sing-box.service"], ["systemctl", "restart", "vpn-stack-xray.service"]],
+            )
+
+    def test_successful_recovery_can_retry_after_existing_cooldown_expires(self) -> None:
+        samples = [self.health_sample(t, via_wg=True, foreign_domains_via_router=False) for t in (0, 120, 122, 240, 360, 362)]
+        with self.health_sandbox(samples) as (_, _, run):
+            server_lifecycle.health(**self.health_collectors())
+            server_lifecycle.health(**self.health_collectors())
+            with patch.object(server_lifecycle.time, "time", return_value=10_899):
+                blocked = server_lifecycle.health(**self.health_collectors())
+            self.assertEqual(blocked["last_action"], "none")
+            run.assert_called_once()
+            with patch.object(server_lifecycle.time, "time", return_value=10_900):
+                retried = server_lifecycle.health(**self.health_collectors())
+            self.assertEqual(retried["last_action"], "restart:sing-box.service:ok")
+            self.assertEqual(retried["last_actions"]["restart:sing-box.service"]["epoch"], 10_900)
+            self.assertEqual(run.call_count, 2)
+
     def test_single_recovery_never_touches_interserver_services(self) -> None:
         current = {
             **self.gateway_contract(topology="single"),
@@ -62,7 +278,7 @@ class ServerLifecycleTests(AgentFixtures, unittest.TestCase):
         run_mock.assert_not_called()
 
     def test_health_requires_two_failed_cycles_before_recovery(self) -> None:
-        failed = {**self.gateway_contract(), "verdicts": {"server_path": "failed"}, "services": {}}
+        failed = {**self.gateway_contract(), "verdicts": {"server_path": "failed"}, "services": {"sing-box": "failed"}}
         with tempfile.TemporaryDirectory() as tmp:
             state = Path(tmp) / "health.json"
             lock = Path(tmp) / "lock"
@@ -109,7 +325,7 @@ class ServerLifecycleTests(AgentFixtures, unittest.TestCase):
         recover.assert_not_called()
 
     def test_failed_recovery_does_not_start_cooldown(self) -> None:
-        failed = {**self.gateway_contract(), "verdicts": {"server_path": "failed", "host_integrity": "verified"}, "services": {}}
+        failed = {**self.gateway_contract(), "verdicts": {"server_path": "failed", "host_integrity": "verified"}, "services": {"sing-box": "failed"}}
         with tempfile.TemporaryDirectory() as tmp:
             with (
                 patch.object(server_runtime, "HEALTH_STATE_PATH", Path(tmp) / "health.json"),
@@ -159,11 +375,14 @@ class ServerLifecycleTests(AgentFixtures, unittest.TestCase):
         now = datetime(2026, 9, 26, 20, 0, tzinfo=timezone.utc)
         failed = {
             **self.gateway_contract(), "generated_at": now.isoformat(),
-            "verdicts": {"server_path": "failed", "host_integrity": "verified"}, "services": {},
+            "verdicts": {"server_path": "failed", "host_integrity": "verified"}, "services": {"sing-box": "failed"},
         }
         for age in (None, -1, 0, 301, 172800):
             with self.subTest(age=age), tempfile.TemporaryDirectory() as tmp:
-                previous = {"consecutive_failures": 1, "hard_reasons": ["server_path"]}
+                previous = {
+                    "consecutive_failures": 1, "hard_reasons": ["server_path"],
+                    "failure_evidence": {"actions": ["restart:sing-box.service"], "requirements": [], "profile_mismatches": [], "wireguard_policy_missing": []},
+                }
                 if age is not None:
                     previous["observed_at"] = (now - timedelta(seconds=age)).isoformat()
                 with (
@@ -182,7 +401,7 @@ class ServerLifecycleTests(AgentFixtures, unittest.TestCase):
         failed = {
             **self.gateway_contract(), "generated_at": "2026-09-26T20:00:00+00:00",
             "verdicts": {"server_path": "failed", "host_integrity": "verified"},
-            "probes": {"requirements": {"foreign_direct": False}}, "services": {},
+            "probes": {"requirements": {"foreign_direct": False}}, "services": {"sing-box": "failed"},
         }
         for verdicts, timestamp, expected in (
             ({"server_path": "verified", "host_integrity": "verified"}, "2026-09-26T20:00:02+00:00", "healthy"),
@@ -194,7 +413,10 @@ class ServerLifecycleTests(AgentFixtures, unittest.TestCase):
             ({"server_path": "failed", "host_integrity": "verified"}, "2026-09-26T20:00:02+00:00", "recovering"),
         ):
             with self.subTest(verdicts=verdicts), tempfile.TemporaryDirectory() as tmp:
-                previous = {"observed_at": "2026-09-26T19:58:00+00:00", "consecutive_failures": 1, "hard_reasons": ["server_path"]}
+                previous = {
+                    "observed_at": "2026-09-26T19:58:00+00:00", "consecutive_failures": 1, "hard_reasons": ["server_path"],
+                    "failure_evidence": {"actions": ["restart:sing-box.service"], "requirements": ["foreign_direct"], "profile_mismatches": [], "wireguard_policy_missing": []},
+                }
                 after = {**failed, "generated_at": timestamp, "verdicts": verdicts, "probes": {"requirements": {"foreign_direct": True}}}
                 with (
                     patch.object(server_runtime, "LOCK_PATH", Path(tmp) / "lock"),
@@ -478,6 +700,39 @@ class ServerLifecycleTests(AgentFixtures, unittest.TestCase):
                 "reordering": 185,
             },
         )
+
+    def test_front_cache_recovery_requires_stall_metrics_from_one_active_socket(self) -> None:
+        source = "5.166.130.228"
+        observed_at = "2026-09-04T12:00:00+00:00"
+        interval = {"observed_at": observed_at, "baseline": False, "degraded_sources": [source]}
+        previous = {"front_interval": {"observed_at": "2026-09-04T11:58:00+00:00", "degraded_sources": [source]}}
+        for second_mss, second_rto, phase, peer, expected in (
+            (1320, 1500, "active", source, False),
+            (536, 1500, "active", source, True),
+            (1320, 8000, "active", source, True),
+            (536, 1500, "closing", source, False),
+            (536, 1500, "active", "192.0.2.1", False),
+        ):
+            with self.subTest(mss=second_mss, rto=second_rto, phase=phase, peer=peer):
+                front = {"flows": {
+                    "first": {"source": source, "phase": "active", "rto_ms": {"max": 200}, "mss": 536},
+                    "second": {"source": peer, "phase": phase, "rto_ms": {"max": second_rto}, "mss": second_mss},
+                }}
+                self.assertEqual(server_lifecycle.front_source_stall(front, source)["stalled"], expected)
+                with (
+                    patch.object(server_lifecycle, "tcp_destination_metrics", return_value={
+                        "source": source, "available": True, "cached": True, "reordering": 185,
+                    }) as metrics,
+                    patch.object(server_runtime, "run", return_value=subprocess.CompletedProcess([], 0, "", "")) as run,
+                ):
+                    result = server_lifecycle.reconcile_front_tcp_metrics_cache(front, interval, previous, observed_at, 10_000)
+                    if expected:
+                        run.assert_called_once_with(["ip", "tcp_metrics", "delete", source], timeout=5)
+                        self.assertEqual(result["actions"][0]["status"], "ok")
+                    else:
+                        metrics.assert_not_called()
+                        run.assert_not_called()
+                        self.assertEqual(result["actions"], [])
 
     def test_front_cache_recovery_deletes_only_confirmed_poisoned_destination(self) -> None:
         source = "5.166.130.228"

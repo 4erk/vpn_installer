@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 import tarfile
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, mock_open, patch
 
 from vpn_installer.audit import docker as audit_docker
 from vpn_installer.audit import lab as audit_lab
@@ -281,13 +283,13 @@ class AuditModuleTests(unittest.TestCase):
                 INSTALL_PLAN_SCHEMA_VERSION,
                 DIAGNOSTICS_SCHEMA_VERSION,
             ),
-            (3, 5, 5, 6),
+            (3, 5, 5, 7),
         )
 
         script = audit_docker.compatible_update_acceptance_script()
         self.assertIn("support validate-installed", script)
         self.assertIn("PYTHONPATH=/work/previous", script)
-        self.assertIn('(3, 5, 5, 6)', script)
+        self.assertIn('(3, 5, 5, 7)', script)
         self.assertIn('source_manifest["schema_version"] == MANIFEST_SCHEMA_VERSION', script)
         self.assertNotIn("transition_0218", script)
         self.assertIn(f'= {COMPATIBLE_INSTALLED_MIN}', script)
@@ -362,6 +364,159 @@ class AuditModuleTests(unittest.TestCase):
         env["CLIENT_UUID"] = "00000000-0000-0000-0000-000000000000"
         client_cfg = audit_lab.build_lab_client_config(env)
         self.assertIn('"server": "198.18.0.10"', client_cfg)
+
+    @staticmethod
+    def lab_loss_cycles(*, both_dead: bool = False):
+        selected, target = audit_lab.TRANSPORT_CANDIDATE_TAGS
+        first = {
+            "state": "suspect", "selected": selected, "changed": False,
+            "hard_failure_evidence": False, "cycle_id": "first",
+            "updated_at": "2026-10-08T12:00:00+00:00",
+            "failure": {"path": selected, "confirmations": 1},
+            "probes": {selected: {"checked": True, "ok": False}},
+        }
+        failure = {"path": selected, "confirmations": 2, "cycle_ids": ["first", "second"]}
+        second = {
+            "state": "failed" if both_dead else "degraded",
+            "selected": selected if both_dead else target, "changed": not both_dead,
+            "hard_failure_evidence": True, "cycle_id": "second",
+            "updated_at": "2026-10-08T12:00:02+00:00",
+            "probes": {selected: {"checked": True, "ok": False}},
+            "selector_before": selected, "selector_after": target,
+            "overlay_probe": {"phase": "activation", "ok": True, "path": target, "cycle_id": "second"},
+            "last_transition": {"cycle_id": "second", "activation_proof": {"ok": True},
+                                "decision_evidence": {"failure": failure,
+                                                      "alternate_health": {**failure, "path": target}}},
+        }
+        if both_dead:
+            second["failure"] = failure
+        return selected, None if both_dead else target, [first, second]
+
+    def test_lab_loss_requires_two_distinct_cycles_for_switch_and_both_dead(self) -> None:
+        for both_dead in (False, True):
+            with self.subTest(both_dead=both_dead):
+                selected, target, cycles = self.lab_loss_cycles(both_dead=both_dead)
+                runner = Mock()
+                runner.docker_exec.side_effect = [Mock(stdout=json.dumps(state)) for state in cycles]
+                with patch.object(audit_lab.time, "sleep") as sleep:
+                    self.assertEqual(audit_lab._lab_confirmed_loss(runner, "gateway", selected, target), cycles)
+                sleep.assert_called_once_with(audit_lab.TRANSPORT_PROBE_INTERVAL_SECONDS)
+                self.assertEqual(runner.docker_exec.call_count, 2)
+
+    def test_lab_loss_rejects_confirmation_or_switch_in_first_cycle(self) -> None:
+        for change in ({"hard_failure_evidence": True}, {"changed": True}, {"would_switch": True},
+                       {"failure": {"path": audit_lab.TRANSPORT_PREFERRED_TAG, "confirmations": 2}}):
+            with self.subTest(change=change):
+                selected, target, cycles = self.lab_loss_cycles()
+                runner = Mock()
+                runner.docker_exec.return_value.stdout = json.dumps({**cycles[0], **change})
+                with self.assertRaisesRegex(AuditFailure, "One failed cycle"):
+                    audit_lab._lab_confirmed_loss(runner, "gateway", selected, target)
+                self.assertEqual(runner.docker_exec.call_count, 1)
+
+    def test_lab_loss_rejects_stale_missing_or_unproven_second_cycle(self) -> None:
+        for change in (
+            {"cycle_id": "first"}, {"cycle_id": ""}, {"updated_at": "invalid"},
+            {"updated_at": "2026-10-08T12:00:00+00:00"},
+            {"updated_at": "2026-10-08T12:00:11+00:00"},
+            {"hard_failure_evidence": False}, {"probes": {}}, {"changed": False},
+            {"overlay_probe": {"ok": True, "phase": "activation", "cycle_id": "first"}},
+            {"last_transition": {"decision_evidence": {}}},
+            {"last_transition": {"cycle_id": "first", "activation_proof": {"ok": True}}},
+            {"last_transition": {"cycle_id": "second", "activation_proof": {"ok": False}}},
+        ):
+            with self.subTest(change=change), patch.object(audit_lab.time, "sleep"):
+                selected, target, cycles = self.lab_loss_cycles()
+                if "last_transition" in change:
+                    change = {"last_transition": {**cycles[1]["last_transition"], **change["last_transition"]}}
+                runner = Mock()
+                runner.docker_exec.side_effect = [Mock(stdout=json.dumps(state)) for state in (cycles[0], {**cycles[1], **change})]
+                with self.assertRaises(AuditFailure):
+                    audit_lab._lab_confirmed_loss(runner, "gateway", selected, target)
+
+    def test_lab_both_dead_rejects_false_health_or_switch(self) -> None:
+        for change in ({"state": "healthy"}, {"changed": True}, {"selected": audit_lab.TRANSPORT_HY2_TAG}):
+            with self.subTest(change=change), patch.object(audit_lab.time, "sleep"):
+                selected, target, cycles = self.lab_loss_cycles(both_dead=True)
+                runner = Mock()
+                runner.docker_exec.side_effect = [Mock(stdout=json.dumps(state)) for state in (cycles[0], {**cycles[1], **change})]
+                with self.assertRaisesRegex(AuditFailure, "Both-path loss"):
+                    audit_lab._lab_confirmed_loss(runner, "gateway", selected, target)
+
+    def test_lab_post_activation_failure_must_belong_to_new_path_only(self) -> None:
+        selected, target, cycles = self.lab_loss_cycles()
+        transient = {**cycles[0], "selected": target,
+                     "failure": {"path": target, "confirmations": 1},
+                     "probes": {target: {"checked": True, "ok": False}}}
+        audit_lab._lab_require_suspect(transient, target)
+        for failure in ({"path": selected, "confirmations": 1}, {"path": target, "confirmations": 2}):
+            with self.subTest(failure=failure), self.assertRaises(AuditFailure):
+                audit_lab._lab_require_suspect({**transient, "failure": failure}, target)
+
+    def test_lab_quality_requires_equal_fresh_udp_samples_with_actual_counts(self) -> None:
+        selected, target = audit_lab.TRANSPORT_CANDIDATE_TAGS
+        quality = {"scope": "raw-underlay-udp", "quality_ok": True,
+                   "budget_ms": audit_lab.TRANSPORT_CANDIDATE_QUALITY_PROBE_TIMEOUT_MS,
+                   **dict.fromkeys(("attempts", "attempts_limit", "transmitted", "received", "valid_responses"),
+                                   audit_lab.TRANSPORT_CANDIDATE_QUALITY_PROBE_ATTEMPTS)}
+        state = {"probes": {selected: {"quality_sampled": True, "quality_probe": quality}, target: quality}}
+        audit_lab._lab_require_udp_quality(state, selected)
+        for tag in (selected, target):
+            for change in ({"scope": "overlay-quality"}, {"budget_ms": 1200}, {"received": 7}, {"attempts": 1}):
+                bad = {**quality, **change}
+                probes = {**state["probes"], tag: {"quality_sampled": True, "quality_probe": bad} if tag == selected else bad}
+                with self.subTest(tag=tag, change=change), self.assertRaises(AuditFailure):
+                    audit_lab._lab_require_udp_quality({"probes": probes}, selected)
+        with self.assertRaisesRegex(AuditFailure, "fresh selected"):
+            audit_lab._lab_require_udp_quality({"probes": {selected: {"quality_sampled": False}, target: quality}}, selected)
+
+    def test_lab_one_way_faults_clean_up_on_error_in_body_or_setup(self) -> None:
+        for reverse in (False, True):
+            runner = Mock()
+            with self.subTest(reverse=reverse), self.assertRaisesRegex(RuntimeError, "probe failed"):
+                with audit_lab._lab_underlay_loss(runner, "node", "198.18.0.20", (51820,), reverse=reverse):
+                    raise RuntimeError("probe failed")
+            commands = [call.args[1] for call in runner.docker_exec.call_args_list]
+            self.assertIn(f"udp {'sport' if reverse else 'dport'} 51820 drop", commands[2])
+            self.assertEqual(commands[-1], "nft delete table inet underlay_fault")
+        runner = Mock()
+        runner.docker_exec.side_effect = [None, AuditFailure("chain failed"), None]
+        with self.assertRaisesRegex(AuditFailure, "chain failed"):
+            with audit_lab._lab_underlay_loss(runner, "node", "198.18.0.20", (51820,)):
+                self.fail("Invalid fault setup entered the scenario")
+        self.assertEqual(runner.docker_exec.call_args.args[1], "nft delete table inet underlay_fault")
+
+    def test_lab_process_identity_detects_restart_even_with_reused_pid(self) -> None:
+        before = {"gateway": {"42": "100"}, "exit": {"52": "200"}, "client": {"62": "300"}}
+        audit_lab.validate_process_continuity(before, dict(before))
+        for after in ({}, {**before, "gateway": {"43": "100"}}, {**before, "gateway": {"42": "101"}}):
+            with self.subTest(after=after), self.assertRaisesRegex(AuditFailure, "restarted"):
+                audit_lab.validate_process_continuity(before, after)
+        for processes in ({}, {"42": "100", "43": "101"}):
+            runner = Mock()
+            runner.docker_exec.return_value.stdout = json.dumps(processes)
+            with self.subTest(processes=processes), self.assertRaisesRegex(AuditFailure, "one live"):
+                audit_lab._lab_processes(runner, {"gateway": "gateway"})
+
+    def test_lab_stream_fixture_sends_one_bounded_checksummed_response(self) -> None:
+        with patch("socketserver.ThreadingTCPServer") as server:
+            exec(audit_lab.build_lab_web_server("global-web"), {})
+        handler = server.call_args.args[1].__new__(server.call_args.args[1])
+        handler.path = "/stream"
+        handler.wfile = io.BytesIO()
+        handler.send_response = Mock()
+        handler.send_header = Mock()
+        handler.end_headers = Mock()
+        with patch("builtins.open", mock_open()), patch.object(audit_lab.time, "sleep") as sleep:
+            handler.do_GET()
+        handler.send_response.assert_called_once_with(200)
+        handler.send_header.assert_any_call("Content-Length", str(audit_lab.LAB_STREAM_BYTES))
+        payload = handler.wfile.getvalue()
+        self.assertEqual(len(payload), audit_lab.LAB_STREAM_BYTES)
+        expected = b"".join(bytes([index % 256]) * audit_lab.LAB_STREAM_CHUNK_BYTES for index in range(audit_lab.LAB_STREAM_CHUNKS))
+        self.assertEqual(hashlib.sha256(payload).digest(), hashlib.sha256(expected).digest())
+        self.assertGreater(sleep.call_count * 0.05, audit_lab.LAB_FAILOVER_MAX_SECONDS)
+        self.assertLess(sleep.call_count * 0.05, audit_lab.LAB_STREAM_MAX_SECONDS)
 
     def test_lab_network_apply_validation_uses_nested_agent_contract(self) -> None:
         lab_source = (Path(__file__).parents[1] / "vpn_installer" / "audit" / "lab.py").read_text(encoding="utf-8")

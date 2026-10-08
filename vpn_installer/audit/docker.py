@@ -760,7 +760,7 @@ def compatible_update_acceptance_script() -> str:
             MANIFEST_SCHEMA_VERSION,
             INSTALL_PLAN_SCHEMA_VERSION,
             DIAGNOSTICS_SCHEMA_VERSION,
-        ) == (3, 5, 5, 6)
+        ) == (3, 5, 5, 7)
 
         source_env = load_env_file(source_release / "node.env")
         source_manifest = json.loads((source_release / "render-manifest.json").read_text(encoding="utf-8"))

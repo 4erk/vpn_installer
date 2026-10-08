@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import time
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from vpn_installer import journal_evidence as journal
 
@@ -42,6 +43,51 @@ def front_evidence(lines=(), *, cutoff: float | None = None) -> dict:
 
 
 class JournalEvidenceTests(unittest.TestCase):
+    def test_bounded_reader_waits_for_exit_after_pipes_close(self) -> None:
+        line = record(175, "positive evidence")
+        code = f"import os, time; print({line!r}, flush=True); os.close(1); os.close(2); time.sleep(0.05)"
+        completed = journal.run_bounded([sys.executable, "-u", "-c", code], timeout=5)
+        self.assertEqual(completed.returncode, 0)
+        self.assertEqual(completed.stderr, "")
+        self.assertEqual(journal.parse_journal_events(completed, include_unit=False), ([(175, "positive evidence")], 0))
+
+    def test_stream_parser_preserves_complete_records_before_truncated_json(self) -> None:
+        lines = iter((record(175, "positive evidence") + "\n", '{"MESSAGE":"truncated'))
+        parsed, malformed = journal.parse_journal_lines(lines, include_unit=False)
+        self.assertEqual(parsed, [(175, "positive evidence")])
+        self.assertEqual(malformed, 1)
+
+    def test_bounded_reader_preserves_output_and_terminates_a_stalled_query(self) -> None:
+        line = record(175, "positive evidence")
+        command = [sys.executable, "-u", "-c", f"import time; print({line!r}, flush=True); time.sleep(10)"]
+        started = time.monotonic()
+        completed = journal.run_bounded(command, timeout=1)
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertIn("deadline", completed.stderr)
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertEqual(journal.parse_journal_events(completed, include_unit=False), ([(175, "positive evidence")], 0))
+
+    def test_bounded_reader_caps_total_bytes_and_single_records(self) -> None:
+        line = record(175, "positive evidence")
+        for oversized in (True, False):
+            code = f"print({line!r}, flush=True); print('x' * 300)" if oversized else f"print(({line!r} + '\\n') * 100, end='')"
+            with self.subTest(oversized=oversized), patch.object(journal, "JOURNAL_MAX_BYTES", 512), patch.object(
+                journal, "JOURNAL_MAX_RECORD_BYTES", 256,
+            ):
+                completed = journal.run_bounded([sys.executable, "-u", "-c", code], timeout=5)
+            self.assertIn("byte bound", completed.stderr)
+            self.assertLessEqual(len(completed.stdout.encode()), 512)
+            parsed, malformed = journal.parse_journal_events(completed, include_unit=False)
+            self.assertGreaterEqual(len(parsed), 1)
+            self.assertEqual(malformed, 0)
+
+    def test_bounded_reader_does_not_start_after_deadline_or_hide_missing_binary(self) -> None:
+        with patch.object(journal.subprocess, "Popen") as process:
+            self.assertIn("deadline", journal.run_bounded(["journalctl"], timeout=0).stderr)
+            process.assert_not_called()
+        with patch.object(journal.subprocess, "Popen", side_effect=FileNotFoundError("not installed")):
+            self.assertIn("not installed", journal.run_bounded(["journalctl"], timeout=1).stderr)
+
     def test_unit_and_kernel_queries_share_failure_and_partial_record_handling(self) -> None:
         for completed in (result(code=1), result(code=2, stderr="denied"),
                           result(record(900), code=2, stderr="partial"),

@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from vpn_installer import server_agent, server_runtime, verify
+from vpn_installer import remote, server_agent, server_runtime, verify
 from vpn_installer.diagnostics import COLLECTOR_NAMES, LOG_WINDOW_KEYS, CollectorState, DiagnosticsSnapshot, LogWindowSnapshot
 from vpn_installer.log_classifier import BUCKETS
 from vpn_installer.models import RemoteTarget
@@ -752,8 +752,9 @@ class VerifyTests(unittest.TestCase):
         with (
             patch("vpn_installer.verify.workflows.prepare_remote_session", return_value=("demo", Path("deployments/demo.env"), env, {}, targets, {})),
             patch("vpn_installer.verify.workflows.print_summary"),
-            patch("vpn_installer.verify.ssh_capture", side_effect=[remote_dir, "", json.dumps(observations["baseline"]), json.dumps(observations["during"]), ""]) as ssh,
-            patch("vpn_installer.verify.scp_upload") as upload,
+            patch("vpn_installer.remote.ssh_capture", side_effect=[remote_dir, "", json.dumps(observations["baseline"]), json.dumps(observations["during"]), ""]) as ssh,
+            patch("vpn_installer.verify.ssh_capture", ssh),
+            patch("vpn_installer.remote.scp_upload") as upload,
             patch("vpn_installer.verify._collect_agent_snapshot") as collect_snapshot,
             patch("vpn_installer.verify._verify_public_vless_uri", side_effect=public_vless),
             patch("vpn_installer.verify._verify_public_hysteria2") as verify_hysteria2,
@@ -797,12 +798,12 @@ class VerifyTests(unittest.TestCase):
                         raise RuntimeError(failure)
 
                 with (
-                    patch.object(verify, "server_agent_artifacts", return_value=sources),
-                    patch.object(verify, "ssh_capture", side_effect=capture),
-                    patch.object(verify, "scp_upload", side_effect=upload),
+                    patch("vpn_installer.render.server_agent_artifacts", return_value=sources),
+                    patch.object(remote, "ssh_capture", side_effect=capture),
+                    patch.object(remote, "scp_upload", side_effect=upload),
                 ):
                     def run():
-                        with verify._transient_front_collector(object()) as script:
+                        with remote.transient_agent_collector(object()) as script:
                             self.assertEqual(script, f"{remote_dir}/vpn-stack-agent.py")
                             if failure == "collect":
                                 raise RuntimeError(failure)
@@ -816,9 +817,9 @@ class VerifyTests(unittest.TestCase):
                 self.assertFalse(any(path.exists() for path in archives))
 
     def test_transient_collector_rejects_unowned_directory_without_removal(self) -> None:
-        with patch.object(verify, "ssh_capture", return_value="/tmp/unrelated") as ssh, patch.object(verify, "scp_upload") as upload:
+        with patch.object(remote, "ssh_capture", return_value="/tmp/unrelated") as ssh, patch.object(remote, "scp_upload") as upload:
             with self.assertRaisesRegex(Exception, "allocate"):
-                with verify._transient_front_collector(object()):
+                with remote.transient_agent_collector(object()):
                     self.fail("unowned path was accepted")
         ssh.assert_called_once()
         upload.assert_not_called()
@@ -839,7 +840,7 @@ class VerifyTests(unittest.TestCase):
                 self.subTest(stage=stage),
                 patch.object(verify.workflows, "prepare_remote_session", return_value=("demo", Path("demo.env"), env, {}, targets, {})),
                 patch.object(verify.workflows, "print_summary"),
-                patch.object(verify, "_transient_front_collector", collector),
+                patch.object(verify, "transient_agent_collector", collector),
                 patch.object(verify, "_capture_client_front", return_value={}),
                 patch.object(verify, "_verify_public_vless_uri", return_value=verified_public_vless_evidence(topology)),
             ):
@@ -877,7 +878,7 @@ class VerifyTests(unittest.TestCase):
             patch("vpn_installer.verify._collect_agent_snapshot", side_effect=collect) as collect_mock,
             patch("vpn_installer.verify._verify_public_vless_uri", side_effect=public_vless),
             patch("vpn_installer.verify._verify_public_hysteria2", side_effect=public_hysteria2),
-            patch("vpn_installer.verify._transient_front_collector", side_effect=AssertionError("native verification must use installed agent")),
+            patch("vpn_installer.verify.transient_agent_collector", side_effect=AssertionError("native verification must use installed agent")),
         ):
             self.assertEqual(verify_live_workflow("demo", non_interactive=True), 0)
         self.assertEqual(collect_mock.call_count, 2)

@@ -737,7 +737,7 @@ def test_ru_singbox_runtime_smoke(runner: AuditRunner, out_dir: Path) -> dict[st
         try:
             completed = runner.docker_exec(
                 container,
-                "curl --silent --show-error --fail --max-time 10 --socks5-hostname 127.0.0.1:2080 http://127.0.0.1:18080/",
+                "curl --silent --show-error --fail --max-time 10 --noproxy '' --socks5-hostname 127.0.0.1:2080 http://127.0.0.1:18080/",
             )
         except Exception:
             runner.docker_exec(container, "cat /tmp/ru-router.log", expected_codes={0, 1})
@@ -815,7 +815,7 @@ def test_interserver_hysteria_runtime(runner: AuditRunner, out_dir: Path) -> dic
                 try:
                     completed = runner.docker_exec(
                         client,
-                        "curl --silent --show-error --fail --max-time 15 --socks5-hostname 127.0.0.1:1080 http://127.0.0.1:18080/",
+                        "curl --silent --show-error --fail --max-time 15 --noproxy '' --socks5-hostname 127.0.0.1:1080 http://127.0.0.1:18080/",
                     )
                 except Exception:
                     runner.docker_exec(server, "cat /tmp/hysteria-server.log /tmp/web.log", expected_codes={0, 1})
@@ -825,7 +825,7 @@ def test_interserver_hysteria_runtime(runner: AuditRunner, out_dir: Path) -> dic
                     raise AuditFailure("Hysteria2 runtime не вернул payload с foreign endpoint")
                 runner.docker_exec(
                     client,
-                    "curl --silent --show-error --fail http://127.0.0.1:19090/proxies/interserver-underlay-hy2 | jq -e '.type == \"Hysteria2\"'",
+                    "curl --silent --show-error --fail --noproxy '*' http://127.0.0.1:19090/proxies/interserver-underlay-hy2 | jq -e '.type == \"Hysteria2\"'",
                 )
     return {"server_config": str(server_config_path), "client_config": str(client_config_path), "result": "handshake-and-http-ok"}
 

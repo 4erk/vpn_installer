@@ -5,12 +5,11 @@ import re
 import shlex
 import tempfile
 import time
-import zipfile
-from contextlib import contextmanager, nullcontext
+from contextlib import nullcontext
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Iterator
+from typing import Callable
 from . import workflows
 from .common import OUT_DIR, print_header
 from .client_artifacts import client_artifact_snapshot, render_vless_uri
@@ -31,8 +30,7 @@ from .network_profile import (
     UDP_WMEM_MAX,
 )
 from .public_transport import PUBLIC_HY2_OUTBOUND_TAG, render_public_hy2_outbound
-from .remote import remote_agent_snapshot, scp_upload, ssh_capture
-from .render import server_agent_artifacts
+from .remote import remote_agent_snapshot, scp_upload, ssh_capture, transient_agent_collector
 from .topology import (
     CAP_INTERSERVER_CLIENT,
     CAP_INTERSERVER_SERVER,
@@ -1253,32 +1251,6 @@ def _verify_public_vless_uri(
     return _annotate_public_vless_evidence(topology, validated)
 
 
-@contextmanager
-def _transient_front_collector(target) -> Iterator[str]:
-    # Use the current collector without replacing the restored release's agent.
-    with tempfile.TemporaryDirectory(prefix="vpn-stack-front-") as temp_dir:
-        archive = Path(temp_dir) / "collector.zip"
-        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
-            for name, source in server_agent_artifacts(interserver=True).items():
-                bundle.writestr(name, source.encode("utf-8"))
-        remote_dir = ssh_capture(
-            target, "mktemp -d /tmp/vpn-stack-front-verify.XXXXXX", command_timeout=15,
-        ).strip()
-        if not re.fullmatch(r"/tmp/vpn-stack-front-verify\.[A-Za-z0-9]{6}", remote_dir):
-            raise AppError("could not allocate transient front collector")
-        try:
-            remote_archive = f"{remote_dir}/collector.zip"
-            scp_upload(target, archive, remote_archive)
-            ssh_capture(
-                target,
-                f"python3 -B -m zipfile -e {shlex.quote(remote_archive)} {shlex.quote(remote_dir)}",
-                command_timeout=20,
-            )
-            yield f"{remote_dir}/vpn-stack-agent.py"
-        finally:
-            ssh_capture(target, f"rm -rf -- {shlex.quote(remote_dir)}", command_timeout=15)
-
-
 def _capture_client_front(target, source: str, *, agent_path: str | None = None) -> dict[str, object]:
     try:
         script = agent_path or "/usr/local/lib/vpn-stack/vpn-stack-agent.py"
@@ -1545,7 +1517,7 @@ def verify_live_workflow(
     if runner_target is not None and gateway_target is not None:
         runner_spec = topology.node(runner_node)
         verifier_source = runner_spec.public_ip or runner_target.public_ip or runner_target.ssh_host
-        collector = nullcontext(None) if require_native_agent else _transient_front_collector(gateway_target)
+        collector = nullcontext(None) if require_native_agent else transient_agent_collector(gateway_target)
         try:
             with collector as agent_path:
                 if not verifier_source:

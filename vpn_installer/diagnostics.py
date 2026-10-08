@@ -13,7 +13,7 @@ except ImportError:  # Installed beside vpn-stack-agent.py as a standalone modul
     from log_classifier import BUCKETS  # type: ignore[no-redef]
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 COLLECTOR_STATUSES = frozenset({"ok", "error", "stale", "skipped", "not_applicable"})
 TOPOLOGIES = frozenset({"single", "dual"})
 NODE_IDS = frozenset({"gateway", "exit"})
@@ -140,6 +140,7 @@ class LogWindowSnapshot:
     top_destinations: dict[str, dict[str, int]] | None = None
     top_sources: dict[str, dict[str, int]] | None = None
     samples: dict[str, str] | None = None
+    failure_details: dict[str, list[dict[str, Any]]] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.collector, CollectorState):
@@ -171,6 +172,20 @@ class LogWindowSnapshot:
                 raise ValueError("log samples must use known bucket names")
             if not all(isinstance(value, str) for value in self.samples.values()):
                 raise TypeError("log samples must contain strings")
+        if self.failure_details is not None:
+            if not isinstance(self.failure_details, dict) or not set(self.failure_details).issubset(BUCKETS):
+                raise ValueError("failure details must use known bucket names")
+            for details in self.failure_details.values():
+                if not isinstance(details, list):
+                    raise TypeError("failure details must be lists")
+                for item in details:
+                    if not isinstance(item, dict) or set(item) != {"phase", "outbound", "failed_endpoint", "request_kind", "count"}:
+                        raise ValueError("invalid failure detail fields")
+                    if (item["phase"] not in {"unknown", "dns", "connect", "read", "write"}
+                            or item["request_kind"] not in {"unknown", "domain", "ipv4_literal", "ipv6_literal"}
+                            or not all(isinstance(item[key], str) for key in ("outbound", "failed_endpoint"))
+                            or not _is_count(item["count"])):
+                        raise ValueError("invalid failure detail values")
 
     def _validate_bounds(self) -> None:
         if self.since is None:
@@ -178,7 +193,7 @@ class LogWindowSnapshot:
         try:
             datetime.fromisoformat(self.since.replace("Z", "+00:00"))
         except ValueError:
-            return  # Schema 6 also carries legacy relative journal expressions.
+            return  # Display-only bounds may contain relative journal expressions.
         since = _timestamp(self.since, "log window since")
         if self.until is not None and since > _timestamp(self.until, "log window until"):
             raise ValueError("log window since must be <= until")
@@ -204,6 +219,7 @@ class LogWindowSnapshot:
         top_destinations: Mapping[str, Mapping[str, int]] | None = None,
         top_sources: Mapping[str, Mapping[str, int]] | None = None,
         samples: Mapping[str, str] | None = None,
+        failure_details: Mapping[str, list[dict[str, Any]]] | None = None,
     ) -> "LogWindowSnapshot":
         missing = set(BUCKETS) - set(counts)
         unknown = set(counts) - set(BUCKETS)
@@ -218,6 +234,7 @@ class LogWindowSnapshot:
             top_destinations={key: dict(value) for key, value in (top_destinations or {}).items()},
             top_sources={key: dict(value) for key, value in (top_sources or {}).items()},
             samples=dict(samples or {}),
+            failure_details=dict(failure_details or {}),
         )
 
     @classmethod
@@ -262,6 +279,7 @@ class LogWindowSnapshot:
             if isinstance(ranked_sources, Mapping)
             else ranked_sources,
             samples=dict(samples) if isinstance(samples, Mapping) else samples,
+            failure_details=value.get("failure_details"),
         )
 
 

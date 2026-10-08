@@ -28,7 +28,7 @@ class LogClassifierTests(unittest.TestCase):
             self.assertEqual(summary["counts"]["domain_to_foreign_timeout"], 1)
             self.assertEqual(summary["counts"]["ipv4_literal_timeout"], 0)
             self.assertEqual(summary["samples"]["domain_to_foreign_timeout"], error)
-            self.assertEqual(set(summary), {"counts", "top_destinations", "top_sources", "samples"})
+            self.assertEqual(set(summary), {"counts", "top_destinations", "top_sources", "samples", "failure_details"})
 
     def test_missing_trace_does_not_invent_literal_request_identity(self) -> None:
         for endpoint in ("203.0.113.5:443", "[2001:db8::5]:443"):
@@ -201,13 +201,37 @@ class LogClassifierTests(unittest.TestCase):
         self.assertEqual(item.destination, "media.example:443")
         self.assertEqual(item.failed_endpoint, "203.0.113.1:443")
 
-    def test_summary_retains_schema_six_fields_and_raw_sample(self) -> None:
+    def test_summary_retains_counts_and_raw_sample_with_failure_details(self) -> None:
         line = "ERROR [10 2s] open connection to media.example:443 using outbound/direct[to-foreign]: i/o timeout"
         summary = summarize_lines([line, line])
-        self.assertEqual(set(summary), {"counts", "top_destinations", "top_sources", "samples"})
+        self.assertEqual(set(summary), {"counts", "top_destinations", "top_sources", "samples", "failure_details"})
         self.assertEqual(set(summary["counts"]), set(BUCKETS))
         self.assertEqual(sum(summary["counts"].values()), 1)
         self.assertEqual(summary["samples"]["domain_to_foreign_timeout"], line)
+
+    def test_unknown_origin_keeps_observed_endpoint_outbound_and_phase(self) -> None:
+        for endpoint in ("203.0.113.5:443", "[2001:db8::5]:443"):
+            line = f"ERROR [42 10s] open connection to {endpoint} using outbound/direct[to-foreign]: dial tcp {endpoint}: i/o timeout"
+            with self.subTest(endpoint=endpoint):
+                summary = summarize_lines([line, line])
+                self.assertEqual(summary["failure_details"], {"unclassified_error": [{
+                    "phase": "connect", "outbound": "to-foreign", "failed_endpoint": endpoint,
+                    "request_kind": "unknown", "count": 1,
+                }]})
+                self.assertEqual(summary["counts"]["ipv4_literal_timeout"], 0)
+                self.assertEqual(summary["counts"]["ipv6_literal_timeout"], 0)
+
+    def test_failure_details_distinguish_requested_domain_from_failed_resolved_ip(self) -> None:
+        lines = [
+            "INFO [7 1ms] inbound/mixed[router-in]: inbound connection to example.com:443",
+            "ERROR [7 2s] open connection to 203.0.113.5:443 using outbound/direct[to-foreign]: dial tcp 203.0.113.5:443: i/o timeout",
+        ]
+        details = summarize_lines(lines)["failure_details"]["domain_to_foreign_timeout"][0]
+        self.assertEqual(details["request_kind"], "domain")
+        self.assertEqual(details["failed_endpoint"], "203.0.113.5:443")
+        item = classify_line("ERROR endpoint/wireguard[interserver-underlay-wg]: failed to send packets")
+        self.assertEqual(item.outbound, "interserver-underlay-wg")
+        self.assertEqual(item.request_kind, "unknown")
 
     def test_stable_foreign_overlay_uses_destination_buckets(self) -> None:
         domain = classify_line("ERROR open connection to example.com:443 using outbound/direct[to-foreign]: i/o timeout")

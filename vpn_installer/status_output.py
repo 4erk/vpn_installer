@@ -40,6 +40,55 @@ def _event_count(total: object, observed: object) -> str:
     return f"unavailable (observed>={observed})" if observed is not None else "unavailable"
 
 
+def _count(value: object) -> str:
+    return str(value) if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else "?"
+
+
+def _probe_counts(probe: dict) -> str:
+    return f"tx={_count(probe.get('transmitted'))},rx={_count(probe.get('received'))},valid={_count(probe.get('valid_responses'))}"
+
+
+def _unknown_failures(name: str, details: object, *, partial: bool = False) -> list[str]:
+    if not isinstance(details, dict):
+        return []
+    rows = [item for items in details.values() if isinstance(items, list) for item in items
+            if isinstance(item, dict) and item.get("request_kind") == "unknown"
+            and _count(item.get("count")) not in {"?", "0"}]
+    if not rows:
+        return []
+    rows.sort(key=lambda item: item["count"], reverse=True)
+    summary = "; ".join(
+        f"count{'>=' if partial else '='}{item['count']} phase={item.get('phase') or 'unknown'} "
+        f"outbound={item.get('outbound') or 'unknown'} endpoint={item.get('failed_endpoint') or 'unknown'}"
+        for item in rows[:2]
+    )
+    if len(rows) > 2:
+        summary += f"; +{len(rows) - 2} more groups"
+    return [f"{'partial ' if partial else ''}unknown requests [{name}]: {summary}"]
+
+
+def _transport_confirmations(adaptive: dict) -> list[str]:
+    keys = ("failure", "alternate_health", "quality_failure", "preferred_recovery")
+    evidence = adaptive
+    label = "transport confirmations"
+    if not any(isinstance(evidence.get(key), dict) and evidence[key] for key in keys):
+        transition = adaptive.get("last_transition", {})
+        evidence = transition.get("decision_evidence", {}) if isinstance(transition, dict) else {}
+        label = "last switch confirmations (historical)"
+    if not isinstance(evidence, dict):
+        return []
+    parts = []
+    for key in keys:
+        item = evidence.get(key)
+        if not isinstance(item, dict) or not item:
+            continue
+        ids = item.get("cycle_ids")
+        cycles = str(len(set(ids))) if isinstance(ids, list) and all(isinstance(value, str) and value for value in ids) else "?"
+        parts.append(f"{key}[{item.get('path') or '?'}]: confirmations={_count(item.get('confirmations'))}, "
+                     f"cycles_recorded={cycles}, observed={item.get('observed_at') or '?'}")
+    return [label + ": " + "; ".join(parts)] if parts else []
+
+
 def _format_log_window(name: str, window: LogWindowSnapshot) -> list[str]:
     boundaries = []
     if window.since:
@@ -67,6 +116,7 @@ def _format_log_window(name: str, window: LogWindowSnapshot) -> list[str]:
         )
         if destinations:
             lines.append(f"top destinations [{name}]: {destinations}")
+    lines.extend(_unknown_failures(name, window.failure_details, partial=window.collector.status != "ok"))
     return lines
 
 
@@ -113,6 +163,7 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
         )
         if destinations:
             lines.append(f"partial top destinations [{name}]: {destinations}")
+        lines.extend(_unknown_failures(name, partial.get("failure_details"), partial=True))
     if snapshot.runtime_overrides:
         overrides = ", ".join(f"{key}={value}" for key, value in sorted(snapshot.runtime_overrides.items()) if value)
         if overrides:
@@ -293,14 +344,17 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
                     details.append(f"overlay_probe=failed({overlay_probe.get('error') or 'unknown'})")
             quality_probe = adaptive.get("last_quality_probe", {})
             if isinstance(quality_probe, dict) and quality_probe.get("quality_checked") is True:
+                sample = quality_probe.get("quality_probe", {})
+                sample = sample if (isinstance(sample, dict) and sample.get("scope") == "raw-underlay-udp"
+                                    and sample.get("checked") is True) else {}
                 quality_outcome = (
                     "ok"
-                    if quality_probe.get("quality_ok", quality_probe.get("ok")) is True
+                    if quality_probe.get("quality_ok") is True
                     else f"degraded({quality_probe.get('quality_error') or quality_probe.get('error') or 'unknown'})"
                 )
                 details.append(
-                    f"quality_probe={quality_outcome}(loss={quality_probe.get('packet_loss_pct', '-')}%,"
-                    f"rtt={quality_probe.get('rtt_avg_ms', '-')}ms)"
+                    f"quality_probe={quality_outcome}(probe_loss={sample.get('packet_loss_pct', '?')}%,"
+                    f"delay={sample.get('delay_ms', '?')}ms,{_probe_counts(sample)})"
                 )
             preferred_retry = adaptive.get("preferred_retry", {})
             if isinstance(preferred_retry, dict):
@@ -329,7 +383,7 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
                     if probe.get("ok") is True
                     else f"failed({probe.get('error') or 'unknown'})"
                 )
-                details.append(f"cold_probe={tag}:{outcome}")
+                details.append(f"cold_probe={tag}:{outcome}({_probe_counts(probe)})")
             adaptive_label = adaptive.get("state") or "-"
             if adaptive.get("fresh") is False:
                 adaptive_label = f"stale({adaptive_label},age={adaptive.get('age_seconds', '-')}s)"
@@ -341,6 +395,8 @@ def format_snapshot_summary(snapshot: DiagnosticsSnapshot) -> list[str]:
             details.append(f"listener={'active' if interserver.get('listening') else 'inactive'}")
             details.append(f"source={interserver.get('source_restricted_to') or '-'}")
         lines.append("interserver transport: " + ", ".join(details))
+        if has_interserver_client:
+            lines.extend(_transport_confirmations(adaptive))
     public_client = snapshot.transport.get("public_client", {})
     if has_public_front and public_client:
         lines.append(

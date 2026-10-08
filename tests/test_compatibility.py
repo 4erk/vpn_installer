@@ -23,23 +23,24 @@ class VersionTests(unittest.TestCase):
             with self.subTest(invalid=invalid), self.assertRaises(CompatibilityError):
                 Version.parse(invalid)
 
-    def test_transition_window_starts_at_0232(self) -> None:
+    def test_transition_window_starts_at_0233(self) -> None:
         window = CompatibilityWindow.current()
-        self.assertEqual(COMPATIBLE_INSTALLED_MIN, "0.23.2")
+        self.assertEqual(COMPATIBLE_INSTALLED_MIN, "0.23.3")
         self.assertEqual(COMPATIBLE_INSTALLED_MAX, VERSION)
         self.assertFalse(window.accepts("0.22.7"))
         self.assertFalse(window.accepts("0.22.8"))
         self.assertFalse(window.accepts("0.23.0"))
         self.assertFalse(window.accepts("0.23.1"))
-        self.assertTrue(window.accepts("0.23.2"))
+        self.assertFalse(window.accepts("0.23.2"))
+        self.assertTrue(window.accepts("0.23.3"))
         self.assertTrue(window.accepts(VERSION))
         self.assertFalse(window.accepts("0.21.8"))
 
     def test_manifest_declares_exact_adapter_free_transition(self) -> None:
         contract = CompatibilityWindow.current().to_manifest()
-        self.assertEqual(contract["installed_min"], "0.23.2")
-        self.assertEqual(contract["installed_max"], "0.23.3")
-        self.assertEqual(contract["transitions"], [{"from": "0.23.2", "to": "0.23.3"}])
+        self.assertEqual(contract["installed_min"], "0.23.3")
+        self.assertEqual(contract["installed_max"], "0.23.4")
+        self.assertEqual(contract["transitions"], [{"from": "0.23.3", "to": "0.23.4"}])
 
     def test_previous_release_manifest_needs_no_adapter(self) -> None:
         contract = {"installed_min": "0.22.6", "installed_max": "0.22.8",
@@ -63,7 +64,7 @@ class VersionTests(unittest.TestCase):
             CompatibilityWindow.from_manifest({"installed_min": "0.20.1", "installed_max": "0.20.1"})
 
     def test_out_of_window_release_has_removal_guidance(self) -> None:
-        for version in ("0.22.8", "0.23.0", "0.23.1", "0.23.4"):
+        for version in ("0.22.8", "0.23.0", "0.23.1", "0.23.2", "0.23.5"):
             with self.subTest(version=version), self.assertRaisesRegex(
                 CompatibilityError,
                 rf"installed release {re.escape(version)}.*{re.escape(cli_entrypoint())} from tag {re.escape(version)}.*remove or purge",

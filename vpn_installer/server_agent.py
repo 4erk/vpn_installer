@@ -120,6 +120,10 @@ FRONT_RTT_INFLATION_FACTOR = 3
 FRONT_CURRENT_ACTIVITY_MAX_IDLE_MS = 30_000
 REALITY_PENDING_HANDSHAKE_DEGRADED = 5
 LOG_CONTEXT_MAX_EVENT_IDS = 500
+LOG_HISTORY_BUDGET_SECONDS = 12
+LOG_HISTORY_CHUNK_MINUTES = 60
+LOG_HISTORY_MAX_BYTES = 16 * 1024 * 1024
+LOG_MAX_EVENTS = 50_000
 PROBLEM_LOG_GREP = (
     "ERROR|FATAL|processed invalid connection|accepted tcp:disabled[.]invalid|"
     "connection rejected|mux connection closed|EOF|connection reset|using outbound/vless"
@@ -367,7 +371,7 @@ def _journal_window_args(minutes: int, until: float | None) -> list[str]:
     return ["--since", f"@{until - minutes * 60:.6f}", "--until", f"@{until:.6f}"]
 
 
-def _journal_event_context(minutes: int, problem_events: list[tuple[float, str]], *, until: float | None = None) -> list[tuple[float, str]]:
+def _journal_event_context(minutes: int, problem_events: list[tuple[float, str]], *, until: float | None = None, timeout: float = 30) -> list[tuple[float, str]]:
     event_ids = list(
         dict.fromkeys(
             event_id
@@ -375,10 +379,10 @@ def _journal_event_context(minutes: int, problem_events: list[tuple[float, str]]
             if "[unit=sing-box.service]" in line and (event_id := event_id_from_line(line))
         )
     )[-LOG_CONTEXT_MAX_EVENT_IDS:]
-    if not event_ids:
+    if not event_ids or timeout <= 0:
         return []
     event_pattern = "|".join(re.escape(event_id) for event_id in event_ids)
-    result = runtime.run(
+    result = journal.run_bounded(
         [
             "journalctl",
             "-u",
@@ -388,7 +392,7 @@ def _journal_event_context(minutes: int, problem_events: list[tuple[float, str]]
             "--output=json", "--all",
             rf"--grep=\[(?:\x1B\[[0-9;]*m)*(?:{event_pattern})\b",
         ],
-        timeout=30,
+        timeout=timeout,
     )
     if journal.journal_command_error(result):
         return []
@@ -400,8 +404,9 @@ def _journal_event_context(minutes: int, problem_events: list[tuple[float, str]]
     ]
 
 
-def journal_problem_events(minutes: int, *, until: float | None = None) -> tuple[list[tuple[float, str]], str]:
-    result = runtime.run(
+def journal_problem_events(minutes: int, *, until: float | None = None, timeout: float = 30) -> tuple[list[tuple[float, str]], str]:
+    deadline = time.monotonic() + timeout
+    result = journal.run_bounded(
         [
             "journalctl",
             "-u",
@@ -413,11 +418,11 @@ def journal_problem_events(minutes: int, *, until: float | None = None) -> tuple
             "--output=json", "--all",
             f"--grep={PROBLEM_LOG_GREP}",
         ],
-        timeout=30,
+        timeout=timeout,
     )
     command_error = journal.journal_command_error(result)
     events, malformed = journal.parse_journal_events(result)
-    events.extend(_journal_event_context(minutes, events, until=until))
+    events.extend(_journal_event_context(minutes, events, until=until, timeout=deadline - time.monotonic()))
     if malformed:
         command_error = "; ".join(filter(None, (command_error, f"journalctl returned {malformed} malformed JSON record(s)")))
     return events, command_error
@@ -588,25 +593,67 @@ def summarize_problem_windows(*, full_logs: bool, fresh_since: str) -> tuple[dic
         fresh_epoch = now - 300
     fresh_age_minutes = max(0, math.ceil((now - fresh_epoch) / 60))
     query_minutes = max(windows)
-    if fresh_age_minutes <= COMPLETE_LOG_RETENTION_MINUTES:
+    if full_logs and fresh_age_minutes <= COMPLETE_LOG_RETENTION_MINUTES:
         query_minutes = max(query_minutes, fresh_age_minutes)
-    query_since = now - query_minutes * 60
-    events, collector_error = journal_problem_events(query_minutes, until=now)
-    coverage = {
-        **journal.journal_coverage(runner=runtime.run, since=query_since, until=now),
-        "query_since_epoch": query_since,
-        "query_until_epoch": now,
-    }
-    events = [(timestamp, line) for timestamp, line in events if timestamp <= now]
-    # Resolve each failure once using the bounded query's context, then slice only its counts.
-    classified = list(zip((timestamp for timestamp, _line in events), classify_lines(line for _timestamp, line in events)))
+    recent_minutes = 30 if full_logs else 5
+    recent_since = now - recent_minutes * 60
+    events, collector_error = journal_problem_events(recent_minutes, until=now)
+    recent_coverage = journal.journal_coverage(runner=journal.run_bounded, since=recent_since, until=now)
+    recent_coverage = {**recent_coverage, "query_since_epoch": recent_since, "query_until_epoch": now}
+    raw_records: list[tuple[float, str]] = []
+
+    def include(records: list[tuple[float, str]], since: float, until: float, *, last: bool = False) -> tuple[int, str]:
+        # A boundary record belongs to the newer segment, never both queries.
+        records = [(stamp, line) for stamp, line in records if since <= stamp and (stamp <= until if last else stamp < until)]
+        available = max(0, LOG_MAX_EVENTS - len(raw_records))
+        error = "journal event count exceeds its memory bound" if len(records) > available else ""
+        records = records[:available]
+        raw_records.extend(records)
+        return sum(len(line.encode("utf-8")) for _, line in records), error
+
+    size, memory_error = include(events, recent_since, now, last=True)
+    collector_error = collector_error or memory_error
+    segments = [(recent_since, now, collector_error)]
+    query_since = recent_since
+    history_coverage = recent_coverage
+    if full_logs:
+        deadline = time.monotonic() + LOG_HISTORY_BUDGET_SECONDS
+        target_since = now - query_minutes * 60
+        # Skip a vacuumed prefix, but retain the requested start so it cannot become a false zero.
+        retained_since = recent_coverage.get("since_epoch")
+        if isinstance(retained_since, (int, float)):
+            target_since = max(target_since, retained_since)
+        while query_since > target_since:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or size >= LOG_HISTORY_MAX_BYTES or len(raw_records) >= LOG_MAX_EVENTS:
+                collector_error = collector_error or "historical journal collection budget exceeded"
+                break
+            minutes = min(LOG_HISTORY_CHUNK_MINUTES, math.ceil((query_since - target_since) / 60))
+            start = query_since - minutes * 60
+            records, error = journal_problem_events(minutes, until=query_since, timeout=min(4, remaining))
+            added, memory_error = include(records, start, query_since)
+            size += added
+            error = error or memory_error
+            segments.append((start, query_since, error))
+            query_since = start
+            if error:
+                collector_error = collector_error or error
+                break
+        # A second inventory catches rotation/vacuum during the historical read.
+        history_coverage = journal.journal_coverage(runner=journal.run_bounded, since=now - query_minutes * 60, until=now)
+        history_coverage = {**history_coverage, "query_since_epoch": now - query_minutes * 60, "query_until_epoch": now}
+    # A request and its repeated errors can straddle journal query boundaries.
+    classified = list(zip((stamp for stamp, _ in raw_records), classify_lines(line for _, line in raw_records)))
     observed_at = datetime.fromtimestamp(now, timezone.utc).isoformat()
 
     def window(since: float) -> dict[str, Any]:
+        coverage = recent_coverage if since >= recent_since else history_coverage
         coverage_error = journal.journal_window_error(
             coverage, since=since, until=now, query_since=query_since, query_until=now,
-            collector_error=collector_error,
         )
+        for start, end, error in segments:
+            if end > since and error:
+                coverage_error = coverage_error or error
         return {
             **summarize_classified_lines(item for timestamp, item in classified if since <= timestamp),
             "observed_at": observed_at,
@@ -2475,7 +2522,7 @@ def collect_runtime_facts(*, live_probes: bool = False, profile: str = "light", 
     resolver = resolver_snapshot()
     observed_at["storage"] = runtime.utc_now()
     root_filesystem = root_filesystem_snapshot()
-    coverage = fresh_logs.get("coverage", {})
+    coverage = logs.get("1440", fresh_logs).get("coverage", {})
     cutoff = coverage.get("query_until_epoch")
     storage = storage_snapshot(root_filesystem, release_installed_at, coverage=coverage, cutoff=cutoff)
     conntrack = conntrack_snapshot(full_logs=full_logs, coverage=coverage, cutoff=cutoff)
@@ -2691,6 +2738,7 @@ def _diagnostics_log_window(raw: object, *, since: str) -> LogWindowSnapshot:
             top_destinations=raw.get("top_destinations") if isinstance(raw.get("top_destinations"), Mapping) else None,
             top_sources=raw.get("top_sources") if isinstance(raw.get("top_sources"), Mapping) else None,
             samples=raw.get("samples") if isinstance(raw.get("samples"), Mapping) else None,
+            failure_details=raw.get("failure_details"),
         )
     except (TypeError, ValueError) as exc:
         return LogWindowSnapshot.unavailable(str(exc))
@@ -2785,27 +2833,21 @@ def diagnostics_snapshot(**snapshot_options: Any) -> dict[str, Any]:
     }
     if set(collectors) != set(COLLECTOR_NAMES):
         raise RuntimeError("diagnostics collectors do not match the schema")
-    if log_error:
-        log_windows = {
-            name: LogWindowSnapshot.unavailable(log_error)
-            for name in ("5m", "30m", "24h", "since_release")
-        }
-    else:
-        release = facts.get("release", {}) if isinstance(facts.get("release"), Mapping) else {}
-        release_installed_at = str(release.get("installed_at", ""))
-        since_release = (
-            _diagnostics_log_window(fresh, since=release_installed_at)
-            if release_installed_at and str(fresh.get("since", "")) == release_installed_at
-            else LogWindowSnapshot.skipped("complete since-release log window was not requested")
-            if not full_logs
-            else LogWindowSnapshot.unavailable("complete since-release log window is unavailable")
-        )
-        log_windows = {
-            "5m": _diagnostics_log_window(minute_windows.get("5"), since="5 minutes ago"),
-            "30m": _diagnostics_log_window(minute_windows.get("30"), since="30 minutes ago") if full_logs else LogWindowSnapshot.skipped("30m window was not requested"),
-            "24h": _diagnostics_log_window(minute_windows.get("1440"), since="1440 minutes ago") if full_logs else LogWindowSnapshot.skipped("24h window was not requested"),
-            "since_release": since_release,
-        }
+    release = facts.get("release", {}) if isinstance(facts.get("release"), Mapping) else {}
+    release_installed_at = str(release.get("installed_at", ""))
+    since_release = (
+        _diagnostics_log_window(fresh, since=release_installed_at)
+        if release_installed_at and str(fresh.get("since", "")) == release_installed_at
+        else LogWindowSnapshot.skipped("complete since-release log window was not requested")
+        if not full_logs
+        else LogWindowSnapshot.unavailable("complete since-release log window is unavailable")
+    )
+    log_windows = {
+        "5m": _diagnostics_log_window(minute_windows.get("5"), since="5 minutes ago"),
+        "30m": _diagnostics_log_window(minute_windows.get("30"), since="30 minutes ago") if full_logs else LogWindowSnapshot.skipped("30m window was not requested"),
+        "24h": _diagnostics_log_window(minute_windows.get("1440"), since="1440 minutes ago") if full_logs else LogWindowSnapshot.skipped("24h window was not requested"),
+        "since_release": since_release,
+    }
     raw_windows = {"5m": minute_windows.get("5"), "30m": minute_windows.get("30"), "24h": minute_windows.get("1440"), "since_release": fresh}
     partial_windows = {
         name: {**raw, "error": log_windows[name].collector.message}

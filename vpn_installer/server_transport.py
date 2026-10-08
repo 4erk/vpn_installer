@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
-import subprocess
 import time
 import urllib.error
 import urllib.parse
@@ -143,18 +141,8 @@ def overlay_quality_probe_due(previous: dict[str, Any], observed_at: str) -> boo
     return age is None or age >= policy.TRANSPORT_QUALITY_PROBE_INTERVAL_SECONDS
 
 
-def ping_failure_reason(result: subprocess.CompletedProcess[str], fallback: str) -> str:
-    detail = " ".join((result.stderr.strip() or result.stdout.strip() or fallback).split())
-    lowered = detail.lower()
-    if "100% packet loss" in lowered or "0 received" in lowered:
-        return f"{fallback} timed out"
-    return detail[:240]
-
-
-def transport_overlay_path_probe(env: dict[str, str], *, quality: bool = False) -> dict[str, Any]:
-    """Probe the managed overlay; quality sampling never decides liveness."""
-
-    started = time.monotonic()
+def transport_overlay_path_probe(env: dict[str, str]) -> dict[str, Any]:
+    """Probe the managed overlay using the same exchange as activation."""
     interface = env.get("WG_INTERFACE", "wg0")
     target = str(env.get("WG_FOREIGN_ADDRESS", "")).split("/", 1)[0]
     if not target:
@@ -168,46 +156,7 @@ def transport_overlay_path_probe(env: dict[str, str], *, quality: bool = False) 
             "target": "",
             "error": "foreign WireGuard address is missing",
         }
-    if not quality:
-        return policy.transport_overlay_dns_probe(interface, target)
-
-    packet_count = policy.TRANSPORT_QUALITY_PROBE_PACKETS
-    payload_bytes = policy.TRANSPORT_QUALITY_PROBE_PAYLOAD_BYTES
-    command = ["ping", "-n", "-I", interface, "-c", str(packet_count)]
-    command.extend(["-i", "0.05", "-w", "2"])
-    command.extend(["-W", "1", "-s", str(payload_bytes), target])
-    result = runtime.run(command, timeout=3)
-    elapsed_ms = max(1, round((time.monotonic() - started) * 1000))
-    error = ""
-    packet_loss_pct: float | None = None
-    rtt_avg_ms: float | None = None
-    loss_match = re.search(r"([0-9]+(?:[.,][0-9]+)?)%\s+packet loss", result.stdout)
-    if loss_match:
-        packet_loss_pct = float(loss_match.group(1).replace(",", "."))
-    rtt_match = re.search(r"=\s*[0-9.]+/([0-9.]+)/[0-9.]+/[0-9.]+\s+ms", result.stdout)
-    if rtt_match:
-        rtt_avg_ms = float(rtt_match.group(1))
-    if packet_loss_pct is not None and packet_loss_pct > 0:
-        error = f"WireGuard overlay packet loss {packet_loss_pct:g}%"
-    if not error and result.returncode != 0:
-        error = ping_failure_reason(result, "WireGuard overlay liveness probe")
-    payload: dict[str, Any] = {
-        "checked": True,
-        "ok": not error,
-        "attempts": packet_count,
-        "delay_ms": 0 if error else round(rtt_avg_ms or elapsed_ms),
-        "elapsed_ms": elapsed_ms,
-        "scope": "overlay-quality",
-        "target": target,
-        "error": error,
-        "quality_checked": packet_loss_pct is not None,
-        "payload_bytes": payload_bytes,
-    }
-    if packet_loss_pct is not None:
-        payload["packet_loss_pct"] = packet_loss_pct
-    if rtt_avg_ms is not None:
-        payload["rtt_avg_ms"] = rtt_avg_ms
-    return payload
+    return policy.transport_overlay_dns_probe(interface, target)
 
 
 def collect_transport_probes(
@@ -222,16 +171,21 @@ def collect_transport_probes(
         return probes
     probes[selected] = transport_overlay_path_probe(env)
     if probes[selected].get("ok") is True and overlay_quality_probe_due(previous, observed_at):
-        quality = transport_overlay_path_probe(env, quality=True)
+        quality = policy.transport_candidate_probe(
+            selected,
+            timeout_ms=policy.TRANSPORT_CANDIDATE_QUALITY_PROBE_TIMEOUT_MS,
+            attempts=policy.TRANSPORT_CANDIDATE_QUALITY_PROBE_ATTEMPTS,
+        )
         probes[selected] = {
             **probes[selected],
             "quality_checked": quality.get("quality_checked") is True,
             "quality_sampled": True,
-            "quality_ok": quality.get("ok") is True,
-            "quality_error": str(quality.get("error", ""))[:240],
+            "quality_ok": quality.get("quality_ok") is True,
+            "quality_error": str(quality.get("quality_error") or quality.get("error", ""))[:240],
+            "quality_probe": quality,
             **{
                 key: quality[key]
-                for key in ("packet_loss_pct", "rtt_avg_ms", "payload_bytes")
+                for key in ("packet_loss_pct",)
                 if key in quality
             },
         }
@@ -244,9 +198,8 @@ def collect_transport_probes(
                     "quality_checked",
                     "quality_ok",
                     "quality_error",
+                    "quality_probe",
                     "packet_loss_pct",
-                    "rtt_avg_ms",
-                    "payload_bytes",
                 )
                 if key in prior_quality
             }
@@ -259,7 +212,8 @@ def collect_transport_probes(
     )
     if probes[selected].get("ok") is not True or fresh_selected_quality_failure:
         alternate = next(tag for tag in policy.TRANSPORT_CANDIDATE_TAGS if tag != selected)
-        if transport_switch_backoff_active(previous, alternate, observed_at) is None:
+        selected_failed = probes[selected].get("checked") is True and probes[selected].get("ok") is False
+        if selected_failed or transport_switch_backoff_active(previous, alternate, observed_at) is None:
             if fresh_selected_quality_failure:
                 probes[alternate] = policy.transport_candidate_probe(
                     alternate,
@@ -557,15 +511,10 @@ def reconcile_interserver_transport() -> dict[str, Any]:
     install_lock = runtime.acquire_install_read_lock()
     if install_lock is None:
         previous = current_transport_state(runtime.read_json(runtime.TRANSPORT_STATE_PATH, {}))
-        payload = {
-            **(previous if isinstance(previous, dict) else {}),
-            "schema_version": policy.TRANSPORT_STATE_SCHEMA_VERSION,
-            "updated_at": runtime.utc_now(),
-            "state": "maintenance",
-            "changed": False,
-            "would_switch": False,
-            "reason": "install transaction is active",
-        }
+        payload = failed_transport_observation(
+            previous, "install transaction is active", selected=str(previous.get("selected", "")),
+        )
+        payload["state"] = "maintenance"
         runtime.write_json_atomic(runtime.TRANSPORT_STATE_PATH, payload)
         return payload
     try:
@@ -636,7 +585,12 @@ def _reconcile_interserver_transport_unlocked() -> dict[str, Any]:
         switch_backoff = transport_switch_backoff_active(previous_state, alternate, observed_at)
         if switch_backoff is not None:
             payload["switch_backoff"] = switch_backoff
-            if payload.get("would_switch"):
+            confirmed_dead_path = (
+                payload.get("hard_failure_evidence") is True
+                and probes.get(selected, {}).get("checked") is True
+                and probes.get(selected, {}).get("ok") is False
+            )
+            if payload.get("would_switch") and not confirmed_dead_path:
                 payload.update(
                     {
                         "state": "degraded" if probes.get(selected, {}).get("ok") is True else "failed",
@@ -651,6 +605,11 @@ def _reconcile_interserver_transport_unlocked() -> dict[str, Any]:
                 )
         if payload.get("would_switch"):
             target = str(payload.get("recommended", ""))
+            decision_evidence = {
+                key: payload[key]
+                for key in ("failure", "alternate_health", "quality_failure", "preferred_recovery")
+                if key in payload
+            }
             transition: dict[str, Any] = {}
             try:
                 transition = select_transport(env, controller, target, cycle_id=cycle_id)
@@ -690,7 +649,11 @@ def _reconcile_interserver_transport_unlocked() -> dict[str, Any]:
                 payload.pop("last_switch_failure", None)
                 payload.pop("quality_failure", None)
                 payload.pop("last_quality_probe", None)
+            # An activation attempt (including rollback) starts a new observation window.
+            payload.pop("failure", None)
+            payload.pop("alternate_health", None)
             if transition:
+                transition["decision_evidence"] = decision_evidence
                 payload["last_transition"] = transition
                 payload["selector_after"] = transition["selector_after"]
                 payload["selected"] = transition["selector_after"]

@@ -1,18 +1,60 @@
 from __future__ import annotations
 
+import io
 import json
 import math
 import re
 import subprocess
+import threading
 from datetime import datetime, timezone
-from typing import Any, Mapping, Protocol
+from typing import Any, Iterable, Mapping, Protocol
 
 
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+JOURNAL_MAX_BYTES = 8 * 1024 * 1024
+JOURNAL_MAX_RECORD_BYTES = 128 * 1024
 
 
 class JournalRunner(Protocol):
     def __call__(self, args: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]: ...
+
+
+def run_bounded(args: list[str], *, timeout: float) -> subprocess.CompletedProcess[str]:
+    """Bound journal output even for a single oversized JSON MESSAGE or a stalled pipe."""
+    output = bytearray()
+    error = ""
+    if timeout <= 0:
+        return subprocess.CompletedProcess(args, 124, "", "journal collection deadline exceeded")
+    try:
+        with subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as process:
+            expired = threading.Event()
+
+            def expire() -> None:
+                expired.set()
+                if process.poll() is None:
+                    process.kill()
+
+            timer = threading.Timer(timeout, expire)
+            timer.start()
+            try:
+                while line := process.stdout.readline(JOURNAL_MAX_RECORD_BYTES + 1):
+                    if len(line) > JOURNAL_MAX_RECORD_BYTES or len(output) + len(line) > JOURNAL_MAX_BYTES:
+                        error = "journal output exceeds its byte bound"
+                        process.kill()
+                        break
+                    output.extend(line)
+                process.wait()
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                process.wait()
+                timer.cancel()
+                timer.join()
+            if expired.is_set():
+                error = "journal collection deadline exceeded"
+            return subprocess.CompletedProcess(args, process.returncode, output.decode("utf-8", errors="replace"), error)
+    except OSError as exc:
+        return subprocess.CompletedProcess(args, 127, output.decode("utf-8", errors="replace"), str(exc))
 
 
 def journal_record_message(record: Mapping[str, Any]) -> str:
@@ -75,9 +117,16 @@ def parse_journal_events(
     result: subprocess.CompletedProcess[str], *, include_unit: bool = True,
 ) -> tuple[list[tuple[float, str]], int]:
     """Keep valid positive records even when their query or sibling records failed."""
+    return parse_journal_lines(io.StringIO(result.stdout), include_unit=include_unit)
+
+
+def parse_journal_lines(
+    lines: Iterable[str], *, include_unit: bool = True,
+) -> tuple[list[tuple[float, str]], int]:
+    """Consume records incrementally, preserving valid evidence around malformed lines."""
     events: list[tuple[float, str]] = []
     malformed = 0
-    for raw_line in result.stdout.splitlines():
+    for raw_line in lines:
         try:
             record = json.loads(raw_line)
             if not isinstance(record, Mapping):

@@ -232,7 +232,7 @@ class InterserverTransportIdentityTests(unittest.TestCase):
         self.assertEqual(missing["state"], "inconclusive")
         self.assertIn("not probed", missing["reason"])
 
-    def test_dataplane_confirmations_switch_in_one_cycle(self) -> None:
+    def test_exchange_retries_are_not_independent_cycle_confirmations(self) -> None:
         result = evaluate_transport_policy(
             selected=TRANSPORT_WG_TAG,
             probes={
@@ -255,12 +255,29 @@ class InterserverTransportIdentityTests(unittest.TestCase):
             observed_at="2026-08-06T12:00:00+00:00",
         )
 
-        self.assertEqual(result["state"], "recovering")
-        self.assertTrue(result["hard_failure_evidence"])
-        self.assertTrue(result["would_switch"])
-        self.assertEqual(result["recommended"], TRANSPORT_HY2_TAG)
-        self.assertEqual(result["failure"]["confirmations"], 2)
-        self.assertEqual(result["alternate_health"]["confirmations"], 2)
+        self.assertEqual(result["state"], "suspect")
+        self.assertFalse(result["hard_failure_evidence"])
+        self.assertFalse(result["would_switch"])
+        self.assertEqual(result["failure"]["confirmations"], 1)
+        self.assertEqual(result["alternate_health"]["confirmations"], 1)
+        confirmed = evaluate_transport_policy(
+            selected=TRANSPORT_WG_TAG, probes=result["probes"], previous=result,
+            observed_at="2026-08-06T12:00:02+00:00",
+        )
+        self.assertTrue(confirmed["would_switch"])
+        self.assertEqual(confirmed["failure"]["cycle_ids"], [
+            "2026-08-06T12:00:00+00:00", "2026-08-06T12:00:02+00:00",
+        ])
+
+    def test_same_cycle_id_cannot_confirm_failure_at_a_new_timestamp(self) -> None:
+        probes = {
+            TRANSPORT_WG_TAG: {"checked": True, "ok": False, "error": "timeout", "cycle_id": "one"},
+            TRANSPORT_HY2_TAG: {"checked": True, "ok": True, "cycle_id": "one"},
+        }
+        state = evaluate_transport_policy(selected=TRANSPORT_WG_TAG, probes=probes, observed_at="2026-10-08T00:00:00Z")
+        replay = evaluate_transport_policy(selected=TRANSPORT_WG_TAG, probes=probes, previous=state, observed_at="2026-10-08T00:00:02Z")
+        self.assertFalse(replay["would_switch"])
+        self.assertEqual(replay["failure"]["confirmations"], 1)
 
     def test_policy_never_switches_for_latency_advantage(self) -> None:
         state: dict[str, object] = {
@@ -551,6 +568,55 @@ class InterserverTransportIdentityTests(unittest.TestCase):
         self.assertEqual(fresh["alternate_health"]["confirmations"], 1)
         self.assertFalse(fresh["would_switch"])
 
+    def test_envelope_timestamp_cannot_refresh_stale_failure_evidence(self) -> None:
+        probes = {
+            TRANSPORT_WG_TAG: {"checked": True, "ok": False, "error": "timeout"},
+            TRANSPORT_HY2_TAG: {"checked": True, "ok": True},
+        }
+        previous = evaluate_transport_policy(selected=TRANSPORT_WG_TAG, probes=probes,
+                                             observed_at="2026-10-08T12:00:00+00:00")
+        previous["updated_at"] = "2026-10-08T12:05:00+00:00"
+        current = evaluate_transport_policy(selected=TRANSPORT_WG_TAG, probes=probes, previous=previous,
+                                            observed_at="2026-10-08T12:05:02+00:00")
+        self.assertFalse(current["would_switch"])
+        for key in ("failure", "alternate_health"):
+            self.assertEqual(current[key]["confirmations"], 1)
+            self.assertEqual(current[key]["cycle_ids"], ["2026-10-08T12:05:02+00:00"])
+
+    def test_confirmation_freshness_uses_own_cadence_and_replays_do_not_refresh_it(self) -> None:
+        for key, gap in (("failure", 10), ("alternate_health", 10), ("quality_failure", 45), ("preferred_recovery", 90)):
+            with self.subTest(key=key):
+                start = datetime(2026, 10, 8, 12, tzinfo=timezone.utc)
+                prior = {"path": TRANSPORT_WG_TAG, "reason": "fixture", "confirmations": 1,
+                         "cycle_ids": ["first"], "observed_at": start.isoformat()}
+                def advance(evidence, seconds, cycle):
+                    return interserver_transport._next_evidence(
+                        {key: evidence}, key=key, path=TRANSPORT_WG_TAG, reason="fixture",
+                        cycle_relation="next", observed_at=(start + timedelta(seconds=seconds)).isoformat(),
+                        cycle_id=cycle, max_gap_seconds=gap,
+                    )
+                boundary = advance(prior, gap, "second")
+                self.assertEqual(boundary["confirmations"], 2)
+                replay = advance(prior, gap, "first")
+                self.assertEqual(replay["observed_at"], prior["observed_at"])
+                expired = advance(replay, gap + 1, "second")
+                self.assertEqual(expired["confirmations"], 1)
+                self.assertEqual(expired["cycle_ids"], ["second"])
+                for invalid in ("", "bad timestamp", (start + timedelta(seconds=gap + 2)).isoformat()):
+                    self.assertEqual(advance({**prior, "observed_at": invalid}, gap + 1, "second")["confirmations"], 1)
+
+    def test_stale_recovery_cannot_keep_old_stable_window_after_envelope_refresh(self) -> None:
+        probes = {tag: {"checked": True, "ok": True} for tag in TRANSPORT_CANDIDATE_TAGS}
+        state = evaluate_transport_policy(selected=TRANSPORT_HY2_TAG, probes=probes,
+                                          observed_at="2026-10-08T12:00:00+00:00")
+        state.update(updated_at="2026-10-08T12:05:00+00:00", preferred_probe_at="2026-10-08T12:05:00+00:00")
+        for stamp in ("12:05:02", "12:05:32", "12:06:02"):
+            state = evaluate_transport_policy(selected=TRANSPORT_HY2_TAG, probes=probes, previous=state,
+                                              observed_at=f"2026-10-08T{stamp}+00:00")
+        self.assertEqual(state["preferred_recovery"]["confirmations"], 3)
+        self.assertEqual(state["preferred_recovery"]["continuous_seconds"], 60)
+        self.assertFalse(state["would_switch"])
+
     def test_failed_switch_requires_fresh_evidence_before_retry(self) -> None:
         probes = {
             TRANSPORT_WG_TAG: {"checked": True, "ok": False, "attempts": 2, "error": "timed out"},
@@ -837,7 +903,7 @@ class InterserverTransportIdentityTests(unittest.TestCase):
     def test_live_cached_quality_snapshot_does_not_erase_preferred_probe_time(self) -> None:
         # Reduced policy inputs from 20260926T200852Z-1/gateway-history.json.
         previous = {
-            "schema_version": 16, "state": "degraded", "selected": TRANSPORT_HY2_TAG,
+            "schema_version": TRANSPORT_STATE_SCHEMA_VERSION, "state": "degraded", "selected": TRANSPORT_HY2_TAG,
             "updated_at": "2026-09-26T13:21:54.548344+00:00",
             "preferred_retry": {
                 "attempts": 2, "path": TRANSPORT_WG_TAG, "reason": "packet_loss",
@@ -1104,6 +1170,8 @@ class OverlayDeadlineTests(unittest.TestCase):
         self.assertEqual(result["attempt_results"][0]["io_phase"], "connect")
         self.assertEqual(result["budget_ms"], 1200)
         self.assertEqual(result["attempts_limit"], 2)
+        self.assertEqual((result["transmitted"], result["received"], result["valid_responses"]), (1, 1, 1))
+        self.assertEqual([(item["transmitted"], item["received"]) for item in result["attempt_results"]], [(0, 0), (1, 1)])
 
     def test_reply_at_the_deadline_is_not_health_evidence(self):
         result, elapsed, _ = self.run_probe([0, 0, 0.6, 0])
@@ -1117,6 +1185,7 @@ class OverlayDeadlineTests(unittest.TestCase):
                 self.assertFalse(result["ok"])
                 self.assertEqual(result["attempts"], 0)
                 self.assertFalse(result["failure_confirmed"])
+                self.assertEqual((result["transmitted"], result["received"], result["valid_responses"]), (0, 0, 0))
         socket_mock.assert_not_called()
 
     def test_lab_overlay_probe_uses_the_bundled_agent_and_reports_typed_failure(self):

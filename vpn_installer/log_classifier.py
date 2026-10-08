@@ -84,6 +84,8 @@ class ClassifiedLogLine:
     phase: str = "unknown"
     requested_destination: str = ""
     failed_endpoint: str = ""
+    outbound: str = ""
+    request_kind: str = "unknown"
 
 
 def normalize_source(value: str) -> str:
@@ -168,7 +170,8 @@ def _outbound_tag(line: str) -> str:
         match = pattern.search(line)
         if match:
             return match.group("tag")
-    return ""
+    match = re.search(r"(?:outbound|endpoint)/[^\[]+\[(?P<tag>[^\]]+)\]", line)
+    return match.group("tag") if match else ""
 
 
 def _destination_ip_version(destination: str) -> int | None:
@@ -237,8 +240,10 @@ def classify_line(line: str, *, requested_destination: str | None = None) -> Cla
     bucket = _classify_bucket(line, bucket_destination, phase=phase, dns_failure=dns_failure)
     if bucket is None:
         return None
+    version = _destination_ip_version(requested_destination)
+    request_kind = f"ipv{version}_literal" if version else "domain" if requested_destination else "unknown"
     return ClassifiedLogLine(bucket, destination, source_from_line(line), event_id_from_line(line),
-                             phase, requested_destination, failed_endpoint)
+                             phase, requested_destination, failed_endpoint, _outbound_tag(line), request_kind)
 
 
 def _classify_bucket(line: str, destination: str, *, phase: str, dns_failure: bool) -> str | None:
@@ -349,6 +354,7 @@ def summarize_classified_lines(
     destinations: dict[str, Counter[str]] = {bucket: Counter() for bucket in BUCKETS}
     sources: dict[str, Counter[str]] = {bucket: Counter() for bucket in BUCKETS}
     samples: dict[str, str] = {}
+    failures: dict[str, Counter[tuple[str, str, str, str]]] = {bucket: Counter() for bucket in BUCKETS}
     seen_events: set[tuple[str, str, str]] = set()
     for line, item in lines:
         if item is None:
@@ -360,6 +366,7 @@ def summarize_classified_lines(
         if event_key:
             seen_events.add(signature)
         counts[item.bucket] += 1
+        failures[item.bucket][(item.phase, item.outbound, item.failed_endpoint, item.request_kind)] += 1
         samples.setdefault(item.bucket, line.strip()[:320])
         destination = item.destination
         if destination:
@@ -371,6 +378,11 @@ def summarize_classified_lines(
         "top_destinations": {bucket: dict(counter.most_common(top_n)) for bucket, counter in destinations.items() if counter},
         "top_sources": {bucket: dict(counter.most_common(top_n)) for bucket, counter in sources.items() if counter},
         "samples": samples,
+        "failure_details": {
+            bucket: [dict(phase=phase, outbound=outbound, failed_endpoint=endpoint, request_kind=kind, count=count)
+                     for (phase, outbound, endpoint, kind), count in counter.most_common(top_n)]
+            for bucket, counter in failures.items() if counter
+        },
     }
 
 

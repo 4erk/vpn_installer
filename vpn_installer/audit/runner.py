@@ -10,6 +10,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import textwrap
 import time
 from contextlib import contextmanager
@@ -334,7 +335,11 @@ class AuditRunner:
         expected_codes: set[int] | None = None,
         timeout_seconds: int = AUDIT_COMMAND_TIMEOUT_SECONDS,
     ) -> subprocess.CompletedProcess[str]:
-        test_dir = ensure_dir(self.logs_dir / re.sub(r"[^A-Za-z0-9._-]+", "-", name))
+        test_dir = self.logs_dir / re.sub(r"[^A-Za-z0-9._-]+", "-", name)
+        try:
+            test_dir.mkdir()
+        except FileExistsError:
+            test_dir = Path(tempfile.mkdtemp(prefix=test_dir.name + "-", dir=self.logs_dir))
         stdout_path = test_dir / "stdout.log"
         stderr_path = test_dir / "stderr.log"
         merged_env = os.environ.copy()
@@ -722,7 +727,7 @@ class AuditRunner:
         host = url.split("://", 1)[-1].split("/", 1)[0].replace(":", "_")
         return self.docker(
             f"curl-{container}-{host}",
-            ["exec", container, "bash", "-lc", f"curl --silent --show-error --fail --max-time 10 --socks5-hostname 127.0.0.1:1080 {url}"],
+            ["exec", container, "bash", "-lc", f"curl --silent --show-error --fail --max-time 10 --noproxy '' --socks5-hostname 127.0.0.1:1080 {url}"],
             expect_code=0,
             expected_codes=expect_codes or {0},
         )

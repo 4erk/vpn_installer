@@ -139,21 +139,24 @@ def front_source_stall(front: Mapping[str, Any], source: str) -> dict[str, Any]:
     max_rto_ms = 0
     min_mss: int | None = None
     active_flows = 0
+    stalled = False
     for metrics in front.get("flows", {}).values():
         if not isinstance(metrics, Mapping) or metrics.get("source") != source or metrics.get("phase") != "active":
             continue
         active_flows += 1
         rto = metrics.get("rto_ms", {})
-        max_rto_ms = max(max_rto_ms, int(rto.get("max", 0) or 0) if isinstance(rto, Mapping) else 0)
+        flow_rto_ms = int(rto.get("max", 0) or 0) if isinstance(rto, Mapping) else 0
+        max_rto_ms = max(max_rto_ms, flow_rto_ms)
         raw_mss = metrics.get("mss")
         if isinstance(raw_mss, int):
             min_mss = raw_mss if min_mss is None else min(min_mss, raw_mss)
-    floor_collapse = min_mss is not None and min_mss <= TCP_MTU_PROBE_FLOOR
+        floor_collapse = isinstance(raw_mss, int) and raw_mss <= TCP_MTU_PROBE_FLOOR
+        stalled |= flow_rto_ms >= FRONT_CACHE_STALLED_RTO_MS or (floor_collapse and flow_rto_ms >= FRONT_RTO_DEGRADED_MS)
     return {
         "active_flows": active_flows,
         "max_rto_ms": max_rto_ms,
         "min_mss": min_mss,
-        "stalled": max_rto_ms >= FRONT_CACHE_STALLED_RTO_MS or (floor_collapse and max_rto_ms >= FRONT_RTO_DEGRADED_MS),
+        "stalled": stalled,
     }
 
 
@@ -286,12 +289,19 @@ def _health_unlocked(
             )
             if failed
         ]
-        previous_hard_reasons = previous.get("hard_reasons", [])
+        recovery_actions = planned_recovery_actions(current)
+        failure_evidence = {
+            "actions": recovery_actions,
+            "requirements": runtime.failed_requirements(current.get("probes", {})),
+            "profile_mismatches": sorted(current.get("network", {}).get("profile_mismatches", [])),
+            "wireguard_policy_missing": sorted(current.get("network", {}).get("wireguard_policy", {}).get("missing", [])),
+        }
         observed_time = runtime.parse_iso_datetime(observed_at)
         previous_time = runtime.parse_iso_datetime(str(previous.get("observed_at", "")))
         confirmation_gap = (observed_time - previous_time).total_seconds() if observed_time and previous_time else None
         same_failure = (
-            hard_failure and hard_reasons == previous_hard_reasons
+            hard_failure and hard_reasons == previous.get("hard_reasons", [])
+            and failure_evidence == previous.get("failure_evidence")
             and confirmation_gap is not None and 0 < confirmation_gap <= HEALTH_CONFIRMATION_MAX_GAP_SECONDS
         )
         failures = (int(previous.get("consecutive_failures", 0)) + 1 if same_failure else 1) if hard_failure else 0
@@ -359,9 +369,6 @@ def _health_unlocked(
         if failed_cache_actions:
             soft_reasons.append(f"front_tcp_metrics_cache_recovery_failed={len(failed_cache_actions)}")
         state = "degraded" if soft_reasons else "healthy"
-        action = "none"
-        recovery_succeeded = False
-        postcheck: dict[str, Any] | None = None
         last_actions = previous.get("last_actions", {})
         if not isinstance(last_actions, dict):
             last_actions = {}
@@ -369,45 +376,19 @@ def _health_unlocked(
             state = "suspect"
         elif hard_failure:
             state = "failed"
-            failure_key = ",".join(hard_reasons)
-            last_action = int((last_actions.get(failure_key, {}) or {}).get("epoch", previous.get("last_action_epoch", 0)) or 0)
-            if server_path_failure and not host_integrity_failure and now_epoch - last_action >= 900:
-                action = recover(current)
-                recovery_succeeded = recovery_action_succeeded(action)
-                if recovery_succeeded:
-                    time.sleep(2)
-                    postcheck = collect_runtime_facts(live_probes=True, profile="light", full_logs=False, include_maintenance=False)
-                    postcheck_time = runtime.parse_iso_datetime(str(postcheck.get("generated_at", "")))
-                    postcheck_fresh = (
-                        observed_time is not None and postcheck_time is not None
-                        and 0 < (postcheck_time - observed_time).total_seconds() <= HEALTH_CONFIRMATION_MAX_GAP_SECONDS
-                    )
-                    soft_reasons.extend(
-                        f"post_recovery.{name}={value}"
-                        for name, value in postcheck.get("verdicts", {}).items()
-                        if isinstance(value, str) and value in {"degraded", "client_specific", "shared", "inconclusive", "failed"}
-                    )
-                    if postcheck_fresh and all(postcheck.get("verdicts", {}).get(name) == "verified" for name in ("server_path", "host_integrity")):
-                        state = "degraded" if soft_reasons else "healthy"
-                        failures = 0
-                    else:
-                        state = "recovering"
-                    last_actions = dict(last_actions)
-                    last_actions[failure_key] = {"epoch": now_epoch, "action": action}
-                elif action != "none":
-                    state = "failed"
         payload = {
             "schema_version": diagnostics.SCHEMA_VERSION,
             "updated_at": runtime.utc_now(),
             "observed_at": observed_at,
             "state": state,
             "consecutive_failures": failures,
-            "last_action": action,
-            "last_action_epoch": now_epoch if recovery_succeeded else int(previous.get("last_action_epoch", 0)),
+            "last_action": "none",
+            "last_action_epoch": int(previous.get("last_action_epoch", 0)),
             "last_actions": last_actions,
             "hard_reasons": hard_reasons,
-            "probe_failures": runtime.failed_requirements((postcheck or current).get("probes", {})),
-            "probes": (postcheck or current).get("probes", {}),
+            "failure_evidence": failure_evidence,
+            "probe_failures": runtime.failed_requirements(current.get("probes", {})),
+            "probes": current.get("probes", {}),
             "network_counters": network_counters,
             "network_deltas": network_deltas,
             "resource_counters": resource_counters,
@@ -419,20 +400,78 @@ def _health_unlocked(
             "soft_reasons": soft_reasons,
             "last_front_degradation": last_front_degradation,
             "front_cache_recovery": front_cache_recovery,
-            "verdicts": (postcheck or current)["verdicts"],
+            "verdicts": current["verdicts"],
         }
-        if postcheck is not None:
-            payload["pre_recovery"] = {
-                "observed_at": observed_at,
-                "hard_reasons": hard_reasons,
-                "probe_failures": runtime.failed_requirements(current.get("probes", {})),
-                "probes": current.get("probes", {}),
-                "verdicts": current["verdicts"],
-            }
-            payload["post_recovery_at"] = postcheck.get("generated_at")
-            payload["post_recovery_verdicts"] = postcheck["verdicts"]
+        eligible_actions = [
+            action
+            for action in recovery_actions
+            if now_epoch - int((last_actions.get(action, {}) or {}).get("epoch", 0)) >= 900
+        ]
+        if server_path_failure and not host_integrity_failure and failures >= 2 and eligible_actions:
+            action = recover(current, actions=eligible_actions)
+            payload["last_action"] = action
+            successful_actions = successful_recovery_actions(action)
+            if successful_actions:
+                completed_epoch = int(time.time())
+                payload.update({
+                    "state": "recovering",
+                    "last_action_epoch": completed_epoch,
+                    "last_actions": {
+                        **last_actions,
+                        **{key: {"epoch": completed_epoch, "action": result} for key, result in successful_actions.items()},
+                    },
+                })
+                _post_recovery_check(payload, current, collect_runtime_facts)
+        payload["updated_at"] = runtime.utc_now()
         runtime.write_json_atomic(runtime.HEALTH_STATE_PATH, payload)
         return payload
+
+
+def _post_recovery_check(
+    payload: dict[str, Any], current: dict[str, Any], collect_runtime_facts: Callable[..., dict[str, Any]],
+) -> None:
+    payload["pre_recovery"] = {
+        "observed_at": payload["observed_at"],
+        "hard_reasons": payload["hard_reasons"],
+        "probe_failures": payload["probe_failures"],
+        "probes": payload["probes"],
+        "verdicts": current["verdicts"],
+    }
+    payload["post_recovery_verdicts"] = {"server_path": "inconclusive", "host_integrity": "inconclusive", "overall": "inconclusive"}
+    payload["verdicts"] = {**current["verdicts"], **payload["post_recovery_verdicts"]}
+    # Persist the completed action before any fallible post-check or interruption.
+    runtime.write_json_atomic(runtime.HEALTH_STATE_PATH, payload)
+    time.sleep(2)
+    try:
+        postcheck = collect_runtime_facts(live_probes=True, profile="light", full_logs=False, include_maintenance=False)
+        observed_time = runtime.parse_iso_datetime(str(payload["observed_at"]))
+        postcheck_time = runtime.parse_iso_datetime(str(postcheck.get("generated_at", "")))
+        postcheck_fresh = (
+            observed_time is not None and postcheck_time is not None
+            and 0 < (postcheck_time - observed_time).total_seconds() <= HEALTH_CONFIRMATION_MAX_GAP_SECONDS
+        )
+        verdicts = postcheck.get("verdicts", {})
+        soft_reasons = [
+            f"post_recovery.{name}={value}"
+            for name, value in verdicts.items()
+            if isinstance(value, str) and value in {"degraded", "client_specific", "shared", "inconclusive", "failed"}
+        ]
+        probe_failures = runtime.failed_requirements(postcheck.get("probes", {}))
+    except Exception as exc:
+        payload["post_recovery_error"] = f"{type(exc).__name__}: {' '.join(str(exc).split())}"[:240]
+        payload["soft_reasons"].append("post_recovery.collection=inconclusive")
+        return
+    payload.update({
+        "post_recovery_at": postcheck.get("generated_at"),
+        "post_recovery_verdicts": verdicts,
+        "probes": postcheck.get("probes", {}),
+        "probe_failures": probe_failures,
+        "verdicts": verdicts,
+    })
+    payload["soft_reasons"].extend(soft_reasons)
+    if postcheck_fresh and all(verdicts.get(name) == "verified" for name in ("server_path", "host_integrity")):
+        payload["state"] = "degraded" if payload["soft_reasons"] else "healthy"
+        payload["consecutive_failures"] = 0
 
 
 def health_log_summary(payload: dict[str, Any]) -> dict[str, Any]:
@@ -447,8 +486,10 @@ def health_log_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "last_action": payload.get("last_action", "none"),
         "maintenance_reason": payload.get("maintenance_reason", ""),
         "hard_reasons": payload.get("hard_reasons", []),
+        "failure_evidence": payload.get("failure_evidence", {}),
         "probe_failures": payload.get("probe_failures", []),
         "pre_recovery": payload.get("pre_recovery", {}),
+        "post_recovery_error": payload.get("post_recovery_error", ""),
         "soft_reasons": payload.get("soft_reasons", []),
         "verdicts": payload.get("verdicts", {}),
         "front_interval": {
@@ -503,14 +544,16 @@ def network_soft_reasons(deltas: dict[str, Any]) -> list[str]:
     return reasons
 
 
-def recovery_action_succeeded(action: str) -> bool:
-    if not action or action == "none":
-        return False
-    results = action.split(";")
-    return all(not result.endswith((":failed", ":invalid-config")) for result in results)
+def successful_recovery_actions(results: str) -> dict[str, str]:
+    successful = {}
+    for result in results.split(";"):
+        action, _, status = result.rpartition(":")
+        if action and status in {"ok", "changed"}:
+            successful[action] = result
+    return successful
 
 
-def recover(current: dict[str, Any]) -> str:
+def planned_recovery_actions(current: dict[str, Any]) -> list[str]:
     services = current.get("services", {})
     interface = str(current.get("wireguard", {}).get("interface", "wg0"))
     raw_capabilities = current.get("capabilities", ())
@@ -527,10 +570,9 @@ def recover(current: dict[str, Any]) -> str:
             continue
         unit = str(configured_units.get(key, runtime.SERVICE_UNIT_DEFAULTS[key])).format(wg_interface=interface)
         if services.get(key) != "active":
-            result = runtime.run(["systemctl", "restart", unit], timeout=30)
-            actions.append(f"restart:{unit}:{'ok' if result.returncode == 0 else 'failed'}")
+            actions.append(f"restart:{unit}")
     if actions:
-        return ";".join(actions)
+        return actions
     artifacts_clean = current.get("artifacts", {}).get("drift") == "none"
     network = current.get("network", {})
     wireguard_policy = network.get("wireguard_policy", {})
@@ -540,33 +582,17 @@ def recover(current: dict[str, Any]) -> str:
         and wireguard_policy.get("managed") is True
         and wireguard_policy.get("ok") is not True
     ):
-        try:
-            applied = apply_wireguard_policy(runtime.parse_env())
-            return f"apply:wireguard-policy:{'changed' if applied.get('changed') else 'ok'}"
-        except (KeyError, RuntimeError, ValueError):
-            return "apply:wireguard-policy:failed"
+        return ["apply:wireguard-policy"]
     profile_mismatches = set(network.get("profile_mismatches", []))
     qdisc_mismatches = profile_mismatches & {"qdisc", "qdisc_limit", "qdisc_flow_limit"}
     qdisc_mismatches.update(name for name in profile_mismatches if name.startswith("overlay_qdisc"))
     if artifacts_clean and qdisc_mismatches:
-        try:
-            applied = (
-                apply_qdisc_profile()
-                if capabilities & runtime.INTERSERVER_CAPABILITIES
-                else apply_qdisc_profile(include_overlay=False)
-            )
-            return f"apply:qdisc:{'changed' if applied.get('changed') else 'ok'}"
-        except RuntimeError:
-            return "apply:qdisc:failed"
+        return ["apply:qdisc"]
     if artifacts_clean and profile_mismatches:
-        result = runtime.run(["sysctl", "--load", str(runtime.SYSCTL_PATH)], timeout=30)
-        return f"reload:sysctl:{'ok' if result.returncode == 0 else 'failed'}"
+        return ["reload:sysctl"]
     bypass = network.get("conntrack", {}).get("front_bypass", {})
     if artifacts_clean and runtime.CAP_PUBLIC_FRONT in capabilities and not bypass.get("active"):
-        if not runtime.NFTABLES_CONFIG_PATH.is_file():
-            return "reload:vpn-stack-nftables.service:invalid-config"
-        result = runtime.run(["systemctl", "reload", runtime.NFTABLES_SERVICE], timeout=30)
-        return f"reload:{runtime.NFTABLES_SERVICE}:{'ok' if result.returncode == 0 else 'failed'}"
+        return [f"reload:{runtime.NFTABLES_SERVICE}"]
     if runtime.CAP_ROUTER in capabilities:
         probes = current.get("probes", {})
         router_path_ok = runtime.probe_path_ok(probes, "foreign_domains_via_router", "domains_via_router")
@@ -576,6 +602,37 @@ def recover(current: dict[str, Any]) -> str:
             direct = probes.get("direct", [])
             independent_path_ok = bool(direct) and all(isinstance(item, Mapping) and item.get("ok") is True for item in direct)
         if independent_path_ok and not router_path_ok:
-            result = runtime.run(["systemctl", "restart", "sing-box.service"], timeout=30)
-            return f"restart:sing-box.service:{'ok' if result.returncode == 0 else 'failed'}"
-    return "none"
+            return ["restart:sing-box.service"]
+    return []
+
+
+def recover(current: dict[str, Any], *, actions: list[str] | None = None) -> str:
+    results: list[str] = []
+    for action in planned_recovery_actions(current) if actions is None else actions:
+        if action == "apply:wireguard-policy":
+            try:
+                applied = apply_wireguard_policy(runtime.parse_env())
+                status = "changed" if applied.get("changed") else "ok"
+            except (KeyError, RuntimeError, ValueError):
+                status = "failed"
+        elif action == "apply:qdisc":
+            try:
+                applied = (
+                    apply_qdisc_profile()
+                    if set(current.get("capabilities", ())) & runtime.INTERSERVER_CAPABILITIES
+                    else apply_qdisc_profile(include_overlay=False)
+                )
+                status = "changed" if applied.get("changed") else "ok"
+            except RuntimeError:
+                status = "failed"
+        elif action == f"reload:{runtime.NFTABLES_SERVICE}" and not runtime.NFTABLES_CONFIG_PATH.is_file():
+            status = "invalid-config"
+        else:
+            command = (
+                ["sysctl", "--load", str(runtime.SYSCTL_PATH)]
+                if action == "reload:sysctl" else ["systemctl", *action.split(":", 1)]
+            )
+            result = runtime.run(command, timeout=30)
+            status = "ok" if result.returncode == 0 else "failed"
+        results.append(f"{action}:{status}")
+    return ";".join(results) or "none"

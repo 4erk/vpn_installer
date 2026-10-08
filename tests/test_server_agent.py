@@ -87,6 +87,9 @@ class ServerAgentTests(AgentFixtures, unittest.TestCase):
         coverage = patch.object(journal_evidence, "journal_coverage", return_value={"since_epoch": 0, "discarded_at": [], "error": ""})
         coverage.start()
         self.addCleanup(coverage.stop)
+        bounded = patch.object(journal_evidence, "run_bounded", side_effect=lambda args, **kwargs: server_runtime.run(args, **kwargs))
+        bounded.start()
+        self.addCleanup(bounded.stop)
 
     def test_truncated_history_is_unavailable_even_when_all_buckets_are_zero(self) -> None:
         facts = self.diagnostics_facts()
@@ -250,13 +253,13 @@ class ServerAgentTests(AgentFixtures, unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "install plan capabilities conflict"):
             server_agent.runtime_contract(manifest)
 
-    def test_agent_emits_native_diagnostics_v6_end_to_end(self) -> None:
+    def test_agent_emits_native_diagnostics_v7_end_to_end(self) -> None:
         facts = self.diagnostics_facts()
         with patch.object(server_agent, "collect_runtime_facts", return_value=facts):
             payload = server_agent.diagnostics_snapshot(live_probes=True, full_logs=True, include_maintenance=True)
 
         snapshot = DiagnosticsSnapshot.from_agent(payload)
-        self.assertEqual(snapshot.schema_version, 6)
+        self.assertEqual(snapshot.schema_version, 7)
         self.assertEqual(snapshot.collector_status, "ok")
         self.assertEqual(snapshot.host["login_user"], "root")
         self.assertEqual(snapshot.log_windows["since_release"].counts["dns_timeout"], 0)
@@ -453,7 +456,10 @@ class ServerAgentTests(AgentFixtures, unittest.TestCase):
             server_agent, "journal_problem_events", return_value=([], "")
         ) as journal:
             server_agent.summarize_problem_windows(full_logs=True, fresh_since=installed_at)
-        journal.assert_called_once_with(7 * 24 * 60, until=now)
+        self.assertEqual(journal.call_args_list[0].args, (30,))
+        self.assertTrue(all(call.args[0] <= 60 for call in journal.call_args_list))
+        last = journal.call_args_list[-1]
+        self.assertEqual(last.kwargs["until"] - last.args[0] * 60, now - 7 * 86400)
 
     def test_log_windows_preserve_acquisition_time_and_exclude_later_events(self) -> None:
         now = 1_786_040_000.0
@@ -463,7 +469,7 @@ class ServerAgentTests(AgentFixtures, unittest.TestCase):
         ) as journal:
             windows, fresh, error = server_agent.summarize_problem_windows(full_logs=True, fresh_since="5 minutes ago")
         self.assertEqual(error, "")
-        journal.assert_called_once_with(1440, until=now)
+        self.assertEqual(journal.call_args_list[0].args, (30,))
         expected = datetime.fromtimestamp(now, timezone.utc).isoformat()
         for window in [*windows.values(), fresh]:
             self.assertEqual(window["observed_at"], expected)
@@ -483,7 +489,7 @@ class ServerAgentTests(AgentFixtures, unittest.TestCase):
             windows, fresh, collector_error = server_agent.summarize_problem_windows(
                 full_logs=True, fresh_since=datetime.fromtimestamp(now - 300, timezone.utc).isoformat(),
             )
-        journal.assert_called_once_with(1440, until=now)
+        self.assertEqual(journal.call_args_list[0].args, (30,))
         self.assertEqual(collector_error, "")
         for window in [*windows.values(), fresh]:
             self.assertEqual(window["counts"]["domain_to_foreign_timeout"], 1)
@@ -618,7 +624,7 @@ class ServerAgentTests(AgentFixtures, unittest.TestCase):
         self.assertEqual(snapshot.reasons, ["interserver_adaptation=stale"])
         self.assertFalse(snapshot.transport["interserver"]["adaptive_state"]["fresh"])
         self.assertEqual(snapshot.transport["interserver"]["adaptive_state"]["updated_at"], state["updated_at"])
-        self.assertEqual(snapshot.schema_version, 6)
+        self.assertEqual(snapshot.schema_version, 7)
 
     def test_journal_problem_and_context_queries_use_the_same_fixed_window(self) -> None:
         now = 1_786_040_000.0
@@ -2565,15 +2571,153 @@ class ServerAgentTests(AgentFixtures, unittest.TestCase):
 
 
 class JournalWindowIntegrationTests(unittest.TestCase):
+    def test_event_memory_cap_preserves_lower_bounds_without_complete_totals(self) -> None:
+        now = 1_786_040_000.0
+        records = [(now - delta, "ERROR connection reset") for delta in (1, 2, 3)]
+        with patch.object(server_agent.time, "time", return_value=now), patch.object(server_agent, "LOG_MAX_EVENTS", 2), patch.object(
+            server_agent, "journal_problem_events", return_value=(records, ""),
+        ), patch.object(journal_evidence, "journal_coverage", return_value={"since_epoch": 0, "discarded_at": [], "error": ""}):
+            windows, _, error = server_agent.summarize_problem_windows(full_logs=False, fresh_since="5 minutes ago")
+        self.assertIn("memory bound", error)
+        self.assertEqual(windows["5"]["counts"]["client_reset_eof"], 2)
+        self.assertIsNone(server_agent._diagnostics_log_window(windows["5"], since="").counts)
+
+    def test_real_json_parser_keeps_fresh_windows_when_history_ends_mid_record(self) -> None:
+        now = 1_786_040_000.0
+        def record(stamp):
+            return json.dumps({"__REALTIME_TIMESTAMP": str(int(stamp * 1e6)), "_SYSTEMD_UNIT": "sing-box.service",
+                "MESSAGE": "ERROR connection: open connection to 203.0.113.5:443 using outbound/direct[to-foreign]: dial tcp 203.0.113.5:443: i/o timeout"})
+        results = [subprocess.CompletedProcess([], 0, record(now - 1), ""),
+                   subprocess.CompletedProcess([], 127, record(now - 1801) + '\n{"MESSAGE":"cut', "deadline exceeded")]
+        with patch.object(server_agent.time, "time", return_value=now), patch.object(
+            journal_evidence, "run_bounded", side_effect=results,
+        ) as reads, patch.object(journal_evidence, "journal_coverage", return_value={"since_epoch": 0, "discarded_at": [], "error": ""}):
+            windows, _, error = server_agent.summarize_problem_windows(full_logs=True, fresh_since="5 minutes ago")
+        self.assertEqual(reads.call_count, 2)
+        self.assertIn("malformed", error)
+        self.assertEqual(windows["30"]["coverage_error"], "")
+        self.assertEqual(windows["30"]["counts"]["unclassified_error"], 1)
+        self.assertEqual(windows["1440"]["counts"]["unclassified_error"], 2)
+        self.assertIsNone(server_agent._diagnostics_log_window(windows["1440"], since="").counts)
+
+    def test_history_interruption_does_not_poison_complete_recent_windows(self) -> None:
+        now = 1_786_040_000.0
+        installed = datetime.fromtimestamp(now - 11 * 86400, timezone.utc).isoformat()
+        recent = (now - 5, "ERROR dns: exchange failed for example.com. IN A: context deadline exceeded")
+        old = (now - 1900, "ERROR open connection to 203.0.113.5:443 using outbound/direct[to-foreign]: dial tcp 203.0.113.5:443: i/o timeout")
+        coverage = {"since_epoch": 0, "discarded_at": [], "error": ""}
+        for failure in ("deadline exceeded", "malformed JSON record", "journal rotated during query"):
+            with self.subTest(failure=failure), patch.object(server_agent.time, "time", return_value=now), patch.object(
+                server_agent, "journal_problem_events", side_effect=[([recent], ""), ([old], failure)],
+            ) as queries, patch.object(journal_evidence, "journal_coverage", return_value=coverage):
+                windows, fresh, error = server_agent.summarize_problem_windows(full_logs=True, fresh_since=installed)
+            self.assertEqual(queries.call_count, 2)
+            self.assertEqual(error, failure)
+            for key in ("5", "30"):
+                self.assertEqual(windows[key]["coverage_error"], "")
+                self.assertEqual(server_agent._diagnostics_log_window(windows[key], since="").collector.status, "ok")
+            for raw in (windows["1440"], fresh):
+                self.assertTrue(raw["coverage_error"])
+                self.assertEqual(raw["counts"]["unclassified_error"], 1)
+                self.assertIsNone(server_agent._diagnostics_log_window(raw, since=installed).counts)
+            facts = AgentFixtures().diagnostics_facts()
+            facts["release"]["installed_at"] = installed
+            facts["logs"] = {"windows_minutes": windows, "fresh": fresh, "collector_error": error}
+            with patch.object(server_agent, "collect_runtime_facts", return_value=facts):
+                snapshot = DiagnosticsSnapshot.from_agent(server_agent.diagnostics_snapshot(live_probes=True))
+            self.assertEqual(snapshot.log_windows["5m"].collector.status, "ok")
+            self.assertEqual(snapshot.log_windows["30m"].collector.status, "ok")
+            self.assertIsNone(snapshot.log_windows["24h"].counts)
+            self.assertEqual(snapshot.component_verdicts["log_history"], "inconclusive")
+            partial = snapshot.storage["journal_coverage"]["partial_windows"]["24h"]
+            self.assertEqual(partial["failure_details"]["unclassified_error"][0]["request_kind"], "unknown")
+
+    def test_history_vacuum_after_fresh_read_does_not_invalidate_fresh_proof(self) -> None:
+        now = 1_786_040_000.0
+        with patch.object(server_agent.time, "time", return_value=now), patch.object(
+            server_agent, "journal_problem_events", return_value=([], ""),
+        ), patch.object(journal_evidence, "journal_coverage", side_effect=[
+            {"since_epoch": now - 86400, "discarded_at": [], "error": ""},
+            {"since_epoch": now - 600, "discarded_at": [], "error": ""},
+        ]):
+            windows, _, _ = server_agent.summarize_problem_windows(full_logs=True, fresh_since="5 minutes ago")
+        self.assertEqual(windows["30"]["coverage_error"], "")
+        self.assertIn("retained", windows["1440"]["coverage_error"])
+
+    def test_history_budget_never_starts_another_query_or_reports_zero_as_complete(self) -> None:
+        now = 1_786_040_000.0
+        for exhausted in ("time", "memory"):
+            with self.subTest(exhausted=exhausted), patch.object(server_agent.time, "time", return_value=now), patch.object(
+                server_agent.time, "monotonic", side_effect=[0, server_agent.LOG_HISTORY_BUDGET_SECONDS] if exhausted == "time" else None,
+                return_value=0,
+            ), patch.object(server_agent, "LOG_HISTORY_MAX_BYTES", 0 if exhausted == "memory" else 1000), patch.object(
+                server_agent, "journal_problem_events", return_value=([], ""),
+            ) as queries, patch.object(journal_evidence, "journal_coverage", return_value={"since_epoch": 0, "discarded_at": [], "error": ""}):
+                windows, _, error = server_agent.summarize_problem_windows(full_logs=True, fresh_since="5 minutes ago")
+            queries.assert_called_once_with(30, until=now)
+            self.assertIn("budget", error)
+            self.assertEqual(windows["5"]["coverage_error"], "")
+            self.assertTrue(windows["1440"]["coverage_error"])
+
+    def test_chunk_boundaries_count_each_record_once(self) -> None:
+        now = 1_786_040_000.0
+        records = [(now - delta, f"ERROR [{delta} 1s] connection reset") for delta in (0, 1800, 5400, 86400)]
+        def query(minutes, *, until, timeout=30):
+            return [item for item in records if until - minutes * 60 <= item[0] <= until], ""
+        with patch.object(server_agent.time, "time", return_value=now), patch.object(
+            server_agent, "journal_problem_events", side_effect=query,
+        ), patch.object(journal_evidence, "journal_coverage", return_value={"since_epoch": 0, "discarded_at": [], "error": ""}):
+            windows, _, error = server_agent.summarize_problem_windows(full_logs=True, fresh_since="5 minutes ago")
+        self.assertEqual(error, "")
+        self.assertEqual(windows["30"]["counts"]["client_reset_eof"], 2)
+        self.assertEqual(windows["1440"]["counts"]["client_reset_eof"], 4)
+
+    def test_request_context_and_repeated_errors_share_classification_across_chunks(self) -> None:
+        now = 1_786_040_000.0
+        context = "[unit=sing-box.service] INFO [42 0ms] inbound/mixed[router-in]: inbound connection to media.example:443"
+        failure = "[unit=sing-box.service] ERROR [42 10s] open connection to 203.0.113.5:443 using outbound/direct[to-foreign]: dial tcp 203.0.113.5:443: i/o timeout"
+        records = [(now - 1802, context), (now - 1801, failure), (now - 1799, failure)]
+        for history_error in ("", "partial history truncated"):
+            def query(minutes, *, until, timeout=30):
+                return [item for item in records if until - minutes * 60 <= item[0] <= until], history_error if until < now else ""
+            with self.subTest(history_error=history_error), patch.object(server_agent.time, "time", return_value=now), patch.object(
+                server_agent, "journal_problem_events", side_effect=query,
+            ) as queries, patch.object(journal_evidence, "journal_coverage", return_value={"since_epoch": 0, "discarded_at": [], "error": ""}), patch.object(
+                server_agent, "classify_lines", wraps=server_agent.classify_lines,
+            ) as classify:
+                windows, _, error = server_agent.summarize_problem_windows(full_logs=True, fresh_since="5 minutes ago")
+            classify.assert_called_once()
+            self.assertGreaterEqual(queries.call_count, 2)
+            self.assertEqual(error, history_error)
+            self.assertEqual(windows["5"]["coverage_error"], "")
+            self.assertEqual(windows["30"]["coverage_error"], "")
+            self.assertEqual(bool(windows["1440"]["coverage_error"]), bool(history_error))
+            for key in ("30", "1440"):
+                self.assertEqual(windows[key]["counts"]["domain_to_foreign_timeout"], 1)
+                self.assertEqual(windows[key]["counts"]["unclassified_error"], 0)
+                self.assertEqual(windows[key]["counts"]["ipv4_literal_timeout"], 0)
+                self.assertEqual(windows[key]["top_destinations"]["domain_to_foreign_timeout"], {"media.example:443": 1})
+
+    def test_compact_collection_does_not_expand_to_release_history(self) -> None:
+        now = 1_786_040_000.0
+        installed = datetime.fromtimestamp(now - 3600, timezone.utc).isoformat()
+        with patch.object(server_agent.time, "time", return_value=now), patch.object(
+            server_agent, "journal_problem_events", return_value=([], ""),
+        ) as queries, patch.object(journal_evidence, "journal_coverage", return_value={"since_epoch": 0, "discarded_at": [], "error": ""}):
+            windows, fresh, _ = server_agent.summarize_problem_windows(full_logs=False, fresh_since=installed)
+        queries.assert_called_once_with(5, until=now)
+        self.assertEqual(set(windows), {"5"})
+        self.assertTrue(fresh["coverage_error"])
+
     def test_fractional_release_age_does_not_clip_initial_events(self) -> None:
         now = 1_786_040_000.75
-        for full_logs, age, expected_minutes in ((True, 86400.5, 1441), (False, 300.5, 6)):
+        for full_logs, age in ((True, 86400.5), (False, 299.5)):
             with self.subTest(full_logs=full_logs):
                 since = now - age
                 installed = datetime.fromtimestamp(since, timezone.utc).isoformat()
                 event = (since + 0.25, "ERROR dns: exchange failed for example.com. IN A: context deadline exceeded")
 
-                def query(minutes, *, until):
+                def query(minutes, *, until, timeout=30):
                     return ([event] if until - minutes * 60 <= event[0] <= until else []), ""
 
                 with patch.object(server_agent.time, "time", return_value=now), patch.object(
@@ -2581,7 +2725,8 @@ class JournalWindowIntegrationTests(unittest.TestCase):
                 ) as problem_query, patch.object(journal_evidence, "journal_coverage", return_value={"since_epoch": 0, "discarded_at": [], "error": ""}):
                     _windows, fresh, error = server_agent.summarize_problem_windows(full_logs=full_logs, fresh_since=installed)
                 self.assertEqual(error, "")
-                problem_query.assert_called_once_with(expected_minutes, until=now)
+                last = problem_query.call_args_list[-1]
+                self.assertLessEqual(last.kwargs["until"] - last.args[0] * 60, since)
                 self.assertEqual(fresh["coverage_error"], "")
                 self.assertEqual(fresh["counts"]["dns_timeout"], 1)
                 self.assertEqual(fresh["since"], installed)
@@ -2596,7 +2741,7 @@ class JournalWindowIntegrationTests(unittest.TestCase):
         ) as problem_query, patch.object(journal_evidence, "journal_coverage", return_value={"since_epoch": 0, "discarded_at": [], "error": ""}):
             windows, fresh, error = server_agent.summarize_problem_windows(full_logs=True, fresh_since=installed)
         self.assertEqual(error, "")
-        problem_query.assert_called_once_with(1440, until=now)
+        self.assertEqual(problem_query.call_args_list[0].args, (30,))
         self.assertEqual(windows["5"]["coverage_error"], "")
         self.assertEqual(fresh["coverage_error"], "requested start precedes collected journal interval")
         self.assertEqual(fresh["coverage"]["query_since_epoch"], now - 86400)

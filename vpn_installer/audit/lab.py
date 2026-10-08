@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from contextlib import contextmanager
+from datetime import datetime
 import json
 import shlex
 import shutil
@@ -12,7 +13,11 @@ from ..common import OUT_DIR
 from ..config import load_env_file
 from ..interserver_transport import (
     HY2_PORT,
+    TRANSPORT_CANDIDATE_PROBE_TIMEOUT_MS,
+    TRANSPORT_CANDIDATE_QUALITY_PROBE_ATTEMPTS,
+    TRANSPORT_CANDIDATE_QUALITY_PROBE_TIMEOUT_MS,
     TRANSPORT_CANDIDATE_TAGS,
+    TRANSPORT_EVIDENCE_MAX_GAP_SECONDS,
     TRANSPORT_HY2_TAG,
     TRANSPORT_PREFERRED_PROBE_INTERVAL_SECONDS,
     TRANSPORT_PREFERRED_RECOVERY_MIN_SECONDS,
@@ -52,8 +57,11 @@ LAB_IPS = {
     "ru_lan": "203.0.113.10",
 }
 LAB_STREAM_CHUNK_BYTES = 65_536
-LAB_STREAM_CHUNKS = 120
+LAB_STREAM_CHUNKS = 320
 LAB_STREAM_BYTES = LAB_STREAM_CHUNK_BYTES * LAB_STREAM_CHUNKS
+LAB_STREAM_MAX_SECONDS = 30
+# Two cycles (overlay + candidate), activation proof, and bounded Docker overhead.
+LAB_FAILOVER_MAX_SECONDS = TRANSPORT_PROBE_INTERVAL_SECONDS + 5 * TRANSPORT_CANDIDATE_PROBE_TIMEOUT_MS / 1000 + 2
 
 
 def run(runner: AuditRunner) -> None:
@@ -215,6 +223,128 @@ def _lab_overlay_deadlines(runner: AuditRunner, gateway: str, dns: str, env: dic
         runner.docker_exec(dns, "tc qdisc del dev eth0 root", expected_codes={0, 2})
 
 
+def _lab_transport_cycle(runner: AuditRunner, gateway: str, *, next_cycle: bool = False) -> dict[str, object]:
+    if next_cycle:
+        time.sleep(TRANSPORT_PROBE_INTERVAL_SECONDS)
+    return json.loads(runner.docker_exec(gateway, "python3 /opt/agent/vpn-stack-agent.py transport-reconcile").stdout)
+
+
+def _lab_require_suspect(state: dict[str, object], selected: str) -> None:
+    if not (
+        state.get("state") == "suspect" and state.get("selected") == selected
+        and state.get("changed") is not True and state.get("would_switch") is not True
+        and state.get("hard_failure_evidence") is not True
+        and state.get("failure", {}).get("path") == selected
+        and state.get("failure", {}).get("confirmations") == 1
+        and state.get("probes", {}).get(selected, {}).get("checked") is True
+        and state.get("probes", {}).get(selected, {}).get("ok") is False
+    ):
+        raise AuditFailure(f"One failed cycle must not confirm failure or switch: {state}")
+
+
+def _lab_confirmed_loss(runner: AuditRunner, gateway: str, selected: str, target: str | None) -> list[dict[str, object]]:
+    first = _lab_transport_cycle(runner, gateway)
+    _lab_require_suspect(first, selected)
+    second = _lab_transport_cycle(runner, gateway, next_cycle=True)
+    try:
+        gap = (datetime.fromisoformat(second["updated_at"]) - datetime.fromisoformat(first["updated_at"])).total_seconds()
+    except (KeyError, TypeError, ValueError) as exc:
+        raise AuditFailure("Loss confirmation has no valid cycle timestamps") from exc
+    if not (
+        first.get("cycle_id") and second.get("cycle_id") and first["cycle_id"] != second["cycle_id"]
+        and TRANSPORT_PROBE_INTERVAL_SECONDS <= gap <= TRANSPORT_EVIDENCE_MAX_GAP_SECONDS
+        and second.get("hard_failure_evidence") is True
+        and second.get("probes", {}).get(selected, {}).get("checked") is True
+        and second.get("probes", {}).get(selected, {}).get("ok") is False
+    ):
+        raise AuditFailure(f"Failure was not confirmed by two distinct fresh cycles: {first}, {second}")
+    evidence = second if target is None else second.get("last_transition", {}).get("decision_evidence", {})
+    paths = {"failure": selected}
+    if target is not None:
+        paths["alternate_health"] = target
+    for key, path in paths.items():
+        item = evidence.get(key, {})
+        if item.get("path") != path or item.get("confirmations") != 2 or item.get("cycle_ids") != [first["cycle_id"], second["cycle_id"]]:
+            raise AuditFailure(f"Missing matching two-cycle {key} evidence: {second}")
+    if target is None:
+        if second.get("state") != "failed" or second.get("changed") is True or second.get("selected") != selected:
+            raise AuditFailure(f"Both-path loss was reported as usable or changed selector: {second}")
+    elif not (
+        second.get("changed") is True and second.get("selected") == target
+        and second.get("selector_before") == selected and second.get("selector_after") == target
+        and second.get("overlay_probe", {}).get("phase") == "activation"
+        and second.get("overlay_probe", {}).get("ok") is True
+        and second.get("overlay_probe", {}).get("path") == target
+        and second.get("overlay_probe", {}).get("cycle_id") == second["cycle_id"]
+        and second.get("last_transition", {}).get("cycle_id") == second["cycle_id"]
+        and second.get("last_transition", {}).get("activation_proof", {}).get("ok") is True
+    ):
+        raise AuditFailure(f"Confirmed loss did not activate a proven fallback: {second}")
+    return [first, second]
+
+
+def _lab_require_udp_quality(state: dict[str, object], selected: str) -> None:
+    probes = state.get("probes", {})
+    active = probes.get(selected, {})
+    if active.get("quality_sampled") is not True:
+        raise AuditFailure(f"Recovery did not collect a fresh selected-path quality sample: {state}")
+    for tag in TRANSPORT_CANDIDATE_TAGS:
+        probe = active.get("quality_probe", {}) if tag == selected else probes.get(tag, {})
+        if not (
+            probe.get("scope") == "raw-underlay-udp" and probe.get("quality_ok") is True
+            and probe.get("budget_ms") == TRANSPORT_CANDIDATE_QUALITY_PROBE_TIMEOUT_MS
+            and all(probe.get(key) == TRANSPORT_CANDIDATE_QUALITY_PROBE_ATTEMPTS
+                    for key in ("attempts", "attempts_limit", "transmitted", "received", "valid_responses"))
+        ):
+            raise AuditFailure(f"Recovered {tag} lacks comparable successful UDP quality evidence: {probe}")
+
+
+@contextmanager
+def _lab_underlay_loss(runner: AuditRunner, container: str, peer: str, ports: tuple[int, ...], *, reverse: bool = False):
+    runner.docker_exec(container, "nft add table inet underlay_fault")
+    try:
+        runner.docker_exec(container, "nft 'add chain inet underlay_fault output { type filter hook output priority -10; policy accept; }'")
+        for port in ports:
+            runner.docker_exec(container, f"nft add rule inet underlay_fault output ip daddr {peer} "
+                               f"udp {'sport' if reverse else 'dport'} {port} drop")
+        yield
+    finally:
+        runner.docker_exec(container, "nft delete table inet underlay_fault")
+
+
+def _lab_processes(runner: AuditRunner, containers: dict[str, str]) -> dict[str, object]:
+    script = textwrap.dedent("""\
+        import json
+        from pathlib import Path
+        processes = {}
+        for path in Path('/proc').glob('[0-9]*/stat'):
+            try:
+                stat = path.read_text()
+            except FileNotFoundError:
+                continue
+            name = stat[stat.index('(') + 1:stat.rindex(')')]
+            fields = stat[stat.rindex(')') + 2:].split()
+            if name == 'sing-box' and fields[0] != 'Z':
+                processes[path.parent.name] = fields[19]
+        print(json.dumps(processes))
+        """)
+    result = {role: json.loads(runner.docker_exec(container, f"python3 -c {shlex.quote(script)}").stdout)
+              for role, container in containers.items()}
+    if any(len(processes) != 1 for processes in result.values()) or not result:
+        raise AuditFailure(f"Expected one live sing-box process per lab node: {result}")
+    return result
+
+
+def validate_process_continuity(before: dict[str, object], after: dict[str, object]) -> None:
+    if not before or before != after:
+        raise AuditFailure(f"sing-box restarted during underlay fault tests: {before} -> {after}")
+
+
+def _lab_require_stream_active(runner: AuditRunner, client: str) -> None:
+    runner.docker_exec(client, "test ! -e /opt/stream.rc && test -s /opt/stream.out && "
+                       f"test $(stat -c %s /opt/stream.out) -lt {LAB_STREAM_BYTES}")
+
+
 @contextmanager
 def _lab_logs(runner: AuditRunner):
     try:
@@ -339,7 +469,7 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
             for web_container in (ru_web_container, global_web_container):
                 runner.docker_exec(
                     web_container,
-                    "for i in $(seq 1 50); do curl -fsS --max-time 1 http://127.0.0.1/ready >/dev/null && exit 0; sleep 0.1; done; cat /opt/web.log; exit 1",
+                    "for i in $(seq 1 50); do curl -fsS --noproxy '*' --max-time 1 http://127.0.0.1/ready >/dev/null && exit 0; sleep 0.1; done; cat /opt/web.log; exit 1",
                 )
             runner.docker_exec(foreign_container, "sysctl -w net.ipv4.ip_forward=1 net.ipv6.conf.all.forwarding=1 >/dev/null")
             runner.docker_exec(ru_container, "sysctl -w net.ipv4.conf.all.src_valid_mark=1 >/dev/null")
@@ -358,6 +488,8 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
             runner.docker_exec(ru_container, "nohup sing-box run -c /opt/ru-singbox.json >/opt/ru-singbox.log 2>&1 &")
             runner.docker_exec(client_container, "nohup sing-box run -c /opt/client-singbox.json >/opt/client-singbox.log 2>&1 &")
             runner.docker_exec(client_container, "for i in $(seq 1 20); do nc -z 127.0.0.1 1080 && exit 0; sleep 1; done; exit 1")
+            process_containers = {"gateway": ru_container, "exit": foreign_container, "client": client_container}
+            processes_before = _lab_processes(runner, process_containers)
 
             ru_resp = runner.lab_curl(client_container, "http://ya.ru/").stdout
             if "server=ru-web" not in ru_resp or f"source={LAB_IPS['ru_lan']}" not in ru_resp:
@@ -386,46 +518,42 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
             runner.docker_exec(
                 client_container,
                 "rm -f /opt/stream.out /opt/stream.rc /opt/stream.time; "
-                "(curl --silent --show-error --fail --socks5-hostname 127.0.0.1:1080 "
+                "(curl --silent --show-error --fail --noproxy '' --socks5-hostname 127.0.0.1:1080 "
+                f"--max-time {LAB_STREAM_MAX_SECONDS} "
                 "--write-out '%{time_total}' --output /opt/stream.out http://example.com/stream "
                 ">/opt/stream.time; echo $? >/opt/stream.rc) &",
             )
-            time.sleep(1)
+            runner.docker_exec(client_container,
+                               "for i in $(seq 1 100); do test ! -e /opt/stream.rc || exit 1; "
+                               f"test -s /opt/stream.out && test $(stat -c %s /opt/stream.out) -ge {LAB_STREAM_CHUNK_BYTES} "
+                               "&& exit 0; sleep 0.05; done; exit 1")
             fallback_tag = next(tag for tag in TRANSPORT_CANDIDATE_TAGS if tag != TRANSPORT_PREFERRED_TAG)
             fault_port = HY2_PORT if TRANSPORT_PREFERRED_TAG == TRANSPORT_HY2_TAG else int(env["WG_PORT"])
-            runner.docker_exec(
-                ru_container,
-                f"nft add table inet underlay_fault; nft 'add chain inet underlay_fault output {{ type filter hook output priority -10; policy accept; }}'; nft add rule inet underlay_fault output ip daddr {LAB_IPS['exit']} udp dport {fault_port} drop",
-            )
-            switch_started = time.monotonic()
-            transition = json.loads(
-                runner.docker_exec(ru_container, "python3 /opt/agent/vpn-stack-agent.py transport-reconcile").stdout
-            )
-            if not (
-                transition.get("changed") is True
-                and transition.get("selected") == fallback_tag
-                and transition.get("hard_failure_evidence") is True
-                and transition.get("selector_before") == TRANSPORT_PREFERRED_TAG
-                and transition.get("selector_after") == fallback_tag
-                and transition.get("overlay_probe", {}).get("phase") == "activation"
-                and transition.get("overlay_probe", {}).get("ok") is True
-                and transition.get("last_transition", {}).get("activation_proof", {}).get("ok") is True
-            ):
-                raise AuditFailure(f"Transport agent did not perform confirmed failover in one cycle: {transition}")
-            fallback_stability = json.loads(
-                runner.docker_exec(ru_container, "python3 /opt/agent/vpn-stack-agent.py transport-reconcile").stdout
-            )
+            fallback_port = int(env["WG_PORT"]) if fallback_tag != TRANSPORT_HY2_TAG else HY2_PORT
+            with _lab_underlay_loss(runner, ru_container, LAB_IPS["exit"], (fault_port,)):
+                _lab_require_stream_active(runner, client_container)
+                switch_started = time.monotonic()
+                forward_loss = _lab_confirmed_loss(runner, ru_container, TRANSPORT_PREFERRED_TAG, fallback_tag)
+                switch_seconds = time.monotonic() - switch_started
+            transition = forward_loss[-1]
+            if switch_seconds > LAB_FAILOVER_MAX_SECONDS:
+                raise AuditFailure(f"Two-cycle failover exceeded {LAB_FAILOVER_MAX_SECONDS:g}s: {switch_seconds:.3f}s")
+            # The first observation after activation must not inherit the old path's failure count.
+            with _lab_underlay_loss(runner, foreign_container, LAB_IPS["gateway"], (fallback_port,), reverse=True):
+                _lab_require_stream_active(runner, client_container)
+                activation_transient = _lab_transport_cycle(runner, ru_container, next_cycle=True)
+                _lab_require_suspect(activation_transient, fallback_tag)
+            fallback_stability = _lab_transport_cycle(runner, ru_container, next_cycle=True)
             if not (
                 fallback_stability.get("changed") is not True
                 and fallback_stability.get("selected") == fallback_tag
+                and fallback_stability.get("overlay_probe", {}).get("ok") is True
+                and not fallback_stability.get("failure")
             ):
-                raise AuditFailure(f"Transport agent did not retain the healthy fallback: {fallback_stability}")
-            switch_seconds = time.monotonic() - switch_started
-            if switch_seconds > 4.0:
-                raise AuditFailure(f"Confirmed underlay failover exceeded 4 seconds: {switch_seconds:.3f}s")
+                raise AuditFailure(f"A brief post-activation loss did not recover on the same path: {fallback_stability}")
             runner.docker_exec(
                 client_container,
-                "for i in $(seq 1 200); do test -s /opt/stream.rc && exit 0; sleep 0.1; done; exit 1",
+                f"for i in $(seq 1 {LAB_STREAM_MAX_SECONDS * 10}); do test -s /opt/stream.rc && exit 0; sleep 0.1; done; exit 1",
             )
             stream_result = runner.docker_exec(
                 client_container,
@@ -440,19 +568,18 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
             if stream_sha256 != digest.hexdigest():
                 raise AuditFailure("Existing TCP stream checksum changed across the underlay switch")
             stream_seconds = float(runner.docker_exec(client_container, "cat /opt/stream.time").stdout.strip())
-            if stream_seconds > 14.0:
+            if stream_seconds > LAB_STREAM_MAX_SECONDS:
                 raise AuditFailure(f"Underlay switch stalled an existing TCP stream for too long: {stream_seconds:.3f}s")
             request_count = runner.docker_exec(global_web_container, "grep -Fxc /stream /opt/requests.log")
             if request_count.stdout.strip() != "1":
                 raise AuditFailure("Continuity check retried HTTP instead of preserving one TCP stream")
-            runner.docker_exec(ru_container, "nft delete table inet underlay_fault")
             runner.docker_exec(
                 ru_container,
                 "python3 -c \"import json; p='/var/lib/vpn-stack/transport-state.json'; "
                 "s=json.load(open(p)); s['preferred_retry']['retry_at']='1970-01-01T00:00:00+00:00'; "
+                "s.pop('quality_probe_at',None); "
                 "open(p,'w').write(json.dumps(s))\"",
             )
-            time.sleep(0.5)
             recovery: list[dict[str, object]] = []
             for attempt in range(3):
                 if attempt:
@@ -469,57 +596,45 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
                         f"s['preferred_probe_at']=(t-timedelta(seconds={TRANSPORT_PREFERRED_PROBE_INTERVAL_SECONDS + 1})).isoformat(); "
                         f"{start_adjustment}open(p,'w').write(json.dumps(s))\"",
                     )
-                recovery.append(
-                    json.loads(
-                        runner.docker_exec(ru_container, "python3 /opt/agent/vpn-stack-agent.py transport-reconcile").stdout
-                    )
-                )
+                recovery.append(_lab_transport_cycle(runner, ru_container, next_cycle=True))
+                if attempt == 0:
+                    _lab_require_udp_quality(recovery[0], fallback_tag)
             if not (
                 all(state.get("changed") is not True and state.get("selected") == fallback_tag for state in recovery[:2])
                 and recovery[-1].get("changed") is True
                 and recovery[-1].get("selected") == TRANSPORT_PREFERRED_TAG
             ):
                 raise AuditFailure(f"Transport agent did not return to the recovered preferred underlay: {recovery}")
-            runner.docker_exec(
-                foreign_container,
-                f"nft add table inet underlay_fault; nft 'add chain inet underlay_fault output {{ type filter hook output priority -10; policy accept; }}'; "
-                f"nft add rule inet underlay_fault output ip daddr {LAB_IPS['gateway']} udp sport {fault_port} drop",
-            )
-            try:
-                reverse_loss = json.loads(runner.docker_exec(
-                    ru_container, "python3 /opt/agent/vpn-stack-agent.py transport-reconcile",
-                ).stdout)
-                if not (reverse_loss.get("changed") is True and reverse_loss.get("selected") == fallback_tag
-                        and reverse_loss.get("overlay_probe", {}).get("ok") is True):
-                    raise AuditFailure(f"Reverse one-way loss did not activate the fallback overlay: {reverse_loss}")
+            with _lab_underlay_loss(runner, foreign_container, LAB_IPS["gateway"], (fault_port,), reverse=True):
+                reverse_loss = _lab_confirmed_loss(runner, ru_container, TRANSPORT_PREFERRED_TAG, fallback_tag)
                 runner.docker_exec(foreign_container, f"nft add rule inet underlay_fault output "
-                                   f"ip daddr {LAB_IPS['gateway']} udp sport {HY2_PORT} drop")
-                both_loss = json.loads(runner.docker_exec(
-                    ru_container, "python3 /opt/agent/vpn-stack-agent.py transport-reconcile",
-                ).stdout)
-                if both_loss.get("state") != "failed" or both_loss.get("changed") is True:
-                    raise AuditFailure(f"Both-path loss was reported as usable: {both_loss}")
-            finally:
-                runner.docker_exec(foreign_container, "nft delete table inet underlay_fault")
-            restored = json.loads(runner.docker_exec(
-                ru_container, "python3 /opt/agent/vpn-stack-agent.py transport-reconcile",
-            ).stdout)
+                                   f"ip daddr {LAB_IPS['gateway']} udp sport {fallback_port} drop")
+                both_loss = _lab_confirmed_loss(runner, ru_container, fallback_tag, None)
+                failed_both = runner.lab_curl(client_container, "http://example.com/", expect_codes={7, 22, 28, 52, 56, 97})
+                if failed_both.returncode == 0:
+                    raise AuditFailure("Both-path loss allowed global traffic instead of failing closed")
+            restored = _lab_transport_cycle(runner, ru_container, next_cycle=True)
             if restored.get("overlay_probe", {}).get("ok") is not True or restored.get("selected") not in {fallback_tag, TRANSPORT_PREFERRED_TAG}:
                 raise AuditFailure(f"No proven overlay recovered after both-path loss: {restored}")
             if restored.get("changed") is True and restored.get("last_transition", {}).get("activation_proof", {}).get("ok") is not True:
                 raise AuditFailure(f"Recovery switched without a matching activation proof: {restored}")
-            restored_stability = json.loads(runner.docker_exec(
-                ru_container, "python3 /opt/agent/vpn-stack-agent.py transport-reconcile",
-            ).stdout)
+            restored_stability = _lab_transport_cycle(runner, ru_container, next_cycle=True)
             if restored_stability.get("overlay_probe", {}).get("ok") is not True or restored_stability.get("selected") != restored.get("selected"):
                 raise AuditFailure(f"Recovered overlay failed its next liveness cycle: {restored_stability}")
+            recovered_response = runner.lab_curl(client_container, "http://example.com/recovered").stdout
+            if "server=global-web" not in recovered_response or f"source={LAB_IPS['exit_wan']}" not in recovered_response:
+                raise AuditFailure(f"Recovered overlay did not restore application traffic: {recovered_response}")
+            processes_after = _lab_processes(runner, process_containers)
+            validate_process_continuity(processes_before, processes_after)
             continuity_report = lab_dir / "transport-continuity.json"
             write_text(
                 continuity_report,
                 json.dumps(
                     {
                         "transition": transition,
+                        "forward_one_way_loss": forward_loss,
                         "overlay_deadlines": deadline_report,
+                        "post_activation_transient": activation_transient,
                         "fallback_stability": fallback_stability,
                         "switch_seconds": switch_seconds,
                         "stream_bytes": LAB_STREAM_BYTES,
@@ -531,6 +646,8 @@ def test_lab_dataplane(runner: AuditRunner) -> dict[str, str]:
                         "both_path_loss": both_loss,
                         "restored_path": restored,
                         "restored_stability": restored_stability,
+                        "processes_before": processes_before,
+                        "processes_after": processes_after,
                     },
                     indent=2,
                     sort_keys=True,

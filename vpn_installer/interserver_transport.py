@@ -34,8 +34,6 @@ TRANSPORT_CANDIDATE_PROBE_TIMEOUT_MS = 1200
 TRANSPORT_OVERLAY_PROBE_ATTEMPTS = 2
 TRANSPORT_PROBE_INTERVAL_SECONDS = 2
 TRANSPORT_QUALITY_PROBE_INTERVAL_SECONDS = 15
-TRANSPORT_QUALITY_PROBE_PACKETS = 20
-TRANSPORT_QUALITY_PROBE_PAYLOAD_BYTES = 1200
 TRANSPORT_FAILURE_CONFIRMATIONS = 2
 TRANSPORT_ALTERNATE_HEALTH_CONFIRMATIONS = 2
 TRANSPORT_EVIDENCE_MAX_GAP_SECONDS = TRANSPORT_PROBE_INTERVAL_SECONDS * 5
@@ -54,7 +52,7 @@ TRANSPORT_SWITCH_RETRY_MAX_SECONDS = 300
 TRANSPORT_SWITCH_PROOF_ATTEMPTS = 5
 TRANSPORT_SWITCH_PROOF_TIMEOUT_MS = TRANSPORT_CANDIDATE_PROBE_TIMEOUT_MS
 TRANSPORT_SWITCH_PROOF_RETRY_DELAY_SECONDS = 0.2
-TRANSPORT_STATE_SCHEMA_VERSION = 16
+TRANSPORT_STATE_SCHEMA_VERSION = 17
 UNDERLAY_WG_RU_ADDRESS = "10.75.0.1/32"
 UNDERLAY_WG_FOREIGN_ADDRESS = "10.75.0.2/32"
 UNDERLAY_WG_MTU = 1420
@@ -118,19 +116,20 @@ def _socks_address(address: str) -> tuple[bytes, bytes]:
     return (b"\x01", parsed.packed) if parsed.version == 4 else (b"\x04", parsed.packed)
 
 
-def _receive_socks_address(connection: socket.socket, address_type: int) -> tuple[str, int]:
+def _receive_socks_address(connection: socket.socket, address_type: int, *, deadline: float) -> tuple[str, int]:
     if address_type == 1:
-        raw_address = _receive_exact(connection, 4)
+        raw_address = _receive_exact(connection, 4, deadline=deadline)
         host = socket.inet_ntop(socket.AF_INET, raw_address)
     elif address_type == 4:
-        raw_address = _receive_exact(connection, 16)
+        raw_address = _receive_exact(connection, 16, deadline=deadline)
         host = socket.inet_ntop(socket.AF_INET6, raw_address)
     elif address_type == 3:
-        raw_address = _receive_exact(connection, _receive_exact(connection, 1)[0])
+        size = _receive_exact(connection, 1, deadline=deadline)[0]
+        raw_address = _receive_exact(connection, size, deadline=deadline)
         host = raw_address.decode("ascii")
     else:
         raise OSError("SOCKS5 proxy returned an invalid address type")
-    return host, int.from_bytes(_receive_exact(connection, 2), "big")
+    return host, int.from_bytes(_receive_exact(connection, 2, deadline=deadline), "big")
 
 
 def _dns_probe_query() -> tuple[int, bytes]:
@@ -186,23 +185,31 @@ def _dns_probe_response(payload: bytes, query_id: int) -> None:
     raise OSError("DNS probe returned no IPv4 answer")
 
 
-def _socks_udp_dns_probe(proxy_port: int, target_host: str, target_port: int, timeout_seconds: float) -> None:
+def _socks_udp_dns_probe(
+    proxy_port: int, target_host: str, target_port: int, timeout_seconds: float,
+    *, deadline: float | None = None, evidence: dict[str, Any] | None = None,
+) -> None:
+    deadline = min(time.monotonic() + timeout_seconds, deadline) if deadline is not None else time.monotonic() + timeout_seconds
+    evidence = evidence if evidence is not None else {}
+    evidence.update(transmitted=0, received=0, io_phase="connect")
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as datagram:
         datagram.bind(("127.0.0.1", 0))
-        datagram.settimeout(timeout_seconds)
         local_host, local_port = datagram.getsockname()
         local_type, local_address = _socks_address(local_host)
         target_type, target_address = _socks_address(target_host)
-        with socket.create_connection(("127.0.0.1", proxy_port), timeout=timeout_seconds) as control:
-            control.settimeout(timeout_seconds)
+        with socket.create_connection(("127.0.0.1", proxy_port), timeout=_probe_remaining(deadline)) as control:
+            evidence["io_phase"] = "socks_greeting"
+            control.settimeout(_probe_remaining(deadline))
             control.sendall(b"\x05\x01\x00")
-            if _receive_exact(control, 2) != b"\x05\x00":
+            if _receive_exact(control, 2, deadline=deadline) != b"\x05\x00":
                 raise OSError("SOCKS5 proxy rejected unauthenticated probing")
+            evidence["io_phase"] = "socks_associate"
+            control.settimeout(_probe_remaining(deadline))
             control.sendall(
                 b"\x05\x03\x00" + local_type + local_address + local_port.to_bytes(2, "big")
             )
-            version, status, _reserved, reply_type = _receive_exact(control, 4)
-            relay_host, relay_port = _receive_socks_address(control, reply_type)
+            version, status, _reserved, reply_type = _receive_exact(control, 4, deadline=deadline)
+            relay_host, relay_port = _receive_socks_address(control, reply_type, deadline=deadline)
             if version != 5 or status != 0:
                 raise OSError(f"SOCKS5 UDP ASSOCIATE failed with status {status}")
             try:
@@ -215,8 +222,14 @@ def _socks_udp_dns_probe(proxy_port: int, target_host: str, target_port: int, ti
                 relay_host = "127.0.0.1"
             query_id, query = _dns_probe_query()
             request = b"\x00\x00\x00" + target_type + target_address + target_port.to_bytes(2, "big") + query
+            evidence["io_phase"] = "send"
+            datagram.settimeout(_probe_remaining(deadline))
             datagram.sendto(request, (relay_host, relay_port))
+            evidence.update(transmitted=1, io_phase="receive")
+            datagram.settimeout(_probe_remaining(deadline))
             response, _source = datagram.recvfrom(4096)
+            evidence.update(received=1, io_phase="validate")
+            _probe_remaining(deadline)
             if len(response) < 7 or response[:3] != b"\x00\x00\x00":
                 raise OSError("SOCKS5 UDP relay returned an invalid datagram")
             offset = 3
@@ -236,6 +249,8 @@ def _socks_udp_dns_probe(proxy_port: int, target_host: str, target_port: int, ti
             if offset > len(response):
                 raise OSError("SOCKS5 UDP relay returned a truncated address")
             _dns_probe_response(response[offset:], query_id)
+            _probe_remaining(deadline)
+            evidence["io_phase"] = "complete"
 
 
 def _probe_result(
@@ -279,27 +294,45 @@ def transport_candidate_probe(
         return _probe_result("raw-underlay-udp", target, started, "unknown transport candidate")
     if attempts < 1:
         return _probe_result("raw-underlay-udp", target, started, "probe attempts must be positive")
-    attempt_timeout = max(0.001, timeout_ms / 1000 / attempts)
+    if timeout_ms <= 0:
+        return _probe_result("raw-underlay-udp", target, started, "probe budget must be positive")
+    deadline = started + timeout_ms / 1000
+    attempt_timeout = timeout_ms / 1000 / attempts
     delays: list[int] = []
+    exchanges: list[dict[str, Any]] = []
     last_error = "underlay DNS probe timed out"
-    for _attempt in range(attempts):
+    for attempt in range(1, attempts + 1):
         attempt_started = time.monotonic()
+        if attempt_started >= deadline:
+            last_error = "underlay DNS probe deadline expired"
+            break
+        attempt_deadline = min(deadline, attempt_started + attempt_timeout)
+        exchange: dict[str, Any] = {"attempt": attempt, "ok": False, "transmitted": 0, "received": 0}
         try:
-            _socks_udp_dns_probe(proxy_port, target_host, FOREIGN_DNS_RELAY_PORT, attempt_timeout)
+            _socks_udp_dns_probe(
+                proxy_port, target_host, FOREIGN_DNS_RELAY_PORT, attempt_timeout,
+                deadline=attempt_deadline, evidence=exchange,
+            )
+            _probe_remaining(attempt_deadline)
         except (OSError, ValueError) as exc:
             last_error = str(exc) or last_error
-            continue
-        delays.append(max(1, round((time.monotonic() - attempt_started) * 1000)))
-    if not delays:
-        return _probe_result("raw-underlay-udp", target, started, last_error, attempts=attempts)
+            exchange["error"] = last_error
+        else:
+            exchange.update(ok=True, error="")
+            delays.append(max(1, round((time.monotonic() - attempt_started) * 1000)))
+        exchange["elapsed_ms"] = max(0, round((time.monotonic() - attempt_started) * 1000))
+        exchanges.append(exchange)
     result = _probe_result(
-        "raw-underlay-udp",
-        target,
-        started,
-        attempts=attempts,
-        health_confirmed=True,
+        "raw-underlay-udp", target, started, "" if delays else last_error,
+        attempts=len(exchanges), health_confirmed=bool(delays),
     )
-    result["delay_ms"] = round(sum(delays) / len(delays))
+    result.update(
+        budget_ms=timeout_ms, attempts_limit=attempts, attempt_results=exchanges,
+        transmitted=sum(item["transmitted"] for item in exchanges),
+        received=sum(item["received"] for item in exchanges),
+        valid_responses=len(delays),
+    )
+    result["delay_ms"] = round(sum(delays) / len(delays)) if delays else 0
     if attempts > 1:
         loss = round((attempts - len(delays)) * 100 / attempts, 3)
         result.update(
@@ -321,8 +354,10 @@ class _OverlayProbeError(OSError):
 
 def _bound_tcp_dns_probe(
     interface: str, target_host: str, target_port: int, timeout_seconds: float,
-    *, deadline: float | None = None,
+    *, deadline: float | None = None, evidence: dict[str, Any] | None = None,
 ) -> None:
+    evidence = evidence if evidence is not None else {}
+    evidence.update(transmitted=0, received=0)
     attempt_deadline = time.monotonic() + timeout_seconds
     if deadline is not None:
         attempt_deadline = min(attempt_deadline, deadline)
@@ -342,10 +377,12 @@ def _bound_tcp_dns_probe(
             phase = "send"
             connection.settimeout(_probe_remaining(attempt_deadline))
             connection.sendall(len(query).to_bytes(2, "big") + query)
+            evidence["transmitted"] = 1
             phase = "receive_length"
             response_size = int.from_bytes(_receive_exact(connection, 2, deadline=attempt_deadline), "big")
             phase = "receive_body"
             response = _receive_exact(connection, response_size, deadline=attempt_deadline)
+            evidence["received"] = 1
             phase = "validate"
             _dns_probe_response(response, query_id)
             _probe_remaining(attempt_deadline)
@@ -378,6 +415,9 @@ def transport_overlay_dns_probe(
             "budget_ms": timeout_ms,
             "attempts_limit": attempts,
             "attempt_results": exchanges,
+            "transmitted": sum(item["transmitted"] for item in exchanges),
+            "received": sum(item["received"] for item in exchanges),
+            "valid_responses": sum(item["ok"] for item in exchanges),
             "started_at": started_at,
             "finished_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -404,11 +444,11 @@ def transport_overlay_dns_probe(
             last_error = "overlay DNS probe deadline expired"
             break
         attempt_deadline = min(call_deadline, attempt_started + attempt_timeout)
-        exchange: dict[str, Any] = {"attempt": attempt, "ok": False}
+        exchange: dict[str, Any] = {"attempt": attempt, "ok": False, "transmitted": 0, "received": 0}
         try:
             _bound_tcp_dns_probe(
                 interface, target_host, FOREIGN_DNS_RELAY_PORT, attempt_timeout,
-                deadline=attempt_deadline,
+                deadline=attempt_deadline, evidence=exchange,
             )
             _probe_remaining(attempt_deadline)
         except (OSError, ValueError) as exc:
@@ -768,6 +808,9 @@ def _normalize_probe(probe: dict[str, Any] | None) -> dict[str, Any]:
         "budget_ms",
         "attempts_limit",
         "attempt_results",
+        "transmitted",
+        "received",
+        "valid_responses",
         "started_at",
         "finished_at",
         "cycle_id",
@@ -779,6 +822,7 @@ def _normalize_probe(probe: dict[str, Any] | None) -> dict[str, Any]:
         "quality_sampled",
         "quality_ok",
         "quality_error",
+        "quality_probe",
         "packet_loss_pct",
         "rtt_avg_ms",
         "payload_bytes",
@@ -846,17 +890,29 @@ def _next_evidence(
     path: str,
     reason: str,
     cycle_relation: str,
+    observed_at: str,
+    cycle_id: str = "",
+    max_gap_seconds: int = TRANSPORT_EVIDENCE_MAX_GAP_SECONDS,
 ) -> dict[str, Any]:
     value = previous.get(key, {})
     prior = value if isinstance(value, dict) else {}
     same_evidence = prior.get("path") == path and prior.get("reason") == reason
-    count = max(1, int(prior.get("confirmations", 0) or 0)) if same_evidence and cycle_relation != "reset" else 1
-    if same_evidence and cycle_relation == "next":
+    evidence_relation = _cycle_relation(prior.get("observed_at"), observed_at, max_gap_seconds=max_gap_seconds)
+    continuous = same_evidence and cycle_relation != "reset" and evidence_relation != "reset"
+    cycle_id = cycle_id or observed_at
+    cycle_ids = list(prior.get("cycle_ids", [])) if continuous else []
+    count = max(1, int(prior.get("confirmations", 0) or 0)) if continuous else 1
+    replayed = cycle_id in cycle_ids
+    if continuous and cycle_relation == "next" and evidence_relation == "next" and not replayed:
         count += 1
+    if cycle_id not in cycle_ids:
+        cycle_ids.append(cycle_id)
     return {
         "path": path,
         "reason": reason,
         "confirmations": count,
+        "cycle_ids": cycle_ids[-TRANSPORT_PREFERRED_RECOVERY_CONFIRMATIONS:],
+        "observed_at": prior["observed_at"] if replayed else observed_at,
     }
 
 
@@ -892,11 +948,12 @@ def _quality_switch_evidence(
     if sampled and observed and 0 <= (observed - sampled).total_seconds() < TRANSPORT_QUALITY_PROBE_INTERVAL_SECONDS:
         return dict(prior), False
 
-    # ICMP loss and candidate DNS success are not comparable rates. Require paired
-    # observations at the quality cadence, never cached liveness cycles.
+    # Paired UDP exchanges at the quality cadence, never cached liveness cycles.
     evidence = _next_evidence(
         {"quality_failure": prior}, key="quality_failure", path=selected,
-        reason=reason, cycle_relation=relation,
+        reason=reason, cycle_relation=relation, observed_at=observed_at,
+        cycle_id=str(selected_probe.get("cycle_id", "")),
+        max_gap_seconds=TRANSPORT_QUALITY_PROBE_INTERVAL_SECONDS * 3,
     )
     evidence.update({"sampled_at": observed_at, "packet_loss_pct": selected_probe.get("packet_loss_pct")})
     confirmed = evidence["confirmations"] >= max(
@@ -1020,9 +1077,9 @@ def evaluate_transport_policy(
             path=selected,
             reason=failure_reason,
             cycle_relation=cycle_relation,
+            observed_at=observed_at,
+            cycle_id=str(selected_probe.get("cycle_id", "")),
         )
-        if selected_probe.get("failure_confirmed") is True:
-            failure["confirmations"] = max(TRANSPORT_FAILURE_CONFIRMATIONS, failure["confirmations"])
         confirmed_failure = failure["confirmations"] >= TRANSPORT_FAILURE_CONFIRMATIONS
         state = "failed" if confirmed_failure and not alternate_probe["ok"] else "suspect"
         reason = (
@@ -1039,12 +1096,9 @@ def evaluate_transport_policy(
                 path=alternate,
                 reason="healthy",
                 cycle_relation=cycle_relation,
+                observed_at=observed_at,
+                cycle_id=str(alternate_probe.get("cycle_id", "")),
             )
-            if alternate_probe.get("health_confirmed") is True:
-                alternate_health["confirmations"] = max(
-                    TRANSPORT_ALTERNATE_HEALTH_CONFIRMATIONS,
-                    alternate_health["confirmations"],
-                )
             details["alternate_health"] = alternate_health
             if (
                 confirmed_failure
@@ -1175,6 +1229,9 @@ def evaluate_transport_policy(
         path=TRANSPORT_PREFERRED_TAG,
         reason="healthy",
         cycle_relation=recovery_relation,
+        observed_at=observed_at,
+        cycle_id=str(alternate_probe.get("cycle_id", "")),
+        max_gap_seconds=TRANSPORT_PREFERRED_EVIDENCE_MAX_GAP_SECONDS,
     )
     prior_recovery = prior.get("preferred_recovery", {})
     continuous_recovery = (
@@ -1182,6 +1239,8 @@ def evaluate_transport_policy(
         and isinstance(prior_recovery, dict)
         and prior_recovery.get("path") == TRANSPORT_PREFERRED_TAG
         and prior_recovery.get("reason") == "healthy"
+        and _cycle_relation(prior_recovery.get("observed_at"), observed_at,
+                            max_gap_seconds=TRANSPORT_PREFERRED_EVIDENCE_MAX_GAP_SECONDS) != "reset"
     )
     recovery_started_at = (
         str(prior_recovery.get("started_at", ""))
