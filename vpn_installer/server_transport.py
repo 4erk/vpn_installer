@@ -647,11 +647,12 @@ def _reconcile_interserver_transport_unlocked() -> dict[str, Any]:
                 )
                 payload.pop("switch_backoff", None)
                 payload.pop("last_switch_failure", None)
-                payload.pop("quality_failure", None)
                 payload.pop("last_quality_probe", None)
             # An activation attempt (including rollback) starts a new observation window.
             payload.pop("failure", None)
             payload.pop("alternate_health", None)
+            payload.pop("quality_failure", None)
+            payload.pop("preferred_recovery", None)
             if transition:
                 transition["decision_evidence"] = decision_evidence
                 payload["last_transition"] = transition

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import subprocess
 import tempfile
 import unittest
@@ -211,6 +212,95 @@ class ServerLifecycleTests(AgentFixtures, unittest.TestCase):
                         [["systemctl", *action.split(":", 1)] for action in [*actions, failed_action, failed_action]],
                     )
 
+    def test_second_recovery_launch_error_preserves_receipt_and_cooldown(self) -> None:
+        execute = server_runtime.run
+        for error in (BlockingIOError(errno.EAGAIN, "launch unavailable"), KeyboardInterrupt("launch interrupted")):
+            with self.subTest(error=type(error).__name__):
+                samples = [self.health_sample(t) for t in (0, 120, 240, 242, 360)]
+                for sample in samples:
+                    sample["services"].update({"sing-box": "failed", "xray": "failed"})
+                with self.health_sandbox(samples) as (state, collect, run):
+                    run.side_effect = execute
+                    server_lifecycle.health(**self.health_collectors())
+
+                    def launch(command, **_kwargs):
+                        if command[-1] == "vpn-stack-xray.service":
+                            receipt = server_runtime.read_json(state, {})
+                            self.assertEqual(receipt["last_action"], "restart:sing-box.service:ok")
+                            self.assertEqual(receipt["last_actions"], {
+                                "restart:sing-box.service": {"epoch": 10_042, "action": "restart:sing-box.service:ok"},
+                            })
+                            self.assertEqual(receipt["verdicts"]["overall"], "inconclusive")
+                            raise error
+                        return subprocess.CompletedProcess(command, 0, "", "")
+
+                    with patch.object(server_runtime.subprocess, "run", side_effect=launch) as process:
+                        with patch.object(server_lifecycle.time, "time", side_effect=[10_000, 10_042]):
+                            with self.assertRaises(type(error)) as raised:
+                                server_lifecycle.health(**self.health_collectors())
+                        self.assertIs(raised.exception, error)
+                        self.assertEqual(collect.call_count, 2)
+                        receipt = server_runtime.read_json(state, {})
+                        self.assertEqual(receipt["state"], "recovering")
+                        self.assertEqual(receipt["last_action_epoch"], 10_042)
+                        process.side_effect = None
+                        process.return_value = subprocess.CompletedProcess([], 0, "", "")
+                        with patch.object(server_lifecycle.time, "time", return_value=10_120):
+                            retried = server_lifecycle.health(**self.health_collectors())
+                            blocked = server_lifecycle.health(**self.health_collectors())
+                    self.assertEqual(retried["last_action"], "restart:vpn-stack-xray.service:ok")
+                    self.assertEqual(retried["last_actions"]["restart:sing-box.service"], receipt["last_actions"]["restart:sing-box.service"])
+                    self.assertEqual(retried["last_actions"]["restart:vpn-stack-xray.service"]["epoch"], 10_120)
+                    self.assertEqual(blocked["last_action"], "none")
+                    self.assertEqual(blocked["last_actions"], retried["last_actions"])
+                    self.assertEqual(
+                        [call.args[0] for call in run.call_args_list],
+                        [["systemctl", "restart", unit] for unit in (
+                            "sing-box.service", "vpn-stack-xray.service", "vpn-stack-xray.service",
+                        )],
+                    )
+
+    def test_recovery_receipt_write_failure_stops_remaining_commands(self) -> None:
+        save = server_runtime.write_json_atomic
+        for fail_at in (1, 2):
+            with self.subTest(fail_at=fail_at):
+                samples = [self.health_sample(t) for t in (0, 120)]
+                for sample in samples:
+                    sample["services"].update({"sing-box": "failed", "xray": "failed", "admin": "failed"})
+                with self.health_sandbox(samples) as (state, collect, run):
+                    baseline = server_lifecycle.health(**self.health_collectors())
+                    error = OSError(errno.ENOSPC, "receipt unavailable")
+
+                    def save_receipt(path, payload):
+                        if write.call_count == fail_at:
+                            raise error
+                        save(path, payload)
+
+                    with (
+                        patch.object(server_runtime, "write_json_atomic", side_effect=save_receipt) as write,
+                        patch.object(server_lifecycle.time, "sleep") as sleep,
+                    ):
+                        with self.assertRaises(OSError) as raised:
+                            server_lifecycle.health(**self.health_collectors())
+                    self.assertIs(raised.exception, error)
+                    self.assertEqual(write.call_count, fail_at)
+                    self.assertEqual(collect.call_count, 2)
+                    sleep.assert_not_called()
+                    self.assertEqual(
+                        [call.args[0] for call in run.call_args_list],
+                        [["systemctl", "restart", unit] for unit in (
+                            "sing-box.service", "vpn-stack-xray.service",
+                        )][:fail_at],
+                    )
+                    persisted = server_runtime.read_json(state, {})
+                    if fail_at == 1:
+                        self.assertEqual(persisted, baseline)
+                    else:
+                        self.assertEqual(persisted["last_action"], "restart:sing-box.service:ok")
+                        self.assertEqual(persisted["last_actions"], {
+                            "restart:sing-box.service": {"epoch": 10_000, "action": "restart:sing-box.service:ok"},
+                        })
+
     def test_recovery_cooldown_is_tied_to_action_not_changed_failure(self) -> None:
         samples = [
             self.health_sample(0, via_wg=True, foreign_domains_via_router=False),
@@ -282,7 +372,14 @@ class ServerLifecycleTests(AgentFixtures, unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             state = Path(tmp) / "health.json"
             lock = Path(tmp) / "lock"
-            with patch.object(server_runtime, "HEALTH_STATE_PATH", state), patch.object(server_runtime, "LOCK_PATH", lock), patch.object(server_agent, "collect_runtime_facts", return_value=failed) as snapshot_mock, patch.object(server_lifecycle, "recover", return_value="restart:sing-box.service:ok") as recover, patch.object(server_lifecycle.time, "sleep"):
+            with (
+                patch.object(server_runtime, "HEALTH_STATE_PATH", state),
+                patch.object(server_runtime, "LOCK_PATH", lock),
+                patch.object(server_agent, "collect_runtime_facts", return_value=failed) as snapshot_mock,
+                patch.object(server_lifecycle, "recover", wraps=server_lifecycle.recover) as recover,
+                patch.object(server_runtime, "run", return_value=subprocess.CompletedProcess([], 0, "", "")),
+                patch.object(server_lifecycle.time, "sleep"),
+            ):
                 first = server_lifecycle.health(**self.health_collectors())
                 second = server_lifecycle.health(**self.health_collectors())
         self.assertEqual(first["state"], "suspect")
@@ -331,7 +428,8 @@ class ServerLifecycleTests(AgentFixtures, unittest.TestCase):
                 patch.object(server_runtime, "HEALTH_STATE_PATH", Path(tmp) / "health.json"),
                 patch.object(server_runtime, "LOCK_PATH", Path(tmp) / "lock"),
                 patch.object(server_agent, "collect_runtime_facts", return_value=failed),
-                patch.object(server_lifecycle, "recover", return_value="restart:sing-box.service:failed") as recover,
+                patch.object(server_lifecycle, "recover", wraps=server_lifecycle.recover) as recover,
+                patch.object(server_runtime, "run", return_value=subprocess.CompletedProcess([], 1, "", "")),
             ):
                 server_lifecycle.health(**self.health_collectors())
                 second = server_lifecycle.health(**self.health_collectors())
@@ -423,7 +521,8 @@ class ServerLifecycleTests(AgentFixtures, unittest.TestCase):
                     patch.object(server_runtime, "read_json", return_value=previous),
                     patch.object(server_runtime, "write_json_atomic"),
                     patch.object(server_agent, "collect_runtime_facts", side_effect=[failed, after]),
-                    patch.object(server_lifecycle, "recover", return_value="restart:sing-box.service:ok") as recover,
+                    patch.object(server_lifecycle, "recover", wraps=server_lifecycle.recover) as recover,
+                    patch.object(server_runtime, "run", return_value=subprocess.CompletedProcess([], 0, "", "")),
                     patch.object(server_lifecycle.time, "sleep"),
                 ):
                     result = server_lifecycle.health(**self.health_collectors())

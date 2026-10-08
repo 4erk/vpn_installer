@@ -996,6 +996,88 @@ print('ok')
         self.assertEqual(trace[5]["switch_backoff"]["attempts"], 2)
         self.assertEqual(trace[5]["switch_backoff"]["retry_at"], "2026-09-05T12:02:04+00:00")
 
+    def test_failed_quality_switch_requires_two_fresh_pairs_after_a_probe_gap(self) -> None:
+        healthy = {"ok": True, "probe": {"checked": True, "ok": True, "health_confirmed": True}}
+        with patch.object(server_transport, "prove_wireguard_overlay", side_effect=[
+            RuntimeError("activation failed"), healthy, healthy,
+        ]) as proof:
+            trace, select, _ = self.run_transport_cycles([0, 16, 48, 64])
+
+        failed, fresh, recovered = trace[1:]
+        transition = failed["last_transition"]
+        self.assertTrue(transition["rollback_verified"])
+        self.assertEqual(transition["decision_evidence"]["quality_failure"]["cycle_ids"],
+                         [trace[0]["cycle_id"], failed["cycle_id"]])
+        self.assertNotIn("quality_failure", failed)
+        self.assertEqual(failed["switch_backoff"]["target"], "interserver-underlay-hy2")
+        self.assertEqual(failed["switch_backoff"]["attempts"], 1)
+        self.assertEqual(failed["switch_backoff"]["retry_at"], "2026-09-05T12:00:46+00:00")
+
+        self.assertFalse(fresh["would_switch"])
+        self.assertFalse(fresh.get("changed", False))
+        self.assertEqual(fresh["selected"], "interserver-underlay-wg")
+        self.assertEqual(fresh["quality_failure"]["confirmations"], 1)
+        self.assertEqual(fresh["quality_failure"]["cycle_ids"], [fresh["cycle_id"]])
+        self.assertEqual(fresh["last_transition"], transition)
+        self.assertEqual(fresh["last_switch_failure"], failed["switch_backoff"])
+        self.assertNotIn("switch_backoff", fresh)
+
+        self.assertTrue(recovered["changed"])
+        self.assertEqual(recovered["selected"], "interserver-underlay-hy2")
+        decision = recovered["last_transition"]["decision_evidence"]["quality_failure"]
+        self.assertEqual(decision["confirmations"], 2)
+        self.assertEqual(decision["cycle_ids"], [fresh["cycle_id"], recovered["cycle_id"]])
+        self.assertNotIn("switch_backoff", recovered)
+        self.assertEqual(select.call_count, 2)
+        self.assertEqual(proof.call_count, 3)
+
+    def test_failed_preferred_recovery_requires_a_new_stable_window(self) -> None:
+        preferred, fallback = interserver_transport.TRANSPORT_CANDIDATE_TAGS
+        now = datetime(2026, 9, 5, 12, tzinfo=timezone.utc)
+        probes = {tag: {"checked": True, "ok": True, "health_confirmed": True,
+                        "quality_checked": True, "quality_ok": True}
+                  for tag in interserver_transport.TRANSPORT_CANDIDATE_TAGS}
+        previous = {}
+        for second in range(-300, 0, 30):
+            previous = interserver_transport.evaluate_transport_policy(
+                selected=fallback, probes=probes, previous=previous,
+                observed_at=(now + timedelta(seconds=second)).isoformat(),
+            )
+        healthy = {"ok": True, "probe": {"checked": True, "ok": True, "health_confirmed": True}}
+        with (
+            patch.object(server_transport, "collect_transport_probes", return_value=probes),
+            patch.object(server_transport, "prove_wireguard_overlay", side_effect=[
+                RuntimeError("activation failed"), healthy, healthy,
+            ]) as proof,
+        ):
+            trace, select, _ = self.run_transport_cycles(
+                list(range(0, 331, 30)), selected=fallback, previous=previous,
+            )
+
+        failed, fresh = trace[:2]
+        transition = failed["last_transition"]
+        self.assertTrue(transition["rollback_verified"])
+        self.assertEqual(transition["decision_evidence"]["preferred_recovery"]["continuous_seconds"], 300)
+        self.assertNotIn("preferred_recovery", failed)
+        self.assertEqual(failed["switch_backoff"]["target"], preferred)
+        self.assertEqual(failed["switch_backoff"]["retry_at"], "2026-09-05T12:00:30+00:00")
+        self.assertEqual(fresh["last_switch_failure"], failed["switch_backoff"])
+        self.assertEqual(fresh["preferred_recovery"]["confirmations"], 1)
+        self.assertEqual(fresh["preferred_recovery"]["cycle_ids"], [fresh["cycle_id"]])
+        self.assertEqual(fresh["preferred_recovery"]["continuous_seconds"], 0)
+        self.assertEqual(fresh["preferred_recovery"]["started_at"], fresh["updated_at"])
+        self.assertEqual(trace[3]["preferred_recovery"]["confirmations"], 3)
+        for state in trace[1:-1]:
+            self.assertFalse(state["would_switch"])
+            self.assertFalse(state.get("changed", False))
+            self.assertEqual(state["last_transition"], transition)
+        recovered = trace[-1]
+        self.assertTrue(recovered["changed"])
+        self.assertEqual(recovered["selected"], preferred)
+        self.assertEqual(recovered["last_transition"]["decision_evidence"]["preferred_recovery"]["continuous_seconds"], 300)
+        self.assertEqual(select.call_count, 2)
+        self.assertEqual(proof.call_count, 3)
+
     def test_hard_liveness_failure_bypasses_soft_quality_and_preferred_retry(self) -> None:
         trace, select, proof = self.run_transport_cycles(
             [0, 2], selected="interserver-underlay-hy2", liveness_ok=False,
@@ -1138,9 +1220,11 @@ print('ok')
         self.assertEqual(first["state"], "degraded")
         self.assertEqual(second["state"], "degraded")
         self.assertIn("switch_backoff", second)
+        self.assertNotIn("quality_failure", second)
         self.assertEqual(third["state"], "degraded")
         self.assertFalse(third["would_switch"])
-        self.assertIn("paused until", third["reason"])
+        self.assertEqual(third["quality_failure"]["confirmations"], 1)
+        self.assertEqual(third["switch_backoff"], second["switch_backoff"])
         select.assert_called_once()
 
     def test_select_transport_restores_previous_selector_when_overlay_proof_fails(self) -> None:

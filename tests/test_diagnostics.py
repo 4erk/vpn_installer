@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from vpn_installer.diagnostics import (
     COLLECTOR_NAMES,
     LOG_WINDOW_KEYS,
+    RELEASE_LOG_WINDOW_KEYS,
     CollectorState,
     DiagnosticsSnapshot,
     LogWindowSnapshot,
@@ -118,6 +119,22 @@ class DiagnosticsTests(unittest.TestCase):
         snapshot.log_windows["5m"] = LogWindowSnapshot.empty(observed_at=OBSERVED_AT)
         restored = DiagnosticsSnapshot.from_json(snapshot.to_json())
         self.assertEqual(restored.freshness_issues(now=datetime.fromisoformat(OBSERVED_AT)), ["log window 5m until is missing"])
+
+    def test_release_freshness_scope_keeps_all_collectors_and_recent_windows(self) -> None:
+        now = datetime.fromisoformat(OBSERVED_AT)
+        old = (now - timedelta(minutes=10)).isoformat()
+        snapshot = DiagnosticsSnapshot(generated_at=OBSERVED_AT, collectors=ok_collectors(), log_windows=empty_windows())
+        snapshot.log_windows["24h"] = LogWindowSnapshot.empty(observed_at=old, since=old, until=old)
+        before = snapshot.to_json()
+        self.assertTrue(snapshot.freshness_issues(now=now))
+        self.assertEqual(snapshot.freshness_issues(now=now, log_window_keys=RELEASE_LOG_WINDOW_KEYS), [])
+        self.assertEqual(snapshot.to_json(), before)
+        snapshot.collectors["logs"] = CollectorState.ok(old)
+        snapshot.log_windows["5m"] = snapshot.log_windows["24h"]
+        issues = snapshot.freshness_issues(now=now, log_window_keys=RELEASE_LOG_WINDOW_KEYS)
+        self.assertTrue(any("collector logs" in issue for issue in issues))
+        self.assertTrue(any("log window 5m" in issue for issue in issues))
+        self.assertFalse(any("24h" in issue for issue in issues))
 
     def test_freshness_preserves_explicit_stale_and_ignores_uncollected_states(self) -> None:
         snapshot = DiagnosticsSnapshot(generated_at=OBSERVED_AT, collectors=ok_collectors(), log_windows=empty_windows())

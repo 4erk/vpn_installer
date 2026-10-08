@@ -408,39 +408,52 @@ def _health_unlocked(
             if now_epoch - int((last_actions.get(action, {}) or {}).get("epoch", 0)) >= 900
         ]
         if server_path_failure and not host_integrity_failure and failures >= 2 and eligible_actions:
-            action = recover(current, actions=eligible_actions)
+            action = recover(
+                current,
+                actions=eligible_actions,
+                on_result=lambda result: _record_recovery_action(payload, current, result),
+            )
             payload["last_action"] = action
-            successful_actions = successful_recovery_actions(action)
-            if successful_actions:
-                completed_epoch = int(time.time())
-                payload.update({
-                    "state": "recovering",
-                    "last_action_epoch": completed_epoch,
-                    "last_actions": {
-                        **last_actions,
-                        **{key: {"epoch": completed_epoch, "action": result} for key, result in successful_actions.items()},
-                    },
-                })
-                _post_recovery_check(payload, current, collect_runtime_facts)
+            if successful_recovery_actions(action):
+                _post_recovery_check(payload, collect_runtime_facts)
         payload["updated_at"] = runtime.utc_now()
         runtime.write_json_atomic(runtime.HEALTH_STATE_PATH, payload)
         return payload
 
 
-def _post_recovery_check(
-    payload: dict[str, Any], current: dict[str, Any], collect_runtime_facts: Callable[..., dict[str, Any]],
+def _record_recovery_action(
+    payload: dict[str, Any], current: dict[str, Any], result: str,
 ) -> None:
-    payload["pre_recovery"] = {
-        "observed_at": payload["observed_at"],
-        "hard_reasons": payload["hard_reasons"],
-        "probe_failures": payload["probe_failures"],
-        "probes": payload["probes"],
-        "verdicts": current["verdicts"],
-    }
-    payload["post_recovery_verdicts"] = {"server_path": "inconclusive", "host_integrity": "inconclusive", "overall": "inconclusive"}
-    payload["verdicts"] = {**current["verdicts"], **payload["post_recovery_verdicts"]}
-    # Persist the completed action before any fallible post-check or interruption.
+    prior_results = payload["last_action"]
+    payload["last_action"] = result if prior_results == "none" else f"{prior_results};{result}"
+    successful_actions = successful_recovery_actions(result)
+    if successful_actions:
+        completed_epoch = int(time.time())
+        payload.update({
+            "state": "recovering",
+            "last_action_epoch": completed_epoch,
+            "last_actions": {
+                **payload["last_actions"],
+                **{key: {"epoch": completed_epoch, "action": value} for key, value in successful_actions.items()},
+            },
+        })
+        payload["pre_recovery"] = {
+            "observed_at": payload["observed_at"],
+            "hard_reasons": payload["hard_reasons"],
+            "probe_failures": payload["probe_failures"],
+            "probes": payload["probes"],
+            "verdicts": current["verdicts"],
+        }
+        payload["post_recovery_verdicts"] = {"server_path": "inconclusive", "host_integrity": "inconclusive", "overall": "inconclusive"}
+        payload["verdicts"] = {**current["verdicts"], **payload["post_recovery_verdicts"]}
+    payload["updated_at"] = runtime.utc_now()
+    # A failed receipt write must abort recovery before the next mutation.
     runtime.write_json_atomic(runtime.HEALTH_STATE_PATH, payload)
+
+
+def _post_recovery_check(
+    payload: dict[str, Any], collect_runtime_facts: Callable[..., dict[str, Any]],
+) -> None:
     time.sleep(2)
     try:
         postcheck = collect_runtime_facts(live_probes=True, profile="light", full_logs=False, include_maintenance=False)
@@ -606,7 +619,10 @@ def planned_recovery_actions(current: dict[str, Any]) -> list[str]:
     return []
 
 
-def recover(current: dict[str, Any], *, actions: list[str] | None = None) -> str:
+def recover(
+    current: dict[str, Any], *, actions: list[str] | None = None,
+    on_result: Callable[[str], None] | None = None,
+) -> str:
     results: list[str] = []
     for action in planned_recovery_actions(current) if actions is None else actions:
         if action == "apply:wireguard-policy":
@@ -635,4 +651,6 @@ def recover(current: dict[str, Any], *, actions: list[str] | None = None) -> str
             result = runtime.run(command, timeout=30)
             status = "ok" if result.returncode == 0 else "failed"
         results.append(f"{action}:{status}")
+        if on_result is not None:
+            on_result(results[-1])
     return ";".join(results) or "none"

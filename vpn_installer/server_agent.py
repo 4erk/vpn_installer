@@ -120,6 +120,7 @@ FRONT_RTT_INFLATION_FACTOR = 3
 FRONT_CURRENT_ACTIVITY_MAX_IDLE_MS = 30_000
 REALITY_PENDING_HANDSHAKE_DEGRADED = 5
 LOG_CONTEXT_MAX_EVENT_IDS = 500
+LOG_CONTEXT_BUDGET_SECONDS = 2
 LOG_HISTORY_BUDGET_SECONDS = 12
 LOG_HISTORY_CHUNK_MINUTES = 60
 LOG_HISTORY_MAX_BYTES = 16 * 1024 * 1024
@@ -585,6 +586,7 @@ def private_reject_correlations(since: str, inbound: str, targets: Iterable[str]
 
 
 def summarize_problem_windows(*, full_logs: bool, fresh_since: str) -> tuple[dict[str, Any], dict[str, Any], str]:
+    """Return recent collector health; historical failures belong to their windows."""
     windows = (5, 30, 1440) if full_logs else (5,)
     now = time.time()
     try:
@@ -601,21 +603,27 @@ def summarize_problem_windows(*, full_logs: bool, fresh_since: str) -> tuple[dic
     recent_coverage = journal.journal_coverage(runner=journal.run_bounded, since=recent_since, until=now)
     recent_coverage = {**recent_coverage, "query_since_epoch": recent_since, "query_until_epoch": now}
     raw_records: list[tuple[float, str]] = []
+    size = 0
 
     def include(records: list[tuple[float, str]], since: float, until: float, *, last: bool = False) -> tuple[int, str]:
         # A boundary record belongs to the newer segment, never both queries.
-        records = [(stamp, line) for stamp, line in records if since <= stamp and (stamp <= until if last else stamp < until)]
-        available = max(0, LOG_MAX_EVENTS - len(raw_records))
-        error = "journal event count exceeds its memory bound" if len(records) > available else ""
-        records = records[:available]
-        raw_records.extend(records)
-        return sum(len(line.encode("utf-8")) for _, line in records), error
+        added = 0
+        for stamp, line in records:
+            if not (since <= stamp and (stamp <= until if last else stamp < until)):
+                continue
+            length = len(line.encode("utf-8"))
+            if len(raw_records) >= LOG_MAX_EVENTS or size + added + length > LOG_HISTORY_MAX_BYTES:
+                return added, "journal event collection exceeds its memory bound"
+            raw_records.append((stamp, line))
+            added += length
+        return added, ""
 
     size, memory_error = include(events, recent_since, now, last=True)
     collector_error = collector_error or memory_error
     segments = [(recent_since, now, collector_error)]
     query_since = recent_since
     history_coverage = recent_coverage
+    history_error = ""
     if full_logs:
         deadline = time.monotonic() + LOG_HISTORY_BUDGET_SECONDS
         target_since = now - query_minutes * 60
@@ -626,7 +634,7 @@ def summarize_problem_windows(*, full_logs: bool, fresh_since: str) -> tuple[dic
         while query_since > target_since:
             remaining = deadline - time.monotonic()
             if remaining <= 0 or size >= LOG_HISTORY_MAX_BYTES or len(raw_records) >= LOG_MAX_EVENTS:
-                collector_error = collector_error or "historical journal collection budget exceeded"
+                history_error = "historical journal collection budget exceeded"
                 break
             minutes = min(LOG_HISTORY_CHUNK_MINUTES, math.ceil((query_since - target_since) / 60))
             start = query_since - minutes * 60
@@ -637,13 +645,39 @@ def summarize_problem_windows(*, full_logs: bool, fresh_since: str) -> tuple[dic
             segments.append((start, query_since, error))
             query_since = start
             if error:
-                collector_error = collector_error or error
+                history_error = error
                 break
+    classified_lines = classify_lines(line for _, line in raw_records)
+    if full_logs and size < LOG_HISTORY_MAX_BYTES and len(raw_records) < LOG_MAX_EVENTS:
+        unresolved = [
+            event for event, (_line, item) in zip(raw_records, classified_lines)
+            if item is not None and item.request_kind == "unknown" and item.event_id
+            and "[unit=sing-box.service]" in event[1]
+        ]
+        if unresolved:
+            # One batch bridges chunk boundaries, using only leftover history time.
+            # Reverse chunk order so the capped ID selection favors recent failures.
+            context = _journal_event_context(
+                query_minutes, list(reversed(unresolved)), until=now,
+                timeout=min(LOG_CONTEXT_BUDGET_SECONDS, deadline - time.monotonic()),
+            )
+            context_lines = []
+            for stamp, line in context:
+                if not now - query_minutes * 60 <= stamp <= now:
+                    continue
+                length = len(line.encode("utf-8"))
+                if size + length > LOG_HISTORY_MAX_BYTES or len(raw_records) + len(context_lines) >= LOG_MAX_EVENTS:
+                    break
+                size += length
+                context_lines.append(line)
+            if context_lines:
+                # Context enriches classification, never adds events to window totals.
+                classified_lines = classify_lines([*(line for _, line in raw_records), *context_lines])[:len(raw_records)]
+    if full_logs:
         # A second inventory catches rotation/vacuum during the historical read.
         history_coverage = journal.journal_coverage(runner=journal.run_bounded, since=now - query_minutes * 60, until=now)
         history_coverage = {**history_coverage, "query_since_epoch": now - query_minutes * 60, "query_until_epoch": now}
-    # A request and its repeated errors can straddle journal query boundaries.
-    classified = list(zip((stamp for stamp, _ in raw_records), classify_lines(line for _, line in raw_records)))
+    classified = list(zip((stamp for stamp, _ in raw_records), classified_lines))
     observed_at = datetime.fromtimestamp(now, timezone.utc).isoformat()
 
     def window(since: float) -> dict[str, Any]:
@@ -651,6 +685,8 @@ def summarize_problem_windows(*, full_logs: bool, fresh_since: str) -> tuple[dic
         coverage_error = journal.journal_window_error(
             coverage, since=since, until=now, query_since=query_since, query_until=now,
         )
+        if since < query_since and history_error:
+            coverage_error = history_error
         for start, end, error in segments:
             if end > since and error:
                 coverage_error = coverage_error or error

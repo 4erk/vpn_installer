@@ -19,6 +19,7 @@ TOPOLOGIES = frozenset({"single", "dual"})
 NODE_IDS = frozenset({"gateway", "exit"})
 LOCATIONS = frozenset({"ru", "foreign"})
 LOG_WINDOW_KEYS = ("5m", "30m", "24h", "since_release")
+RELEASE_LOG_WINDOW_KEYS = ("5m", "30m", "since_release")
 INCOMPLETE_LOG_HISTORY_REASON = "journal history is incomplete; partial observations are not full-window counts"
 COLLECTOR_NAMES = (
     "services",
@@ -412,6 +413,7 @@ class DiagnosticsSnapshot:
         now: datetime,
         max_age_seconds: float = 180,
         future_skew_seconds: float = 30,
+        log_window_keys: tuple[str, ...] = LOG_WINDOW_KEYS,
     ) -> list[str]:
         """Validate claimed observations without rewriting historical evidence.
 
@@ -446,6 +448,8 @@ class DiagnosticsSnapshot:
                 if state.status == "stale":
                     issues.append(f"collector {name} is marked stale")
         for name, window in self.log_windows.items():
+            if name not in log_window_keys:
+                continue
             if window.collector.status in {"ok", "stale"}:
                 check(f"log window {name} observed_at", window.collector.observed_at)
                 check(f"log window {name} until", window.until)

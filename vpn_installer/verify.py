@@ -14,7 +14,7 @@ from . import workflows
 from .common import OUT_DIR, print_header
 from .client_artifacts import client_artifact_snapshot, render_vless_uri
 from .models import AppError
-from .diagnostics import DiagnosticsSnapshot, classify_interserver_adaptation
+from .diagnostics import LOG_WINDOW_KEYS, RELEASE_LOG_WINDOW_KEYS, DiagnosticsSnapshot, classify_interserver_adaptation
 from .log_classifier import normalize_source, split_endpoint
 from .journal_evidence import journal_snapshot_error
 from .network_profile import (
@@ -119,6 +119,7 @@ def _verify_snapshot(
     freshness_issues = snapshot.freshness_issues(
         now=datetime.now(timezone.utc), max_age_seconds=SNAPSHOT_MAX_AGE_SECONDS,
         future_skew_seconds=30,
+        log_window_keys=RELEASE_LOG_WINDOW_KEYS if release_logs_only else LOG_WINDOW_KEYS,
     )
 
     hard_failures: list[str] = []
@@ -155,7 +156,7 @@ def _verify_snapshot(
         if state.status != "not_applicable":
             hard_failures.append(f"collector {name} must be not_applicable for this node")
     for name, window in snapshot.log_windows.items():
-        if release_logs_only and name != "since_release":
+        if release_logs_only and name not in RELEASE_LOG_WINDOW_KEYS:
             continue
         if window.collector.status == "error":
             if not release_logs_only and name == "since_release" and not _release_within_complete_log_retention(snapshot):
@@ -367,7 +368,7 @@ def _install_release_gate(
         except (TypeError, ValueError) as exc:
             return rejected(f"{node_id} native evidence is invalid: {exc}")
         snapshot = _reconcile_public_capabilities(snapshot, public_vless)
-        if any(window.collector.status == "error" for name, window in original.log_windows.items() if name != "since_release"):
+        if any(window.collector.status in {"error", "stale", "skipped"} for name, window in original.log_windows.items() if name not in RELEASE_LOG_WINDOW_KEYS):
             accepted_degradations.append(f"{node_id}:incomplete_historical_logs")
         if snapshot.verdict == "verified":
             continue

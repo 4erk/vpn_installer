@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from vpn_installer import remote, server_agent, server_runtime, verify
+from vpn_installer import journal_evidence, remote, server_agent, server_runtime, verify
 from vpn_installer.diagnostics import COLLECTOR_NAMES, LOG_WINDOW_KEYS, CollectorState, DiagnosticsSnapshot, LogWindowSnapshot
 from vpn_installer.log_classifier import BUCKETS
 from vpn_installer.models import RemoteTarget
@@ -43,6 +43,7 @@ from vpn_installer.verify import (
 )
 from vpn_installer.vless_verify import RELIABILITY_PROBE_URLS, parse_vless_uri
 from tests.test_journal_evidence import front_evidence
+from tests.server_agent_fixtures import AgentFixtures
 from tests.test_server_agent import front_snapshot
 
 
@@ -657,7 +658,7 @@ class VerifyTests(unittest.TestCase):
         public = verified_public_vless_evidence(topology)
         public["paths"]["public_vless"] = {"checked": True}
         gateway = acceptance_snapshot(NODE_GATEWAY)
-        for name in ("5m", "30m", "24h"):
+        for name in ("24h",):
             gateway.log_windows[name] = LogWindowSnapshot.unavailable("journal starts after requested window")
         _verify_snapshot(gateway)
         before = copy.deepcopy(gateway.to_dict())
@@ -694,6 +695,65 @@ class VerifyTests(unittest.TestCase):
                 else:
                     broken.route_probes["ok"] = False
                 self.assertFalse(gate(broken)["eligible"])
+
+        for name in ("5m", "30m", "since_release"):
+            for status in ("error", "skipped", "not_applicable", "stale"):
+                with self.subTest(window=name, status=status):
+                    broken = copy.deepcopy(gateway)
+                    if status == "stale":
+                        old = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+                        broken.log_windows[name] = LogWindowSnapshot.empty(observed_at=old, since=old, until=old)
+                    else:
+                        broken.log_windows[name] = LogWindowSnapshot(collector=CollectorState(status, message="unavailable"))
+                    self.assertFalse(gate(broken)["eligible"])
+        for name in verify._required_snapshot_collectors(frozenset(gateway.capabilities)):
+            for status in ("error", "skipped", "not_applicable", "stale"):
+                with self.subTest(collector=name, status=status):
+                    broken = copy.deepcopy(gateway)
+                    broken.collectors[name] = (CollectorState.stale(broken.generated_at) if status == "stale"
+                                               else CollectorState(status, message="unavailable"))
+                    self.assertFalse(gate(broken)["eligible"])
+
+    def test_historical_query_failure_reaches_release_gate_without_poisoning_fresh_collection(self) -> None:
+        topology = TopologySpec.from_env(deployment_env())
+        public = verified_public_vless_evidence(topology)
+        public["paths"]["public_vless"] = {"checked": True}
+        now = datetime.now(timezone.utc)
+        installed = (now - timedelta(seconds=60)).isoformat()
+        for failed_scope in ("history", "recent"):
+            def query(minutes, *, until, timeout=30):
+                failed = (until < now.timestamp()) if failed_scope == "history" else (until == now.timestamp())
+                return [], "deadline exceeded" if failed else ""
+            with self.subTest(scope=failed_scope), patch.object(server_agent.time, "time", return_value=now.timestamp()), patch.object(
+                server_agent, "journal_problem_events", side_effect=query,
+            ), patch.object(journal_evidence, "journal_coverage", return_value={"since_epoch": 0, "discarded_at": [], "error": ""}):
+                windows, fresh, error = server_agent.summarize_problem_windows(full_logs=True, fresh_since=installed)
+            facts = AgentFixtures().diagnostics_facts()
+            facts.update(generated_at=now.isoformat(), collector_observed_at={name: now.isoformat() for name in COLLECTOR_NAMES})
+            facts["release"]["installed_at"] = installed
+            facts["logs"] = {"windows_minutes": windows, "fresh": fresh, "collector_error": error}
+            with patch.object(server_agent, "collect_runtime_facts", return_value=facts):
+                produced = DiagnosticsSnapshot.from_agent(server_agent.diagnostics_snapshot(live_probes=True))
+            self.assertEqual(produced.verdict, "inconclusive")
+            self.assertEqual(produced.collectors["logs"].status, "ok" if failed_scope == "history" else "error")
+            self.assertIn("24h", produced.storage["journal_coverage"]["partial_windows"])
+            gateway = acceptance_snapshot(NODE_GATEWAY, log_windows=produced.log_windows, release=produced.release)
+            gateway.collectors["logs"] = produced.collectors["logs"]
+            _verify_snapshot(gateway)
+            before = copy.deepcopy(gateway.to_dict())
+            decision = _install_release_gate(topology, public, {"verdict": "verified"},
+                [gateway, acceptance_snapshot(NODE_EXIT)], same_node_functional_verified=False)
+            self.assertEqual(decision["eligible"], failed_scope == "history")
+            self.assertEqual(gateway.to_dict(), before)
+
+    def test_release_gate_ignores_only_historical_window_freshness(self) -> None:
+        gateway = acceptance_snapshot(NODE_GATEWAY)
+        old = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+        gateway.log_windows["24h"] = LogWindowSnapshot.empty(observed_at=old, since=old, until=old)
+        self.assertEqual(_verify_snapshot(copy.deepcopy(gateway)).verdict, "inconclusive")
+        self.assertEqual(_verify_snapshot(copy.deepcopy(gateway), release_logs_only=True).verdict, "verified")
+        gateway.log_windows["5m"] = gateway.log_windows["24h"]
+        self.assertEqual(_verify_snapshot(gateway, release_logs_only=True).verdict, "inconclusive")
 
     def test_install_gate_does_not_make_operational_client_loss_green(self) -> None:
         env = deployment_env()
