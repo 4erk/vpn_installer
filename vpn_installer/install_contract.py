@@ -8,7 +8,7 @@ from typing import Any, Mapping
 
 from . import VERSION
 from .common import parse_env_value
-from .compatibility import COMPATIBLE_INSTALLED_MIN, CompatibilityWindow, require_compatible_installed
+from .compatibility import CompatibilityWindow, require_compatible_installed
 from .manifest import (
     INSTALL_PLAN_SCHEMA_VERSION,
     MANIFEST_SCHEMA_VERSION,
@@ -231,8 +231,10 @@ def _validate_bundle(
     expected_platform: PlatformSpec | None = None,
 ) -> None:
 
-    if expected_version not in {COMPATIBLE_INSTALLED_MIN, VERSION}:
-        _fail(f"no validated artifact inventory for release {expected_version}")
+    try:
+        CompatibilityWindow.current().require(expected_version)
+    except ValueError as exc:
+        _fail(str(exc))
     bundle = Path(bundle)
     contract_dir = Path(contract_dir)
     external_assets = Path(external_assets) if external_assets is not None else None

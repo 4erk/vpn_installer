@@ -4,12 +4,15 @@ import ast
 import hashlib
 import io
 import json
+import subprocess
 import tarfile
 import tempfile
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import Mock, mock_open, patch
 
+from vpn_installer import VERSION
 from vpn_installer.audit import docker as audit_docker
 from vpn_installer.audit import lab as audit_lab
 from vpn_installer.audit import quick as audit_quick
@@ -298,18 +301,94 @@ class AuditModuleTests(unittest.TestCase):
             (3, 5, 5, 8),
         )
 
-        script = audit_docker.compatible_update_acceptance_script()
-        self.assertIn("support validate-installed", script)
-        self.assertIn("PYTHONPATH=/work/previous", script)
-        self.assertNotIn('(3, 5, 5, 7)', script)
-        self.assertIn('source_runtime["version"] == COMPATIBLE_INSTALLED_MIN', script)
-        self.assertIn('"diagnostics": source_runtime["diagnostics"]', script)
-        self.assertIn('source_manifest["schema_version"] == MANIFEST_SCHEMA_VERSION', script)
-        self.assertNotIn("transition_0218", script)
-        self.assertIn(f'= {COMPATIBLE_INSTALLED_MIN}', script)
-        self.assertIn("current.patch + 1", script)
-        self.assertIn("cannot be updated", script)
+        versions = audit_docker.compatible_predecessor_versions()
+        self.assertIn("0.23.6", versions)
+        for version in versions:
+            with self.subTest(version=version):
+                script = audit_docker.compatible_update_acceptance_script(version)
+                self.assertIn("support validate-installed", script)
+                self.assertIn('PYTHONPATH="$previous_source"', script)
+                self.assertIn("previous_source=/work/previous/$previous_version", script)
+                self.assertIn("result_dir=/work/result/$previous_version", script)
+                self.assertIn(f"previous_version={version}", script)
+                self.assertIn('source_runtime["version"] == previous_version', script)
+                self.assertIn('source_manifest["version"] == previous_version', script)
+                self.assertIn('"version": previous_version', script)
+                self.assertIn('"diagnostics": source_runtime["diagnostics"]', script)
+                self.assertIn('source_manifest["schema_version"] == MANIFEST_SCHEMA_VERSION', script)
+                self.assertNotIn("transition_0218", script)
+                self.assertNotIn("__PREVIOUS_VERSION__", script)
+                self.assertNotIn("previous_release_fixture_builder", script)
+                self.assertIn("current.patch + 1", script)
+                self.assertIn("cannot be updated", script)
         self.assertLessEqual(audit_docker.COMPATIBLE_UPDATE_TIMEOUT_SECONDS, 45)
+
+    def test_compatible_predecessor_tags_follow_window_and_exclude_current_future_and_nonsemver(self) -> None:
+        tags = "\n".join(("0.23.7", "0.23.4", "0.23.6", "0.23.5", VERSION, "999.0.0",
+                          "0.23.3", "v0.23.6", "0.23.06", " 0.23.6", "0.23.6-rc1"))
+        with patch.object(audit_docker.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, tags, "")) as run:
+            self.assertEqual(audit_docker.compatible_predecessor_versions(), ("0.23.4", "0.23.5", "0.23.6", "0.23.7"))
+        self.assertEqual(run.call_args.args[0], ["git", "tag", "--list"])
+        self.assertEqual(run.call_args.kwargs["timeout"], 10)
+
+    def test_compatible_predecessor_tags_require_minimum_and_successful_inventory(self) -> None:
+        for completed, message in (
+            (subprocess.CompletedProcess([], 0, "0.23.6\n", ""), "required compatibility source tag"),
+            (subprocess.CompletedProcess([], 1, "", "tag inventory failed"), "tag inventory failed"),
+        ):
+            with self.subTest(completed=completed), patch.object(audit_docker.subprocess, "run", return_value=completed):
+                with self.assertRaisesRegex(AuditFailure, message):
+                    audit_docker.compatible_predecessor_versions()
+
+    def test_compatible_update_script_rejects_nonpredecessors(self) -> None:
+        with self.assertRaises(AuditFailure):
+            audit_docker.compatible_update_acceptance_script(VERSION)
+        for version in ("0.23.3", "999.0.0", "0.23.6; false"):
+            with self.subTest(version=version), self.assertRaises(ValueError):
+                audit_docker.compatible_update_acceptance_script(version)
+
+    def test_compatible_update_matrix_exports_each_tag_and_reuses_container_with_one_deadline(self) -> None:
+        versions = audit_docker.compatible_predecessor_versions()
+        runner = Mock(work_dir=Path("audit-work"), run_id="matrix")
+        runner.create_env.return_value = (Path("dual.env"), {"DEPLOY_NAME": "matrix"})
+        runner.docker_container.return_value = nullcontext()
+        with (
+            patch.object(audit_docker, "compatible_predecessor_versions", return_value=versions),
+            patch.object(audit_docker, "export_release_source", side_effect=lambda _ref, destination: destination) as export,
+            patch.object(audit_docker.time, "monotonic", side_effect=[0, *range(1, len(versions) + 1)]),
+        ):
+            details = audit_docker.test_compatible_update(runner)
+        self.assertEqual([call.args[0] for call in export.call_args_list], [f"refs/tags/{version}" for version in versions])
+        runner.create_env.assert_called_once()
+        runner.docker_container.assert_called_once()
+        runner.docker_cp_from.assert_called_once()
+        scripts = runner.docker_exec.call_args_list[1:]
+        self.assertEqual(len(scripts), len(versions))
+        for index, (version, call) in enumerate(zip(versions, scripts), 1):
+            with self.subTest(version=version):
+                self.assertIn(f"previous_version={version}", call.args[1])
+                self.assertEqual(call.kwargs["timeout_seconds"], audit_docker.COMPATIBLE_UPDATE_TIMEOUT_SECONDS - index)
+                runner.docker_copy.assert_any_call(
+                    "audit-compatible-update-matrix", runner.work_dir / "compatible-update" / "previous" / version,
+                    f"/work/previous/{version}",
+                )
+                self.assertIn(f"{version}->{VERSION}", details["transition"])
+
+    def test_compatible_update_matrix_stops_on_deadline_or_failed_predecessor(self) -> None:
+        for expired in (True, False):
+            with self.subTest(expired=expired):
+                runner = Mock(work_dir=Path("audit-work"), run_id="matrix")
+                runner.create_env.return_value = (Path("dual.env"), {"DEPLOY_NAME": "matrix"})
+                runner.docker_container.return_value = nullcontext()
+                runner.docker_exec.side_effect = [None, AuditFailure("validator rejected predecessor")]
+                with (
+                    patch.object(audit_docker, "compatible_predecessor_versions", return_value=("0.23.6", "0.23.7")),
+                    patch.object(audit_docker, "export_release_source", side_effect=lambda _ref, destination: destination),
+                    patch.object(audit_docker.time, "monotonic", side_effect=[0, 46 if expired else 1]),
+                    self.assertRaisesRegex(AuditFailure, "deadline exceeded" if expired else "0.23.6.*validator rejected"),
+                ):
+                    audit_docker.test_compatible_update(runner)
+                self.assertEqual(runner.docker_exec.call_count, 1 if expired else 2)
 
     def test_transaction_rollback_linux_gate_uses_bounded_release_contracts(self) -> None:
         script = audit_docker.transaction_rollback_acceptance_script(repr("{}"), "audit-upgrade")

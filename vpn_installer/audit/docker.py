@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import tarfile
 import textwrap
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -15,7 +16,7 @@ from threading import BoundedSemaphore
 
 from .. import VERSION
 from ..common import INSTALL_SCRIPT_PATH, ROOT_DIR
-from ..compatibility import COMPATIBLE_INSTALLED_MIN
+from ..compatibility import COMPATIBLE_INSTALLED_MIN, CompatibilityWindow, Version
 from ..diagnostics import (
     SCHEMA_VERSION as DIAGNOSTICS_SCHEMA_VERSION,
     COLLECTOR_NAMES,
@@ -696,7 +697,32 @@ def previous_release_fixture_builder_text() -> str:
     )
 
 
-def compatible_update_acceptance_script() -> str:
+def compatible_predecessor_versions() -> tuple[str, ...]:
+    """Select published predecessor tags using the authoritative compatibility window."""
+    window = CompatibilityWindow.current()
+    completed = subprocess.run(
+        ["git", "tag", "--list"], cwd=ROOT_DIR, capture_output=True, text=True, check=False, timeout=10,
+    )
+    if completed.returncode != 0:
+        raise AuditFailure(f"cannot enumerate compatibility source tags: {(completed.stderr or completed.stdout).strip()}")
+    current = Version.parse(VERSION)
+    versions = set()
+    for tag in completed.stdout.splitlines():
+        try:
+            version = Version.parse(tag)
+        except ValueError:
+            continue
+        if tag == str(version) and window.accepts(version) and version < current:
+            versions.add(version)
+    if window.minimum not in versions:
+        raise AuditFailure(f"required compatibility source tag is unavailable: {window.minimum}")
+    return tuple(str(version) for version in sorted(versions))
+
+
+def compatible_update_acceptance_script(previous_version: str = COMPATIBLE_INSTALLED_MIN) -> str:
+    previous_version = str(CompatibilityWindow.current().require(previous_version))
+    if Version.parse(previous_version) >= Version.parse(VERSION):
+        raise AuditFailure(f"compatibility source must precede the current release: {previous_version}")
     return textwrap.dedent(
         """\
         set -euo pipefail
@@ -704,11 +730,14 @@ def compatible_update_acceptance_script() -> str:
         support() { PYTHONPATH=/work python3 -m vpn_installer.install_support "$@"; }
         meta_value() { awk -F '\t' -v key="$2" '$1 == key { print $2 }' "$1/meta.tsv"; }
 
+        previous_version=__PREVIOUS_VERSION__
+        previous_source=/work/previous/$previous_version
+        result_dir=/work/result/$previous_version
         current_bundle=/work/current-exit
         current_contract=/work/contracts/current-exit
-        source_release=/etc/vpn-stack/releases/previous-exit
-        source_contract=/work/contracts/previous-exit
-        mkdir -p /work/contracts /work/assets /work/result
+        source_release=/etc/vpn-stack/releases/previous-exit-$previous_version
+        source_contract=/work/contracts/previous-exit-$previous_version
+        mkdir -p /work/contracts /work/assets "$result_dir"
         echo __GEOSITE_SRS_BASE64__ | base64 -d >/work/assets/geosite-ru.srs
         echo __GEOIP_SRS_BASE64__ | base64 -d >/work/assets/geoip-ru.srs
 
@@ -722,12 +751,12 @@ def compatible_update_acceptance_script() -> str:
           --expected-node exit \
           --external-assets /work/assets \
           --contract-dir "$current_contract"
-        PYTHONPATH=/work/previous python3 -m vpn_installer.install_support render-node \
+        PYTHONPATH="$previous_source" python3 -m vpn_installer.install_support render-node \
           --node exit \
           --env-file /work/dual.env \
           --assets-dir /work/assets \
           --output-dir "$source_release"
-        PYTHONPATH=/work/previous python3 - >/work/result/previous-runtime.json <<'PY'
+        PYTHONPATH="$previous_source" python3 - >"$result_dir/previous-runtime.json" <<'PY'
         import json
         from vpn_installer import VERSION
         from vpn_installer.diagnostics import SCHEMA_VERSION
@@ -744,7 +773,7 @@ def compatible_update_acceptance_script() -> str:
         test "$(meta_value "$current_contract" version)" = __CURRENT_VERSION__
         test "$(meta_value "$current_contract" schema_version)" = __CURRENT_MANIFEST_SCHEMA__
 
-        PYTHONPATH=/work python3 - "$source_release" /work/result <<'PY'
+        PYTHONPATH=/work python3 - "$source_release" "$result_dir" "$previous_version" <<'PY'
         import json
         import shutil
         import sys
@@ -760,17 +789,19 @@ def compatible_update_acceptance_script() -> str:
 
         source_release = Path(sys.argv[1])
         result_dir = Path(sys.argv[2])
+        previous_version = sys.argv[3]
         window = CompatibilityWindow.current()
         assert str(window.minimum) == COMPATIBLE_INSTALLED_MIN
         assert str(window.maximum) == VERSION
+        assert window.require(previous_version) < window.maximum
         source_runtime = json.loads((result_dir / "previous-runtime.json").read_text())
-        assert source_runtime["version"] == COMPATIBLE_INSTALLED_MIN
+        assert source_runtime["version"] == previous_version
 
         source_env = load_env_file(source_release / "node.env")
         source_manifest = json.loads((source_release / "render-manifest.json").read_text(encoding="utf-8"))
         source_plan = json.loads((source_release / "install-plan.json").read_text(encoding="utf-8"))
         assert source_env["CONFIG_SCHEMA"] == str(CONFIG_SCHEMA_VERSION)
-        assert source_manifest["version"] == COMPATIBLE_INSTALLED_MIN
+        assert source_manifest["version"] == previous_version
         assert source_manifest["schema_version"] == MANIFEST_SCHEMA_VERSION
         assert source_plan["schema_version"] == INSTALL_PLAN_SCHEMA_VERSION
 
@@ -793,7 +824,7 @@ def compatible_update_acceptance_script() -> str:
 
         result = {
             "from": {
-                "version": COMPATIBLE_INSTALLED_MIN,
+                "version": previous_version,
                 "config": CONFIG_SCHEMA_VERSION,
                 "state": CONFIG_SCHEMA_VERSION,
                 "manifest": MANIFEST_SCHEMA_VERSION,
@@ -816,7 +847,7 @@ def compatible_update_acceptance_script() -> str:
     ).replace("__GEOSITE_SRS_BASE64__", VALID_GEOSITE_SRS_BASE64).replace(
         "__GEOIP_SRS_BASE64__", VALID_GEOIP_SRS_BASE64
     ).replace(
-        "__PREVIOUS_VERSION__", COMPATIBLE_INSTALLED_MIN
+        "__PREVIOUS_VERSION__", previous_version
     ).replace(
         "__SOURCE_MANIFEST_SCHEMA__", str(MANIFEST_SCHEMA_VERSION)
     ).replace(
@@ -827,30 +858,44 @@ def compatible_update_acceptance_script() -> str:
 
 
 def test_compatible_update(runner: AuditRunner) -> dict[str, str]:
+    predecessors = compatible_predecessor_versions()
+    if not predecessors:
+        raise AuditFailure("compatibility window has no predecessor releases to audit")
     env_path, env = runner.create_env(
         "compatible-update",
         {"FOREIGN_BLOCK_RU": "0"},
         topology=TOPOLOGY_DUAL,
         gateway_location=LOCATION_RU,
     )
-    previous_source = export_release_source(COMPATIBLE_INSTALLED_MIN, runner.work_dir / "compatible-update" / "previous")
+    sources = {
+        version: export_release_source(f"refs/tags/{version}", runner.work_dir / "compatible-update" / "previous" / version)
+        for version in predecessors
+    }
     result_dir = runner.work_dir / "compatible-update-result"
     container = f"audit-compatible-update-{runner.run_id}"
     with runner.docker_container(container, AUDIT_IMAGE):
-        runner.docker_exec(container, "mkdir -p /work")
+        runner.docker_exec(container, "mkdir -p /work/previous /work/result")
         runner.docker_copy(container, ROOT_DIR / "vpn_installer", "/work")
-        runner.docker_copy(container, previous_source, "/work/previous")
         runner.docker_copy(container, env_path, "/work/dual.env")
-        runner.docker_exec(
-            container,
-            compatible_update_acceptance_script(),
-            timeout_seconds=COMPATIBLE_UPDATE_TIMEOUT_SECONDS,
-        )
+        deadline = time.monotonic() + COMPATIBLE_UPDATE_TIMEOUT_SECONDS
+        for version, source in sources.items():
+            runner.docker_copy(container, source, f"/work/previous/{version}")
+            remaining = int(deadline - time.monotonic())
+            if remaining <= 0:
+                raise AuditFailure(f"compatible update matrix deadline exceeded before {version}")
+            try:
+                runner.docker_exec(
+                    container,
+                    compatible_update_acceptance_script(version),
+                    timeout_seconds=remaining,
+                )
+            except AuditFailure as exc:
+                raise AuditFailure(f"compatible update {version}->{VERSION} failed: {exc}") from exc
         runner.docker_cp_from(container, "/work/result", result_dir)
     return {
         "container": container,
         "deployment": env["DEPLOY_NAME"],
-        "transition": f"{COMPATIBLE_INSTALLED_MIN}->{VERSION} (validated predecessor)",
+        "transition": ", ".join(f"{version}->{VERSION}" for version in predecessors) + " (validated predecessors)",
         "artifacts": str(result_dir),
     }
 
