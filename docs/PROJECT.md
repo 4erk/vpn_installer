@@ -2,6 +2,8 @@
 
 ## Контракт и границы
 
+Проверка исходного IPv6-адреса и ограничения защиты от сканирования описаны в [NETWORK.md](./NETWORK.md).
+
 ```text
 single: клиент -> gateway Xray/Reality -> sing-box -> local egress
 

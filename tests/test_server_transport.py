@@ -226,10 +226,18 @@ print('ok')
         self.assertIn("deadline", probe.call_args.kwargs)
 
     def test_transport_candidate_quality_probe_reports_partial_loss(self) -> None:
+        responses = iter((True, False, True, True))
+
+        def exchange(*_args, evidence, **_kwargs):
+            evidence.update(transmitted=1, io_phase="receive")
+            if not next(responses):
+                raise TimeoutError("timed out")
+            evidence.update(received=1, io_phase="complete")
+
         with patch.object(
             interserver_transport,
             "_socks_udp_dns_probe",
-            side_effect=[None, TimeoutError("timed out"), None, None],
+            side_effect=exchange,
         ) as probe:
             result = interserver_transport.transport_candidate_probe(
                 "interserver-underlay-wg",
@@ -239,8 +247,10 @@ print('ok')
 
         self.assertTrue(result["ok"])
         self.assertTrue(result["health_confirmed"])
+        self.assertTrue(result["quality_checked"])
         self.assertFalse(result["quality_ok"])
         self.assertEqual(result["packet_loss_pct"], 25.0)
+        self.assertEqual((result["transmitted"], result["received"]), (4, 3))
         self.assertEqual(probe.call_count, 4)
         self.assertEqual(probe.call_args.args, (19093, "10.75.0.2", 1053, 0.3))
 
@@ -364,6 +374,10 @@ print('ok')
         self.assertEqual(result["elapsed_ms"], 4500)
         self.assertEqual(result["attempts"], 1)
         self.assertEqual(result["valid_responses"], 0)
+        self.assertFalse(result["quality_checked"])
+        self.assertFalse(result["quality_ok"])
+        self.assertNotIn("packet_loss_pct", result)
+        self.assertIn("deadline", result["quality_error"])
         exchange.assert_called_once()
 
     def test_socks_fragmented_negotiation_shares_one_deadline(self) -> None:
@@ -408,7 +422,17 @@ print('ok')
             result = interserver_transport.transport_candidate_probe("interserver-underlay-wg", attempts=3)
         self.assertEqual(result["attempts"], 3)
         self.assertEqual((result["transmitted"], result["received"], result["valid_responses"]), (2, 1, 1))
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["health_confirmed"])
+        self.assertFalse(result["quality_checked"])
         self.assertFalse(result["quality_ok"])
+        self.assertNotIn("packet_loss_pct", result)
+        self.assertEqual(result["error"], "SOCKS5 proxy rejected probing")
+        self.assertIn(result["error"], result["quality_error"])
+        self.assertEqual(
+            [item["error"] for item in result["attempt_results"]],
+            ["SOCKS5 proxy rejected probing", "timed out", ""],
+        )
 
     def test_bound_tcp_probe_validates_the_framed_dns_response(self) -> None:
         connection = MagicMock()
@@ -550,6 +574,24 @@ print('ok')
         candidate.assert_called_once_with("interserver-underlay-wg", timeout_ms=2400, attempts=8)
         self.assertEqual(selected["quality_probe"], quality)
 
+    def test_transport_cycle_does_not_promote_an_unchecked_quality_rate(self) -> None:
+        selected = interserver_transport.TRANSPORT_WG_TAG
+        quality = {
+            "checked": True, "ok": False, "quality_checked": False, "quality_ok": False,
+            "error": "Connection refused", "packet_loss_pct": 100.0,
+        }
+        with (
+            patch.object(server_transport, "transport_overlay_path_probe", return_value={"checked": True, "ok": True}),
+            patch.object(interserver_transport, "transport_candidate_probe", return_value=quality),
+        ):
+            probes = server_transport.collect_transport_probes(
+                selected, {}, env={}, observed_at="2026-10-13T12:00:00+00:00",
+            )
+        self.assertNotIn("packet_loss_pct", probes[selected])
+        self.assertEqual(probes[selected]["quality_probe"], quality)
+        self.assertEqual(probes[selected]["quality_error"], quality["error"])
+        self.assertTrue(probes[selected]["ok"])
+
     def test_transport_cycle_keeps_a_live_path_when_quality_sample_has_loss(self) -> None:
         liveness = {"checked": True, "ok": True, "attempts": 1, "scope": "overlay-dns", "health_confirmed": True}
         quality = {
@@ -592,6 +634,87 @@ print('ok')
             timeout_ms=interserver_transport.TRANSPORT_CANDIDATE_QUALITY_PROBE_TIMEOUT_MS,
             attempts=interserver_transport.TRANSPORT_CANDIDATE_QUALITY_PROBE_ATTEMPTS,
         )
+
+    def test_quality_failover_requires_sent_queries_not_collector_errors(self) -> None:
+        env = {"WG_INTERFACE": "wg0", "WG_FOREIGN_ADDRESS": "10.74.0.2/24"}
+        liveness = {"checked": True, "ok": True, "scope": "overlay-dns"}
+        for selected in interserver_transport.TRANSPORT_CANDIDATE_TAGS:
+            for sent in (False, True):
+                with self.subTest(selected=selected, sent=sent):
+                    def exchange(port, *_args, evidence, **_kwargs):
+                        if port == interserver_transport.TRANSPORT_PROBE_PORTS[selected]:
+                            evidence.update(transmitted=int(sent), io_phase="receive" if sent else "connect")
+                            if sent:
+                                raise TimeoutError("timed out")
+                            raise ConnectionRefusedError("Connection refused")
+                        evidence.update(transmitted=1, received=1, io_phase="complete")
+
+                    state = {}
+                    with (
+                        patch.object(server_transport, "transport_overlay_path_probe", return_value=liveness),
+                        patch.object(interserver_transport, "_socks_udp_dns_probe", side_effect=exchange),
+                    ):
+                        for second in (0, 16):
+                            observed_at = f"2026-10-13T12:00:{second:02d}+00:00"
+                            probes = server_transport.collect_transport_probes(
+                                selected, state, env=env, observed_at=observed_at,
+                            )
+                            state = interserver_transport.evaluate_transport_policy(
+                                selected=selected, probes=probes, previous=state, observed_at=observed_at,
+                            )
+                            self.assertTrue(probes[selected]["ok"])
+                            self.assertEqual(state["would_switch"], sent and second == 16)
+                            raw = state["probes"][selected]["quality_probe"]
+                            self.assertEqual(raw["transmitted"], 8 if sent else 0)
+                            self.assertEqual(len(raw["attempt_results"]), 8)
+                            self.assertFalse(raw["ok"])
+                            self.assertFalse(raw["health_confirmed"])
+                            if sent:
+                                self.assertTrue(raw["quality_checked"])
+                                self.assertEqual(raw["packet_loss_pct"], 100.0)
+                                self.assertEqual(state["quality_failure"]["confirmations"], 1 if second == 0 else 2)
+                            else:
+                                self.assertFalse(raw["quality_checked"])
+                                self.assertNotIn("packet_loss_pct", raw)
+                                self.assertNotIn("packet_loss_pct", probes[selected])
+                                self.assertEqual(state["state"], "inconclusive")
+                                self.assertIn("Connection refused", state["reason"])
+                                self.assertNotIn("quality_failure", state)
+
+    def test_failed_overlay_can_recover_after_inconclusive_quality(self) -> None:
+        selected = interserver_transport.TRANSPORT_WG_TAG
+        alternate = interserver_transport.TRANSPORT_HY2_TAG
+        previous = {
+            "schema_version": interserver_transport.TRANSPORT_STATE_SCHEMA_VERSION,
+            "selected": selected, "state": "inconclusive", "updated_at": "2026-10-13T12:00:00+00:00",
+            "quality_probe_at": "2026-10-13T12:00:00+00:00",
+            "last_quality_probe": {
+                "quality_checked": False, "quality_ok": False, "quality_error": "Connection refused",
+            },
+        }
+
+        def exchange(*_args, evidence, **_kwargs):
+            evidence.update(transmitted=1, received=1, io_phase="complete")
+
+        with (
+            patch.object(server_transport, "transport_overlay_path_probe", return_value={
+                "checked": True, "ok": False, "error": "timed out", "scope": "overlay-dns",
+            }),
+            patch.object(interserver_transport, "_socks_udp_dns_probe", side_effect=exchange),
+        ):
+            for second in (2, 4):
+                observed_at = f"2026-10-13T12:00:{second:02d}+00:00"
+                probes = server_transport.collect_transport_probes(
+                    selected, previous, env={}, observed_at=observed_at,
+                )
+                previous = interserver_transport.evaluate_transport_policy(
+                    selected=selected, probes=probes, previous=previous, observed_at=observed_at,
+                )
+                self.assertTrue(probes[alternate]["ok"])
+                self.assertNotIn("quality_probe", probes[selected])
+                self.assertEqual(previous["would_switch"], second == 4)
+            self.assertTrue(previous["hard_failure_evidence"])
+            self.assertEqual(previous["recommended"], alternate)
 
     def test_transport_cycle_bypasses_preferred_retry_when_selected_fallback_degrades(self) -> None:
         liveness = {"checked": True, "ok": True, "attempts": 1, "scope": "overlay-dns", "health_confirmed": True}

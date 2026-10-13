@@ -375,6 +375,41 @@ class InterserverTransportIdentityTests(unittest.TestCase):
         self.assertEqual(result["recommended"], TRANSPORT_HY2_TAG)
         self.assertEqual(result["preferred_retry"]["retry_at"], "2026-08-06T12:01:15+00:00")
 
+    def test_unknown_quality_is_not_healthy_or_switch_evidence(self) -> None:
+        unknown = {
+            "checked": True, "ok": True, "quality_checked": False, "quality_ok": False,
+            "quality_error": "underlay quality sample incomplete: Connection refused",
+        }
+        healthy = {
+            "checked": True, "ok": True, "health_confirmed": True,
+            "quality_checked": True, "quality_ok": True,
+        }
+        for selected in TRANSPORT_CANDIDATE_TAGS:
+            alternate = next(tag for tag in TRANSPORT_CANDIDATE_TAGS if tag != selected)
+            for fresh in (True, False):
+                with self.subTest(selected=selected, fresh=fresh):
+                    previous = {}
+                    for second in (0, 2, 16):
+                        observed_at = f"2026-10-13T12:00:{second:02d}+00:00"
+                        previous = evaluate_transport_policy(
+                            selected=selected,
+                            probes={
+                                selected: {**unknown, "quality_sampled": fresh},
+                                alternate: healthy if second != 2 else {"checked": False},
+                            },
+                            previous=previous, observed_at=observed_at,
+                        )
+                        self.assertEqual(previous["state"], "inconclusive")
+                        self.assertEqual(previous["reason"], unknown["quality_error"])
+                        self.assertFalse(previous["would_switch"])
+                        self.assertNotIn("quality_failure", previous)
+                        self.assertNotIn("preferred_recovery", previous)
+                        if selected != TRANSPORT_PREFERRED_TAG:
+                            self.assertEqual(
+                                previous["preferred_probe_at"],
+                                "2026-10-13T12:00:00+00:00" if second == 2 else observed_at,
+                            )
+
     def test_quality_evidence_resets_after_clean_missing_lossy_or_stale_samples(self) -> None:
         loss = {
             "checked": True, "ok": True, "quality_checked": True, "quality_sampled": True,

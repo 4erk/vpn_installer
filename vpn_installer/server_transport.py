@@ -186,7 +186,7 @@ def collect_transport_probes(
             **{
                 key: quality[key]
                 for key in ("packet_loss_pct",)
-                if key in quality
+                if quality.get("quality_checked") is True and key in quality
             },
         }
     elif probes[selected].get("ok") is True and isinstance(previous.get("last_quality_probe"), dict):

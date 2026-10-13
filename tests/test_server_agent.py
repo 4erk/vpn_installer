@@ -270,6 +270,23 @@ class ServerAgentTests(AgentFixtures, unittest.TestCase):
         )
         self.assertNotIn("collector_observed_at", payload)
 
+    def test_ipv6_source_evidence_is_optional_and_round_trips_without_changing_verdict(self) -> None:
+        for error in ("", "Network is unreachable"):
+            with self.subTest(error=error):
+                facts = self.diagnostics_facts()
+                with patch.object(server_agent, "collect_runtime_facts", return_value=facts):
+                    before = server_agent.diagnostics_snapshot(live_probes=True)
+                    facts["network"]["ipv6_source"] = {
+                        "target": "2606:4700:4700::1111", "selected_source": "", "interface": "",
+                        "route": {"records": [], "error": error}, "addresses": {"records": [], "error": ""},
+                    }
+                    after = server_agent.diagnostics_snapshot(live_probes=True)
+                snapshot = DiagnosticsSnapshot.from_json(DiagnosticsSnapshot.from_agent(after).to_json())
+                self.assertEqual(snapshot.network["ipv6_source"], facts["network"]["ipv6_source"])
+                self.assertEqual(after["schema_version"], before["schema_version"])
+                for key in ("collectors", "verdict", "reasons", "component_verdicts"):
+                    self.assertEqual(after[key], before[key])
+
     def test_snapshot_envelope_does_not_refresh_collectors_or_log_windows(self) -> None:
         facts = self.diagnostics_facts()
         facts["generated_at"] = "2026-08-06T18:10:00+00:00"
@@ -609,6 +626,7 @@ class ServerAgentTests(AgentFixtures, unittest.TestCase):
             (server_transport, 'interserver_transport_snapshot'): {"configured": True, "selection": {"available": True}, "adaptive_state": adaptive},
             (server_agent, 'udp_443_policy'): "routed", (server_agent, 'public_hy2_snapshot'): {"configured": True, "listening": True, "firewall": True},
             (server_agent, 'tcp_adaptation_snapshot'): {"qdisc": "fq"}, (server_agent, 'resolver_snapshot'): {"managed_config": True},
+            (server_agent, 'ipv6_source_snapshot'): {},
             (server_agent, 'root_filesystem_snapshot'): {"verdict": "verified"},
             (server_agent, 'storage_snapshot'): {**self.diagnostics_facts()["storage"], "memory": {"reserve_ready": True, "router": {"go_memory_limit_active": True}}},
             (server_agent, 'conntrack_snapshot'): self.diagnostics_facts()["network"]["conntrack"], (server_agent, 'xray_conntrack_bypass_snapshot'): {"active": True},
@@ -1185,6 +1203,7 @@ class ServerAgentTests(AgentFixtures, unittest.TestCase):
             ),
             patch.object(server_runtime, "wireguard_policy_snapshot", return_value={"managed": True, "ok": True, "checks": {}, "missing": []}),
             patch.object(server_agent, "conntrack_snapshot", return_value={}),
+            patch.object(server_agent, "ipv6_source_snapshot", return_value={"selected_source": "2001:db8::10"}) as ipv6_source,
             patch.object(server_agent, "xray_conntrack_bypass_snapshot", return_value={"active": True, "ingress": True, "egress": True}),
             patch.object(server_agent, "host_snapshot", return_value={"hostname": "ru-host", "login_user": "root", "is_root": True, "has_sudo": True, "os_id": "ubuntu", "os_version": "24.04", "default_interface": "ens3"}) as host_snapshot,
             patch.object(server_agent, "installed_at_value", return_value="2026-07-15T00:00:00Z"),
@@ -1195,6 +1214,8 @@ class ServerAgentTests(AgentFixtures, unittest.TestCase):
         host_snapshot.assert_called_once_with("ens3")
         self.assertEqual(snapshot["release"]["installed_at"], "2026-07-15T00:00:00Z")
         self.assertEqual(snapshot["network"]["tcp_adaptation"]["mtu_probing"], 1)
+        ipv6_source.assert_called_once_with()
+        self.assertEqual(snapshot["network"]["ipv6_source"], {"selected_source": "2001:db8::10"})
 
     def test_runtime_facts_timestamp_each_collector_before_its_acquisition(self) -> None:
         clock = datetime(2026, 9, 5, 12, tzinfo=timezone.utc)
@@ -1208,6 +1229,7 @@ class ServerAgentTests(AgentFixtures, unittest.TestCase):
             (server_agent, 'run_confirmed_probes'): ("route_probes", {"profile": "acceptance", "requirements": {}}),
             (server_transport, 'interserver_transport_snapshot'): ("transport", {"configured": True}),
             (server_agent, 'tcp_adaptation_snapshot'): ("network", {"qdisc": "fq"}),
+            (server_agent, 'ipv6_source_snapshot'): ("network", {"selected_source": "2001:db8::10"}),
             (server_agent, 'root_filesystem_snapshot'): ("storage", {"verdict": "verified"}),
             (server_agent, 'wireguard_snapshot'): ("wireguard", {"interface": "wg0", "state": "up"}),
         }
@@ -2470,17 +2492,21 @@ class ServerAgentTests(AgentFixtures, unittest.TestCase):
         self.assertFalse(server_agent.release_gate_ok(probes))
 
     def test_route_probe_uses_headers_instead_of_downloading_unbounded_body(self) -> None:
-        completed = subprocess.CompletedProcess(["curl"], 0, "200|0.010|0.020|203.0.113.10", "")
+        completed = subprocess.CompletedProcess(["curl"], 0, "200|0.010|0.020|203.0.113.10|192.0.2.10", "")
         with patch.object(server_runtime, "run", return_value=completed) as run_mock:
             result = server_agent.probe_url("https://github.com/")
 
         self.assertTrue(result["ok"])
+        self.assertEqual(result["local_ip"], "192.0.2.10")
+        self.assertEqual(result["remote_ip"], "203.0.113.10")
+        self.assertEqual((result["connect_s"], result["total_s"]), (0.01, 0.02))
+        self.assertIn("%{http_code}|%{time_connect}|%{time_total}|%{remote_ip}|%{local_ip}", run_mock.call_args.args[0])
         self.assertIn("--head", run_mock.call_args.args[0])
         self.assertIn("-L", run_mock.call_args.args[0])
         self.assertEqual(run_mock.call_args.args[0][run_mock.call_args.args[0].index("--connect-timeout") + 1], "5")
 
     def test_literal_probe_does_not_follow_a_domain_redirect(self) -> None:
-        completed = subprocess.CompletedProcess(["curl"], 0, "302|0.010|0.020|1.1.1.1", "")
+        completed = subprocess.CompletedProcess(["curl"], 0, "302|0.010|0.020|1.1.1.1|192.0.2.10", "")
         with patch.object(server_runtime, "run", return_value=completed) as run_mock:
             result = server_agent.probe_url(
                 "https://1.1.1.1/cdn-cgi/trace",
@@ -2518,7 +2544,7 @@ class ServerAgentTests(AgentFixtures, unittest.TestCase):
         self.assertEqual(resolver["upstreams"], ["1.1.1.1", "9.9.9.9", "8.8.8.8"])
 
     def test_proxy_probe_does_not_force_ip_family_on_ipv4_loopback_proxy(self) -> None:
-        completed = subprocess.CompletedProcess(["curl"], 0, "200|0.001|0.100|127.0.0.1", "")
+        completed = subprocess.CompletedProcess(["curl"], 0, "200|0.001|0.100|127.0.0.1|127.0.0.1", "")
         with patch.object(server_runtime, "run", return_value=completed) as run_mock:
             result = server_agent.probe_url(
                 "https://[2606:4700:4700::1111]/cdn-cgi/trace",
@@ -2528,6 +2554,96 @@ class ServerAgentTests(AgentFixtures, unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertNotIn("-6", run_mock.call_args.args[0])
+        self.assertEqual(result["local_ip"], "127.0.0.1")
+
+    def test_ipv6_probe_records_curl_source_not_requested_binding(self) -> None:
+        for binding in ("", "eth0", "2001:db8::10"):
+            with self.subTest(binding=binding):
+                completed = subprocess.CompletedProcess(["curl"], 0, "200|0.010|0.020|2606:4700:4700::1111|2001:db8::10", "")
+                with patch.object(server_runtime, "run", return_value=completed) as run:
+                    result = server_agent.probe_url("https://[2606:4700:4700::1111]/", interface=binding, ip_version=6)
+                self.assertTrue(result["ok"])
+                self.assertEqual(result["local_ip"], "2001:db8::10")
+                self.assertIn("-6", run.call_args.args[0])
+                if binding:
+                    args = run.call_args.args[0]
+                    self.assertEqual(args[args.index("--interface") + 1], binding)
+
+    def test_failed_probe_preserves_observed_source_without_guessing_missing_source(self) -> None:
+        for source in ("", "2001:db8::10"):
+            with self.subTest(source=source):
+                completed = subprocess.CompletedProcess(["curl"], 28, f"000|0.000|5.001||{source}", "connection timed out")
+                with patch.object(server_runtime, "run", return_value=completed):
+                    result = server_agent.probe_url("https://[2606:4700:4700::1111]/", interface="eth0", ip_version=6)
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["local_ip"], source)
+                self.assertEqual(result["total_s"], 5.001)
+                self.assertEqual(result["error"], "connection timed out")
+
+    def test_probe_rejects_malformed_writeout_without_raising_or_reporting_success(self) -> None:
+        for output in (
+            "", "200|0.010|0.020|203.0.113.10", "200|0.010|0.020|203.0.113.10|192.0.2.10|extra",
+            "200|bad|0.020||", "200||0.020||", "200|0.010|nan||", "200|inf|0.020||",
+            "200|0.010|-1||", "bad|0.010|0.020||",
+        ):
+            with self.subTest(output=output):
+                completed = subprocess.CompletedProcess(["curl"], 0, output, "")
+                with patch.object(server_runtime, "run", return_value=completed):
+                    result = server_agent.probe_url("https://example.org/")
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["error"], "invalid curl write-out")
+                self.assertEqual(result["local_ip"], "")
+                self.assertIsNone(result["connect_s"])
+                self.assertIsNone(result["total_s"])
+
+    def test_ipv6_source_snapshot_preserves_selected_source_and_address_flags(self) -> None:
+        routes = [{"dst": "2606:4700:4700::1111", "dev": "eth0", "prefsrc": "2001:db8::10"}]
+        addresses = [{"ifname": "eth0", "addr_info": [
+            {"family": "inet6", "local": "2001:db8::10", "prefixlen": 64, "scope": "global", "dynamic": True, "mngtmpaddr": True},
+            {"family": "inet6", "local": "2001:db8::20", "prefixlen": 48, "scope": "global"},
+            {"family": "inet6", "local": "fe80::10", "scope": "link"},
+        ]}]
+        with patch.object(server_runtime, "run", side_effect=[
+            subprocess.CompletedProcess([], 0, json.dumps(records), "") for records in (routes, addresses)
+        ]) as run:
+            evidence = server_agent.ipv6_source_snapshot()
+        self.assertEqual(evidence["selected_source"], "2001:db8::10")
+        self.assertEqual(evidence["interface"], "eth0")
+        self.assertEqual(evidence["route"], {"records": routes, "error": ""})
+        self.assertEqual(evidence["addresses"], {"records": addresses, "error": ""})
+        self.assertEqual([call.args[0] for call in run.call_args_list], [
+            ["ip", "-j", "-6", "route", "get", evidence["target"]], ["ip", "-j", "-6", "address", "show"],
+        ])
+        self.assertTrue(all(call.kwargs == {"timeout": 3} for call in run.call_args_list))
+
+    def test_ipv6_source_snapshot_keeps_query_errors_separate_and_never_guesses_source(self) -> None:
+        routes = [{"dev": "eth0", "prefsrc": "2001:db8::10"}]
+        addresses = [{"ifname": "eth0", "addr_info": [{"family": "inet6", "local": "2001:db8::10"}]}]
+        failures = [subprocess.CompletedProcess([], 0, output, "") for output in ("broken", "null", "{}", "[null]", "[{}]")]
+        failures.extend((subprocess.CompletedProcess([], 2, "[]", "Network is unreachable"),
+                         subprocess.CompletedProcess([], 127, "", "ip unavailable or timed out"),
+                         subprocess.CompletedProcess([], 1, json.dumps(routes), "partial output")))
+        for name, index in (("route", 0), ("addresses", 1)):
+            for failure in failures:
+                with self.subTest(name=name, failure=failure):
+                    results = [subprocess.CompletedProcess([], 0, json.dumps(records), "") for records in (routes, addresses)]
+                    results[index] = failure
+                    with patch.object(server_runtime, "run", side_effect=results):
+                        evidence = server_agent.ipv6_source_snapshot()
+                    self.assertTrue(evidence[name]["error"])
+                    self.assertEqual(evidence[name]["records"], [])
+                    other = "addresses" if name == "route" else "route"
+                    self.assertEqual(evidence[other]["error"], "")
+                    self.assertEqual(evidence[other]["records"], addresses if name == "route" else routes)
+                    self.assertEqual(evidence["selected_source"], "" if name == "route" else "2001:db8::10")
+
+    def test_ipv6_source_snapshot_with_no_route_or_addresses_is_not_source_evidence(self) -> None:
+        with patch.object(server_runtime, "run", return_value=subprocess.CompletedProcess([], 0, "[]", "")):
+            evidence = server_agent.ipv6_source_snapshot()
+        self.assertEqual(evidence["selected_source"], "")
+        self.assertEqual(evidence["interface"], "")
+        self.assertTrue(evidence["route"]["error"])
+        self.assertEqual(evidence["addresses"], {"records": [], "error": ""})
 
     def test_acceptance_retries_one_failed_cycle_without_declaring_hard_failure(self) -> None:
         failed = {

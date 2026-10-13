@@ -1997,6 +1997,34 @@ def conntrack_snapshot(
     }
 
 
+def ipv6_source_snapshot() -> dict[str, Any]:
+    # Route lookup is not a connection probe; preserve address flags without inferring origin.
+    target = "2606:4700:4700::1111"
+    evidence: dict[str, Any] = {"target": target}
+    for name, args in (
+        ("route", ["ip", "-j", "-6", "route", "get", target]),
+        ("addresses", ["ip", "-j", "-6", "address", "show"]),
+    ):
+        result = runtime.run(args, timeout=3)
+        records = runtime.read_json_text(result.stdout, None)
+        valid = isinstance(records, list) and all(isinstance(row, dict) for row in records)
+        if name == "route":
+            valid = valid and len(records) == 1 and all(
+                isinstance(records[0].get(key), str) and records[0][key] for key in ("prefsrc", "dev")
+            )
+        else:
+            valid = valid and all(
+                isinstance(row.get("addr_info"), list) and all(isinstance(addr, dict) for addr in row["addr_info"])
+                for row in records
+            )
+        error = (result.stderr.strip() or f"ip exited {result.returncode}") if result.returncode else ""
+        error = error or ("invalid ip JSON evidence" if not valid else "")
+        evidence[name] = {"records": records if not error else [], "error": error[:240]}
+    route = next(iter(evidence["route"]["records"]), {})
+    evidence.update(selected_source=route.get("prefsrc", ""), interface=route.get("dev", ""))
+    return evidence
+
+
 def probe_url(
     url: str,
     *,
@@ -2012,7 +2040,7 @@ def probe_url(
         args.append(f"-{ip_version}")
     if follow_redirects:
         args.append("-L")
-    args.extend(["--head", "-sS", "-o", "/dev/null", "-w", "%{http_code}|%{time_connect}|%{time_total}|%{remote_ip}", "--connect-timeout", "5", "--max-time", str(timeout)])
+    args.extend(["--head", "-sS", "-o", "/dev/null", "-w", "%{http_code}|%{time_connect}|%{time_total}|%{remote_ip}|%{local_ip}", "--connect-timeout", "5", "--max-time", str(timeout)])
     if insecure:
         args.append("-k")
     if interface:
@@ -2022,14 +2050,26 @@ def probe_url(
     args.append(url)
     result = runtime.run(args, timeout=timeout + 2)
     fields = result.stdout.strip().split("|")
+    parse_error = ""
+    try:
+        if len(fields) != 5:
+            raise ValueError
+        connect_s, total_s = map(float, fields[1:3])
+        if not re.fullmatch(r"[0-9]{3}", fields[0]) or not all(math.isfinite(value) and value >= 0 for value in (connect_s, total_s)):
+            raise ValueError
+    except ValueError:
+        fields = ["000", "", "", "", ""]
+        connect_s = total_s = None
+        parse_error = "invalid curl write-out"
     return {
         "target": url,
-        "ok": result.returncode == 0 and len(fields) == 4 and fields[0] != "000",
-        "http_code": fields[0] if fields else "000",
-        "connect_s": float(fields[1]) if len(fields) > 1 and fields[1] else None,
-        "total_s": float(fields[2]) if len(fields) > 2 and fields[2] else None,
-        "remote_ip": fields[3] if len(fields) > 3 else "",
-        "error": result.stderr.strip()[:240],
+        "ok": result.returncode == 0 and not parse_error and fields[0] != "000",
+        "http_code": fields[0],
+        "connect_s": connect_s,
+        "total_s": total_s,
+        "remote_ip": fields[3],
+        "local_ip": fields[4],
+        "error": (result.stderr.strip() or parse_error)[:240],
     }
 
 
@@ -2547,6 +2587,7 @@ def collect_runtime_facts(*, live_probes: bool = False, profile: str = "light", 
     observed_at["network"] = runtime.utc_now()
     tcp_adaptation = tcp_adaptation_snapshot(public_iface, wg_interface if has_interserver else "")
     resolver = resolver_snapshot()
+    ipv6_source = ipv6_source_snapshot()
     observed_at["storage"] = runtime.utc_now()
     root_filesystem = root_filesystem_snapshot()
     coverage = logs.get("1440", fresh_logs).get("coverage", {})
@@ -2702,6 +2743,7 @@ def collect_runtime_facts(*, live_probes: bool = False, profile: str = "light", 
             "conntrack": conntrack,
             "tcp_adaptation": tcp_adaptation,
             "resolver": resolver,
+            "ipv6_source": ipv6_source,
             "managed_profile": expected_network_profile,
             "profile_mismatches": profile_mismatches,
             "wireguard_policy": wireguard_policy,

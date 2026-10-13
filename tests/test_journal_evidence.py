@@ -10,9 +10,34 @@ from unittest.mock import Mock, patch
 from vpn_installer import journal_evidence as journal
 
 
-def header(head: int, tail: int, since: float, until: float, *, state: str = "ARCHIVED") -> str:
+# Required fields from the saved Oct 8 inventory. OFFLINE variants model a normal
+# sync transition, not the unrecorded state at the time of the incident.
+EXIT_CURRENT_HEADER = """File path: /var/log/journal/3f8498c7c1ad40e6b84ace8bd060ce23/system.journal
+Sequential number ID: e8a8a771d6f8422cb662eb7b33d52683
+State: ONLINE
+Head sequential number: 5657490 (565392)
+Tail sequential number: 5658849 (5658e1)
+Head realtime timestamp: Thu 2026-10-08 10:36:31 UTC (65d51ce11f8be)
+Tail realtime timestamp: Thu 2026-10-08 11:48:36 UTC (65d52cfdf0a31)
+Entry objects: 1360
+
+"""
+EXIT_PREVIOUS_HEADER = """File path: /var/log/journal/3f8498c7c1ad40e6b84ace8bd060ce23/system@e8a8a771d6f8422cb662eb7b33d52683-0000000000562a85-00065d4e42ece8b1.journal
+Sequential number ID: e8a8a771d6f8422cb662eb7b33d52683
+State: ARCHIVED
+Head sequential number: 5646981 (562a85)
+Tail sequential number: 5657489 (565391)
+Head realtime timestamp: Thu 2026-10-08 06:22:51 UTC (65d4e42ece8b1)
+Tail realtime timestamp: Thu 2026-10-08 10:36:28 UTC (65d51cde63a60)
+Entry objects: 10509
+
+"""
+
+
+def header(head: int, tail: int, since: float, until: float, *, state: str = "ARCHIVED", filename: str | None = None) -> str:
+    filename = filename or ("system.journal" if state in ("ONLINE", "OFFLINE") else f"system@{head}.journal")
     return (
-        f"File path: /var/log/journal/machine/system{head}.journal\n"
+        f"File path: /var/log/journal/machine/{filename}\n"
         "Sequential number ID: 7868558e4bed47e98aa6f9fd64d292b3\n"
         f"State: {state}\nHead sequential number: {head} (unused)\n"
         f"Tail sequential number: {tail} (unused)\nEntry objects: {tail-head+1}\n"
@@ -141,32 +166,142 @@ class JournalEvidenceTests(unittest.TestCase):
 
     def test_retained_range_stops_at_missing_file(self) -> None:
         old = header(10, 19, 100, 200)
-        active = header(30, 39, 300, 400, state="ONLINE")
-        self.assertEqual(journal.journal_retained_range(old + active)["since_epoch"], 300)
-        complete = journal.journal_retained_range(old + header(20, 29, 201, 299) + active)
-        self.assertEqual(complete["since_epoch"], 100)
-        self.assertEqual(complete["files"], 3)
+        for state in ("ONLINE", "OFFLINE"):
+            with self.subTest(state=state):
+                active = header(30, 39, 300, 400, state=state)
+                self.assertEqual(journal.journal_retained_range(old + active)["since_epoch"], 300)
+                complete = journal.journal_retained_range(old + header(20, 29, 201, 299) + active)
+                self.assertEqual(complete["since_epoch"], 100)
+                self.assertEqual(complete["files"], 3)
+
+    def test_retained_range_accepts_pinned_current_headers_online_or_synced_offline(self) -> None:
+        for state in ("ONLINE", "OFFLINE"):
+            current = EXIT_CURRENT_HEADER.replace("State: ONLINE", f"State: {state}")
+            for inventory in (current + EXIT_PREVIOUS_HEADER, EXIT_PREVIOUS_HEADER + current):
+                for newline in ("\n", "\r\n"):
+                    with self.subTest(state=state, newline=newline, current_first=inventory.startswith(current)):
+                        self.assertEqual(journal.journal_retained_range(inventory.replace("\n", newline)), {
+                            "since_epoch": 1791440571.918513,
+                            "sequence_id": "e8a8a771d6f8422cb662eb7b33d52683", "files": 2,
+                        })
+
+    def test_retained_range_requires_current_filename_not_just_online_state(self) -> None:
+        for state in ("ONLINE", "OFFLINE"):
+            for filename in ("system@old.journal", "system.journal~", "user-1000.journal", "not-system.journal"):
+                with self.subTest(state=state, filename=filename), self.assertRaises(ValueError):
+                    journal.journal_retained_range(header(10, 19, 100, 200, state=state, filename=filename))
+
+    def test_retained_range_rejects_multiple_current_or_unarchived_files(self) -> None:
+        for state in ("ONLINE", "OFFLINE"):
+            current = header(20, 29, 201, 300, state=state)
+            for other_state in ("ONLINE", "OFFLINE", "ARCHIVED"):
+                other = header(10, 19, 100, 200, state=other_state, filename="system.journal")
+                for extra in (other, other.replace("/var/log/", "/run/log/"),
+                              other.replace("7868558e4bed47e98aa6f9fd64d292b3", "0" * 32),
+                              other.replace("Entry objects: 10", "Entry objects: 0")):
+                    with self.subTest(state=state, other_state=other_state, extra=extra), self.assertRaises(ValueError):
+                        journal.journal_retained_range(current + extra)
+            for other_state in ("ONLINE", "OFFLINE"):
+                other = header(10, 19, 100, 200, state=other_state, filename="system@old.journal")
+                with self.subTest(state=state, other_state=other_state), self.assertRaises(ValueError):
+                    journal.journal_retained_range(other + current)
+
+    def test_retained_range_rejects_empty_current_and_archived_only_inventories(self) -> None:
+        archived = header(10, 19, 100, 200)
+        empty_archive = header(0, 0, 0, 0).replace("Entry objects: 1", "Entry objects: 0")
+        for inventory in ("", archived, empty_archive, archived + empty_archive):
+            with self.subTest(inventory=inventory), self.assertRaises(ValueError):
+                journal.journal_retained_range(inventory)
+        for state in ("ONLINE", "OFFLINE"):
+            empty = header(0, 0, 0, 0, state=state).replace("Entry objects: 1", "Entry objects: 0")
+            for inventory in (empty, archived + empty):
+                with self.subTest(state=state, inventory=inventory), self.assertRaises(ValueError):
+                    journal.journal_retained_range(inventory)
+            current = header(20, 29, 201, 300, state=state)
+            self.assertEqual(journal.journal_retained_range(empty_archive + current)["since_epoch"], 201)
+
+    def test_retained_range_rejects_current_behind_or_overlapping_its_archive(self) -> None:
+        for state in ("ONLINE", "OFFLINE"):
+            current = header(20, 29, 201, 300, state=state)
+            for archived in (header(10, 20, 100, 201), header(20, 29, 201, 300), header(30, 39, 301, 400)):
+                with self.subTest(state=state, archived=archived), self.assertRaises(ValueError):
+                    journal.journal_retained_range(archived + current)
 
     def test_retained_range_requires_valid_unique_active_inventory(self) -> None:
         active = header(10, 19, 100, 200, state="ONLINE")
         for value in (
             "", active.replace("Entry objects: 10", "Entry objects: 9"),
-            active.replace("State: ONLINE", "State: OFFLINE"), active + active,
+            active.replace("State: ONLINE", "State: ARCHIVED"), active + active,
             active.replace("7868558e4bed47e98aa6f9fd64d292b3", "invalid"),
             active * 129, active + "x" * 256_000,
         ):
             with self.subTest(value=value[:80]), self.assertRaises(ValueError):
                 journal.journal_retained_range(value)
 
-    def test_retained_range_does_not_cross_sequence_or_clock_discontinuity(self) -> None:
-        active = header(20, 29, 201, 299, state="ONLINE")
-        for previous in (
-            header(10, 19, 100, 202),
-            header(10, 19, 100, 200).replace("7868558e4bed47e98aa6f9fd64d292b3", "0" * 32),
-            header(10, 19, 100, 200) * 2,
+    def test_retained_range_rejects_malformed_offline_headers(self) -> None:
+        current = EXIT_CURRENT_HEADER.replace("State: ONLINE", "State: OFFLINE")
+        for old, new in (
+            ("Entry objects: 1360", "Entry objects: -1"),
+            ("Entry objects: 1360", "Entry objects: invalid"),
+            ("Entry objects: 1360", "Entry objects: 1359"),
+            ("Head sequential number: 5657490 (565392)\n", ""),
+            ("Head sequential number: 5657490", "Head sequential number: 0"),
+            ("State: OFFLINE\n", ""), ("State: OFFLINE", "State: UNKNOWN"),
+            ("e8a8a771d6f8422cb662eb7b33d52683", "invalid"),
+            ("(65d51ce11f8be)", "(0)"), ("(65d52cfdf0a31)", "(invalid)"),
+            ("(65d52cfdf0a31)", "(65d51ce11f8bd)"),
         ):
-            with self.subTest(previous=previous):
-                self.assertEqual(journal.journal_retained_range(previous + active)["since_epoch"], 201)
+            with self.subTest(old=old, new=new), self.assertRaises(ValueError):
+                journal.journal_retained_range(EXIT_PREVIOUS_HEADER + current.replace(old, new))
+
+    def test_retained_range_does_not_cross_sequence_or_clock_discontinuity(self) -> None:
+        for state in ("ONLINE", "OFFLINE"):
+            active = header(20, 29, 201, 299, state=state)
+            for previous in (
+                header(10, 19, 100, 202),
+                header(10, 19, 100, 200).replace("7868558e4bed47e98aa6f9fd64d292b3", "0" * 32),
+                header(10, 19, 100, 200) * 2,
+            ):
+                with self.subTest(state=state, previous=previous):
+                    self.assertEqual(journal.journal_retained_range(previous + active)["since_epoch"], 201)
+
+    def test_offline_window_completeness_still_requires_retention_and_loss_evidence(self) -> None:
+        inventory = header(10, 19, 100, 200) + header(30, 39, 300, 400, state="OFFLINE")
+        for loss, complete in ((result(code=1), True), (result(record(350, "Suppressed 7 messages")), False),
+                               (result("malformed"), False), (result(code=2, stderr="denied"), False)):
+            with self.subTest(loss=loss):
+                runner = Mock(side_effect=[result(record(350)), result(inventory), loss])
+                snapshot = journal.kernel_event_snapshot(
+                    runner=runner, pattern="table full", window_starts={"recent": 300, "gap": 150},
+                    query_since=150, cutoff=400,
+                )
+                self.assertEqual(snapshot["observed_counts"], {"recent": 1, "gap": 1})
+                self.assertEqual(snapshot["counts"], {"recent": 1 if complete else None, "gap": None})
+                self.assertEqual(snapshot["windows"]["recent"]["scope"], "complete" if complete else "unavailable")
+                self.assertEqual(snapshot["windows"]["gap"]["scope"], "unavailable")
+                self.assertEqual(snapshot["coverage"]["since_epoch"], 300)
+                self.assertEqual(runner.call_count, 3)
+
+    def test_unavailable_current_keeps_zero_and_positive_totals_unknown(self) -> None:
+        current = header(30, 39, 300, 400, state="OFFLINE")
+        archived = header(10, 19, 100, 200)
+        for inventory in ("", archived, current + current,
+                          current.replace("Entry objects: 10", "Entry objects: 0"),
+                          current.replace("State: OFFLINE", "State: ARCHIVED"),
+                          current.replace("Entry objects: 10", "Entry objects: 9")):
+            for events, observed in ((result(code=1), 0), (result(record(350)), 1)):
+                with self.subTest(inventory=inventory, observed=observed):
+                    runner = Mock(side_effect=[events, result(inventory)])
+                    snapshot = journal.kernel_event_snapshot(
+                        runner=runner, pattern="table full", window_starts={"recent": 300},
+                        query_since=300, cutoff=400,
+                    )
+                    self.assertIsNone(snapshot["counts"]["recent"])
+                    self.assertEqual(snapshot["observed_counts"]["recent"], observed)
+                    self.assertEqual(snapshot["windows"]["recent"]["scope"], "unavailable")
+                    self.assertTrue(snapshot["coverage"]["error"])
+                    self.assertIsNone(snapshot["coverage"]["since_epoch"])
+                    self.assertEqual(runner.call_count, 2)
 
     def test_command_error_distinguishes_empty_match_from_failure_or_warning(self) -> None:
         for completed, error in (

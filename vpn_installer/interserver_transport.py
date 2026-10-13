@@ -322,9 +322,16 @@ def transport_candidate_probe(
             delays.append(max(1, round((time.monotonic() - attempt_started) * 1000)))
         exchange["elapsed_ms"] = max(0, round((time.monotonic() - attempt_started) * 1000))
         exchanges.append(exchange)
+    collection_error = ""
+    if attempts > 1 and (len(exchanges) != attempts or any(item["transmitted"] != 1 for item in exchanges)):
+        # Unsent or unattempted queries cannot establish a network loss rate.
+        collection_error = next(
+            (item.get("error") or "probe did not transmit" for item in exchanges if item["transmitted"] != 1),
+            last_error,
+        )
     result = _probe_result(
-        "raw-underlay-udp", target, started, "" if delays else last_error,
-        attempts=len(exchanges), health_confirmed=bool(delays),
+        "raw-underlay-udp", target, started, collection_error or ("" if delays else last_error),
+        attempts=len(exchanges), health_confirmed=bool(delays) and not collection_error,
     )
     result.update(
         budget_ms=timeout_ms, attempts_limit=attempts, attempt_results=exchanges,
@@ -333,7 +340,13 @@ def transport_candidate_probe(
         valid_responses=len(delays),
     )
     result["delay_ms"] = round(sum(delays) / len(delays)) if delays else 0
-    if attempts > 1:
+    if collection_error:
+        result.update(
+            quality_checked=False,
+            quality_ok=False,
+            quality_error=f"underlay quality sample incomplete: {collection_error}"[:240],
+        )
+    elif attempts > 1:
         loss = round((attempts - len(delays)) * 100 / attempts, 3)
         result.update(
             {
@@ -847,6 +860,8 @@ def _probe_failure_reason(probe: dict[str, Any]) -> str:
 
 
 def _selected_quality(probe: dict[str, Any]) -> tuple[str, str]:
+    if probe.get("quality_checked") is False:
+        return "inconclusive", str(probe.get("quality_error") or "overlay quality sample is unavailable")
     if probe.get("quality_checked") is True and probe.get("quality_ok") is False:
         return "degraded", str(probe.get("quality_error") or "overlay quality sample is degraded")
     return "healthy", ""
@@ -1126,6 +1141,17 @@ def evaluate_transport_policy(
         )
 
     state, quality_reason = _selected_quality(selected_probe)
+    if state == "inconclusive":
+        details = _preferred_recovery_details(prior, observed_at)
+        if selected != TRANSPORT_PREFERRED_TAG:
+            if alternate_probe["checked"]:
+                details["preferred_probe_at"] = observed_at
+            elif prior.get("preferred_probe_at"):
+                details["preferred_probe_at"] = prior["preferred_probe_at"]
+        return _policy_state(
+            selected, normalized, observed_at, state, quality_reason,
+            **details,
+        )
     if state == "degraded":
         evidence, confirmed = _quality_switch_evidence(selected, selected_probe, alternate_probe, prior, observed_at)
         details = _preferred_recovery_details(prior, observed_at)

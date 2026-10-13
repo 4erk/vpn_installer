@@ -7,6 +7,7 @@ import re
 import subprocess
 import threading
 from datetime import datetime, timezone
+from pathlib import PurePosixPath
 from typing import Any, Iterable, Mapping, Protocol
 
 
@@ -80,31 +81,43 @@ def journal_command_error(result: subprocess.CompletedProcess[str]) -> str:
 
 
 def journal_retained_range(headers: str) -> dict[str, Any]:
-    """Find the contiguous system-journal sequence ending in the active file."""
+    """Find the contiguous system-journal sequence ending in the current file."""
     records = [part for part in headers.split("File path: ")[1:] if part.strip()]
     if not records or len(records) > 128 or len(headers) > 256_000:
         raise ValueError("journal header inventory is empty or exceeds its bound")
     files = []
     try:
         for record in records:
-            fields = dict(line.split(": ", 1) for line in record.splitlines()[1:] if ": " in line)
+            lines = record.splitlines()
+            current = PurePosixPath(lines[0]).name == "system.journal"
+            fields = dict(line.split(": ", 1) for line in lines[1:] if ": " in line)
+            # SyncIntervalSec places the current journal OFFLINE after syncing.
+            allowed_states = ("ONLINE", "OFFLINE") if current else ("ARCHIVED",)
+            if fields["State"] not in allowed_states:
+                raise ValueError("journal file name or state is inconsistent")
             count = int(fields["Entry objects"])
+            sequence = fields["Sequential number ID"]
+            if not re.fullmatch(r"[0-9a-f]{32}", sequence) or count < 0:
+                raise ValueError("journal sequence or entry count is inconsistent")
             if count == 0:
+                if current:
+                    raise ValueError("current system journal is empty")
                 continue
             head = int(fields["Head sequential number"].split()[0])
             tail = int(fields["Tail sequential number"].split()[0])
             since = int(fields["Head realtime timestamp"].rsplit("(", 1)[1].rstrip(")"), 16) / 1_000_000
             until = int(fields["Tail realtime timestamp"].rsplit("(", 1)[1].rstrip(")"), 16) / 1_000_000
-            sequence = fields["Sequential number ID"]
-            if not re.fullmatch(r"[0-9a-f]{32}", sequence) or head <= 0 or count != tail - head + 1 or not 0 < since <= until:
+            if head <= 0 or count != tail - head + 1 or not 0 < since <= until:
                 raise ValueError("journal sequence or timestamps are inconsistent")
-            files.append({"head": head, "tail": tail, "since": since, "until": until, "sequence": sequence, "state": fields["State"]})
+            files.append({"head": head, "tail": tail, "since": since, "until": until, "sequence": sequence, "current": current})
     except (KeyError, IndexError, TypeError, ValueError, OverflowError) as exc:
         raise ValueError(f"journal header inventory is incomplete: {exc}") from exc
-    active = [item for item in files if item["state"] == "ONLINE"]
+    active = [item for item in files if item["current"]]
     if len(active) != 1:
-        raise ValueError("a unique active system journal is unavailable")
+        raise ValueError("a unique current system journal is unavailable")
     first = active[0]
+    if any(item["sequence"] == first["sequence"] and not item["current"] and item["tail"] >= first["head"] for item in files):
+        raise ValueError("current system journal is not the end of its sequence")
     while True:
         previous = [item for item in files if item["sequence"] == first["sequence"] and item["tail"] + 1 == first["head"]]
         if len(previous) != 1 or previous[0]["until"] > first["since"]:
